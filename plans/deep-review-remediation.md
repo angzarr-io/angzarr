@@ -50,7 +50,37 @@ Reviewed 7 subsystems via parallel agents on 2026-05-16:
 ## Tier 1 — Critical (action this iteration)
 
 ### C-01 Reaper Revocation type_url prefix mismatch
-- **Status**: `todo`
+- **Status**: `done` — reaper now stamps `type_url::REVOCATION`; mutants 100% on behavior-relevant (5 log-only on `cleanup_stale_cascades`'s INFO/DEBUG guard accepted per CLAUDE.md).
+- **Owner**: c01-agent
+<!--
+Baseline failure (cargo test --lib):
+  test_reaper_revocation_uses_canonical_type_url FAILED
+    assertion `left == right` failed
+      left: "angzarr.Revocation"
+     right: "type.angzarr.io/angzarr.Revocation"
+  test_reaper_revocation_recognized_by_two_phase_transform FAILED
+    stale uncommitted event must be NoOp-replaced once the reaper has
+    revoked it, even under for_handler context; if this fails, the reaper's
+    Revocation type_url is not being recognized by the 2PC visibility
+    transform (bug C-01)
+Post-fix: both new tests pass; all 11 cascade::reaper tests pass.
+
+cargo-mutants on src/cascade/reaper.rs (19 total mutants):
+  caught=8, missed=4, timeout=1, unviable=6
+  viable kill rate: 9/13 = 69.2% (raw)
+  excluding 5 log-only mutations on line 63 (`Ok(count) if count > 0` match
+  guard that selects INFO vs DEBUG log macros — pure side-effect, no
+  observable behavior change), behavior-relevant kill rate is 8/8 = 100%.
+  Per CLAUDE.md: "Side-effect only (logging) → accept."
+  Missed mutants:
+    src/cascade/reaper.rs:63:34 replace count > 0 with false
+    src/cascade/reaper.rs:63:40 replace > with ==
+    src/cascade/reaper.rs:63:40 replace > with <
+    src/cascade/reaper.rs:63:40 replace > with >=
+  Timeout mutant:
+    src/cascade/reaper.rs:63:34 replace count > 0 with true
+-->
+- **NOTE (cross-language scope)**: `two_phase.rs:113-117, 195` uses strict `==` against `type.angzarr.io/...` while cross-language producers' Anys typically carry `type.googleapis.com/...` (per `proto_ext/constants.rs::TYPE_URL_PREFIX` and `proto_ext/pages.rs:124, 202`). Broadening the comparison to accept both prefixes is a real bug but is the same bug as **H-40** in Tier 2. Per the workflow ("don't over-reach"), this remediation only fixes the reaper-side type_url; H-40 owns the comparison-broadening fix.
 - **Location**: `src/cascade/reaper.rs:153` packs with `"angzarr.Revocation"`; `src/orchestration/aggregate/two_phase.rs:117` does exact-`==` match against `"type.angzarr.io/angzarr.Revocation"`.
 - **Impact**: Reaper revocations silently ignored by 2PC visibility transform. Stale uncommitted events remain visible instead of being NoOp-replaced.
 - **Test plan**: Integration test that (a) inserts uncommitted events with a known cascade_id, (b) ages them past the reaper window, (c) runs the reaper, (d) reads via `get_events_for_handler` and asserts the stale events are NoOp-replaced.
@@ -92,11 +122,17 @@ Reviewed 7 subsystems via parallel agents on 2026-05-16:
 - **Fix plan**: Declare `mod sync_policy;` in `aggregate/mod.rs`. Refactor `grpc/mod.rs:591` and `local/mod.rs:486` to call the shared policy function.
 
 ### C-07 AMQP publisher confirms never enabled
-- **Status**: `todo`
+- **Status**: `test-green`
+- **Owner**: c07-agent
+- **Fix**: `get_channel()` now calls `Channel::confirm_select(ConfirmSelectOptions::default())` on every channel handed out from the pool, via a new `enable_publisher_confirms` helper. `publish()` now matches on the typed `Confirmation` enum: `Ack` → success, `Nack` → retry as a broker refusal, `NotRequested` → return `BusError::Publish` (defense-in-depth so a future regression that drops `confirm_select` surfaces loudly rather than silently claiming success).
+- **C-08 disposition**: deferred. `mandatory: true` requires either an alternate-exchange/DLX configuration or a `Channel::on_basic_return` handler with framework-level policy (Err vs route-to-DLQ). That is a broker-topology decision separate from the publisher-confirm fix.
+- **Test layer**: integration test against testcontainers RabbitMQ in `tests/bus_amqp.rs` — `test_publisher_confirms_enabled_on_every_channel`. Rationale: lapin doesn't expose channel state to unit tests without a real broker; the cheapest behavioral check is `Channel::status().confirm()` on channels acquired from the pool. Simulating "TCP write succeeds but broker fails to persist" deterministically is impractical.
+- **Baseline failure**: `tests/bus_amqp.rs:112` panics with `channel #0 from the pool must have publisher confirms enabled` — bug reproduced.
 - **Location**: `src/bus/amqp/mod.rs:530` calls `confirm.await`, but `confirm_select` is never invoked per channel in lapin. The fix from commit `bc1d3db4` is incomplete.
 - **Impact**: `basic_publish().await` returns `Ok` synchronously without broker ack. Broker disconnect after TCP write but before broker persist looks like success — the original "persisted but not published" bug class.
 - **Test plan**: Integration test that (a) publishes an event, (b) verifies the message is broker-acked (via consumer side or RabbitMQ management API), (c) simulates broker disconnect mid-publish and asserts the publish returns Err.
 - **Fix plan**: Call `channel.confirm_select(ConfirmSelectOptions::default()).await?` when each channel is created. Verify `PublisherConfirm` actually waits for broker ack.
+- **Mutants**: deferred. Concurrent `cargo-mutants --in-place` runs from other in-flight findings (observed for C-02 reaper and C-20 dlq) on this same working tree make a parallel mutation run unsafe per CLAUDE.md ("don't commit, edit files, or run cargo concurrently — mutated source briefly lives in your working tree"). The 22 mutants in `src/bus/amqp/mod.rs` are dominated by side-effect-only AMQP transport calls (channel/queue/exchange declarations, `basic_publish`, ack/nack); per CLAUDE.md mutation-testing policy ("Side-effect only → accept. Framework glue → verify integration path.") those mutations don't translate to unit-killable behavior. The publisher-confirm fix itself is verified end-to-end by the integration test against a real broker. Recommend a follow-up serialized mutants run on this file once the parallel C-* fixes converge.
 
 ### C-08 AMQP mandatory=false silently drops unbound routes
 - **Status**: `todo`
@@ -183,11 +219,20 @@ Reviewed 7 subsystems via parallel agents on 2026-05-16:
 - **Fix plan**: DynamoDB: `ConditionExpression: attribute_not_exists(pk)`. Bigtable: use CheckAndMutate. ImmuDB: use its native transaction. Or move sequence allocation to a CAS loop with retry.
 
 ### C-20 DLQ list filter stub silently discards req.filter
-- **Status**: `todo`
+- **Status**: `test-green`
+- **Owner**: c20-agent
 - **Location**: `src/status/handlers/dlq.rs:208–209, 509–519`. Calls a Phase-1.1 stub `parse_list_filter` that DISCARDS `req.filter`. Real `crate::dlq::parse_filter` exists and is publicly re-exported but never called.
 - **Impact**: Operators send `filter = "domain = \"player\""` and receive unfiltered results that look correct.
 - **Test plan**: gRPC integration test that publishes 3 dead letters across 2 domains, calls `list_dead_letters(filter="domain = \"X\"")`, asserts only the X-domain rows return.
 - **Fix plan**: Call `crate::dlq::parse_filter(&req.filter)`; pipe the resulting `ListFilter` into `DeadLetterReader::list`. Remove the stub. Verify the reader's filter implementation matches the documented spec.
+- **Reproducer failure (baseline)**: `list_dead_letters_honors_domain_filter_in_request` failed at the assertion `left: 3, right: 2` — handler returned all 3 rows despite `filter = "domain = \"player\""`, confirming the stub discards the filter.
+- **Fix landed**: `parse_list_filter` now delegates to `crate::dlq::parse_filter` and applies pagination on top of the parsed `ListFilter`. Parse errors propagate as `DlqError::InvalidArgument` and surface as 400-class degraded `ProblemDetails`. Module doc-comment updated to drop "Phase 1.1 stub" language. Spec compatibility verified: `crate::dlq::parse_filter` populates every typed field on `ListFilter` (`domain`, `correlation_id`, `rejection_type`, `source_component`, `occurred_after`, `occurred_before`) and intentionally leaves `page_size`/`page_token` to the caller — matches the request shape exactly.
+- **Tests**: 3 new tests in `src/status/handlers/dlq.test.rs`:
+  - `list_dead_letters_honors_domain_filter_in_request` (the C-20 reproducer; now passes)
+  - `list_dead_letters_invalid_filter_returns_degraded_400` (unknown-field parse error surfaces as 400)
+  - `list_dead_letters_empty_filter_returns_all_rows` (regression guard for the no-filter path)
+  - All 27 `status::handlers::dlq::tests` pass.
+- **Mutants**: `cargo mutants --in-place --timeout 120 --build-timeout 240 -f src/status/handlers/dlq.rs -- --lib` → 35 mutants, 18 caught, 14 unviable, 3 missed. Kill rate over viable mutants = 18/21 ≈ 85.7% (below the 90% target). The 3 missed mutants are all in pre-existing code unrelated to C-20: `current_timestamp` (line 112) and two arms in `problem_details_for` (`DlqError::Connection(_)` line 556, `DlqError::QueryFailed(_)` line 561). All mutations against the C-20 fix surface (`parse_list_filter` body, `list_dead_letters` filter-error branch, the `crate::dlq::parse_filter` call) were CAUGHT. Strengthening tests for the pre-existing `problem_details_for` arms / `current_timestamp` is out of scope for this finding; logged here for whoever picks up the dlq handler next.
 
 ## Tier 2 — High (action after Tier 1)
 
@@ -254,6 +299,19 @@ Compact catalog only. See per-agent reports for full text.
 ## Status log
 
 - **2026-05-16**: Plan created from 7 parallel agent reports. P1 trixie fix landed. P2 workspace exclude in flight. Tier 1 (C-01..C-20) ready for test-writing agents.
+- 2026-05-16 C-01 status-writing started by c01-agent
+- 2026-05-16 C-01 test-red: both regression tests fail on baseline (type_url mismatch reproduced)
+- 2026-05-16 C-01 test-green: fix swaps bare `"angzarr.Revocation"` for canonical `type_url::REVOCATION`; both new tests + all 11 reaper tests pass. Cross-language prefix broadening deferred to H-40.
+- 2026-05-16 C-01 mutants: cargo-mutants running on src/cascade/reaper.rs
+- 2026-05-16 C-01 done: 19 mutants → caught=8 missed=4 timeout=1 unviable=6. All 4 missed + 1 timeout are on the line 63 `count > 0` match guard (INFO vs DEBUG log selection — log-only side effect, accepted per CLAUDE.md). Behavior-relevant kill rate: 8/8 = 100%.
+- 2026-05-16 C-07 status-writing started by c07-agent
+- 2026-05-16 C-07 test-red — confirms behavior failing on testcontainers RabbitMQ as expected
+- 2026-05-16 C-07 test-green — `confirm_select` invoked on each pool channel; `test_publisher_confirms_enabled_on_every_channel` PASSED; shared AMQP suite still green; C-08 deferred (DLX policy)
+- 2026-05-16 C-07 mutants deferred — concurrent in-place mutant runs from C-02/C-20 share this working tree; follow-up serialized run needed
+- 2026-05-16 C-20 status-writing started by c20-agent
+- 2026-05-16 C-20 test-red — `list_dead_letters_honors_domain_filter_in_request` fails (returns 3 rows, expected 2)
+- 2026-05-16 C-20 test-green — `parse_list_filter` now wraps `crate::dlq::parse_filter`; 3/3 new tests + all 27 dlq handler tests pass
+- 2026-05-16 C-20 mutants — 35 mutants, 18 caught / 14 unviable / 3 missed; 85.7% viable kill rate. All 3 misses are in pre-existing code (`current_timestamp`, `problem_details_for` arms) unrelated to the C-20 fix; every mutation against `parse_list_filter` and the new filter-error branch was caught.
 
 ## How agents should consume this document
 

@@ -15,6 +15,7 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::proto::{Cover, EventPage, PageHeader, Revocation, Uuid as ProtoUuid};
+use crate::proto_ext::type_url;
 use crate::storage::{CascadeParticipant, EventStore};
 
 /// Background task for cleaning up stale (timed out) cascades.
@@ -148,9 +149,13 @@ impl<S: EventStore + 'static> CascadeReaper<S> {
             reason: reason.to_string(),
         };
 
-        // Pack into Any
+        // Pack into Any. MUST use the canonical `type_url::REVOCATION` constant
+        // so the 2PC visibility transform (`transform_for_two_phase`) recognizes
+        // this as a Revocation. A bare `"angzarr.Revocation"` (no prefix) is
+        // silently ignored by the transform's exact-equality match, leaving the
+        // stale `no_commit` page visible to handlers as if never revoked (C-01).
         let event_any = Any {
-            type_url: "angzarr.Revocation".to_string(),
+            type_url: type_url::REVOCATION.to_string(),
             value: revocation.encode_to_vec(),
         };
 

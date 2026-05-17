@@ -31,9 +31,7 @@ use sqlx::QueryBuilder;
 use tracing::info;
 
 use super::super::error::DlqError;
-use super::super::reader::{
-    DeadLetterPage, DeadLetterReader, ListFilter, StoredDeadLetter,
-};
+use super::super::reader::{DeadLetterPage, DeadLetterReader, ListFilter, StoredDeadLetter};
 
 // ============================================================================
 // Helpers shared by both backends
@@ -241,11 +239,9 @@ fn sqlite_row_to_stored(r: &sqlx::sqlite::SqliteRow) -> Result<StoredDeadLetter,
         source_component: r
             .try_get("source_component")
             .map_err(|e| DlqError::QueryFailed(format!("sqlite row.source_component: {}", e)))?,
-        source_component_type: r
-            .try_get("source_component_type")
-            .map_err(|e| {
-                DlqError::QueryFailed(format!("sqlite row.source_component_type: {}", e))
-            })?,
+        source_component_type: r.try_get("source_component_type").map_err(|e| {
+            DlqError::QueryFailed(format!("sqlite row.source_component_type: {}", e))
+        })?,
         occurred_at: parse_stored_timestamp(&occurred_at, "occurred_at")?,
         created_at: parse_stored_timestamp(&created_at, "created_at")?,
     })
@@ -400,9 +396,9 @@ fn pg_row_to_stored(r: &sqlx::postgres::PgRow) -> Result<StoredDeadLetter, DlqEr
         source_component: r
             .try_get("source_component")
             .map_err(|e| DlqError::QueryFailed(format!("pg row.source_component: {}", e)))?,
-        source_component_type: r.try_get("source_component_type").map_err(|e| {
-            DlqError::QueryFailed(format!("pg row.source_component_type: {}", e))
-        })?,
+        source_component_type: r
+            .try_get("source_component_type")
+            .map_err(|e| DlqError::QueryFailed(format!("pg row.source_component_type: {}", e)))?,
         occurred_at: parse_stored_timestamp(&occurred_at, "occurred_at")?,
         created_at: parse_stored_timestamp(&created_at, "created_at")?,
     })

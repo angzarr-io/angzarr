@@ -91,12 +91,7 @@ pub async fn run_sqlite_migrations(pool: &sqlx::SqlitePool) -> Result<(), DlqErr
     sqlx::migrate!("migrations/status/sqlite")
         .run(pool)
         .await
-        .map_err(|e| {
-            DlqError::QueryFailed(format!(
-                "SQLite status migrations failed: {}",
-                e
-            ))
-        })?;
+        .map_err(|e| DlqError::QueryFailed(format!("SQLite status migrations failed: {}", e)))?;
     info!("SQLite status migrations applied");
     Ok(())
 }
@@ -158,12 +153,7 @@ pub async fn run_postgres_migrations(pool: &sqlx::PgPool) -> Result<(), DlqError
     sqlx::migrate!("migrations/status/postgres")
         .run(pool)
         .await
-        .map_err(|e| {
-            DlqError::QueryFailed(format!(
-                "Postgres status migrations failed: {}",
-                e
-            ))
-        })?;
+        .map_err(|e| DlqError::QueryFailed(format!("Postgres status migrations failed: {}", e)))?;
     info!("Postgres status migrations applied");
     Ok(())
 }

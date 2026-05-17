@@ -85,7 +85,11 @@ fn unknown_field_is_rejected() {
     let err = parse_filter(r#"domian = "x""#).unwrap_err();
     assert!(matches!(err, DlqError::InvalidArgument(_)));
     if let DlqError::InvalidArgument(msg) = err {
-        assert!(msg.contains("domian"), "msg should name the bad field: {}", msg);
+        assert!(
+            msg.contains("domian"),
+            "msg should name the bad field: {}",
+            msg
+        );
     }
 }
 
@@ -153,8 +157,8 @@ fn page_size_and_token_are_not_touched_by_parser() {
 fn extra_whitespace_around_tokens_is_tolerated() {
     // Operators may format for readability; the grammar tolerates
     // extra whitespace except inside quoted values.
-    let f = parse_filter(r#"  domain   =   "player"   AND   source_component  =  "saga"  "#)
-        .unwrap();
+    let f =
+        parse_filter(r#"  domain   =   "player"   AND   source_component  =  "saga"  "#).unwrap();
     assert_eq!(f.domain.as_deref(), Some("player"));
     assert_eq!(f.source_component.as_deref(), Some("saga"));
 }

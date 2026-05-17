@@ -5,13 +5,14 @@
 //! and the `Health<T>` envelope wrapping; the reader owns the
 //! storage-specific query path.
 //!
-//! ## Filter parsing (Phase 1.1)
+//! ## Filter parsing
 //!
-//! `ListDeadLettersRequest.filter` is the AIP-160 string surface.
-//! Phase 1.1 ships a stub that returns an empty filter for any
-//! input — sufficient for the Noop reader smoke path. A real
-//! AND-only grammar parser lands in P1.2 alongside the Postgres /
-//! SQLite reader impls.
+//! `ListDeadLettersRequest.filter` is the AIP-160 string surface,
+//! parsed by [`crate::dlq::parse_filter`] into a typed [`ListFilter`].
+//! The handler forwards the parsed filter (plus AIP-158 pagination)
+//! to the backing [`DeadLetterReader`]. Empty filter strings pass
+//! through as an unconstrained [`ListFilter::default`]; parse
+//! errors map to a 400-class degraded [`ProblemDetails`] response.
 //!
 //! ## Resilience contract
 //!
@@ -130,14 +131,18 @@ fn current_timestamp() -> prost_types::Timestamp {
 fn extract_command_for_replay(
     stored: &StoredDeadLetter,
 ) -> Result<crate::proto::CommandBook, ProblemDetails> {
-    let dl = crate::proto::AngzarrDeadLetter::decode(stored.payload.as_slice())
-        .map_err(|e| ProblemDetails {
+    let dl = crate::proto::AngzarrDeadLetter::decode(stored.payload.as_slice()).map_err(|e| {
+        ProblemDetails {
             r#type: "urn:angzarr:status:dlq:payload-decode".to_string(),
             title: "Cannot decode DLQ payload".to_string(),
             status: 500,
-            detail: format!("stored payload bytes are not a valid AngzarrDeadLetter: {}", e),
+            detail: format!(
+                "stored payload bytes are not a valid AngzarrDeadLetter: {}",
+                e
+            ),
             instance: String::new(),
-        })?;
+        }
+    })?;
     match dl.payload {
         Some(crate::proto::angzarr_dead_letter::Payload::RejectedCommand(cmd)) => Ok(cmd),
         Some(crate::proto::angzarr_dead_letter::Payload::RejectedEvents(_)) => {
@@ -205,8 +210,21 @@ impl DlqAdminService for DlqAdminHandler {
         let req = request.into_inner();
         let (checked_at, source) = self.envelope_fields();
 
-        // AIP-160 filter parsing — stub for Phase 1.1. See module docs.
-        let filter = parse_list_filter(&req.filter, req.page_size, req.page_token);
+        // AIP-160 filter parsing — see module docs. Parse errors are
+        // surfaced to the operator as 400-class degraded, never a
+        // silent unfiltered result.
+        let filter = match parse_list_filter(&req.filter, req.page_size, req.page_token) {
+            Ok(f) => f,
+            Err(e) => {
+                return Ok(Response::new(ListDeadLettersResponse {
+                    state: Some(list_dead_letters_response::State::Degraded(
+                        problem_details_for(&e),
+                    )),
+                    checked_at: Some(checked_at),
+                    source,
+                }));
+            }
+        };
 
         match self.reader.list(filter).await {
             Ok(page) => Ok(Response::new(ListDeadLettersResponse {
@@ -315,13 +333,15 @@ impl DlqAdminService for DlqAdminHandler {
             Ok(Some(row)) => row,
             Ok(None) => {
                 return Ok(Response::new(ReplayDeadLetterResponse {
-                    state: Some(replay_dead_letter_response::State::Degraded(ProblemDetails {
-                        r#type: "urn:angzarr:status:dlq:not-found".to_string(),
-                        title: "Dead letter not found".to_string(),
-                        status: 404,
-                        detail: format!("no dlq_entries row with id={}", req.id),
-                        instance: String::new(),
-                    })),
+                    state: Some(replay_dead_letter_response::State::Degraded(
+                        ProblemDetails {
+                            r#type: "urn:angzarr:status:dlq:not-found".to_string(),
+                            title: "Dead letter not found".to_string(),
+                            status: 404,
+                            detail: format!("no dlq_entries row with id={}", req.id),
+                            instance: String::new(),
+                        },
+                    )),
                     checked_at: Some(now_ts),
                     source,
                 }));
@@ -378,12 +398,18 @@ impl DlqAdminService for DlqAdminHandler {
                     mode = ?mode,
                     "DLQ entry replayed"
                 );
-                self.audit_replay(&stored, mode, &new_correlation_id, ReplayOutcome::Success, None)
-                    .await;
+                self.audit_replay(
+                    &stored,
+                    mode,
+                    &new_correlation_id,
+                    ReplayOutcome::Success,
+                    None,
+                )
+                .await;
                 Ok(Response::new(ReplayDeadLetterResponse {
                     state: Some(replay_dead_letter_response::State::Ok(ReplayDeadLetterOk {
                         new_correlation_id,
-                        replayed_at: Some(now_ts.clone()),
+                        replayed_at: Some(now_ts),
                         applied_mode: mode.to_proto() as i32,
                     })),
                     checked_at: Some(now_ts),
@@ -455,8 +481,7 @@ impl DlqAdminHandler {
 /// Fully-qualified proto type name of `AngzarrDeadLetter` —
 /// pinned here so a future rename surfaces as a build/test failure
 /// rather than silently producing empty `payload_view` strings.
-const ANGZARR_DEAD_LETTER_TYPE_NAME: &str =
-    "angzarr_client.proto.angzarr.AngzarrDeadLetter";
+const ANGZARR_DEAD_LETTER_TYPE_NAME: &str = "angzarr_client.proto.angzarr.AngzarrDeadLetter";
 
 /// Map [`StoredDeadLetter`] (domain row) → proto wire type.
 ///
@@ -466,10 +491,8 @@ const ANGZARR_DEAD_LETTER_TYPE_NAME: &str =
 /// falls back to the raw `payload` bytes. Per the plan's tolerance
 /// contract.
 fn stored_to_proto(s: StoredDeadLetter) -> ProtoStoredDeadLetter {
-    let payload_view = crate::proto_reflect::decode_to_json(
-        ANGZARR_DEAD_LETTER_TYPE_NAME,
-        &s.payload,
-    );
+    let payload_view =
+        crate::proto_reflect::decode_to_json(ANGZARR_DEAD_LETTER_TYPE_NAME, &s.payload);
     ProtoStoredDeadLetter {
         id: s.id,
         domain: s.domain,
@@ -504,18 +527,30 @@ fn rejection_type_from_str(s: &str) -> RejectionType {
     }
 }
 
-/// Phase 1.1 stub: ignores `filter` content, just plumbs pagination
-/// fields through. Real AIP-160 parser lands in P1.2.
-fn parse_list_filter(_filter: &str, page_size: i32, page_token: String) -> ListFilter {
-    ListFilter {
-        page_size: page_size.max(0) as u32,
-        page_token: if page_token.is_empty() {
-            None
-        } else {
-            Some(page_token)
-        },
-        ..ListFilter::default()
-    }
+/// Parse a `ListDeadLettersRequest` into a typed [`ListFilter`].
+///
+/// Combines the AIP-160 filter grammar (delegated to
+/// [`crate::dlq::parse_filter`], which understands `domain`,
+/// `correlation_id`, `rejection_type`, `source_component`,
+/// `occurred_after`, `occurred_before` AND-joined) with the AIP-158
+/// pagination fields, which live on the request rather than in the
+/// filter string.
+///
+/// Errors propagate as [`DlqError::InvalidArgument`] so the handler
+/// can surface a 400-class degraded `ProblemDetails`.
+fn parse_list_filter(
+    filter: &str,
+    page_size: i32,
+    page_token: String,
+) -> Result<ListFilter, DlqError> {
+    let mut f = crate::dlq::parse_filter(filter)?;
+    f.page_size = page_size.max(0) as u32;
+    f.page_token = if page_token.is_empty() {
+        None
+    } else {
+        Some(page_token)
+    };
+    Ok(f)
 }
 
 /// Build an RFC 7807-style `ProblemDetails` for a backend error.
@@ -542,11 +577,7 @@ fn problem_details_for(err: &DlqError) -> ProblemDetails {
             "Invalid DLQ query argument",
             400,
         ),
-        _ => (
-            "urn:angzarr:status:dlq:error",
-            "DLQ admin error",
-            500,
-        ),
+        _ => ("urn:angzarr:status:dlq:error", "DLQ admin error", 500),
     };
     ProblemDetails {
         r#type: type_uri.to_string(),

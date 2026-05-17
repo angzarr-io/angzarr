@@ -347,7 +347,6 @@ impl ProcessManagerContext for PmWithSyncOverride {
             commands: vec![CommandBook {
                 cover: Some(cover),
                 pages: vec![page],
-                ..Default::default()
             }],
             process_events: vec![],
             facts: vec![],

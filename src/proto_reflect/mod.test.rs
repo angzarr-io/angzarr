@@ -361,8 +361,7 @@ fn decode_any_to_json_matches_decode_to_json() {
         edition: None,
     };
     let bytes = cover.encode_to_vec();
-    let from_bytes =
-        decode_to_json("angzarr_client.proto.angzarr.Cover", &bytes);
+    let from_bytes = decode_to_json("angzarr_client.proto.angzarr.Cover", &bytes);
     let from_any = decode_any_to_json(&Any {
         type_url: "type.googleapis.com/angzarr_client.proto.angzarr.Cover".to_string(),
         value: bytes,

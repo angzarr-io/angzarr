@@ -11,9 +11,7 @@ use sqlx::SqlitePool;
 use uuid::Uuid;
 
 use super::*;
-use crate::dlq::audit::{
-    ReplayAuditRecord, ReplayAuditWriter, ReplayOutcome,
-};
+use crate::dlq::audit::{ReplayAuditRecord, ReplayAuditWriter, ReplayOutcome};
 use crate::dlq::replay::ReplayMode;
 
 async fn fresh_pool() -> SqlitePool {
@@ -71,15 +69,14 @@ async fn write_persists_record_with_expected_fields() {
     };
     writer.record(rec).await.unwrap();
 
-    let row: (i64, String, String, String, Option<String>, String) =
-        sqlx::query_as(
-            "SELECT dlq_id, replay_mode, new_correlation_id, \
+    let row: (i64, String, String, String, Option<String>, String) = sqlx::query_as(
+        "SELECT dlq_id, replay_mode, new_correlation_id, \
              outcome, original_correlation_id, replayed_at \
              FROM dlq_replay_audit WHERE dlq_id = 42",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(row.0, 42);
     assert_eq!(row.1, "fresh_sequence");
     assert_eq!(row.2, "new-corr-xyz");
@@ -115,14 +112,13 @@ async fn write_persists_failure_with_message() {
         .await
         .unwrap();
 
-    let (outcome, msg, mode): (String, Option<String>, String) =
-        sqlx::query_as(
-            "SELECT outcome, result_message, replay_mode \
+    let (outcome, msg, mode): (String, Option<String>, String) = sqlx::query_as(
+        "SELECT outcome, result_message, replay_mode \
              FROM dlq_replay_audit WHERE dlq_id = 99",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
     assert_eq!(outcome, "failure");
     assert_eq!(msg.as_deref(), Some("publisher said no"));
     assert_eq!(mode, "as_is");
@@ -152,12 +148,10 @@ async fn multiple_replays_of_same_dlq_id_all_persist() {
             .unwrap();
     }
 
-    let count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM dlq_replay_audit WHERE dlq_id = 7",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM dlq_replay_audit WHERE dlq_id = 7")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(count, 3, "all three replays should be retained");
 }
 

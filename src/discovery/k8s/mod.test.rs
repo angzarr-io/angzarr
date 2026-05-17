@@ -203,7 +203,11 @@ fn test_extract_saga_missing_source_domain_skipped() {
 /// against `domain` to decide whether to fan out.
 #[test]
 fn test_extract_pm_with_subscriptions() {
-    let svc = make_test_pm_service("pmg-fulfillment", Some("order,inventory,fulfillment"), 50239);
+    let svc = make_test_pm_service(
+        "pmg-fulfillment",
+        Some("order,inventory,fulfillment"),
+        50239,
+    );
     let pm = K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").expect("pm extracted");
     assert_eq!(pm.service.name, "pmg-fulfillment");
     assert_eq!(

@@ -10,9 +10,10 @@ use deadpool_lapin::{Manager, Pool, PoolError};
 use hex;
 use lapin::{
     options::{
-        BasicConsumeOptions, BasicPublishOptions, ExchangeDeclareOptions, QueueBindOptions,
-        QueueDeclareOptions,
+        BasicConsumeOptions, BasicPublishOptions, ConfirmSelectOptions, ExchangeDeclareOptions,
+        QueueBindOptions, QueueDeclareOptions,
     },
+    publisher_confirm::Confirmation,
     types::FieldTable,
     BasicProperties, Channel, ExchangeKind,
 };
@@ -198,15 +199,53 @@ impl AmqpEventBus {
         })
     }
 
-    /// Get a channel from the pool.
+    /// Get a channel from the pool with publisher confirms enabled.
+    ///
+    /// Every channel handed out for publishing must have `confirm.select`
+    /// activated; otherwise `basic_publish().await` returns
+    /// `Confirmation::NotRequested` synchronously and the broker ack is
+    /// never awaited. That defeats the "persisted but not published"
+    /// guarantee the bus is supposed to provide.
     async fn get_channel(&self) -> Result<Channel> {
         let conn = self.pool.get().await.map_err(|e: PoolError| {
             BusError::Connection(format!("Failed to get connection from pool: {}", e))
         })?;
 
-        conn.create_channel()
+        let channel = conn
+            .create_channel()
             .await
-            .map_err(|e| BusError::Connection(format!("Failed to create channel: {}", e)))
+            .map_err(|e| BusError::Connection(format!("Failed to create channel: {}", e)))?;
+
+        Self::enable_publisher_confirms(&channel).await?;
+        Ok(channel)
+    }
+
+    /// Activate publisher confirms (`confirm.select`) on a channel.
+    ///
+    /// lapin tracks per-channel whether confirms are active; only after
+    /// this call does `basic_publish().await` resolve to a real broker
+    /// ack/nack (`Confirmation::Ack`/`Nack`) rather than the synchronous
+    /// `Confirmation::NotRequested`. Idempotent: re-calling on an
+    /// already-confirming channel is a no-op as far as lapin's state is
+    /// concerned.
+    async fn enable_publisher_confirms(channel: &Channel) -> Result<()> {
+        channel
+            .confirm_select(ConfirmSelectOptions::default())
+            .await
+            .map_err(|e| {
+                BusError::Connection(format!("Failed to enable publisher confirms: {}", e))
+            })
+    }
+
+    /// Test helper: borrow a fresh channel from the pool to inspect its state.
+    ///
+    /// Used by integration tests to verify that publisher confirms have been
+    /// enabled on each channel (lapin's `Channel::status().confirm()`). Without
+    /// this, `basic_publish().await` returns `Confirmation::NotRequested`
+    /// synchronously and the broker ack is never awaited.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn test_acquire_channel(&self) -> Result<Channel> {
+        self.get_channel().await
     }
 
     /// Build routing key from event book.
@@ -528,13 +567,44 @@ impl EventBus for AmqpEventBus {
                 .await
             {
                 Ok(confirm) => match confirm.await {
-                    Ok(_) => {
+                    Ok(Confirmation::Ack(_)) => {
                         debug!(
                             exchange = %self.config.exchange,
                             routing_key = %routing_key,
                             "Published event book"
                         );
                         return Ok(PublishResult::default());
+                    }
+                    Ok(Confirmation::Nack(msg)) => {
+                        // Broker actively refused the message (full queue,
+                        // mirroring failure, etc). Retry — a different node
+                        // or a future attempt may accept it.
+                        error!(
+                            attempt = attempt + 1,
+                            max_retries = MAX_RETRIES,
+                            returned = msg.is_some(),
+                            "Publish nacked by broker, retrying..."
+                        );
+                        last_error =
+                            Some(BusError::Publish("Publish nacked by broker".to_string()));
+                    }
+                    Ok(Confirmation::NotRequested) => {
+                        // Programmer error: somehow a channel without
+                        // `confirm.select` activated slipped through
+                        // `get_channel()`. Surface as a publish error
+                        // rather than silently succeeding — the
+                        // alternative is the "persisted but not
+                        // published" bug class this code path is
+                        // supposed to prevent.
+                        error!(
+                            attempt = attempt + 1,
+                            max_retries = MAX_RETRIES,
+                            "Publish confirms not activated on channel — \
+                             refusing to claim success without broker ack"
+                        );
+                        last_error = Some(BusError::Publish(
+                            "Publisher confirms not enabled on channel".to_string(),
+                        ));
                     }
                     Err(e) => {
                         error!(

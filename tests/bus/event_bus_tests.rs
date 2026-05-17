@@ -39,6 +39,7 @@ pub fn make_event_book(domain: &str) -> EventBook {
                 type_url: "type.googleapis.com/test.TestEvent".to_string(),
                 value: vec![1, 2, 3],
             })),
+            ..Default::default()
         }],
         snapshot: None,
         ..Default::default()
@@ -443,6 +444,7 @@ pub async fn test_payload_bytes_exact<B: EventBus>(
                 type_url: "type.test/BinaryPayload".to_string(),
                 value: payload_bytes.clone(),
             })),
+            ..Default::default()
         }],
         snapshot: None,
         ..Default::default()

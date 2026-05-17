@@ -12,6 +12,7 @@
 //!     - DLQ admin (`StoredDeadLetter.payload_view`, P1.2.5)
 //!     - Event-store browsing (planned, P3 / GraphQL gateway)
 //!     - Future user-domain command / projection viewers
+//!
 //!   Tolerance contract: every JSON decoder returns an empty string
 //!   on failure (pool not initialized, type unknown, bad bytes,
 //!   serialization error). Callers fall back to raw bytes — no panic,

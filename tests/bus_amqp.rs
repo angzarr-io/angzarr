@@ -77,3 +77,46 @@ async fn test_amqp_event_bus() {
 
     println!("=== All AMQP EventBus tests PASSED ===");
 }
+
+/// Regression test for finding C-07: AMQP publisher confirms must be enabled
+/// on every channel handed out by the pool.
+///
+/// Without `Channel::confirm_select`, lapin's `basic_publish().await`
+/// resolves the returned `PublisherConfirm` to `Confirmation::NotRequested`
+/// synchronously — the call returns `Ok` even if the broker disconnects
+/// between the TCP write and broker-side persist. This is the original
+/// "persisted but not published" failure mode the historical fix at commit
+/// `bc1d3db4` was meant to address.
+///
+/// We verify the behavior at the channel level: after `AmqpEventBus::new`,
+/// every channel acquired from the pool must report `status().confirm()`
+/// == true. This is the cheapest behavioral signal that confirms have been
+/// activated; the alternative (simulating a broker crash between TCP write
+/// and persist) is impractical to make deterministic in a test.
+#[tokio::test]
+async fn test_publisher_confirms_enabled_on_every_channel() {
+    println!("=== AMQP publisher-confirms regression test (C-07) ===");
+    let (_container, url) = start_rabbitmq().await;
+
+    let bus = AmqpEventBus::new(AmqpConfig::publisher(&url))
+        .await
+        .expect("Failed to create AMQP publisher");
+
+    // Pull several channels from the pool — the pool size is small (10) so
+    // this will exercise both fresh-channel creation and reuse.
+    for i in 0..3 {
+        let channel = bus
+            .test_acquire_channel()
+            .await
+            .expect("acquire channel from pool");
+        assert!(
+            channel.status().confirm(),
+            "channel #{i} from the pool must have publisher confirms enabled \
+             (confirm_select must be invoked when each channel is created); \
+             without confirms, basic_publish().await silently returns Ok \
+             without any broker ack"
+        );
+    }
+
+    println!("=== publisher-confirms enabled on every channel: PASSED ===");
+}

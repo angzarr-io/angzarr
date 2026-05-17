@@ -87,11 +87,9 @@ fn parse_clause(s: &str) -> Result<(&str, Clause<'_>), DlqError> {
 }
 
 fn parse_quoted(s: &str) -> Result<(&str, String), DlqError> {
-    let s = s
-        .strip_prefix('"')
-        .ok_or_else(|| DlqError::InvalidArgument(
-            "filter values must be double-quoted strings".to_string(),
-        ))?;
+    let s = s.strip_prefix('"').ok_or_else(|| {
+        DlqError::InvalidArgument("filter values must be double-quoted strings".to_string())
+    })?;
     let end = s.find('"').ok_or_else(|| {
         DlqError::InvalidArgument("unterminated quoted string in filter".to_string())
     })?;

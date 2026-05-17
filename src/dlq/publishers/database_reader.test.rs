@@ -64,8 +64,8 @@ fn make_command(domain: &str, correlation_id: &str) -> CommandBook {
     }
 }
 
-/// A test fixture dead letter parameterized by domain + correlation
-/// + a human-readable rejection reason. Uses sequence-mismatch as
+/// A test fixture dead letter parameterized by domain, correlation,
+/// and a human-readable rejection reason. Uses sequence-mismatch as
 /// the underlying kind (arbitrary; any kind would do).
 fn dead_letter(domain: &str, correlation_id: &str, reason: &str) -> AngzarrDeadLetter {
     let cmd = make_command(domain, correlation_id);
@@ -137,9 +137,18 @@ async fn list_orders_newest_first() {
 #[tokio::test]
 async fn list_filters_by_domain() {
     let (publisher, reader) = fresh_pair().await;
-    publisher.publish(dead_letter("player", "1", "p")).await.unwrap();
-    publisher.publish(dead_letter("table", "2", "t")).await.unwrap();
-    publisher.publish(dead_letter("player", "3", "p2")).await.unwrap();
+    publisher
+        .publish(dead_letter("player", "1", "p"))
+        .await
+        .unwrap();
+    publisher
+        .publish(dead_letter("table", "2", "t"))
+        .await
+        .unwrap();
+    publisher
+        .publish(dead_letter("player", "3", "p2"))
+        .await
+        .unwrap();
 
     let page = reader
         .list(ListFilter {
@@ -155,9 +164,18 @@ async fn list_filters_by_domain() {
 #[tokio::test]
 async fn list_filters_by_correlation_id() {
     let (publisher, reader) = fresh_pair().await;
-    publisher.publish(dead_letter("a", "trace-x", "1")).await.unwrap();
-    publisher.publish(dead_letter("a", "trace-y", "2")).await.unwrap();
-    publisher.publish(dead_letter("a", "trace-x", "3")).await.unwrap();
+    publisher
+        .publish(dead_letter("a", "trace-x", "1"))
+        .await
+        .unwrap();
+    publisher
+        .publish(dead_letter("a", "trace-y", "2"))
+        .await
+        .unwrap();
+    publisher
+        .publish(dead_letter("a", "trace-x", "3"))
+        .await
+        .unwrap();
 
     let page = reader
         .list(ListFilter {
@@ -175,9 +193,18 @@ async fn list_filters_combine_with_and() {
     // contract). Catches a regression where a future refactor
     // accidentally ORs them.
     let (publisher, reader) = fresh_pair().await;
-    publisher.publish(dead_letter("player", "trace-x", "1")).await.unwrap();
-    publisher.publish(dead_letter("player", "trace-y", "2")).await.unwrap();
-    publisher.publish(dead_letter("table", "trace-x", "3")).await.unwrap();
+    publisher
+        .publish(dead_letter("player", "trace-x", "1"))
+        .await
+        .unwrap();
+    publisher
+        .publish(dead_letter("player", "trace-y", "2"))
+        .await
+        .unwrap();
+    publisher
+        .publish(dead_letter("table", "trace-x", "3"))
+        .await
+        .unwrap();
 
     let page = reader
         .list(ListFilter {
@@ -189,10 +216,7 @@ async fn list_filters_combine_with_and() {
         .unwrap();
     assert_eq!(page.entries.len(), 1);
     assert_eq!(page.entries[0].domain, "player");
-    assert_eq!(
-        page.entries[0].correlation_id.as_deref(),
-        Some("trace-x")
-    );
+    assert_eq!(page.entries[0].correlation_id.as_deref(), Some("trace-x"));
 }
 
 #[tokio::test]
@@ -264,11 +288,17 @@ async fn list_filters_by_occurred_after_excludes_older_rows() {
     // then publish more. The threshold filter must drop the
     // pre-threshold rows.
     let (publisher, reader) = fresh_pair().await;
-    publisher.publish(dead_letter("a", "1", "early")).await.unwrap();
+    publisher
+        .publish(dead_letter("a", "1", "early"))
+        .await
+        .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
     let threshold = Utc::now();
     tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
-    publisher.publish(dead_letter("a", "2", "late")).await.unwrap();
+    publisher
+        .publish(dead_letter("a", "2", "late"))
+        .await
+        .unwrap();
 
     let page = reader
         .list(ListFilter {
@@ -328,9 +358,18 @@ async fn delete_missing_id_returns_false_not_error() {
 #[tokio::test]
 async fn delete_does_not_affect_other_rows() {
     let (publisher, reader) = fresh_pair().await;
-    publisher.publish(dead_letter("a", "1", "r1")).await.unwrap();
-    publisher.publish(dead_letter("a", "2", "r2")).await.unwrap();
-    publisher.publish(dead_letter("a", "3", "r3")).await.unwrap();
+    publisher
+        .publish(dead_letter("a", "1", "r1"))
+        .await
+        .unwrap();
+    publisher
+        .publish(dead_letter("a", "2", "r2"))
+        .await
+        .unwrap();
+    publisher
+        .publish(dead_letter("a", "3", "r3"))
+        .await
+        .unwrap();
 
     let list = reader.list(ListFilter::default()).await.unwrap();
     assert_eq!(list.entries.len(), 3);

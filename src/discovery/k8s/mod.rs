@@ -211,8 +211,10 @@ impl K8sServiceDiscovery {
             let services: Api<Service> = Api::namespaced(client, &namespace);
             let watcher = watcher::watcher(
                 services,
-                watcher::Config::default()
-                    .labels(&format!("{}={}", COMPONENT_LABEL, COMPONENT_PROCESS_MANAGER)),
+                watcher::Config::default().labels(&format!(
+                    "{}={}",
+                    COMPONENT_LABEL, COMPONENT_PROCESS_MANAGER
+                )),
             );
 
             info!(
@@ -251,10 +253,7 @@ impl K8sServiceDiscovery {
                         source_domain = %saga.source_domain,
                         "Saga discovered/updated"
                     );
-                    cache
-                        .write()
-                        .await
-                        .insert(saga.service.name.clone(), saga);
+                    cache.write().await.insert(saga.service.name.clone(), saga);
                 }
             }
             Event::Delete(svc) => {
@@ -711,10 +710,7 @@ impl ServiceDiscovery for K8sServiceDiscovery {
 
         // Sync sagas
         let saga_list = services
-            .list(
-                &ListParams::default()
-                    .labels(&format!("{}={}", COMPONENT_LABEL, COMPONENT_SAGA)),
-            )
+            .list(&ListParams::default().labels(&format!("{}={}", COMPONENT_LABEL, COMPONENT_SAGA)))
             .await?;
         for svc in saga_list {
             if let Some(saga) = self.extract_saga(&svc) {
@@ -735,10 +731,10 @@ impl ServiceDiscovery for K8sServiceDiscovery {
 
         // Sync PMs
         let pm_list = services
-            .list(
-                &ListParams::default()
-                    .labels(&format!("{}={}", COMPONENT_LABEL, COMPONENT_PROCESS_MANAGER)),
-            )
+            .list(&ListParams::default().labels(&format!(
+                "{}={}",
+                COMPONENT_LABEL, COMPONENT_PROCESS_MANAGER
+            )))
             .await?;
         for svc in pm_list {
             if let Some(pm) = self.extract_pm(&svc) {

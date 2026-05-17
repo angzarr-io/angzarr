@@ -43,10 +43,7 @@ fn proto_out_of_range_value_falls_back_to_fresh_sequence() {
     // Tolerance: a client speaking a newer proto we don't know yet
     // (or a corrupted wire value) must not panic. The safe default
     // applies.
-    assert_eq!(
-        ReplayMode::from_proto(999_999),
-        ReplayMode::FreshSequence
-    );
+    assert_eq!(ReplayMode::from_proto(999_999), ReplayMode::FreshSequence);
 }
 
 #[test]
@@ -58,10 +55,7 @@ fn rust_as_is_maps_back_to_proto_as_is() {
 #[test]
 fn rust_fresh_sequence_maps_back_to_proto_fresh_sequence() {
     use crate::proto::status::ReplayMode as Proto;
-    assert_eq!(
-        ReplayMode::FreshSequence.to_proto(),
-        Proto::FreshSequence
-    );
+    assert_eq!(ReplayMode::FreshSequence.to_proto(), Proto::FreshSequence);
 }
 
 #[tokio::test]
@@ -84,7 +78,10 @@ async fn noop_replay_publisher_returns_not_configured() {
     // ProblemDetails. Any other error variant would land in a
     // different bucket and surface incorrectly.
     let p = NoopReplayPublisher;
-    let err = p.replay(crate::proto::CommandBook::default()).await.unwrap_err();
+    let err = p
+        .replay(crate::proto::CommandBook::default())
+        .await
+        .unwrap_err();
     assert!(matches!(err, DlqError::NotConfigured));
 }
 

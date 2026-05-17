@@ -344,7 +344,10 @@ async fn list_populates_payload_view_with_decoded_json() {
     };
     assert_eq!(entries.len(), 1);
     let view = &entries[0].payload_view;
-    assert!(!view.is_empty(), "payload_view must be non-empty after decode");
+    assert!(
+        !view.is_empty(),
+        "payload_view must be non-empty after decode"
+    );
     assert!(
         view.contains("trace-payload-view"),
         "decoded JSON should surface correlation_id: {}",
@@ -406,10 +409,7 @@ impl RecordingReplayPublisher {
 
 #[async_trait::async_trait]
 impl crate::dlq::ReplayPublisher for RecordingReplayPublisher {
-    async fn replay(
-        &self,
-        command: crate::proto::CommandBook,
-    ) -> Result<(), crate::dlq::DlqError> {
+    async fn replay(&self, command: crate::proto::CommandBook) -> Result<(), crate::dlq::DlqError> {
         *self.last.lock().unwrap() = Some(command);
         Ok(())
     }
@@ -484,7 +484,9 @@ fn cmd_dl_row(id: i64, correlation: &str) -> StoredDeadLetter {
         rejection_reason: "sequence mismatch".to_string(),
         source_component: "agg-player".to_string(),
         source_component_type: "aggregate".to_string(),
-        payload: Some(crate::proto::angzarr_dead_letter::Payload::RejectedCommand(cmd)),
+        payload: Some(crate::proto::angzarr_dead_letter::Payload::RejectedCommand(
+            cmd,
+        )),
         ..Default::default()
     };
     StoredDeadLetter {
@@ -555,7 +557,9 @@ async fn replay_rewrites_correlation_id_on_published_command() {
         .await
         .unwrap();
 
-    let captured = pubr.taken().expect("publisher must have received a command");
+    let captured = pubr
+        .taken()
+        .expect("publisher must have received a command");
     let new_corr = captured.cover.unwrap().correlation_id;
     assert!(!new_corr.is_empty());
     assert_ne!(new_corr, "original-trace");
@@ -748,10 +752,7 @@ async fn replay_failure_writes_audit_row_with_failure_outcome() {
     struct AlwaysFailPublisher;
     #[async_trait::async_trait]
     impl crate::dlq::ReplayPublisher for AlwaysFailPublisher {
-        async fn replay(
-            &self,
-            _: crate::proto::CommandBook,
-        ) -> Result<(), crate::dlq::DlqError> {
+        async fn replay(&self, _: crate::proto::CommandBook) -> Result<(), crate::dlq::DlqError> {
             Err(crate::dlq::DlqError::Connection("nope".to_string()))
         }
         fn source_id(&self) -> &'static str {
@@ -888,6 +889,176 @@ async fn replay_garbage_payload_bytes_returns_500_degraded() {
     }
 }
 
+// ============================================================================
+// Filter parsing (C-20)
+// ============================================================================
+//
+// WHY: `ListDeadLettersRequest.filter` is the AIP-160 surface operators
+// use to narrow queries. A Phase-1.1 stub previously discarded
+// `req.filter` entirely, returning every row regardless of constraint.
+// The handler must parse `req.filter` via `crate::dlq::parse_filter`
+// and forward the typed `ListFilter` to the reader.
+//
+// Test double: an in-memory reader holding 3 rows across 2 domains. The
+// reader honours `ListFilter.domain` so the test exercises the full
+// parse → forward → filter chain. The reader also records the most
+// recent `ListFilter` for cross-checking the parser output.
+struct InMemoryFilteringReader {
+    rows: Vec<StoredDeadLetter>,
+    last_filter: std::sync::Mutex<Option<ListFilter>>,
+}
+
+impl InMemoryFilteringReader {
+    fn with_three_across_two_domains() -> Self {
+        Self {
+            rows: vec![
+                row_with_domain(1, "player", "corr-p1"),
+                row_with_domain(2, "player", "corr-p2"),
+                row_with_domain(3, "tournament", "corr-t1"),
+            ],
+            last_filter: std::sync::Mutex::new(None),
+        }
+    }
+    fn last_filter(&self) -> Option<ListFilter> {
+        self.last_filter.lock().unwrap().clone()
+    }
+}
+
+fn row_with_domain(id: i64, domain: &str, correlation: &str) -> StoredDeadLetter {
+    StoredDeadLetter {
+        id,
+        domain: domain.to_string(),
+        correlation_id: Some(correlation.to_string()),
+        payload: vec![],
+        rejection_reason: "x".to_string(),
+        rejection_type: "sequence_mismatch".to_string(),
+        details: None,
+        source_component: format!("agg-{}", domain),
+        source_component_type: "aggregate".to_string(),
+        occurred_at: Utc.with_ymd_and_hms(2026, 5, 15, 12, 0, 0).unwrap(),
+        created_at: Utc.with_ymd_and_hms(2026, 5, 15, 12, 0, 1).unwrap(),
+    }
+}
+
+#[async_trait::async_trait]
+impl DeadLetterReader for InMemoryFilteringReader {
+    async fn list(&self, filter: ListFilter) -> Result<DeadLetterPage, DlqError> {
+        *self.last_filter.lock().unwrap() = Some(filter.clone());
+        let matches: Vec<_> = self
+            .rows
+            .iter()
+            .filter(|r| match &filter.domain {
+                Some(d) => &r.domain == d,
+                None => true,
+            })
+            .cloned()
+            .collect();
+        Ok(DeadLetterPage {
+            entries: matches,
+            next_page_token: None,
+        })
+    }
+    async fn get(&self, id: i64) -> Result<Option<StoredDeadLetter>, DlqError> {
+        Ok(self.rows.iter().find(|r| r.id == id).cloned())
+    }
+    async fn delete(&self, _: i64) -> Result<bool, DlqError> {
+        Ok(false)
+    }
+    fn source_id(&self) -> &'static str {
+        "filtering"
+    }
+}
+
+#[tokio::test]
+async fn list_dead_letters_honors_domain_filter_in_request() {
+    // C-20: operators send `filter = "domain = \"player\""` and must
+    // receive ONLY the player-domain rows. Previously the handler's
+    // Phase-1.1 stub discarded req.filter entirely and returned all 3
+    // rows. The fix wires `crate::dlq::parse_filter` into the call so
+    // the typed `ListFilter` reaches the reader.
+    let reader = Arc::new(InMemoryFilteringReader::with_three_across_two_domains());
+    let h = DlqAdminHandler::new(reader.clone() as Arc<dyn DeadLetterReader>);
+
+    let resp = h
+        .list_dead_letters(tonic::Request::new(ListDeadLettersRequest {
+            filter: r#"domain = "player""#.to_string(),
+            page_size: 0,
+            page_token: String::new(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let entries = match resp.state.unwrap() {
+        ListState::Ok(ok) => ok.entries,
+        ListState::Degraded(p) => panic!("expected ok, got degraded: {}", p.detail),
+    };
+
+    assert_eq!(
+        entries.len(),
+        2,
+        "filter should narrow 3 rows -> 2 player-domain rows; got {} entries (filter not wired?)",
+        entries.len()
+    );
+    for e in &entries {
+        assert_eq!(
+            e.domain, "player",
+            "every returned row must be in player domain, got: {}",
+            e.domain
+        );
+    }
+    // Belt-and-suspenders: the parsed filter that reached the reader
+    // must carry the domain constraint. Catches a regression where
+    // someone parses but forgets to pass through the result.
+    let observed = reader.last_filter().expect("reader.list called once");
+    assert_eq!(
+        observed.domain.as_deref(),
+        Some("player"),
+        "parsed ListFilter.domain must reach the reader"
+    );
+}
+
+#[tokio::test]
+async fn list_dead_letters_invalid_filter_returns_degraded_400() {
+    // Garbage filter (unknown field, OR, unterminated quote) must
+    // surface a 400-class degraded ProblemDetails rather than a silent
+    // unfiltered list. Confirms parse errors take the degraded path
+    // instead of being swallowed.
+    let reader = Arc::new(InMemoryFilteringReader::with_three_across_two_domains());
+    let h = DlqAdminHandler::new(reader.clone() as Arc<dyn DeadLetterReader>);
+    let resp = h
+        .list_dead_letters(tonic::Request::new(ListDeadLettersRequest {
+            filter: r#"domian = "player""#.to_string(), // misspelled field
+            page_size: 0,
+            page_token: String::new(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    match resp.state.unwrap() {
+        ListState::Degraded(p) => assert_eq!(p.status, 400),
+        ListState::Ok(_) => panic!("invalid filter must surface degraded 400"),
+    }
+}
+
+#[tokio::test]
+async fn list_dead_letters_empty_filter_returns_all_rows() {
+    // Empty filter → no constraint. Confirms the fix preserves the
+    // existing behaviour for unfiltered queries.
+    let reader = Arc::new(InMemoryFilteringReader::with_three_across_two_domains());
+    let h = DlqAdminHandler::new(reader.clone() as Arc<dyn DeadLetterReader>);
+    let resp = h
+        .list_dead_letters(tonic::Request::new(ListDeadLettersRequest::default()))
+        .await
+        .unwrap()
+        .into_inner();
+    let entries = match resp.state.unwrap() {
+        ListState::Ok(ok) => ok.entries,
+        ListState::Degraded(p) => panic!("expected ok: {}", p.detail),
+    };
+    assert_eq!(entries.len(), 3, "empty filter should return all rows");
+}
+
 #[tokio::test]
 async fn payload_view_empty_when_payload_bytes_are_garbage() {
     // Tolerance contract: a row whose payload doesn't decode
@@ -936,7 +1107,17 @@ async fn payload_view_empty_when_payload_bytes_are_garbage() {
         ListState::Ok(ok) => ok.entries,
         ListState::Degraded(p) => panic!("must NOT degrade on bad payload bytes: {}", p.detail),
     };
-    assert_eq!(entries.len(), 1, "row still surfaces despite decode failure");
-    assert_eq!(entries[0].payload_view, "", "payload_view empty on decode failure");
-    assert!(!entries[0].payload.is_empty(), "raw payload bytes still available");
+    assert_eq!(
+        entries.len(),
+        1,
+        "row still surfaces despite decode failure"
+    );
+    assert_eq!(
+        entries[0].payload_view, "",
+        "payload_view empty on decode failure"
+    );
+    assert!(
+        !entries[0].payload.is_empty(),
+        "raw payload bytes still available"
+    );
 }

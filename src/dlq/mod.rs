@@ -84,13 +84,11 @@ use crate::proto::{
 use sererr_proto::ProtoCapturedError;
 
 // Re-export core types
+pub use audit::{NoopReplayAuditWriter, ReplayAuditRecord, ReplayAuditWriter, ReplayOutcome};
 pub use chained::ChainedDlqPublisher;
 pub use config::{DlqConfig, DlqTargetConfig};
 pub use error::{errmsg, DlqError};
 pub use factory::{init_dlq_publisher, DlqBackend};
-pub use audit::{
-    NoopReplayAuditWriter, ReplayAuditRecord, ReplayAuditWriter, ReplayOutcome,
-};
 pub use filter::parse_filter;
 pub use reader::{
     DeadLetterPage, DeadLetterReader, ListFilter, NoopDeadLetterReader, StoredDeadLetter,
