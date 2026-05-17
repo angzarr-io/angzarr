@@ -4,9 +4,9 @@
 # Build: podman build -t ghcr.io/angzarr-io/angzarr-base .
 #
 # Provides: just, buf, core build tools, system libraries
-# Based on: debian:bookworm-slim (minimal)
+# Based on: debian:trixie-slim (minimal)
 
-FROM docker.io/library/debian:bookworm-slim AS base
+FROM docker.io/library/debian:trixie-slim AS base
 
 ARG JUST_VERSION=1.36.0
 ARG BUF_VERSION=1.47.2

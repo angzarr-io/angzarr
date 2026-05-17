@@ -221,7 +221,7 @@ RUN TARGET=$(cat /tmp/target) && \
 # =============================================================================
 # Runtime bases
 # =============================================================================
-FROM docker.io/library/debian:bookworm-slim AS runtime-dev-base
+FROM docker.io/library/debian:trixie-slim AS runtime-dev-base
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     gdb \
