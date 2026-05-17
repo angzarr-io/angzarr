@@ -4,7 +4,42 @@ members = [
     "crates/trivial-delegation",
     "xtask",
 ]
+# sererr is a submodule with its own cargo workspace. Cargo's auto-discovery
+# would otherwise treat sererr/packages/rust/* as members of THIS workspace.
+# `exclude` removes them from membership but does NOT stop cargo's path-dep
+# `.workspace = true` inheritance lookup from walking up and claiming this
+# workspace as the root (a known cargo limitation around nested workspaces).
+# The `[workspace.package]` block below mirrors sererr's own at
+# sererr/packages/rust/Cargo.toml so that the inheritance resolves to the
+# right values even when claimed by the wrong workspace. Sync if sererr's
+# upstream values change.
+exclude = ["sererr"]
 resolver = "2"
+
+# Mirrored from sererr/packages/rust/Cargo.toml's [workspace.package].
+# Only consumed by sererr's path-dep inner crates' `<field>.workspace = true`
+# inheritance. Has no effect on the angzarr crate itself (which sets its
+# package fields explicitly in [package] below).
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["sererr contributors"]
+license = "MIT OR BSD-3-Clause"
+homepage = "https://sererr.fyi"
+repository = "https://github.com/sererr/sererr"
+keywords = ["error", "stack-trace", "sentry", "backtrace", "diagnostics"]
+categories = ["development-tools::debugging"]
+
+# Mirrored from sererr/packages/rust/Cargo.toml's [workspace.dependencies].
+# Consumed only by sererr's path-dep inner crates when they declare
+# `<dep> = { workspace = true }`. Paths are rewritten to be relative to
+# THIS Cargo.toml (sererr/packages/rust/<crate>) because cargo resolves
+# them against the claiming workspace root.
+[workspace.dependencies]
+backtrace = "0.3"
+prost = "0.14"
+sererr = { version = "0.1", path = "sererr/packages/rust/sererr" }
+sererr-proto = { version = "0.1", path = "sererr/packages/rust/sererr-proto" }
 
 [package]
 name = "angzarr"
@@ -80,6 +115,7 @@ full-musl = ["k8s", "gcp-cloudrun", "gcp-k8s", "aws-k8s", "redis", "immudb", "lo
 # gRPC
 tonic = { version = "0.14", features = ["tls-ring", "transport"] }
 tonic-health = "0.14"
+tonic-reflection = "0.14"
 prost = "0.14"
 prost-types = "0.14"
 tonic-prost = "0.14.5"
@@ -186,6 +222,18 @@ sha2 = "0.10.9"
 mutants = "0.0.4"
 trivial-delegation = { path = "crates/trivial-delegation" }
 
+# Structured stack-trace + error-chain capture.
+#   - `sererr` provides plain Rust types (no proto dep) used as the
+#     in-process representation in `src/dlq/mod.rs`.
+#   - `sererr-proto` provides the prost-generated `sererr.v1.*` types
+#     referenced from `types.proto` via `import "sererr/sererr.proto"`.
+#     angzarr's build.rs uses `extern_path` to wire the generated
+#     `EventProcessingFailedDetails.stack_trace` field to
+#     `sererr_proto::sererr_v1::CapturedError` instead of generating
+#     a duplicate definition.
+sererr = { path = "sererr/packages/rust/sererr" }
+sererr-proto = { path = "sererr/packages/rust/sererr-proto" }
+
 # Unix process management (signals, child-process lifecycle).
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["signal", "process", "fs", "user"] }
@@ -217,6 +265,10 @@ path = "src/bin/angzarr_process_manager.rs"
 [[bin]]
 name = "angzarr-upcaster"
 path = "src/bin/angzarr_upcaster.rs"
+
+[[bin]]
+name = "angzarr-status"
+path = "src/bin/angzarr_status.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"

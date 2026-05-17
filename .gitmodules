@@ -1,3 +1,6 @@
 [submodule "angzarr-project"]
 	path = angzarr-project
 	url = https://github.com/angzarr-io/angzarr-project.git
+[submodule "sererr"]
+	path = sererr
+	url = https://github.com/benjaminabbitt/sererr.git

@@ -51,6 +51,7 @@ fn make_test_command() -> CommandBook {
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::AngzarrDeferred(
                     make_angzarr_deferred(),
                 )),
@@ -113,6 +114,7 @@ fn test_compensation_context_from_non_saga_command() {
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(0)),
             }),
             payload: Some(command_page::Payload::Command(prost_types::Any {
@@ -253,6 +255,7 @@ async fn test_handle_business_response_with_events() {
             }),
             pages: vec![EventPage {
                 header: Some(PageHeader {
+                    sync_mode: None,
                     sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(6)),
                 }),
                 created_at: None,

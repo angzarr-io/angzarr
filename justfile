@@ -10,7 +10,7 @@
 #
 # When running outside a devcontainer:
 #   - Builds/uses local devcontainer image with `just` pre-installed
-#   - Podman mounts justfile.container as /workspace/justfile
+#   - Docker mounts justfile.container as /workspace/justfile
 #
 # When running inside a devcontainer (DEVCONTAINER=true):
 #   - Commands execute directly via `just <target>`
@@ -20,11 +20,18 @@ set shell := ["bash", "-c"]
 
 TOP := `git rev-parse --show-toplevel`
 REGISTRY := "ghcr.io/angzarr-io"
-# Container runtime: prefer docker, fall back to podman, empty if neither available
-# (empty is fine when running inside a container where we don't need nested containers)
-CONTAINER_CMD := `command -v docker 2>/dev/null || command -v podman 2>/dev/null || echo ""`
-# Run containers as current user to avoid root-owned files in mounted volumes
-CONTAINER_RUN := CONTAINER_CMD + " run --rm -u $(id -u):$(id -g)"
+# Container runtime: docker (rootless or rootful). Empty when running inside
+# a container where we don't need nested containers.
+CONTAINER_CMD := `command -v docker 2>/dev/null || echo ""`
+# `-u $(id -u):$(id -g)` is the right idiom for ROOTFUL docker (forces files
+# created in bind mounts to have the host user's UID instead of root). With
+# ROOTLESS docker it is the WRONG idiom: the rootless daemon already maps
+# container root -> host UID via the user namespace, so passing -u remaps the
+# container process onto a SUBUID (host UID 100000+offset) that doesn't own
+# any of the host files, breaking bind-mount writes. Detect rootless via the
+# daemon's `SecurityOptions` and conditionally skip -u.
+CONTAINER_USER_ARG := if `docker info 2>/dev/null | grep -q rootless && echo yes || echo no` == "yes" { "" } else { "-u $(id -u):$(id -g)" }
+CONTAINER_RUN := CONTAINER_CMD + " run --rm " + CONTAINER_USER_ARG
 
 # NOTE: Client libraries and examples have been extracted to separate repos:
 #   - angzarr-client-{lang}: Client libraries (pip install angzarr-client, etc.)
@@ -85,16 +92,17 @@ _container-dind +ARGS: _build-images
         just --justfile "{{TOP}}/justfile.container" {{ARGS}}
     else
         IMAGE=$(just _image-tag angzarr-rust)
-        # Find container socket (docker or podman)
-        if [ -S "/var/run/docker.sock" ]; then
+        # Find docker socket: rootless (per-user) takes precedence over rootful
+        ROOTLESS_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
+        if [ -S "$ROOTLESS_SOCK" ]; then
+            SOCK="$ROOTLESS_SOCK"
+            SOCK_MSG="Ensure rootless docker is running: systemctl --user start docker"
+        elif [ -S "/var/run/docker.sock" ]; then
             SOCK="/var/run/docker.sock"
-            SOCK_MSG="Ensure Docker daemon is running"
-        elif [ -S "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" ]; then
-            SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
-            SOCK_MSG="Start the podman socket with: systemctl --user start podman.socket"
+            SOCK_MSG="Ensure Docker daemon is running: sudo systemctl start docker"
         else
-            SOCK="/var/run/docker.sock"
-            SOCK_MSG="Ensure Docker daemon is running"
+            SOCK="$ROOTLESS_SOCK"
+            SOCK_MSG="No docker socket found. Start rootless docker: systemctl --user start docker"
         fi
         if [ ! -S "$SOCK" ]; then
             echo "Error: Container socket not found at $SOCK"
@@ -182,13 +190,18 @@ buf-docs:
     #!/usr/bin/env bash
     set -euo pipefail
     mkdir -p "{{TOP}}/docs/docs/api/proto"
-    # List proto files (exclude health which is internal)
+    # List proto files (exclude health which is internal). Sererr's
+    # proto root is also mounted because types.proto imports
+    # `sererr/sererr.proto` from the `sererr/` submodule.
     PROTOS=$(find "{{TOP}}/angzarr-project/proto" -name '*.proto' ! -path '*/health/*' -printf '%P\n' | sort)
+    SERERR_PROTO_DIR="{{TOP}}/sererr/proto"
     {{CONTAINER_RUN}} \
         -v "{{TOP}}/angzarr-project/proto:/protos:Z" \
+        -v "${SERERR_PROTO_DIR}:/sererr-protos:Z" \
         -v "{{TOP}}/docs/docs/api/proto:/out:Z" \
         docker.io/pseudomuto/protoc-gen-doc \
         --proto_path=/protos \
+        --proto_path=/sererr-protos \
         --doc_opt=markdown,index.md \
         $PROTOS
     # Escape curly braces for MDX compatibility (handles google.api.http examples)
@@ -271,6 +284,13 @@ lint:
 # Run unit tests
 test:
     just _container test
+
+# Pre-commit gate: fmt + lint + test in a SINGLE container invocation.
+# Avoids the inter-container `.cargo-lock` race that bites when lefthook
+# runs `just fmt`, `just lint`, `just test` as three separate host
+# invocations under rootless docker bind-mounts.
+precommit:
+    just _container precommit
 
 # Regenerate mutation test exclusions from #[trivial_delegation] attributes
 gen-mutants-exclude:

@@ -200,6 +200,178 @@ fn test_unknown_type_error() {
 }
 
 // ============================================================================
+// decode_to_json tolerance tests
+// ============================================================================
+//
+// WHY: payload rendering for the DLQ admin surface (and later the
+// GraphQL gateway) calls `decode_to_json` per row. Failure modes —
+// pool not initialized, unknown type, bad bytes — must produce an
+// empty string (the agreed-upon "I couldn't decode" signal), NOT
+// panic, NOT crash the response. The plan's resilience contract
+// pins this behavior; these tests pin it in code.
+
+/// Unknown type returns empty string even when the pool IS initialized.
+/// Catches the easy bug where we accidentally surface a panic from
+/// `decode` on a missing descriptor lookup.
+#[test]
+fn decode_to_json_unknown_type_returns_empty() {
+    let _ = ensure_initialized();
+    let result = decode_to_json("definitely.not.a.real.Type", b"\x08\x42");
+    assert_eq!(result, "");
+}
+
+/// Bad bytes against a known type return empty string.
+#[test]
+fn decode_to_json_garbage_bytes_returns_empty() {
+    let _ = ensure_initialized();
+    let result = decode_to_json(
+        "angzarr_client.proto.angzarr.AngzarrDeadLetter",
+        &[0xff, 0xff, 0xff, 0xff],
+    );
+    assert_eq!(result, "");
+}
+
+/// Round-trip: encode an `AngzarrDeadLetter`, decode_to_json returns
+/// a non-empty JSON string containing the expected fields.
+#[test]
+fn decode_to_json_roundtrip_angzarr_dead_letter() {
+    use prost::Message;
+    let _ = ensure_initialized();
+    let dl = crate::proto::AngzarrDeadLetter {
+        cover: Some(crate::proto::Cover {
+            domain: "player".to_string(),
+            root: None,
+            correlation_id: "trace-xyz".to_string(),
+            edition: None,
+        }),
+        rejection_reason: "test failure".to_string(),
+        source_component: "agg-player".to_string(),
+        source_component_type: "aggregate".to_string(),
+        ..Default::default()
+    };
+    let bytes = dl.encode_to_vec();
+    let json = decode_to_json("angzarr_client.proto.angzarr.AngzarrDeadLetter", &bytes);
+
+    assert!(!json.is_empty(), "json must be non-empty on happy path");
+    // Field-name spot checks against the proto3 JSON encoding.
+    assert!(
+        json.contains("\"player\""),
+        "decoded JSON should contain domain value: {}",
+        json
+    );
+    assert!(
+        json.contains("\"trace-xyz\""),
+        "decoded JSON should contain correlation_id: {}",
+        json
+    );
+    assert!(
+        json.contains("\"test failure\""),
+        "decoded JSON should contain rejection_reason: {}",
+        json
+    );
+}
+
+/// `ensure_initialized` is idempotent — repeat calls succeed.
+#[test]
+fn ensure_initialized_is_idempotent() {
+    let r1 = ensure_initialized();
+    let r2 = ensure_initialized();
+    let r3 = ensure_initialized();
+    assert!(r1.is_ok());
+    assert!(r2.is_ok());
+    assert!(r3.is_ok());
+}
+
+// ============================================================================
+// Any-in-hand path (decode_any_to_json) — reusable across the framework
+// ============================================================================
+//
+// The DLQ admin handler decodes a typed AngzarrDeadLetter via
+// decode_to_json. The event-store browser, GraphQL gateway, and
+// future projection viewers will work with bare `Any` payloads
+// (EventPage.event, CommandPage.command, etc.) — these tests pin
+// the Any-in-hand entry point that the same primitive serves.
+
+/// Happy path: encode a known framework message in an Any, decode
+/// back to JSON. Catches a regression in the type_url → DescriptorPool
+/// lookup chain (which is what makes the reusable surface work).
+#[test]
+fn decode_any_to_json_roundtrip_known_type() {
+    use prost::Message;
+    use prost_types::Any;
+
+    let _ = ensure_initialized();
+    let cover = crate::proto::Cover {
+        domain: "any-roundtrip".to_string(),
+        root: None,
+        correlation_id: "trace-cover".to_string(),
+        edition: None,
+    };
+    let any = Any {
+        type_url: "type.googleapis.com/angzarr_client.proto.angzarr.Cover".to_string(),
+        value: cover.encode_to_vec(),
+    };
+    let json = decode_any_to_json(&any);
+    assert!(!json.is_empty(), "Any decode should produce JSON: {}", json);
+    assert!(
+        json.contains("any-roundtrip"),
+        "JSON should contain cover.domain: {}",
+        json
+    );
+}
+
+/// Unknown type_url returns empty string (tolerance contract for
+/// the Any-in-hand path).
+#[test]
+fn decode_any_to_json_unknown_type_returns_empty() {
+    use prost_types::Any;
+    let _ = ensure_initialized();
+    let any = Any {
+        type_url: "type.googleapis.com/never.heard.of.It".to_string(),
+        value: vec![0x08, 0x42],
+    };
+    assert_eq!(decode_any_to_json(&any), "");
+}
+
+/// Bad bytes against a real type_url return empty string.
+#[test]
+fn decode_any_to_json_garbage_bytes_returns_empty() {
+    use prost_types::Any;
+    let _ = ensure_initialized();
+    let any = Any {
+        type_url: "type.googleapis.com/angzarr_client.proto.angzarr.Cover".to_string(),
+        value: vec![0xff; 16],
+    };
+    assert_eq!(decode_any_to_json(&any), "");
+}
+
+/// Symmetry: encode the same message, decode via either entry point —
+/// outputs match. Confirms the bytes-path and Any-path are not
+/// silently drifting from each other.
+#[test]
+fn decode_any_to_json_matches_decode_to_json() {
+    use prost::Message;
+    use prost_types::Any;
+
+    let _ = ensure_initialized();
+    let cover = crate::proto::Cover {
+        domain: "symmetry-test".to_string(),
+        root: None,
+        correlation_id: "trace-sym".to_string(),
+        edition: None,
+    };
+    let bytes = cover.encode_to_vec();
+    let from_bytes =
+        decode_to_json("angzarr_client.proto.angzarr.Cover", &bytes);
+    let from_any = decode_any_to_json(&Any {
+        type_url: "type.googleapis.com/angzarr_client.proto.angzarr.Cover".to_string(),
+        value: bytes,
+    });
+    assert!(!from_bytes.is_empty());
+    assert_eq!(from_bytes, from_any);
+}
+
+// ============================================================================
 // Integration Test Scaffolding
 // ============================================================================
 //

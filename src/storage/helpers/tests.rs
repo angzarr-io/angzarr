@@ -15,6 +15,7 @@ use prost_types::Timestamp;
 fn make_event_with_sequence(seq: u32) -> EventPage {
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(page_header::SequenceType::Sequence(seq)),
         }),
         payload: None,
@@ -81,6 +82,7 @@ fn test_resolve_sequence_zero() {
 fn test_parse_timestamp_present() {
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: None,
@@ -102,6 +104,7 @@ fn test_parse_timestamp_present() {
 fn test_parse_timestamp_missing_uses_now() {
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: None,
@@ -121,6 +124,7 @@ fn test_parse_timestamp_missing_uses_now() {
 fn test_parse_timestamp_invalid() {
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: None,

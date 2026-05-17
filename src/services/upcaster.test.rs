@@ -51,6 +51,7 @@ async fn test_upcaster_passthrough_when_disabled() {
 
     let events = vec![EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(1)),
         }),
         created_at: None,

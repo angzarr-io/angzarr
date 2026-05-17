@@ -292,6 +292,7 @@ fn test_max_page_sequence_single_page() {
         cover: None,
         pages: vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(SequenceType::Sequence(5)),
             }),
             payload: None,
@@ -313,6 +314,7 @@ fn test_max_page_sequence_multiple_pages() {
         pages: vec![
             EventPage {
                 header: Some(PageHeader {
+                    sync_mode: None,
                     sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(2)),
                 }),
                 payload: None,
@@ -321,6 +323,7 @@ fn test_max_page_sequence_multiple_pages() {
             },
             EventPage {
                 header: Some(PageHeader {
+                    sync_mode: None,
                     sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(7)),
                 }),
                 payload: None,
@@ -329,6 +332,7 @@ fn test_max_page_sequence_multiple_pages() {
             },
             EventPage {
                 header: Some(PageHeader {
+                    sync_mode: None,
                     sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(4)),
                 }),
                 payload: None,

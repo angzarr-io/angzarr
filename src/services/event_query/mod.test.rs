@@ -86,6 +86,7 @@ async fn test_get_event_book_with_data() {
 
     let events = vec![EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(event_page::Payload::Event(Any {
@@ -185,6 +186,7 @@ async fn test_get_event_book_with_range() {
     for i in 0..5 {
         let events = vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(i)),
             }),
             payload: Some(event_page::Payload::Event(Any {
@@ -264,6 +266,7 @@ async fn test_get_events_with_data() {
     // First add some events via the store directly
     let events = vec![EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(event_page::Payload::Event(Any {
@@ -372,6 +375,7 @@ async fn test_get_aggregate_roots_with_data() {
     // Add some events - must have at least one event to create an aggregate root
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(event_page::Payload::Event(Any {
@@ -406,6 +410,7 @@ async fn test_get_aggregate_roots_multiple_domains() {
     // Must add at least one event to create an aggregate root
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(event_page::Payload::Event(Any {
@@ -465,6 +470,7 @@ async fn test_get_event_book_by_correlation_id() {
     // Add events with correlation ID
     let events = vec![EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(event_page::Payload::Event(Any {
@@ -535,6 +541,7 @@ async fn test_get_events_by_correlation_id_multiple_aggregates() {
     ] {
         let events = vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
             }),
             payload: Some(event_page::Payload::Event(Any {
@@ -585,6 +592,7 @@ async fn test_get_event_book_temporal_by_time() {
     let events = vec![
         EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
             }),
             payload: Some(event_page::Payload::Event(Any {
@@ -599,6 +607,7 @@ async fn test_get_event_book_temporal_by_time() {
         },
         EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(1)),
             }),
             payload: Some(event_page::Payload::Event(Any {
@@ -613,6 +622,7 @@ async fn test_get_event_book_temporal_by_time() {
         },
         EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(2)),
             }),
             payload: Some(event_page::Payload::Event(Any {
@@ -669,6 +679,7 @@ async fn test_get_event_book_temporal_by_sequence() {
     for i in 0..5 {
         let events = vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(i)),
             }),
             payload: Some(event_page::Payload::Event(Any {
@@ -750,6 +761,7 @@ async fn test_get_event_book_returns_all_events_despite_snapshot() {
     // Add an event at sequence 0
     let events = vec![EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(event_page::Payload::Event(Any {
@@ -823,6 +835,7 @@ async fn test_get_event_book_with_sequences() {
     for i in 0..5 {
         let events = vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(i)),
             }),
             payload: Some(event_page::Payload::Event(Any {

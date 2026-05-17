@@ -37,6 +37,7 @@ fn make_event_book(payload_size: usize) -> EventBook {
         cover: None,
         pages: vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
             }),
             created_at: None,
@@ -222,6 +223,7 @@ async fn test_resolving_handler_resolves_external_payloads() {
         cover: None,
         pages: vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
             }),
             created_at: None,

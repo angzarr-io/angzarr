@@ -7,203 +7,315 @@ description: Auto-generated documentation for Angzarr protobuf definitions
 
 ## Table of Contents {#top}
 
-- [angzarr/cloudevents.proto](#angzarr_cloudevents-proto)
-    - [CloudEvent](#angzarr-CloudEvent)
-    - [CloudEvent.ExtensionsEntry](#angzarr-CloudEvent-ExtensionsEntry)
-    - [CloudEventsResponse](#angzarr-CloudEventsResponse)
+- [angzarr_client/proto/angzarr/cloudevents.proto](#angzarr_client_proto_angzarr_cloudevents-proto)
+    - [CloudEvent](#angzarr_client-proto-angzarr-CloudEvent)
+    - [CloudEvent.ExtensionsEntry](#angzarr_client-proto-angzarr-CloudEvent-ExtensionsEntry)
+    - [CloudEventsResponse](#angzarr_client-proto-angzarr-CloudEventsResponse)
   
-- [angzarr/command_handler.proto](#angzarr_command_handler-proto)
-    - [BusinessResponse](#angzarr-BusinessResponse)
-    - [CommandResponse](#angzarr-CommandResponse)
-    - [FactInjectionResponse](#angzarr-FactInjectionResponse)
-    - [ReplayRequest](#angzarr-ReplayRequest)
-    - [ReplayResponse](#angzarr-ReplayResponse)
-    - [RevocationResponse](#angzarr-RevocationResponse)
-    - [SpeculateCommandHandlerRequest](#angzarr-SpeculateCommandHandlerRequest)
+- [angzarr_client/proto/angzarr/command_handler.proto](#angzarr_client_proto_angzarr_command_handler-proto)
+    - [BusinessResponse](#angzarr_client-proto-angzarr-BusinessResponse)
+    - [CommandResponse](#angzarr_client-proto-angzarr-CommandResponse)
+    - [FactInjectionResponse](#angzarr_client-proto-angzarr-FactInjectionResponse)
+    - [FactRequest](#angzarr_client-proto-angzarr-FactRequest)
+    - [ReplayRequest](#angzarr_client-proto-angzarr-ReplayRequest)
+    - [ReplayResponse](#angzarr_client-proto-angzarr-ReplayResponse)
+    - [RevocationResponse](#angzarr_client-proto-angzarr-RevocationResponse)
+    - [SpeculateCommandHandlerRequest](#angzarr_client-proto-angzarr-SpeculateCommandHandlerRequest)
   
-    - [CommandHandlerCoordinatorService](#angzarr-CommandHandlerCoordinatorService)
-    - [CommandHandlerService](#angzarr-CommandHandlerService)
+    - [CommandHandlerCoordinatorService](#angzarr_client-proto-angzarr-CommandHandlerCoordinatorService)
+    - [CommandHandlerService](#angzarr_client-proto-angzarr-CommandHandlerService)
   
-- [angzarr/meta.proto](#angzarr_meta-proto)
-    - [DeleteEditionEvents](#angzarr-DeleteEditionEvents)
+- [angzarr_client/proto/angzarr/meta.proto](#angzarr_client_proto_angzarr_meta-proto)
+    - [DeleteEditionEvents](#angzarr_client-proto-angzarr-DeleteEditionEvents)
   
-- [angzarr/process_manager.proto](#angzarr_process_manager-proto)
-    - [ProcessManagerHandleRequest](#angzarr-ProcessManagerHandleRequest)
-    - [ProcessManagerHandleResponse](#angzarr-ProcessManagerHandleResponse)
-    - [ProcessManagerPrepareRequest](#angzarr-ProcessManagerPrepareRequest)
-    - [ProcessManagerPrepareResponse](#angzarr-ProcessManagerPrepareResponse)
-    - [SpeculatePmRequest](#angzarr-SpeculatePmRequest)
+- [angzarr_client/proto/angzarr/process_manager.proto](#angzarr_client_proto_angzarr_process_manager-proto)
+    - [ProcessManagerCoordinatorRequest](#angzarr_client-proto-angzarr-ProcessManagerCoordinatorRequest)
+    - [ProcessManagerHandleRequest](#angzarr_client-proto-angzarr-ProcessManagerHandleRequest)
+    - [ProcessManagerHandleRequest.DestinationSequencesEntry](#angzarr_client-proto-angzarr-ProcessManagerHandleRequest-DestinationSequencesEntry)
+    - [ProcessManagerHandleResponse](#angzarr_client-proto-angzarr-ProcessManagerHandleResponse)
+    - [SpeculatePmRequest](#angzarr_client-proto-angzarr-SpeculatePmRequest)
   
-    - [ProcessManagerCoordinatorService](#angzarr-ProcessManagerCoordinatorService)
-    - [ProcessManagerService](#angzarr-ProcessManagerService)
+    - [ProcessManagerCoordinatorService](#angzarr_client-proto-angzarr-ProcessManagerCoordinatorService)
+    - [ProcessManagerService](#angzarr_client-proto-angzarr-ProcessManagerService)
   
-- [angzarr/projector.proto](#angzarr_projector-proto)
-    - [SpeculateProjectorRequest](#angzarr-SpeculateProjectorRequest)
+- [angzarr_client/proto/angzarr/projector.proto](#angzarr_client_proto_angzarr_projector-proto)
+    - [SpeculateProjectorRequest](#angzarr_client-proto-angzarr-SpeculateProjectorRequest)
   
-    - [ProjectorCoordinatorService](#angzarr-ProjectorCoordinatorService)
-    - [ProjectorService](#angzarr-ProjectorService)
+    - [ProjectorCoordinatorService](#angzarr_client-proto-angzarr-ProjectorCoordinatorService)
+    - [ProjectorService](#angzarr_client-proto-angzarr-ProjectorService)
   
-- [angzarr/query.proto](#angzarr_query-proto)
-    - [EventQueryService](#angzarr-EventQueryService)
+- [angzarr_client/proto/angzarr/query.proto](#angzarr_client_proto_angzarr_query-proto)
+    - [EventQueryService](#angzarr_client-proto-angzarr-EventQueryService)
   
-- [angzarr/saga.proto](#angzarr_saga-proto)
-    - [SagaCompensationFailed](#angzarr-SagaCompensationFailed)
-    - [SagaExecuteRequest](#angzarr-SagaExecuteRequest)
-    - [SagaPrepareRequest](#angzarr-SagaPrepareRequest)
-    - [SagaPrepareResponse](#angzarr-SagaPrepareResponse)
-    - [SagaResponse](#angzarr-SagaResponse)
-    - [SagaRetryRequest](#angzarr-SagaRetryRequest)
-    - [SpeculateSagaRequest](#angzarr-SpeculateSagaRequest)
+- [angzarr_client/proto/angzarr/saga.proto](#angzarr_client_proto_angzarr_saga-proto)
+    - [SagaCompensationFailed](#angzarr_client-proto-angzarr-SagaCompensationFailed)
+    - [SagaHandleRequest](#angzarr_client-proto-angzarr-SagaHandleRequest)
+    - [SagaHandleRequest.DestinationSequencesEntry](#angzarr_client-proto-angzarr-SagaHandleRequest-DestinationSequencesEntry)
+    - [SagaResponse](#angzarr_client-proto-angzarr-SagaResponse)
+    - [SpeculateSagaRequest](#angzarr_client-proto-angzarr-SpeculateSagaRequest)
   
-    - [SagaCoordinatorService](#angzarr-SagaCoordinatorService)
-    - [SagaService](#angzarr-SagaService)
+    - [SagaCoordinatorService](#angzarr_client-proto-angzarr-SagaCoordinatorService)
+    - [SagaService](#angzarr_client-proto-angzarr-SagaService)
   
-- [angzarr/stream.proto](#angzarr_stream-proto)
-    - [EventStreamService](#angzarr-EventStreamService)
+- [angzarr_client/proto/angzarr/stream.proto](#angzarr_client_proto_angzarr_stream-proto)
+    - [EventStreamService](#angzarr_client-proto-angzarr-EventStreamService)
   
-- [angzarr/types.proto](#angzarr_types-proto)
-    - [AggregateRoot](#angzarr-AggregateRoot)
-    - [AngzarrDeadLetter](#angzarr-AngzarrDeadLetter)
-    - [AngzarrDeadLetter.MetadataEntry](#angzarr-AngzarrDeadLetter-MetadataEntry)
-    - [CommandBook](#angzarr-CommandBook)
-    - [CommandPage](#angzarr-CommandPage)
-    - [CommandRequest](#angzarr-CommandRequest)
-    - [ComponentDescriptor](#angzarr-ComponentDescriptor)
-    - [ContextualCommand](#angzarr-ContextualCommand)
-    - [ContextualCommandRequest](#angzarr-ContextualCommandRequest)
-    - [Cover](#angzarr-Cover)
-    - [DomainDivergence](#angzarr-DomainDivergence)
-    - [Edition](#angzarr-Edition)
-    - [EventBook](#angzarr-EventBook)
-    - [EventPage](#angzarr-EventPage)
-    - [EventProcessingFailedDetails](#angzarr-EventProcessingFailedDetails)
-    - [EventRequest](#angzarr-EventRequest)
-    - [EventStreamFilter](#angzarr-EventStreamFilter)
-    - [FactSequence](#angzarr-FactSequence)
-    - [GetDescriptorRequest](#angzarr-GetDescriptorRequest)
-    - [Notification](#angzarr-Notification)
-    - [Notification.MetadataEntry](#angzarr-Notification-MetadataEntry)
-    - [PayloadReference](#angzarr-PayloadReference)
-    - [PayloadRetrievalFailedDetails](#angzarr-PayloadRetrievalFailedDetails)
-    - [Projection](#angzarr-Projection)
-    - [Query](#angzarr-Query)
-    - [RejectionNotification](#angzarr-RejectionNotification)
-    - [SagaCommandOrigin](#angzarr-SagaCommandOrigin)
-    - [SequenceMismatchDetails](#angzarr-SequenceMismatchDetails)
-    - [SequenceRange](#angzarr-SequenceRange)
-    - [SequenceSet](#angzarr-SequenceSet)
-    - [Snapshot](#angzarr-Snapshot)
-    - [Target](#angzarr-Target)
-    - [TemporalQuery](#angzarr-TemporalQuery)
-    - [UUID](#angzarr-UUID)
+- [angzarr_client/proto/angzarr/types.proto](#angzarr_client_proto_angzarr_types-proto)
+    - [AggregateRoot](#angzarr_client-proto-angzarr-AggregateRoot)
+    - [AngzarrDeadLetter](#angzarr_client-proto-angzarr-AngzarrDeadLetter)
+    - [AngzarrDeadLetter.MetadataEntry](#angzarr_client-proto-angzarr-AngzarrDeadLetter-MetadataEntry)
+    - [AngzarrDeferredSequence](#angzarr_client-proto-angzarr-AngzarrDeferredSequence)
+    - [CascadeCommit](#angzarr_client-proto-angzarr-CascadeCommit)
+    - [CascadeConflictDetail](#angzarr_client-proto-angzarr-CascadeConflictDetail)
+    - [CascadeRollback](#angzarr_client-proto-angzarr-CascadeRollback)
+    - [CommandBook](#angzarr_client-proto-angzarr-CommandBook)
+    - [CommandPage](#angzarr_client-proto-angzarr-CommandPage)
+    - [CommandRequest](#angzarr_client-proto-angzarr-CommandRequest)
+    - [Compensate](#angzarr_client-proto-angzarr-Compensate)
+    - [ComponentDescriptor](#angzarr_client-proto-angzarr-ComponentDescriptor)
+    - [Confirmation](#angzarr_client-proto-angzarr-Confirmation)
+    - [ContextualCommand](#angzarr_client-proto-angzarr-ContextualCommand)
+    - [ContextualCommandRequest](#angzarr_client-proto-angzarr-ContextualCommandRequest)
+    - [Cover](#angzarr_client-proto-angzarr-Cover)
+    - [DomainDivergence](#angzarr_client-proto-angzarr-DomainDivergence)
+    - [Edition](#angzarr_client-proto-angzarr-Edition)
+    - [EventBook](#angzarr_client-proto-angzarr-EventBook)
+    - [EventPage](#angzarr_client-proto-angzarr-EventPage)
+    - [EventProcessingFailedDetails](#angzarr_client-proto-angzarr-EventProcessingFailedDetails)
+    - [EventRequest](#angzarr_client-proto-angzarr-EventRequest)
+    - [EventStreamFilter](#angzarr_client-proto-angzarr-EventStreamFilter)
+    - [ExternalDeferredSequence](#angzarr_client-proto-angzarr-ExternalDeferredSequence)
+    - [GetDescriptorRequest](#angzarr_client-proto-angzarr-GetDescriptorRequest)
+    - [NoOp](#angzarr_client-proto-angzarr-NoOp)
+    - [Notification](#angzarr_client-proto-angzarr-Notification)
+    - [PageHeader](#angzarr_client-proto-angzarr-PageHeader)
+    - [PayloadReference](#angzarr_client-proto-angzarr-PayloadReference)
+    - [PayloadRetrievalFailedDetails](#angzarr_client-proto-angzarr-PayloadRetrievalFailedDetails)
+    - [Projection](#angzarr_client-proto-angzarr-Projection)
+    - [Query](#angzarr_client-proto-angzarr-Query)
+    - [RejectionNotification](#angzarr_client-proto-angzarr-RejectionNotification)
+    - [Revocation](#angzarr_client-proto-angzarr-Revocation)
+    - [SequenceMismatchDetails](#angzarr_client-proto-angzarr-SequenceMismatchDetails)
+    - [SequenceRange](#angzarr_client-proto-angzarr-SequenceRange)
+    - [SequenceSet](#angzarr_client-proto-angzarr-SequenceSet)
+    - [Snapshot](#angzarr_client-proto-angzarr-Snapshot)
+    - [Target](#angzarr_client-proto-angzarr-Target)
+    - [TemporalQuery](#angzarr_client-proto-angzarr-TemporalQuery)
+    - [UUID](#angzarr_client-proto-angzarr-UUID)
   
-    - [MergeStrategy](#angzarr-MergeStrategy)
-    - [PayloadStorageType](#angzarr-PayloadStorageType)
-    - [SnapshotRetention](#angzarr-SnapshotRetention)
-    - [SyncMode](#angzarr-SyncMode)
+    - [CascadeErrorMode](#angzarr_client-proto-angzarr-CascadeErrorMode)
+    - [MergeStrategy](#angzarr_client-proto-angzarr-MergeStrategy)
+    - [PayloadStorageType](#angzarr_client-proto-angzarr-PayloadStorageType)
+    - [SnapshotRetention](#angzarr_client-proto-angzarr-SnapshotRetention)
+    - [SyncMode](#angzarr_client-proto-angzarr-SyncMode)
   
-- [angzarr/upcaster.proto](#angzarr_upcaster-proto)
-    - [UpcastRequest](#angzarr-UpcastRequest)
-    - [UpcastResponse](#angzarr-UpcastResponse)
+- [angzarr_client/proto/angzarr/upcaster.proto](#angzarr_client_proto_angzarr_upcaster-proto)
+    - [UpcastRequest](#angzarr_client-proto-angzarr-UpcastRequest)
+    - [UpcastResponse](#angzarr_client-proto-angzarr-UpcastResponse)
   
-    - [UpcasterService](#angzarr-UpcasterService)
+    - [UpcasterService](#angzarr_client-proto-angzarr-UpcasterService)
   
-- [examples/ai_sidecar.proto](#examples_ai_sidecar-proto)
-    - [ActionHistory](#examples-ActionHistory)
-    - [ActionRequest](#examples-ActionRequest)
-    - [ActionResponse](#examples-ActionResponse)
-    - [BatchActionRequest](#examples-BatchActionRequest)
-    - [BatchActionResponse](#examples-BatchActionResponse)
-    - [HealthRequest](#examples-HealthRequest)
-    - [HealthResponse](#examples-HealthResponse)
-    - [OpponentStats](#examples-OpponentStats)
+- [angzarr_client/proto/examples/ai_sidecar.proto](#angzarr_client_proto_examples_ai_sidecar-proto)
+    - [ActionContext](#angzarr_client-proto-examples-ActionContext)
+    - [ActionHistory](#angzarr_client-proto-examples-ActionHistory)
+    - [ActionRequest](#angzarr_client-proto-examples-ActionRequest)
+    - [ActionResponse](#angzarr_client-proto-examples-ActionResponse)
+    - [BatchActionRequest](#angzarr_client-proto-examples-BatchActionRequest)
+    - [BatchActionResponse](#angzarr_client-proto-examples-BatchActionResponse)
+    - [EndSessionRequest](#angzarr_client-proto-examples-EndSessionRequest)
+    - [EndSessionResponse](#angzarr_client-proto-examples-EndSessionResponse)
+    - [Experience](#angzarr_client-proto-examples-Experience)
+    - [HandEvent](#angzarr_client-proto-examples-HandEvent)
+    - [HealthRequest](#angzarr_client-proto-examples-HealthRequest)
+    - [HealthResponse](#angzarr_client-proto-examples-HealthResponse)
+    - [OpponentProfile](#angzarr_client-proto-examples-OpponentProfile)
+    - [OpponentQuery](#angzarr_client-proto-examples-OpponentQuery)
+    - [OpponentStats](#angzarr_client-proto-examples-OpponentStats)
+    - [OpponentStatsResponse](#angzarr_client-proto-examples-OpponentStatsResponse)
+    - [RecordResponse](#angzarr_client-proto-examples-RecordResponse)
+    - [ReloadModelRequest](#angzarr_client-proto-examples-ReloadModelRequest)
+    - [ReloadModelResponse](#angzarr_client-proto-examples-ReloadModelResponse)
+    - [StartSessionRequest](#angzarr_client-proto-examples-StartSessionRequest)
+    - [StartSessionResponse](#angzarr_client-proto-examples-StartSessionResponse)
   
-    - [AiSidecar](#examples-AiSidecar)
+    - [AiSidecar](#angzarr_client-proto-examples-AiSidecar)
   
-- [examples/hand.proto](#examples_hand-proto)
-    - [ActionTaken](#examples-ActionTaken)
-    - [AwardPot](#examples-AwardPot)
-    - [BettingRoundComplete](#examples-BettingRoundComplete)
-    - [BlindPosted](#examples-BlindPosted)
-    - [CardsDealt](#examples-CardsDealt)
-    - [CardsMucked](#examples-CardsMucked)
-    - [CardsRevealed](#examples-CardsRevealed)
-    - [CommunityCardsDealt](#examples-CommunityCardsDealt)
-    - [DealCards](#examples-DealCards)
-    - [DealCommunityCards](#examples-DealCommunityCards)
-    - [DrawCompleted](#examples-DrawCompleted)
-    - [HandComplete](#examples-HandComplete)
-    - [HandState](#examples-HandState)
-    - [PlayerAction](#examples-PlayerAction)
-    - [PlayerHandState](#examples-PlayerHandState)
-    - [PlayerHoleCards](#examples-PlayerHoleCards)
-    - [PlayerInHand](#examples-PlayerInHand)
-    - [PlayerStackSnapshot](#examples-PlayerStackSnapshot)
-    - [PlayerTimedOut](#examples-PlayerTimedOut)
-    - [PostBlind](#examples-PostBlind)
-    - [PotAward](#examples-PotAward)
-    - [PotAwarded](#examples-PotAwarded)
-    - [PotWinner](#examples-PotWinner)
-    - [RequestDraw](#examples-RequestDraw)
-    - [RevealCards](#examples-RevealCards)
-    - [ShowdownStarted](#examples-ShowdownStarted)
+- [angzarr_client/proto/examples/buy_in.proto](#angzarr_client_proto_examples_buy_in-proto)
+    - [BuyInCompleted](#angzarr_client-proto-examples-BuyInCompleted)
+    - [BuyInConfirmed](#angzarr_client-proto-examples-BuyInConfirmed)
+    - [BuyInFailed](#angzarr_client-proto-examples-BuyInFailed)
+    - [BuyInInitiated](#angzarr_client-proto-examples-BuyInInitiated)
+    - [BuyInOrchestratorState](#angzarr_client-proto-examples-BuyInOrchestratorState)
+    - [BuyInPhaseChanged](#angzarr_client-proto-examples-BuyInPhaseChanged)
+    - [BuyInRequested](#angzarr_client-proto-examples-BuyInRequested)
+    - [BuyInReservationReleased](#angzarr_client-proto-examples-BuyInReservationReleased)
+    - [ConfirmBuyIn](#angzarr_client-proto-examples-ConfirmBuyIn)
+    - [InitiateBuyIn](#angzarr_client-proto-examples-InitiateBuyIn)
+    - [PlayerSeated](#angzarr_client-proto-examples-PlayerSeated)
+    - [ReleaseBuyIn](#angzarr_client-proto-examples-ReleaseBuyIn)
+    - [SeatPlayer](#angzarr_client-proto-examples-SeatPlayer)
+    - [SeatingRejected](#angzarr_client-proto-examples-SeatingRejected)
   
-- [examples/player.proto](#examples_player-proto)
-    - [ActionRequested](#examples-ActionRequested)
-    - [DepositFunds](#examples-DepositFunds)
-    - [FundsDeposited](#examples-FundsDeposited)
-    - [FundsReleased](#examples-FundsReleased)
-    - [FundsReserved](#examples-FundsReserved)
-    - [FundsTransferred](#examples-FundsTransferred)
-    - [FundsWithdrawn](#examples-FundsWithdrawn)
-    - [PlayerRegistered](#examples-PlayerRegistered)
-    - [PlayerReturningToPlay](#examples-PlayerReturningToPlay)
-    - [PlayerSittingOut](#examples-PlayerSittingOut)
-    - [PlayerState](#examples-PlayerState)
-    - [PlayerState.TableReservationsEntry](#examples-PlayerState-TableReservationsEntry)
-    - [RegisterPlayer](#examples-RegisterPlayer)
-    - [ReleaseFunds](#examples-ReleaseFunds)
-    - [RequestAction](#examples-RequestAction)
-    - [ReserveFunds](#examples-ReserveFunds)
-    - [SitIn](#examples-SitIn)
-    - [SitOut](#examples-SitOut)
-    - [TransferFunds](#examples-TransferFunds)
-    - [WithdrawFunds](#examples-WithdrawFunds)
+- [angzarr_client/proto/examples/hand.proto](#angzarr_client_proto_examples_hand-proto)
+    - [ActionTaken](#angzarr_client-proto-examples-ActionTaken)
+    - [AwardPot](#angzarr_client-proto-examples-AwardPot)
+    - [BettingRoundComplete](#angzarr_client-proto-examples-BettingRoundComplete)
+    - [BlindPosted](#angzarr_client-proto-examples-BlindPosted)
+    - [CardsDealt](#angzarr_client-proto-examples-CardsDealt)
+    - [CardsMucked](#angzarr_client-proto-examples-CardsMucked)
+    - [CardsRevealed](#angzarr_client-proto-examples-CardsRevealed)
+    - [CommunityCardsDealt](#angzarr_client-proto-examples-CommunityCardsDealt)
+    - [DealCards](#angzarr_client-proto-examples-DealCards)
+    - [DealCommunityCards](#angzarr_client-proto-examples-DealCommunityCards)
+    - [DrawCompleted](#angzarr_client-proto-examples-DrawCompleted)
+    - [HandComplete](#angzarr_client-proto-examples-HandComplete)
+    - [HandState](#angzarr_client-proto-examples-HandState)
+    - [PlayerAction](#angzarr_client-proto-examples-PlayerAction)
+    - [PlayerHandState](#angzarr_client-proto-examples-PlayerHandState)
+    - [PlayerHoleCards](#angzarr_client-proto-examples-PlayerHoleCards)
+    - [PlayerInHand](#angzarr_client-proto-examples-PlayerInHand)
+    - [PlayerStackSnapshot](#angzarr_client-proto-examples-PlayerStackSnapshot)
+    - [PlayerTimedOut](#angzarr_client-proto-examples-PlayerTimedOut)
+    - [PostBlind](#angzarr_client-proto-examples-PostBlind)
+    - [PotAward](#angzarr_client-proto-examples-PotAward)
+    - [PotAwarded](#angzarr_client-proto-examples-PotAwarded)
+    - [PotWinner](#angzarr_client-proto-examples-PotWinner)
+    - [RequestDraw](#angzarr_client-proto-examples-RequestDraw)
+    - [RevealCards](#angzarr_client-proto-examples-RevealCards)
+    - [ShowdownStarted](#angzarr_client-proto-examples-ShowdownStarted)
   
-- [examples/poker_types.proto](#examples_poker_types-proto)
-    - [Card](#examples-Card)
-    - [Currency](#examples-Currency)
-    - [HandRanking](#examples-HandRanking)
-    - [Pot](#examples-Pot)
-    - [Seat](#examples-Seat)
+- [angzarr_client/proto/examples/orchestration.proto](#angzarr_client_proto_examples_orchestration-proto)
+    - [OrchestrationFailure](#angzarr_client-proto-examples-OrchestrationFailure)
   
-    - [ActionType](#examples-ActionType)
-    - [BettingPhase](#examples-BettingPhase)
-    - [GameVariant](#examples-GameVariant)
-    - [HandRankType](#examples-HandRankType)
-    - [PlayerType](#examples-PlayerType)
-    - [Rank](#examples-Rank)
-    - [Suit](#examples-Suit)
+    - [BuyInPhase](#angzarr_client-proto-examples-BuyInPhase)
+    - [RebuyPhase](#angzarr_client-proto-examples-RebuyPhase)
+    - [RegistrationPhase](#angzarr_client-proto-examples-RegistrationPhase)
   
-- [examples/table.proto](#examples_table-proto)
-    - [AddChips](#examples-AddChips)
-    - [ChipsAdded](#examples-ChipsAdded)
-    - [CreateTable](#examples-CreateTable)
-    - [EndHand](#examples-EndHand)
-    - [HandEnded](#examples-HandEnded)
-    - [HandEnded.StackChangesEntry](#examples-HandEnded-StackChangesEntry)
-    - [HandStarted](#examples-HandStarted)
-    - [JoinTable](#examples-JoinTable)
-    - [LeaveTable](#examples-LeaveTable)
-    - [PlayerJoined](#examples-PlayerJoined)
-    - [PlayerLeft](#examples-PlayerLeft)
-    - [PlayerSatIn](#examples-PlayerSatIn)
-    - [PlayerSatOut](#examples-PlayerSatOut)
-    - [PotResult](#examples-PotResult)
-    - [SeatSnapshot](#examples-SeatSnapshot)
-    - [StartHand](#examples-StartHand)
-    - [TableCreated](#examples-TableCreated)
-    - [TableState](#examples-TableState)
+- [angzarr_client/proto/examples/player.proto](#angzarr_client_proto_examples_player-proto)
+    - [ActionRequested](#angzarr_client-proto-examples-ActionRequested)
+    - [DeductReservedFunds](#angzarr_client-proto-examples-DeductReservedFunds)
+    - [DepositFunds](#angzarr_client-proto-examples-DepositFunds)
+    - [FundsDeducted](#angzarr_client-proto-examples-FundsDeducted)
+    - [FundsDeposited](#angzarr_client-proto-examples-FundsDeposited)
+    - [FundsReleased](#angzarr_client-proto-examples-FundsReleased)
+    - [FundsReserved](#angzarr_client-proto-examples-FundsReserved)
+    - [FundsTransferred](#angzarr_client-proto-examples-FundsTransferred)
+    - [FundsWithdrawn](#angzarr_client-proto-examples-FundsWithdrawn)
+    - [PlayerRegistered](#angzarr_client-proto-examples-PlayerRegistered)
+    - [PlayerReturningToPlay](#angzarr_client-proto-examples-PlayerReturningToPlay)
+    - [PlayerSittingOut](#angzarr_client-proto-examples-PlayerSittingOut)
+    - [PlayerState](#angzarr_client-proto-examples-PlayerState)
+    - [PlayerState.TableReservationsEntry](#angzarr_client-proto-examples-PlayerState-TableReservationsEntry)
+    - [RegisterPlayer](#angzarr_client-proto-examples-RegisterPlayer)
+    - [ReleaseFunds](#angzarr_client-proto-examples-ReleaseFunds)
+    - [RequestAction](#angzarr_client-proto-examples-RequestAction)
+    - [ReserveFunds](#angzarr_client-proto-examples-ReserveFunds)
+    - [SitIn](#angzarr_client-proto-examples-SitIn)
+    - [SitOut](#angzarr_client-proto-examples-SitOut)
+    - [TransferFunds](#angzarr_client-proto-examples-TransferFunds)
+    - [WithdrawFunds](#angzarr_client-proto-examples-WithdrawFunds)
+  
+- [angzarr_client/proto/examples/poker_types.proto](#angzarr_client_proto_examples_poker_types-proto)
+    - [Card](#angzarr_client-proto-examples-Card)
+    - [Currency](#angzarr_client-proto-examples-Currency)
+    - [HandRanking](#angzarr_client-proto-examples-HandRanking)
+    - [Pot](#angzarr_client-proto-examples-Pot)
+    - [Seat](#angzarr_client-proto-examples-Seat)
+  
+    - [ActionType](#angzarr_client-proto-examples-ActionType)
+    - [BettingPhase](#angzarr_client-proto-examples-BettingPhase)
+    - [GameVariant](#angzarr_client-proto-examples-GameVariant)
+    - [HandRankType](#angzarr_client-proto-examples-HandRankType)
+    - [PlayerType](#angzarr_client-proto-examples-PlayerType)
+    - [Rank](#angzarr_client-proto-examples-Rank)
+    - [Suit](#angzarr_client-proto-examples-Suit)
+  
+- [angzarr_client/proto/examples/rebuy.proto](#angzarr_client_proto_examples_rebuy-proto)
+    - [AddRebuyChips](#angzarr_client-proto-examples-AddRebuyChips)
+    - [ConfirmRebuyFee](#angzarr_client-proto-examples-ConfirmRebuyFee)
+    - [InitiateRebuy](#angzarr_client-proto-examples-InitiateRebuy)
+    - [RebuyChipsAdded](#angzarr_client-proto-examples-RebuyChipsAdded)
+    - [RebuyCompleted](#angzarr_client-proto-examples-RebuyCompleted)
+    - [RebuyFailed](#angzarr_client-proto-examples-RebuyFailed)
+    - [RebuyFeeConfirmed](#angzarr_client-proto-examples-RebuyFeeConfirmed)
+    - [RebuyFeeReleased](#angzarr_client-proto-examples-RebuyFeeReleased)
+    - [RebuyInitiated](#angzarr_client-proto-examples-RebuyInitiated)
+    - [RebuyOrchestratorState](#angzarr_client-proto-examples-RebuyOrchestratorState)
+    - [RebuyPhaseChanged](#angzarr_client-proto-examples-RebuyPhaseChanged)
+    - [RebuyRequested](#angzarr_client-proto-examples-RebuyRequested)
+    - [ReleaseRebuyFee](#angzarr_client-proto-examples-ReleaseRebuyFee)
+  
+- [angzarr_client/proto/examples/registration.proto](#angzarr_client_proto_examples_registration-proto)
+    - [ConfirmRegistrationFee](#angzarr_client-proto-examples-ConfirmRegistrationFee)
+    - [InitiateTournamentRegistration](#angzarr_client-proto-examples-InitiateTournamentRegistration)
+    - [RegistrationCompleted](#angzarr_client-proto-examples-RegistrationCompleted)
+    - [RegistrationFailed](#angzarr_client-proto-examples-RegistrationFailed)
+    - [RegistrationFeeConfirmed](#angzarr_client-proto-examples-RegistrationFeeConfirmed)
+    - [RegistrationFeeReleased](#angzarr_client-proto-examples-RegistrationFeeReleased)
+    - [RegistrationInitiated](#angzarr_client-proto-examples-RegistrationInitiated)
+    - [RegistrationOrchestratorState](#angzarr_client-proto-examples-RegistrationOrchestratorState)
+    - [RegistrationPhaseChanged](#angzarr_client-proto-examples-RegistrationPhaseChanged)
+    - [RegistrationRequested](#angzarr_client-proto-examples-RegistrationRequested)
+    - [ReleaseRegistrationFee](#angzarr_client-proto-examples-ReleaseRegistrationFee)
+  
+- [angzarr_client/proto/examples/table.proto](#angzarr_client_proto_examples_table-proto)
+    - [AddChips](#angzarr_client-proto-examples-AddChips)
+    - [ChipsAdded](#angzarr_client-proto-examples-ChipsAdded)
+    - [CreateTable](#angzarr_client-proto-examples-CreateTable)
+    - [EndHand](#angzarr_client-proto-examples-EndHand)
+    - [HandEnded](#angzarr_client-proto-examples-HandEnded)
+    - [HandEnded.StackChangesEntry](#angzarr_client-proto-examples-HandEnded-StackChangesEntry)
+    - [HandStarted](#angzarr_client-proto-examples-HandStarted)
+    - [JoinTable](#angzarr_client-proto-examples-JoinTable)
+    - [LeaveTable](#angzarr_client-proto-examples-LeaveTable)
+    - [PlayerJoined](#angzarr_client-proto-examples-PlayerJoined)
+    - [PlayerLeft](#angzarr_client-proto-examples-PlayerLeft)
+    - [PlayerSatIn](#angzarr_client-proto-examples-PlayerSatIn)
+    - [PlayerSatOut](#angzarr_client-proto-examples-PlayerSatOut)
+    - [PotResult](#angzarr_client-proto-examples-PotResult)
+    - [SeatSnapshot](#angzarr_client-proto-examples-SeatSnapshot)
+    - [StartHand](#angzarr_client-proto-examples-StartHand)
+    - [TableCreated](#angzarr_client-proto-examples-TableCreated)
+    - [TableState](#angzarr_client-proto-examples-TableState)
+  
+- [angzarr_client/proto/examples/tournament.proto](#angzarr_client_proto_examples_tournament-proto)
+    - [AddonConfig](#angzarr_client-proto-examples-AddonConfig)
+    - [AddonProcessed](#angzarr_client-proto-examples-AddonProcessed)
+    - [AdvanceBlindLevel](#angzarr_client-proto-examples-AdvanceBlindLevel)
+    - [BlindLevel](#angzarr_client-proto-examples-BlindLevel)
+    - [BlindLevelAdvanced](#angzarr_client-proto-examples-BlindLevelAdvanced)
+    - [CloseRegistration](#angzarr_client-proto-examples-CloseRegistration)
+    - [CompleteTournament](#angzarr_client-proto-examples-CompleteTournament)
+    - [CreateTournament](#angzarr_client-proto-examples-CreateTournament)
+    - [EliminatePlayer](#angzarr_client-proto-examples-EliminatePlayer)
+    - [EnrollPlayer](#angzarr_client-proto-examples-EnrollPlayer)
+    - [OpenRegistration](#angzarr_client-proto-examples-OpenRegistration)
+    - [PauseTournament](#angzarr_client-proto-examples-PauseTournament)
+    - [PlayerEliminated](#angzarr_client-proto-examples-PlayerEliminated)
+    - [PlayerRegistration](#angzarr_client-proto-examples-PlayerRegistration)
+    - [PlayerUnregistered](#angzarr_client-proto-examples-PlayerUnregistered)
+    - [ProcessAddon](#angzarr_client-proto-examples-ProcessAddon)
+    - [ProcessRebuy](#angzarr_client-proto-examples-ProcessRebuy)
+    - [RebuyConfig](#angzarr_client-proto-examples-RebuyConfig)
+    - [RebuyDenied](#angzarr_client-proto-examples-RebuyDenied)
+    - [RebuyProcessed](#angzarr_client-proto-examples-RebuyProcessed)
+    - [RegistrationClosed](#angzarr_client-proto-examples-RegistrationClosed)
+    - [RegistrationOpened](#angzarr_client-proto-examples-RegistrationOpened)
+    - [ResumeTournament](#angzarr_client-proto-examples-ResumeTournament)
+    - [StartTournament](#angzarr_client-proto-examples-StartTournament)
+    - [TournamentCompleted](#angzarr_client-proto-examples-TournamentCompleted)
+    - [TournamentCreated](#angzarr_client-proto-examples-TournamentCreated)
+    - [TournamentEnrollmentRejected](#angzarr_client-proto-examples-TournamentEnrollmentRejected)
+    - [TournamentPaused](#angzarr_client-proto-examples-TournamentPaused)
+    - [TournamentPlayerEnrolled](#angzarr_client-proto-examples-TournamentPlayerEnrolled)
+    - [TournamentResult](#angzarr_client-proto-examples-TournamentResult)
+    - [TournamentResumed](#angzarr_client-proto-examples-TournamentResumed)
+    - [TournamentStarted](#angzarr_client-proto-examples-TournamentStarted)
+    - [TournamentState](#angzarr_client-proto-examples-TournamentState)
+    - [TournamentState.RegisteredPlayersEntry](#angzarr_client-proto-examples-TournamentState-RegisteredPlayersEntry)
+    - [UnregisterPlayer](#angzarr_client-proto-examples-UnregisterPlayer)
+  
+    - [TournamentStatus](#angzarr_client-proto-examples-TournamentStatus)
   
 - [google/api/annotations.proto](#google_api_annotations-proto)
     - [File-level Extensions](#google_api_annotations-proto-extensions)
@@ -213,25 +325,19 @@ description: Auto-generated documentation for Angzarr protobuf definitions
     - [Http](#google-api-Http)
     - [HttpRule](#google-api-HttpRule)
   
-- [io/cloudevents/v1/cloudevents.proto](#io_cloudevents_v1_cloudevents-proto)
-    - [CloudEvent](#io-cloudevents-v1-CloudEvent)
-    - [CloudEvent.AttributesEntry](#io-cloudevents-v1-CloudEvent-AttributesEntry)
-    - [CloudEventAttributeValue](#io-cloudevents-v1-CloudEventAttributeValue)
-    - [CloudEventBatch](#io-cloudevents-v1-CloudEventBatch)
-  
 - [Scalar Value Types](#scalar-value-types)
 
 
 
 <p align="right"><a href="#top">Top</a></p>
 
-## angzarr/cloudevents.proto {#angzarr_cloudevents-proto}
+## angzarr_client/proto/angzarr/cloudevents.proto {#angzarr_client_proto_angzarr_cloudevents-proto}
 
 
 
 
-### CloudEvent {#angzarr-CloudEvent}
-docs:start:cloud_event
+### CloudEvent {#angzarr_client-proto-angzarr-CloudEvent}
+region cloud_event
 CloudEvent represents a single event for external consumption.
 
 Client projectors create these by filtering/transforming internal events.
@@ -247,7 +353,7 @@ proto message that omits sensitive fields.
 | ----- | ---- | ----- | ----------- |
 | type | string |  | Event type (e.g., &#34;com.example.order.created&#34;). Default: proto type_url suffix from original event. |
 | data | [google.protobuf.Any](https://protobuf.dev/reference/protobuf/google.protobuf/#any) |  | Event payload as proto Any. Framework converts to JSON for CloudEvents output. Client should filter sensitive fields before packing. |
-| extensions | [CloudEvent.ExtensionsEntry](#angzarr-CloudEvent-ExtensionsEntry) | repeated | Custom extension attributes. Keys should follow CloudEvents naming (lowercase, no dots). Framework adds correlationid automatically if present in Cover. |
+| extensions | [CloudEvent.ExtensionsEntry](#angzarr_client-proto-angzarr-CloudEvent-ExtensionsEntry) | repeated | Custom extension attributes. Keys should follow CloudEvents naming (lowercase, no dots). Framework adds correlationid automatically if present in Cover. |
 | id | string | optional | Optional overrides. Framework uses Cover/EventPage values if not set.
 
 Default: \{domain\}:\{root_id\}:\{sequence\} |
@@ -260,7 +366,7 @@ Default: \{domain\}:\{root_id\}:\{sequence\} |
 
 
 
-### CloudEvent.ExtensionsEntry {#angzarr-CloudEvent-ExtensionsEntry}
+### CloudEvent.ExtensionsEntry {#angzarr_client-proto-angzarr-CloudEvent-ExtensionsEntry}
 
 
 
@@ -275,7 +381,7 @@ Default: \{domain\}:\{root_id\}:\{sequence\} |
 
 
 
-### CloudEventsResponse {#angzarr-CloudEventsResponse}
+### CloudEventsResponse {#angzarr_client-proto-angzarr-CloudEventsResponse}
 CloudEventsResponse is returned by client projectors in Projection.projection.
 
 Framework detects this type by checking projection.type_url and routes
@@ -287,7 +393,7 @@ Client may return 0 events (skip), 1 event (typical), or N events
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| events | [CloudEvent](#angzarr-CloudEvent) | repeated |  |
+| events | [CloudEvent](#angzarr_client-proto-angzarr-CloudEvent) | repeated |  |
 
 
 
@@ -305,20 +411,20 @@ Client may return 0 events (skip), 1 event (typical), or N events
 
 <p align="right"><a href="#top">Top</a></p>
 
-## angzarr/command_handler.proto {#angzarr_command_handler-proto}
+## angzarr_client/proto/angzarr/command_handler.proto {#angzarr_client_proto_angzarr_command_handler-proto}
 
 
 
 
-### BusinessResponse {#angzarr-BusinessResponse}
+### BusinessResponse {#angzarr_client-proto-angzarr-BusinessResponse}
 Wrapper response for BusinessLogic.Handle
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| events | [EventBook](#angzarr-EventBook) |  | Business provides compensation events |
-| revocation | [RevocationResponse](#angzarr-RevocationResponse) |  | Business requests framework action |
-| notification | [Notification](#angzarr-Notification) |  | Forward rejection notification upstream |
+| events | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  | Business provides compensation events |
+| revocation | [RevocationResponse](#angzarr_client-proto-angzarr-RevocationResponse) |  | Business requests framework action |
+| notification | [Notification](#angzarr_client-proto-angzarr-Notification) |  | Forward rejection notification upstream |
 
 
 
@@ -326,14 +432,14 @@ Wrapper response for BusinessLogic.Handle
 
 
 
-### CommandResponse {#angzarr-CommandResponse}
+### CommandResponse {#angzarr_client-proto-angzarr-CommandResponse}
 Response from entity - aggregate events &#43; sync projector results
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| events | [EventBook](#angzarr-EventBook) |  | Events from the target aggregate |
-| projections | [Projection](#angzarr-Projection) | repeated | Synchronous projector results |
+| events | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  | Events from the target aggregate |
+| projections | [Projection](#angzarr_client-proto-angzarr-Projection) | repeated | Synchronous projector results |
 
 
 
@@ -341,26 +447,26 @@ Response from entity - aggregate events &#43; sync projector results
 
 
 
-### FactInjectionResponse {#angzarr-FactInjectionResponse}
-docs:start:fact_injection
+### FactInjectionResponse {#angzarr_client-proto-angzarr-FactInjectionResponse}
+region fact_injection
 Response from fact injection.
 Indicates whether facts were newly persisted or already existed (idempotent).
 
 Request uses EventRequest with:
-- events: EventBook containing fact events (with FactSequence markers)
+- events: EventBook containing fact events (with ExternalDeferredSequence markers in PageHeader)
 - sync_mode: Controls sync processing (default: async)
 - route_to_handler: Whether to invoke command handler&#39;s handle_fact (default: true)
 
-IMPORTANT: Set Cover.external_id for idempotency. The coordinator uses this
-to deduplicate fact injections - subsequent requests with the same external_id
+IMPORTANT: Set PageHeader.external_deferred.external_id for idempotency. The coordinator
+uses this to deduplicate fact injections - subsequent requests with the same external_id
 return the original events without re-persisting.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| events | [EventBook](#angzarr-EventBook) |  | Persisted events with real sequence numbers |
+| events | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  | Persisted events with real sequence numbers |
 | already_processed | bool |  | True if external_id was already seen (idempotent response) |
-| projections | [Projection](#angzarr-Projection) | repeated | Synchronous projector results (if any) |
+| projections | [Projection](#angzarr_client-proto-angzarr-Projection) | repeated | Synchronous projector results (if any) |
 
 
 
@@ -368,14 +474,31 @@ return the original events without re-persisting.
 
 
 
-### ReplayRequest {#angzarr-ReplayRequest}
+### FactRequest {#angzarr_client-proto-angzarr-FactRequest}
+Request to process fact events through aggregate business logic.
+The aggregate updates its state based on external realities and returns
+events to persist. The coordinator assigns real sequence numbers.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| facts | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  | Fact events with ExternalDeferredSequence markers |
+| prior_events | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  | Prior events for state reconstruction |
+
+
+
+
+
+
+
+### ReplayRequest {#angzarr_client-proto-angzarr-ReplayRequest}
 Request to replay events and compute resulting state
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| base_snapshot | [Snapshot](#angzarr-Snapshot) |  | Starting state (empty = initial state) |
-| events | [EventPage](#angzarr-EventPage) | repeated | Events to apply in order |
+| base_snapshot | [Snapshot](#angzarr_client-proto-angzarr-Snapshot) |  | Starting state (empty = initial state) |
+| events | [EventPage](#angzarr_client-proto-angzarr-EventPage) | repeated | Events to apply in order |
 
 
 
@@ -383,7 +506,7 @@ Request to replay events and compute resulting state
 
 
 
-### ReplayResponse {#angzarr-ReplayResponse}
+### ReplayResponse {#angzarr_client-proto-angzarr-ReplayResponse}
 Response with computed state after replay
 
 
@@ -397,7 +520,7 @@ Response with computed state after replay
 
 
 
-### RevocationResponse {#angzarr-RevocationResponse}
+### RevocationResponse {#angzarr_client-proto-angzarr-RevocationResponse}
 client logic requests framework to handle revocation
 
 
@@ -415,14 +538,14 @@ client logic requests framework to handle revocation
 
 
 
-### SpeculateCommandHandlerRequest {#angzarr-SpeculateCommandHandlerRequest}
+### SpeculateCommandHandlerRequest {#angzarr_client-proto-angzarr-SpeculateCommandHandlerRequest}
 Request for speculative command execution against temporal state.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| command | [CommandBook](#angzarr-CommandBook) |  |  |
-| point_in_time | [TemporalQuery](#angzarr-TemporalQuery) |  |  |
+| command | [CommandBook](#angzarr_client-proto-angzarr-CommandBook) |  |  |
+| point_in_time | [TemporalQuery](#angzarr_client-proto-angzarr-TemporalQuery) |  |  |
 
 
 
@@ -436,27 +559,28 @@ Request for speculative command execution against temporal state.
 
 
 
-### CommandHandlerCoordinatorService {#angzarr-CommandHandlerCoordinatorService}
+### CommandHandlerCoordinatorService {#angzarr_client-proto-angzarr-CommandHandlerCoordinatorService}
 CommandHandlerCoordinatorService: orchestrates command processing for domain aggregates
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| HandleCommand | [CommandRequest](#angzarr-CommandRequest) | [CommandResponse](#angzarr-CommandResponse) | Process command with optional sync mode (default: async fire-and-forget) |
-| HandleEvent | [EventRequest](#angzarr-EventRequest) | [FactInjectionResponse](#angzarr-FactInjectionResponse) | Inject fact events - external realities that cannot be rejected. Idempotent: subsequent requests with same external_id return original events. Use EventRequest.route_to_handler to control command handler invocation. |
-| HandleSyncSpeculative | [SpeculateCommandHandlerRequest](#angzarr-SpeculateCommandHandlerRequest) | [CommandResponse](#angzarr-CommandResponse) | Speculative execution - execute against temporal state without persisting |
-| HandleCompensation | [CommandRequest](#angzarr-CommandRequest) | [BusinessResponse](#angzarr-BusinessResponse) | Compensation flow - returns BusinessResponse for saga compensation handling. If business returns events, persists them. Caller handles revocation flags. |
+| HandleCommand | [CommandRequest](#angzarr_client-proto-angzarr-CommandRequest) | [CommandResponse](#angzarr_client-proto-angzarr-CommandResponse) | Process command with optional sync mode (default: async fire-and-forget) |
+| HandleEvent | [EventRequest](#angzarr_client-proto-angzarr-EventRequest) | [FactInjectionResponse](#angzarr_client-proto-angzarr-FactInjectionResponse) | Inject fact events - external realities that cannot be rejected. Idempotent: subsequent requests with same external_id return original events. Use EventRequest.route_to_handler to control command handler invocation. |
+| HandleSyncSpeculative | [SpeculateCommandHandlerRequest](#angzarr_client-proto-angzarr-SpeculateCommandHandlerRequest) | [CommandResponse](#angzarr_client-proto-angzarr-CommandResponse) | Speculative execution - execute against temporal state without persisting |
+| HandleCompensation | [CommandRequest](#angzarr_client-proto-angzarr-CommandRequest) | [BusinessResponse](#angzarr_client-proto-angzarr-BusinessResponse) | Compensation flow - returns BusinessResponse for saga compensation handling. If business returns events, persists them. Caller handles revocation flags. |
 
 
 
-### CommandHandlerService {#angzarr-CommandHandlerService}
+### CommandHandlerService {#angzarr_client-proto-angzarr-CommandHandlerService}
 CommandHandlerService: client logic that processes commands and emits events
 Business logic layer that implements command handling for a domain aggregate
 client logic doesn&#39;t care about sync - coordinator decides
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| Handle | [ContextualCommand](#angzarr-ContextualCommand) | [BusinessResponse](#angzarr-BusinessResponse) | Process command and return business response (events or revocation request) |
-| Replay | [ReplayRequest](#angzarr-ReplayRequest) | [ReplayResponse](#angzarr-ReplayResponse) | Replay events to compute state (for conflict detection) Optional: only needed if aggregate supports MERGE_COMMUTATIVE |
+| Handle | [ContextualCommand](#angzarr_client-proto-angzarr-ContextualCommand) | [BusinessResponse](#angzarr_client-proto-angzarr-BusinessResponse) | Process command and return business response (events or revocation request) |
+| HandleFact | [FactRequest](#angzarr_client-proto-angzarr-FactRequest) | [EventBook](#angzarr_client-proto-angzarr-EventBook) | Process fact events - update aggregate state based on external realities. Optional: if unimplemented, facts are persisted as-is (pass-through). |
+| Replay | [ReplayRequest](#angzarr_client-proto-angzarr-ReplayRequest) | [ReplayResponse](#angzarr_client-proto-angzarr-ReplayResponse) | Replay events to compute state (for conflict detection) Optional: only needed if aggregate supports MERGE_COMMUTATIVE |
 
  
 
@@ -464,12 +588,12 @@ client logic doesn&#39;t care about sync - coordinator decides
 
 <p align="right"><a href="#top">Top</a></p>
 
-## angzarr/meta.proto {#angzarr_meta-proto}
+## angzarr_client/proto/angzarr/meta.proto {#angzarr_client_proto_angzarr_meta-proto}
 
 
 
 
-### DeleteEditionEvents {#angzarr-DeleteEditionEvents}
+### DeleteEditionEvents {#angzarr_client-proto-angzarr-DeleteEditionEvents}
 Delete all events for an edition&#43;domain combination.
 Main timeline (&#39;angzarr&#39; or empty edition name) cannot be deleted.
 
@@ -483,9 +607,6 @@ Main timeline (&#39;angzarr&#39; or empty edition name) cannot be deleted.
 
 
 
-
-
-
  
 
  
@@ -498,20 +619,21 @@ Main timeline (&#39;angzarr&#39; or empty edition name) cannot be deleted.
 
 <p align="right"><a href="#top">Top</a></p>
 
-## angzarr/process_manager.proto {#angzarr_process_manager-proto}
+## angzarr_client/proto/angzarr/process_manager.proto {#angzarr_client_proto_angzarr_process_manager-proto}
 
 
 
 
-### ProcessManagerHandleRequest {#angzarr-ProcessManagerHandleRequest}
-Phase 2 request: full context for PM decision.
+### ProcessManagerCoordinatorRequest {#angzarr_client-proto-angzarr-ProcessManagerCoordinatorRequest}
+Request for PM coordinator orchestration.
+Used by CASCADE mode to invoke PM synchronously.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| trigger | [EventBook](#angzarr-EventBook) |  | Full state of triggering domain. |
-| process_state | [EventBook](#angzarr-EventBook) |  | Current process manager state (event-sourced). |
-| destinations | [EventBook](#angzarr-EventBook) | repeated | Additional destinations fetched per Prepare response. |
+| trigger | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  | Triggering events |
+| sync_mode | [SyncMode](#angzarr_client-proto-angzarr-SyncMode) |  | Propagate for CASCADE recursion |
+| cascade_error_mode | [CascadeErrorMode](#angzarr_client-proto-angzarr-CascadeErrorMode) |  | How to handle errors in CASCADE mode |
 
 
 
@@ -519,16 +641,49 @@ Phase 2 request: full context for PM decision.
 
 
 
-### ProcessManagerHandleResponse {#angzarr-ProcessManagerHandleResponse}
-Phase 2 response: local events, then remote commands and facts.
+### ProcessManagerHandleRequest {#angzarr_client-proto-angzarr-ProcessManagerHandleRequest}
+PM handle request: full context for PM decision.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| trigger | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  | Full state of triggering domain. |
+| process_state | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  | Current process manager state (event-sourced). |
+| destination_sequences | [ProcessManagerHandleRequest.DestinationSequencesEntry](#angzarr_client-proto-angzarr-ProcessManagerHandleRequest-DestinationSequencesEntry) | repeated | Destination sequences for command stamping (domain → next_sequence). PM should NOT rebuild destination state — use facts and let aggregates decide. |
+
+
+
+
+
+
+
+### ProcessManagerHandleRequest.DestinationSequencesEntry {#angzarr_client-proto-angzarr-ProcessManagerHandleRequest-DestinationSequencesEntry}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| key | string |  |  |
+| value | uint32 |  |  |
+
+
+
+
+
+
+
+### ProcessManagerHandleResponse {#angzarr_client-proto-angzarr-ProcessManagerHandleResponse}
+PM handle response: local events, then remote commands and facts.
 Execution order: process_events persisted first, then commands sent, then facts injected.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| process_events | [EventBook](#angzarr-EventBook) |  | Local: Events for the process manager&#39;s own domain (non-duplicative workflow state). These are persisted via AggregateCoordinator to the PM&#39;s domain. |
-| commands | [CommandBook](#angzarr-CommandBook) | repeated | Remote: Commands to issue to other aggregates. |
-| facts | [EventBook](#angzarr-EventBook) | repeated | Remote: Facts to inject to other aggregates. Each EventBook targets a specific aggregate via its Cover. |
+| process_events | [EventBook](#angzarr_client-proto-angzarr-EventBook) | repeated | Local: Events for the process manager&#39;s own domain (non-duplicative workflow state). These are persisted via AggregateCoordinator to the PM&#39;s domain.
+
+Audit #92: changed from singular `EventBook` to `repeated EventBook` so the merge policy (which book&#39;s cover wins, how to concatenate pages from multiple emissions) lives in the coordinator with full information, not in the client doing first-non-empty-cover-wins pre-emit. PMs that emit a single book just send a 1-element list. |
+| commands | [CommandBook](#angzarr_client-proto-angzarr-CommandBook) | repeated | Remote: Commands to issue to other aggregates. |
+| facts | [EventBook](#angzarr_client-proto-angzarr-EventBook) | repeated | Remote: Facts to inject to other aggregates. Each EventBook targets a specific aggregate via its Cover. |
 
 
 
@@ -536,42 +691,13 @@ Execution order: process_events persisted first, then commands sent, then facts 
 
 
 
-### ProcessManagerPrepareRequest {#angzarr-ProcessManagerPrepareRequest}
-Phase 1 request: PM declares additional destinations needed.
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| trigger | [EventBook](#angzarr-EventBook) |  | Full state of triggering domain (by correlation_id). |
-| process_state | [EventBook](#angzarr-EventBook) |  | Current process manager state (by correlation_id). May be empty for new workflow. |
-
-
-
-
-
-
-
-### ProcessManagerPrepareResponse {#angzarr-ProcessManagerPrepareResponse}
-Phase 1 response: destinations to fetch before Handle.
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| destinations | [Cover](#angzarr-Cover) | repeated | Additional aggregates needed beyond trigger. Query by correlation_id. Minimize fetches - only declare what&#39;s actually needed. |
-
-
-
-
-
-
-
-### SpeculatePmRequest {#angzarr-SpeculatePmRequest}
+### SpeculatePmRequest {#angzarr_client-proto-angzarr-SpeculatePmRequest}
 Request for speculative PM execution.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| request | [ProcessManagerHandleRequest](#angzarr-ProcessManagerHandleRequest) |  |  |
+| request | [ProcessManagerHandleRequest](#angzarr_client-proto-angzarr-ProcessManagerHandleRequest) |  |  |
 
 
 
@@ -585,16 +711,17 @@ Request for speculative PM execution.
 
 
 
-### ProcessManagerCoordinatorService {#angzarr-ProcessManagerCoordinatorService}
+### ProcessManagerCoordinatorService {#angzarr_client-proto-angzarr-ProcessManagerCoordinatorService}
 ProcessManagerCoordinatorService: orchestrates PM execution
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| HandleSpeculative | [SpeculatePmRequest](#angzarr-SpeculatePmRequest) | [ProcessManagerHandleResponse](#angzarr-ProcessManagerHandleResponse) | Speculative execution - returns commands and events without persisting |
+| Handle | [ProcessManagerCoordinatorRequest](#angzarr_client-proto-angzarr-ProcessManagerCoordinatorRequest) | [ProcessManagerHandleResponse](#angzarr_client-proto-angzarr-ProcessManagerHandleResponse) | Full orchestration with sync mode. Used by CASCADE mode to call PMs synchronously. |
+| HandleSpeculative | [SpeculatePmRequest](#angzarr_client-proto-angzarr-SpeculatePmRequest) | [ProcessManagerHandleResponse](#angzarr_client-proto-angzarr-ProcessManagerHandleResponse) | Speculative execution - returns commands and events without persisting |
 
 
 
-### ProcessManagerService {#angzarr-ProcessManagerService}
+### ProcessManagerService {#angzarr_client-proto-angzarr-ProcessManagerService}
 ProcessManagerService: stateful coordinator for long-running workflows across multiple aggregates.
 
 WARNING: Only use when saga &#43; queries is insufficient. Consider:
@@ -613,8 +740,9 @@ It reuses all aggregate infrastructure (EventStore, SnapshotStore, AggregateCoor
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| Prepare | [ProcessManagerPrepareRequest](#angzarr-ProcessManagerPrepareRequest) | [ProcessManagerPrepareResponse](#angzarr-ProcessManagerPrepareResponse) | Phase 1: Declare which additional destinations are needed beyond the trigger. PM automatically receives triggering event&#39;s domain state. |
-| Handle | [ProcessManagerHandleRequest](#angzarr-ProcessManagerHandleRequest) | [ProcessManagerHandleResponse](#angzarr-ProcessManagerHandleResponse) | Phase 2: Handle with trigger &#43; process state &#43; fetched destinations. Returns commands for other aggregates and events for the PM&#39;s own domain. |
+| Handle | [ProcessManagerHandleRequest](#angzarr_client-proto-angzarr-ProcessManagerHandleRequest) | [ProcessManagerHandleResponse](#angzarr_client-proto-angzarr-ProcessManagerHandleResponse) | Handle with trigger &#43; process state. Returns commands for other aggregates and events for the PM&#39;s own domain.
+
+PMs do not rebuild destination aggregate state — they translate events into commands/facts and rely on destination_sequences for command stamping. See process manager design philosophy. |
 
  
 
@@ -622,18 +750,18 @@ It reuses all aggregate infrastructure (EventStore, SnapshotStore, AggregateCoor
 
 <p align="right"><a href="#top">Top</a></p>
 
-## angzarr/projector.proto {#angzarr_projector-proto}
+## angzarr_client/proto/angzarr/projector.proto {#angzarr_client_proto_angzarr_projector-proto}
 
 
 
 
-### SpeculateProjectorRequest {#angzarr-SpeculateProjectorRequest}
+### SpeculateProjectorRequest {#angzarr_client-proto-angzarr-SpeculateProjectorRequest}
 Request for speculative projector execution.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| events | [EventBook](#angzarr-EventBook) |  |  |
+| events | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  |  |
 
 
 
@@ -647,25 +775,25 @@ Request for speculative projector execution.
 
 
 
-### ProjectorCoordinatorService {#angzarr-ProjectorCoordinatorService}
+### ProjectorCoordinatorService {#angzarr_client-proto-angzarr-ProjectorCoordinatorService}
 ProjectorCoordinatorService: orchestrates projection processing
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| HandleSync | [EventRequest](#angzarr-EventRequest) | [Projection](#angzarr-Projection) | Sync processing - returns projection based on sync_mode |
-| Handle | [EventBook](#angzarr-EventBook) | [.google.protobuf.Empty](https://protobuf.dev/reference/protobuf/google.protobuf/#empty) | Async processing - fire and forget |
-| HandleSpeculative | [SpeculateProjectorRequest](#angzarr-SpeculateProjectorRequest) | [Projection](#angzarr-Projection) | Speculative processing - returns projection without side effects |
+| HandleSync | [EventRequest](#angzarr_client-proto-angzarr-EventRequest) | [Projection](#angzarr_client-proto-angzarr-Projection) | Sync processing - returns projection based on sync_mode |
+| Handle | [EventBook](#angzarr_client-proto-angzarr-EventBook) | [.google.protobuf.Empty](https://protobuf.dev/reference/protobuf/google.protobuf/#empty) | Async processing - fire and forget |
+| HandleSpeculative | [SpeculateProjectorRequest](#angzarr_client-proto-angzarr-SpeculateProjectorRequest) | [Projection](#angzarr_client-proto-angzarr-Projection) | Speculative processing - returns projection without side effects |
 
 
 
-### ProjectorService {#angzarr-ProjectorService}
+### ProjectorService {#angzarr_client-proto-angzarr-ProjectorService}
 ProjectorService: client logic that projects events to read models
 client logic doesn&#39;t care about sync - coordinator decides
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| Handle | [EventBook](#angzarr-EventBook) | [Projection](#angzarr-Projection) | Async projection - projector should persist and return |
-| HandleSpeculative | [EventBook](#angzarr-EventBook) | [Projection](#angzarr-Projection) | Speculative processing - projector must avoid external side effects |
+| Handle | [EventBook](#angzarr_client-proto-angzarr-EventBook) | [Projection](#angzarr_client-proto-angzarr-Projection) | Async projection - projector should persist and return |
+| HandleSpeculative | [EventBook](#angzarr_client-proto-angzarr-EventBook) | [Projection](#angzarr_client-proto-angzarr-Projection) | Speculative processing - projector must avoid external side effects |
 
  
 
@@ -673,7 +801,7 @@ client logic doesn&#39;t care about sync - coordinator decides
 
 <p align="right"><a href="#top">Top</a></p>
 
-## angzarr/query.proto {#angzarr_query-proto}
+## angzarr_client/proto/angzarr/query.proto {#angzarr_client_proto_angzarr_query-proto}
 
 
  
@@ -684,15 +812,15 @@ client logic doesn&#39;t care about sync - coordinator decides
 
 
 
-### EventQueryService {#angzarr-EventQueryService}
+### EventQueryService {#angzarr_client-proto-angzarr-EventQueryService}
 EventQueryService: query interface for retrieving events
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| GetEventBook | [Query](#angzarr-Query) | [EventBook](#angzarr-EventBook) | Get a single EventBook (unary) - use for explicit queries with gRPC tooling |
-| GetEvents | [Query](#angzarr-Query) | [EventBook](#angzarr-EventBook) stream | Stream EventBooks matching query - use for bulk retrieval (SSE) |
-| Synchronize | [Query](#angzarr-Query) stream | [EventBook](#angzarr-EventBook) stream | Bidirectional sync - not exposed via REST (use gRPC directly) |
-| GetAggregateRoots | [.google.protobuf.Empty](https://protobuf.dev/reference/protobuf/google.protobuf/#empty) | [AggregateRoot](#angzarr-AggregateRoot) stream | List all aggregate roots (SSE) |
+| GetEventBook | [Query](#angzarr_client-proto-angzarr-Query) | [EventBook](#angzarr_client-proto-angzarr-EventBook) | Get a single EventBook (unary) - use for explicit queries with gRPC tooling |
+| GetEvents | [Query](#angzarr_client-proto-angzarr-Query) | [EventBook](#angzarr_client-proto-angzarr-EventBook) stream | Stream EventBooks matching query - use for bulk retrieval (SSE) |
+| Synchronize | [Query](#angzarr_client-proto-angzarr-Query) stream | [EventBook](#angzarr_client-proto-angzarr-EventBook) stream | Bidirectional sync - not exposed via REST (use gRPC directly) |
+| GetAggregateRoots | [.google.protobuf.Empty](https://protobuf.dev/reference/protobuf/google.protobuf/#empty) | [AggregateRoot](#angzarr_client-proto-angzarr-AggregateRoot) stream | List all aggregate roots (SSE) |
 
  
 
@@ -700,23 +828,22 @@ EventQueryService: query interface for retrieving events
 
 <p align="right"><a href="#top">Top</a></p>
 
-## angzarr/saga.proto {#angzarr_saga-proto}
+## angzarr_client/proto/angzarr/saga.proto {#angzarr_client_proto_angzarr_saga-proto}
 
 
 
 
-### SagaCompensationFailed {#angzarr-SagaCompensationFailed}
+### SagaCompensationFailed {#angzarr_client-proto-angzarr-SagaCompensationFailed}
 System event when compensation fails/requested
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| triggering_aggregate | [Cover](#angzarr-Cover) |  |  |
+| triggering_aggregate | [Cover](#angzarr_client-proto-angzarr-Cover) |  |  |
 | triggering_event_sequence | uint32 |  |  |
-| saga_name | string |  |  |
 | rejection_reason | string |  |  |
 | compensation_failure_reason | string |  |  |
-| rejected_command | [CommandBook](#angzarr-CommandBook) |  |  |
+| rejected_command | [CommandBook](#angzarr_client-proto-angzarr-CommandBook) |  |  |
 | occurred_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -725,14 +852,33 @@ System event when compensation fails/requested
 
 
 
-### SagaExecuteRequest {#angzarr-SagaExecuteRequest}
+### SagaHandleRequest {#angzarr_client-proto-angzarr-SagaHandleRequest}
+Request for saga execution.
+Sagas are pure translators: source events → commands.
+Destination sequences provided for command stamping.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| source | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  | Source events that triggered the saga |
+| sync_mode | [SyncMode](#angzarr_client-proto-angzarr-SyncMode) |  | Propagate for CASCADE recursion |
+| cascade_error_mode | [CascadeErrorMode](#angzarr_client-proto-angzarr-CascadeErrorMode) |  | How to handle errors in CASCADE mode |
+| destination_sequences | [SagaHandleRequest.DestinationSequencesEntry](#angzarr_client-proto-angzarr-SagaHandleRequest-DestinationSequencesEntry) | repeated | domain → next_sequence for command stamping |
+
+
+
+
+
+
+
+### SagaHandleRequest.DestinationSequencesEntry {#angzarr_client-proto-angzarr-SagaHandleRequest-DestinationSequencesEntry}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| source | [EventBook](#angzarr-EventBook) |  | Source events (same as prepare) |
-| destinations | [EventBook](#angzarr-EventBook) | repeated | Fetched destination state |
+| key | string |  |  |
+| value | uint32 |  |  |
 
 
 
@@ -740,42 +886,14 @@ System event when compensation fails/requested
 
 
 
-### SagaPrepareRequest {#angzarr-SagaPrepareRequest}
-Two-phase saga protocol messages
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| source | [EventBook](#angzarr-EventBook) |  | Source events that triggered the saga |
-
-
-
-
-
-
-
-### SagaPrepareResponse {#angzarr-SagaPrepareResponse}
-
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| destinations | [Cover](#angzarr-Cover) | repeated | Destination aggregates the saga needs to read |
-
-
-
-
-
-
-
-### SagaResponse {#angzarr-SagaResponse}
+### SagaResponse {#angzarr_client-proto-angzarr-SagaResponse}
 Response from saga - commands for other aggregates
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| commands | [CommandBook](#angzarr-CommandBook) | repeated | Commands to execute on other aggregates |
-| events | [EventBook](#angzarr-EventBook) | repeated | Events to publish directly |
+| commands | [CommandBook](#angzarr_client-proto-angzarr-CommandBook) | repeated | Commands to execute on other aggregates (with angzarr_deferred) |
+| events | [EventBook](#angzarr_client-proto-angzarr-EventBook) | repeated | Events (facts) to inject directly |
 
 
 
@@ -783,31 +901,13 @@ Response from saga - commands for other aggregates
 
 
 
-### SagaRetryRequest {#angzarr-SagaRetryRequest}
-
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| source | [EventBook](#angzarr-EventBook) |  |  |
-| destinations | [EventBook](#angzarr-EventBook) | repeated |  |
-| rejected_command | [CommandBook](#angzarr-CommandBook) |  |  |
-| rejection_reason | string |  |  |
-| attempt | uint32 |  |  |
-
-
-
-
-
-
-
-### SpeculateSagaRequest {#angzarr-SpeculateSagaRequest}
+### SpeculateSagaRequest {#angzarr_client-proto-angzarr-SpeculateSagaRequest}
 Request for speculative saga execution.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| request | [SagaExecuteRequest](#angzarr-SagaExecuteRequest) |  |  |
+| request | [SagaHandleRequest](#angzarr_client-proto-angzarr-SagaHandleRequest) |  |  |
 
 
 
@@ -821,24 +921,24 @@ Request for speculative saga execution.
 
 
 
-### SagaCoordinatorService {#angzarr-SagaCoordinatorService}
-SagaCoordinatorService: orchestrates saga execution
+### SagaCoordinatorService {#angzarr_client-proto-angzarr-SagaCoordinatorService}
+SagaCoordinatorService: orchestrates saga execution.
+Framework handles sequence stamping and delivery retry.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| Execute | [SagaExecuteRequest](#angzarr-SagaExecuteRequest) | [SagaResponse](#angzarr-SagaResponse) | Async processing - fire and forget |
-| ExecuteSpeculative | [SpeculateSagaRequest](#angzarr-SpeculateSagaRequest) | [SagaResponse](#angzarr-SagaResponse) | Speculative execution - returns commands without side effects |
+| Execute | [SagaHandleRequest](#angzarr_client-proto-angzarr-SagaHandleRequest) | [SagaResponse](#angzarr_client-proto-angzarr-SagaResponse) | Execute saga: translate source events → commands, deliver to targets |
+| ExecuteSpeculative | [SpeculateSagaRequest](#angzarr_client-proto-angzarr-SpeculateSagaRequest) | [SagaResponse](#angzarr_client-proto-angzarr-SagaResponse) | Speculative execution - returns commands without side effects |
 
 
 
-### SagaService {#angzarr-SagaService}
-SagaService: client logic that coordinates across aggregates
-Two-phase protocol: Prepare (declare destinations) → Execute (with fetched state)
+### SagaService {#angzarr_client-proto-angzarr-SagaService}
+SagaService: stateless translation from source events to commands.
+Sagas receive only source events — framework handles sequence stamping and delivery.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| Prepare | [SagaPrepareRequest](#angzarr-SagaPrepareRequest) | [SagaPrepareResponse](#angzarr-SagaPrepareResponse) | Phase 1: Saga declares which destination aggregates it needs |
-| Execute | [SagaExecuteRequest](#angzarr-SagaExecuteRequest) | [SagaResponse](#angzarr-SagaResponse) | Phase 2: Execute with source &#43; fetched destination state |
+| Handle | [SagaHandleRequest](#angzarr_client-proto-angzarr-SagaHandleRequest) | [SagaResponse](#angzarr_client-proto-angzarr-SagaResponse) | Translate source events into commands for target domains. Commands use angzarr_deferred — framework stamps explicit sequences on delivery. |
 
  
 
@@ -846,7 +946,7 @@ Two-phase protocol: Prepare (declare destinations) → Execute (with fetched sta
 
 <p align="right"><a href="#top">Top</a></p>
 
-## angzarr/stream.proto {#angzarr_stream-proto}
+## angzarr_client/proto/angzarr/stream.proto {#angzarr_client_proto_angzarr_stream-proto}
 
 
  
@@ -857,13 +957,13 @@ Two-phase protocol: Prepare (declare destinations) → Execute (with fetched sta
 
 
 
-### EventStreamService {#angzarr-EventStreamService}
-docs:start:event_stream_service
+### EventStreamService {#angzarr_client-proto-angzarr-EventStreamService}
+region event_stream_service
 EventStreamService: streams events to registered subscribers
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| Subscribe | [EventStreamFilter](#angzarr-EventStreamFilter) | [EventBook](#angzarr-EventBook) stream | Subscribe to events matching correlation ID (required) Returns INVALID_ARGUMENT if correlation_id is empty REST: Server-Sent Events (SSE) stream |
+| Subscribe | [EventStreamFilter](#angzarr_client-proto-angzarr-EventStreamFilter) | [EventBook](#angzarr_client-proto-angzarr-EventBook) stream | Subscribe to events matching correlation ID (required) Returns INVALID_ARGUMENT if correlation_id is empty REST: Server-Sent Events (SSE) stream |
 
  
 
@@ -871,19 +971,19 @@ EventStreamService: streams events to registered subscribers
 
 <p align="right"><a href="#top">Top</a></p>
 
-## angzarr/types.proto {#angzarr_types-proto}
+## angzarr_client/proto/angzarr/types.proto {#angzarr_client_proto_angzarr_types-proto}
 
 
 
 
-### AggregateRoot {#angzarr-AggregateRoot}
+### AggregateRoot {#angzarr_client-proto-angzarr-AggregateRoot}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | domain | string |  |  |
-| root | [UUID](#angzarr-UUID) |  |  |
+| root | [UUID](#angzarr_client-proto-angzarr-UUID) |  |  |
 
 
 
@@ -891,23 +991,23 @@ EventStreamService: streams events to registered subscribers
 
 
 
-### AngzarrDeadLetter {#angzarr-AngzarrDeadLetter}
-docs:start:dead_letter
+### AngzarrDeadLetter {#angzarr_client-proto-angzarr-AngzarrDeadLetter}
+region dead_letter
 Dead letter queue entry for failed messages requiring manual intervention.
 Per-domain topics: angzarr.dlq.\{domain\}
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| cover | [Cover](#angzarr-Cover) |  | Routing: domain, root, correlation_id |
-| rejected_command | [CommandBook](#angzarr-CommandBook) |  | Command that failed |
-| rejected_events | [EventBook](#angzarr-EventBook) |  | Events that failed (saga/projector failures) |
+| cover | [Cover](#angzarr_client-proto-angzarr-Cover) |  | Routing: domain, root, correlation_id |
+| rejected_command | [CommandBook](#angzarr_client-proto-angzarr-CommandBook) |  | Command that failed |
+| rejected_events | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  | Events that failed (saga/projector failures) |
 | rejection_reason | string |  | Human-readable reason |
-| sequence_mismatch | [SequenceMismatchDetails](#angzarr-SequenceMismatchDetails) |  | Sequence conflict details |
-| event_processing_failed | [EventProcessingFailedDetails](#angzarr-EventProcessingFailedDetails) |  | Handler failure details |
-| payload_retrieval_failed | [PayloadRetrievalFailedDetails](#angzarr-PayloadRetrievalFailedDetails) |  | Payload store failure details |
+| sequence_mismatch | [SequenceMismatchDetails](#angzarr_client-proto-angzarr-SequenceMismatchDetails) |  | Sequence conflict details |
+| event_processing_failed | [EventProcessingFailedDetails](#angzarr_client-proto-angzarr-EventProcessingFailedDetails) |  | Handler failure details |
+| payload_retrieval_failed | [PayloadRetrievalFailedDetails](#angzarr_client-proto-angzarr-PayloadRetrievalFailedDetails) |  | Payload store failure details |
 | occurred_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
-| metadata | [AngzarrDeadLetter.MetadataEntry](#angzarr-AngzarrDeadLetter-MetadataEntry) | repeated | Additional context |
+| metadata | [AngzarrDeadLetter.MetadataEntry](#angzarr_client-proto-angzarr-AngzarrDeadLetter-MetadataEntry) | repeated | Additional context |
 | source_component | string |  | Which component sent to DLQ |
 | source_component_type | string |  | &#34;aggregate&#34; | &#34;saga&#34; | &#34;projector&#34; | &#34;process_manager&#34; |
 
@@ -917,7 +1017,7 @@ Per-domain topics: angzarr.dlq.\{domain\}
 
 
 
-### AngzarrDeadLetter.MetadataEntry {#angzarr-AngzarrDeadLetter-MetadataEntry}
+### AngzarrDeadLetter.MetadataEntry {#angzarr_client-proto-angzarr-AngzarrDeadLetter-MetadataEntry}
 
 
 
@@ -932,17 +1032,80 @@ Per-domain topics: angzarr.dlq.\{domain\}
 
 
 
-### CommandBook {#angzarr-CommandBook}
+### AngzarrDeferredSequence {#angzarr_client-proto-angzarr-AngzarrDeferredSequence}
+For saga-produced commands and facts.
+Framework stamps sequence on delivery; idempotency derived from source info.
+Rejections route back to source aggregate.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| source | [Cover](#angzarr_client-proto-angzarr-Cover) |  | Full source aggregate (domain &#43; root &#43; edition) - rejection routes here |
+| source_seq | uint32 |  | Sequence of the triggering event |
+
+
+
+
+
+
+
+### CascadeCommit {#angzarr_client-proto-angzarr-CascadeCommit}
+region cascade_commit
+PM/coordinator emits to commit all uncommitted events for a cascade.
+Framework distributes Confirmation to all participants.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| cascade_id | string |  |  |
+
+
+
+
+
+
+
+### CascadeConflictDetail {#angzarr_client-proto-angzarr-CascadeConflictDetail}
+region cascade_conflict_detail
+Error detail for conflict rejection when overlapping fields are locked.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| cascade_ids | string | repeated | Cascades holding locks |
+| overlapping_fields | string | repeated | Fields that conflict |
+
+
+
+
+
+
+
+### CascadeRollback {#angzarr_client-proto-angzarr-CascadeRollback}
+region cascade_rollback
+PM/coordinator emits to rollback all uncommitted events for a cascade.
+Framework distributes Revocation to all participants.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| cascade_id | string |  |  |
+| reason | string |  |  |
+
+
+
+
+
+
+
+### CommandBook {#angzarr_client-proto-angzarr-CommandBook}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| cover | [Cover](#angzarr-Cover) |  |  |
-| pages | [CommandPage](#angzarr-CommandPage) | repeated |  |
-| saga_origin | [SagaCommandOrigin](#angzarr-SagaCommandOrigin) |  | Field 3 removed: correlation_id moved to Cover
-
-Tracks origin for compensation flow |
+| cover | [Cover](#angzarr_client-proto-angzarr-Cover) |  |  |
+| pages | [CommandPage](#angzarr_client-proto-angzarr-CommandPage) | repeated | Field 3 removed: correlation_id moved to Cover Field 4 removed: saga_origin moved to PageHeader.angzarr_deferred Field 5 removed: &#39;fact&#39; was unused |
 
 
 
@@ -950,16 +1113,16 @@ Tracks origin for compensation flow |
 
 
 
-### CommandPage {#angzarr-CommandPage}
+### CommandPage {#angzarr_client-proto-angzarr-CommandPage}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| sequence | uint32 |  | Expected sequence number for this command&#39;s events. Must match the aggregate&#39;s current next sequence (i.e., events.len()). For new aggregates, use 0. |
-| merge_strategy | [MergeStrategy](#angzarr-MergeStrategy) |  |  |
+| header | [PageHeader](#angzarr_client-proto-angzarr-PageHeader) |  | Sequence type and provenance |
+| merge_strategy | [MergeStrategy](#angzarr_client-proto-angzarr-MergeStrategy) |  |  |
 | command | [google.protobuf.Any](https://protobuf.dev/reference/protobuf/google.protobuf/#any) |  |  |
-| external | [PayloadReference](#angzarr-PayloadReference) |  | Claim check: payload stored externally |
+| external | [PayloadReference](#angzarr_client-proto-angzarr-PayloadReference) |  | Claim check: payload stored externally |
 
 
 
@@ -967,15 +1130,17 @@ Tracks origin for compensation flow |
 
 
 
-### CommandRequest {#angzarr-CommandRequest}
+### CommandRequest {#angzarr_client-proto-angzarr-CommandRequest}
 Request wrapper for command operations.
-Adds execution metadata (sync_mode) to CommandBook.
+Adds execution metadata (sync_mode, cascade_error_mode) to CommandBook.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| command | [CommandBook](#angzarr-CommandBook) |  |  |
-| sync_mode | [SyncMode](#angzarr-SyncMode) |  |  |
+| command | [CommandBook](#angzarr_client-proto-angzarr-CommandBook) |  |  |
+| sync_mode | [SyncMode](#angzarr_client-proto-angzarr-SyncMode) |  |  |
+| cascade_error_mode | [CascadeErrorMode](#angzarr_client-proto-angzarr-CascadeErrorMode) |  | How to handle saga/PM errors in CASCADE mode |
+| cascade_id | string | optional | If set, enables 2PC: events written with committed=false |
 
 
 
@@ -983,7 +1148,26 @@ Adds execution metadata (sync_mode) to CommandBook.
 
 
 
-### ComponentDescriptor {#angzarr-ComponentDescriptor}
+### Compensate {#angzarr_client-proto-angzarr-Compensate}
+region compensate
+Routes to client compensation handler - original events remain visible.
+Unlike Revocation, this triggers client-implemented inverse logic.
+The Compensate marker itself is filtered to NoOp; original events stay visible.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| target | [Cover](#angzarr_client-proto-angzarr-Cover) |  | Domain &#43; root of aggregate |
+| sequences | uint32 | repeated | Sequences to compensate |
+| reason | string |  | Why compensation is needed |
+
+
+
+
+
+
+
+### ComponentDescriptor {#angzarr_client-proto-angzarr-ComponentDescriptor}
 Component self-description.
 
 
@@ -991,7 +1175,7 @@ Component self-description.
 | ----- | ---- | ----- | ----------- |
 | name | string |  |  |
 | component_type | string |  |  |
-| inputs | [Target](#angzarr-Target) | repeated | Domains I subscribe to (event types I consume) |
+| inputs | [Target](#angzarr_client-proto-angzarr-Target) | repeated | Domains I subscribe to (event types I consume) |
 
 
 
@@ -999,14 +1183,32 @@ Component self-description.
 
 
 
-### ContextualCommand {#angzarr-ContextualCommand}
+### Confirmation {#angzarr_client-proto-angzarr-Confirmation}
+region confirmation
+Confirms pending events - makes them visible to business logic.
+Written by framework when all sagas in a cascade succeed.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| target | [Cover](#angzarr_client-proto-angzarr-Cover) |  | Domain &#43; root of aggregate being confirmed |
+| sequences | uint32 | repeated | Explicit list of sequences being confirmed |
+| cascade_id | string |  | Set for cascade commits, empty for general confirmation |
+
+
+
+
+
+
+
+### ContextualCommand {#angzarr_client-proto-angzarr-ContextualCommand}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| events | [EventBook](#angzarr-EventBook) |  | Passed from aggregate coordinator to aggregate, consists of everything needed to execute/evaluate the command |
-| command | [CommandBook](#angzarr-CommandBook) |  |  |
+| events | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  | Passed from aggregate coordinator to aggregate, consists of everything needed to execute/evaluate the command |
+| command | [CommandBook](#angzarr_client-proto-angzarr-CommandBook) |  |  |
 
 
 
@@ -1014,15 +1216,15 @@ Component self-description.
 
 
 
-### ContextualCommandRequest {#angzarr-ContextualCommandRequest}
+### ContextualCommandRequest {#angzarr_client-proto-angzarr-ContextualCommandRequest}
 Request wrapper for contextual command operations (internal use).
 Adds execution metadata (sync_mode) to ContextualCommand.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| command | [ContextualCommand](#angzarr-ContextualCommand) |  |  |
-| sync_mode | [SyncMode](#angzarr-SyncMode) |  |  |
+| command | [ContextualCommand](#angzarr_client-proto-angzarr-ContextualCommand) |  |  |
+| sync_mode | [SyncMode](#angzarr_client-proto-angzarr-SyncMode) |  |  |
 
 
 
@@ -1030,17 +1232,16 @@ Adds execution metadata (sync_mode) to ContextualCommand.
 
 
 
-### Cover {#angzarr-Cover}
-docs:start:cover
+### Cover {#angzarr_client-proto-angzarr-Cover}
+region cover
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | domain | string |  |  |
-| root | [UUID](#angzarr-UUID) |  |  |
+| root | [UUID](#angzarr_client-proto-angzarr-UUID) |  |  |
 | correlation_id | string |  | Workflow correlation - flows through all commands/events |
-| edition | [Edition](#angzarr-Edition) |  | Edition for diverged timelines; empty name = main timeline |
-| external_id | string |  | Idempotency key for fact events (e.g., Stripe payment ID, tracking number) |
+| edition | [Edition](#angzarr_client-proto-angzarr-Edition) |  | Edition for diverged timelines; empty name = main timeline |
 
 
 
@@ -1048,7 +1249,7 @@ docs:start:cover
 
 
 
-### DomainDivergence {#angzarr-DomainDivergence}
+### DomainDivergence {#angzarr_client-proto-angzarr-DomainDivergence}
 Explicit divergence point for a specific domain.
 Used when creating historical branches or coordinating saga writes across domains.
 
@@ -1064,8 +1265,8 @@ Used when creating historical branches or coordinating saga writes across domain
 
 
 
-### Edition {#angzarr-Edition}
-docs:start:edition
+### Edition {#angzarr_client-proto-angzarr-Edition}
+region edition
 Edition identifier with optional explicit divergence points.
 
 Two modes:
@@ -1077,7 +1278,7 @@ Two modes:
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | name | string |  | Edition name, e.g., &#34;v2&#34;; empty = main timeline |
-| divergences | [DomainDivergence](#angzarr-DomainDivergence) | repeated | Optional: explicit per-domain divergence points |
+| divergences | [DomainDivergence](#angzarr_client-proto-angzarr-DomainDivergence) | repeated | Optional: explicit per-domain divergence points |
 
 
 
@@ -1085,15 +1286,15 @@ Two modes:
 
 
 
-### EventBook {#angzarr-EventBook}
-docs:start:event_book
+### EventBook {#angzarr_client-proto-angzarr-EventBook}
+region event_book
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| cover | [Cover](#angzarr-Cover) |  |  |
-| snapshot | [Snapshot](#angzarr-Snapshot) |  | Snapshot state; sequence computed by framework on persist |
-| pages | [EventPage](#angzarr-EventPage) | repeated |  |
+| cover | [Cover](#angzarr_client-proto-angzarr-Cover) |  |  |
+| snapshot | [Snapshot](#angzarr_client-proto-angzarr-Snapshot) |  | Snapshot state; sequence computed by framework on persist |
+| pages | [EventPage](#angzarr_client-proto-angzarr-EventPage) | repeated |  |
 | next_sequence | uint32 |  | Field 4 removed: correlation_id moved to Cover Field 5 removed: snapshot_state unified into snapshot field
 
 Computed on load, never stored: (last page seq OR snapshot seq if no pages) &#43; 1 |
@@ -1104,17 +1305,20 @@ Computed on load, never stored: (last page seq OR snapshot seq if no pages) &#43
 
 
 
-### EventPage {#angzarr-EventPage}
-docs:start:event_page
+### EventPage {#angzarr_client-proto-angzarr-EventPage}
+region event_page
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| sequence | uint32 |  | Normal: explicit position in event stream |
-| fact | [FactSequence](#angzarr-FactSequence) |  | Fact: coordinator assigns next sequence |
+| header | [PageHeader](#angzarr_client-proto-angzarr-PageHeader) |  | Sequence type and provenance |
 | created_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 | event | [google.protobuf.Any](https://protobuf.dev/reference/protobuf/google.protobuf/#any) |  |  |
-| external | [PayloadReference](#angzarr-PayloadReference) |  | Claim check: payload stored externally |
+| external | [PayloadReference](#angzarr_client-proto-angzarr-PayloadReference) |  | Claim check: payload stored externally |
+| no_commit | bool |  | Two-phase commit support (Phase 1: 2PC Storage Model)
+
+true = pending 2PC (cascade), needs Confirmation; false (default) = immediately committed |
+| cascade_id | string | optional | Groups related pending events for atomic commit/rollback (null if not in cascade) |
 
 
 
@@ -1122,7 +1326,7 @@ docs:start:event_page
 
 
 
-### EventProcessingFailedDetails {#angzarr-EventProcessingFailedDetails}
+### EventProcessingFailedDetails {#angzarr_client-proto-angzarr-EventProcessingFailedDetails}
 Event processing failure details for DLQ entries.
 Contains information about why a saga/projector failed to process events.
 
@@ -1132,6 +1336,7 @@ Contains information about why a saga/projector failed to process events.
 | error | string |  | Error message from the handler |
 | retry_count | uint32 |  | Number of retry attempts before DLQ routing |
 | is_transient | bool |  | Whether the failure is considered transient |
+| stack_trace | [sererr.v1.CapturedError](#sererr-v1-CapturedError) | repeated | Flat array of captured errors representing the cause chain (most-causal-first; the originating caught error is the LAST element). Matches Sentry&#39;s `exception.values` shape; linkage via each entry&#39;s `mechanism.exception_id` / `mechanism.parent_id`. Empty when no capture was attempted. See sererr.fyi/spec/proto for the schema rationale. |
 
 
 
@@ -1139,15 +1344,15 @@ Contains information about why a saga/projector failed to process events.
 
 
 
-### EventRequest {#angzarr-EventRequest}
+### EventRequest {#angzarr_client-proto-angzarr-EventRequest}
 Request wrapper for event operations (fact injection).
 Adds execution metadata (sync_mode, route_to_handler) to EventBook.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| events | [EventBook](#angzarr-EventBook) |  |  |
-| sync_mode | [SyncMode](#angzarr-SyncMode) |  |  |
+| events | [EventBook](#angzarr_client-proto-angzarr-EventBook) |  |  |
+| sync_mode | [SyncMode](#angzarr_client-proto-angzarr-SyncMode) |  |  |
 | route_to_handler | bool |  | For fact injection: when true (default), invokes command handler&#39;s handle_fact for validation/error checking before persistence. Facts cannot be rejected, but the handler can validate data integrity and log warnings. When false, facts are persisted directly without handler involvement. |
 
 
@@ -1156,8 +1361,8 @@ Adds execution metadata (sync_mode, route_to_handler) to EventBook.
 
 
 
-### EventStreamFilter {#angzarr-EventStreamFilter}
-docs:start:event_stream_filter
+### EventStreamFilter {#angzarr_client-proto-angzarr-EventStreamFilter}
+region event_stream_filter
 Subscription filter for event streaming
 
 
@@ -1171,21 +1376,15 @@ Subscription filter for event streaming
 
 
 
-### FactSequence {#angzarr-FactSequence}
-docs:start:fact_sequence
-Marker for fact events - external realities that must be recorded.
-Facts are events that already happened in the external world and cannot be rejected.
-The coordinator assigns the actual sequence number on receipt.
-
-IMPORTANT: When using FactSequence, set Cover.external_id for idempotency.
-The coordinator uses Cover.external_id to deduplicate fact events.
-Cover.external_id propagates through the entire system for tracing.
+### ExternalDeferredSequence {#angzarr_client-proto-angzarr-ExternalDeferredSequence}
+For facts from external systems (webhooks, integrations).
+Framework stamps sequence on delivery; idempotency via external_id.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| source | string |  | Origin system identifier (e.g., &#34;stripe&#34;, &#34;fedex&#34;, &#34;scheduler&#34;) |
-| description | string |  | Human-readable description of why this is a fact (optional) |
+| external_id | string |  | Idempotency key from external system (e.g., &#34;pi_1234&#34; from Stripe) |
+| description | string |  | Human-readable origin (e.g., &#34;Stripe webhook&#34;) |
 
 
 
@@ -1193,7 +1392,7 @@ Cover.external_id propagates through the entire system for tracing.
 
 
 
-### GetDescriptorRequest {#angzarr-GetDescriptorRequest}
+### GetDescriptorRequest {#angzarr_client-proto-angzarr-GetDescriptorRequest}
 Request for GetDescriptor RPC.
 
 
@@ -1202,8 +1401,26 @@ Request for GetDescriptor RPC.
 
 
 
-### Notification {#angzarr-Notification}
-docs:start:notification
+### NoOp {#angzarr_client-proto-angzarr-NoOp}
+region noop
+Placeholder returned by coordinator for uncommitted/framework events.
+Never persisted - only returned at read time for filtered events.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| original_sequence | uint32 |  | Sequence of the filtered event |
+| cascade_id | string |  | Which cascade it belonged to (if pending) |
+| reason | string |  | &#34;uncommitted&#34;, &#34;revoked&#34;, &#34;framework_event&#34; |
+
+
+
+
+
+
+
+### Notification {#angzarr_client-proto-angzarr-Notification}
+region notification
 Base notification message for transient system signals.
 Contains routing info via Cover but no persistence semantics.
 Type discrimination via payload.type_url (standard Any behavior).
@@ -1211,10 +1428,9 @@ Type discrimination via payload.type_url (standard Any behavior).
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| cover | [Cover](#angzarr-Cover) |  | Routing: domain, root, correlation_id |
+| cover | [Cover](#angzarr_client-proto-angzarr-Cover) |  | Routing: domain, root, correlation_id |
 | payload | [google.protobuf.Any](https://protobuf.dev/reference/protobuf/google.protobuf/#any) |  | Type-specific content (RejectionNotification, etc.) |
 | sent_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  | When notification was created |
-| metadata | [Notification.MetadataEntry](#angzarr-Notification-MetadataEntry) | repeated | Optional key-value metadata |
 
 
 
@@ -1222,14 +1438,18 @@ Type discrimination via payload.type_url (standard Any behavior).
 
 
 
-### Notification.MetadataEntry {#angzarr-Notification-MetadataEntry}
-
+### PageHeader {#angzarr_client-proto-angzarr-PageHeader}
+region page_header
+Shared header for CommandPage and EventPage.
+Encodes sequence type and provenance for framework processing.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| key | string |  |  |
-| value | string |  |  |
+| sequence | uint32 |  | Explicit sequence (aggregate handlers, legacy) |
+| external_deferred | [ExternalDeferredSequence](#angzarr_client-proto-angzarr-ExternalDeferredSequence) |  | External fact (Stripe, FedEx, etc.) |
+| angzarr_deferred | [AngzarrDeferredSequence](#angzarr_client-proto-angzarr-AngzarrDeferredSequence) |  | Saga-produced command/fact |
+| sync_mode | [SyncMode](#angzarr_client-proto-angzarr-SyncMode) | optional | Per-command override of the enclosing CommandRequest&#39;s sync_mode. Only meaningful on CommandPage headers; ignored on EventPage headers. PMs emit a `repeated CommandBook` and cannot reach the request wrapper themselves; setting sync_mode here lets a PM tag a single emitted command (e.g. SYNC_MODE_DECISION when its accept/reject must surface synchronously) while the surrounding flow stays whatever the original caller asked for. When unset (the common case) coordinators inherit CommandRequest.sync_mode unchanged. |
 
 
 
@@ -1237,14 +1457,14 @@ Type discrimination via payload.type_url (standard Any behavior).
 
 
 
-### PayloadReference {#angzarr-PayloadReference}
+### PayloadReference {#angzarr_client-proto-angzarr-PayloadReference}
 Reference to externally stored payload (claim check pattern).
 Used when event/command payloads exceed message bus size limits.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| storage_type | [PayloadStorageType](#angzarr-PayloadStorageType) |  |  |
+| storage_type | [PayloadStorageType](#angzarr_client-proto-angzarr-PayloadStorageType) |  |  |
 | uri | string |  | Location URI: - file:///var/angzarr/payloads/\{hash\}.bin - gs://bucket/prefix/\{hash\}.bin - s3://bucket/prefix/\{hash\}.bin |
 | content_hash | bytes |  | Content hash for integrity verification and deduplication (SHA-256) |
 | original_size | uint64 |  | Original serialized payload size in bytes |
@@ -1256,14 +1476,14 @@ Used when event/command payloads exceed message bus size limits.
 
 
 
-### PayloadRetrievalFailedDetails {#angzarr-PayloadRetrievalFailedDetails}
+### PayloadRetrievalFailedDetails {#angzarr_client-proto-angzarr-PayloadRetrievalFailedDetails}
 Payload retrieval failure details for DLQ entries.
 Contains information about why an externally stored payload couldn&#39;t be retrieved.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| storage_type | [PayloadStorageType](#angzarr-PayloadStorageType) |  | Storage backend type |
+| storage_type | [PayloadStorageType](#angzarr_client-proto-angzarr-PayloadStorageType) |  | Storage backend type |
 | uri | string |  | URI of the payload that couldn&#39;t be retrieved |
 | content_hash | bytes |  | Content hash for identification |
 | original_size | uint64 |  | Original payload size in bytes |
@@ -1275,13 +1495,13 @@ Contains information about why an externally stored payload couldn&#39;t be retr
 
 
 
-### Projection {#angzarr-Projection}
+### Projection {#angzarr_client-proto-angzarr-Projection}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| cover | [Cover](#angzarr-Cover) |  |  |
+| cover | [Cover](#angzarr_client-proto-angzarr-Cover) |  |  |
 | projector | string |  |  |
 | sequence | uint32 |  |  |
 | projection | [google.protobuf.Any](https://protobuf.dev/reference/protobuf/google.protobuf/#any) |  |  |
@@ -1292,16 +1512,16 @@ Contains information about why an externally stored payload couldn&#39;t be retr
 
 
 
-### Query {#angzarr-Query}
+### Query {#angzarr_client-proto-angzarr-Query}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| cover | [Cover](#angzarr-Cover) |  | Cover identifies the aggregate: domain &#43; (root | correlation_id | both) Query by root: Cover \{ domain, root \} Query by correlation: Cover \{ domain, correlation_id \} |
-| range | [SequenceRange](#angzarr-SequenceRange) |  |  |
-| sequences | [SequenceSet](#angzarr-SequenceSet) |  |  |
-| temporal | [TemporalQuery](#angzarr-TemporalQuery) |  |  |
+| cover | [Cover](#angzarr_client-proto-angzarr-Cover) |  | Cover identifies the aggregate: domain &#43; (root | correlation_id | both) Query by root: Cover \{ domain, root \} Query by correlation: Cover \{ domain, correlation_id \} |
+| range | [SequenceRange](#angzarr_client-proto-angzarr-SequenceRange) |  |  |
+| sequences | [SequenceSet](#angzarr_client-proto-angzarr-SequenceSet) |  |  |
+| temporal | [TemporalQuery](#angzarr_client-proto-angzarr-TemporalQuery) |  |  |
 
 
 
@@ -1309,20 +1529,20 @@ Contains information about why an externally stored payload couldn&#39;t be retr
 
 
 
-### RejectionNotification {#angzarr-RejectionNotification}
-docs:start:rejection_notification
+### RejectionNotification {#angzarr_client-proto-angzarr-RejectionNotification}
+region rejection_notification
 Notification payload for command rejection scenarios.
 Embedded in Notification.payload when a saga/PM command is rejected.
 
+Source info for compensation is in rejected_command.pages[].header.angzarr_deferred:
+- source.domain, source.root, source.edition → where to route rejection
+- source_seq → which event triggered the command
+
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| rejected_command | [CommandBook](#angzarr-CommandBook) |  | The command that was rejected (full context) |
+| rejected_command | [CommandBook](#angzarr_client-proto-angzarr-CommandBook) |  | The command that was rejected (full context) |
 | rejection_reason | string |  | Why: &#34;insufficient_funds&#34;, &#34;out_of_stock&#34;, etc. |
-| issuer_name | string |  | Saga/PM name that issued the command |
-| issuer_type | string |  | &#34;saga&#34; | &#34;process_manager&#34; |
-| source_aggregate | [Cover](#angzarr-Cover) |  | Aggregate that originally triggered the flow |
-| source_event_sequence | uint32 |  | Event sequence that triggered the saga/PM |
 
 
 
@@ -1330,15 +1550,19 @@ Embedded in Notification.payload when a saga/PM command is rejected.
 
 
 
-### SagaCommandOrigin {#angzarr-SagaCommandOrigin}
-Track saga command origin for compensation flow
+### Revocation {#angzarr_client-proto-angzarr-Revocation}
+region revocation
+Revokes events - marks them as NoOp at read time.
+Written by framework on cascade failure, timeout, or explicit revocation API.
+Original events become invisible to business logic.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| saga_name | string |  | Name of the saga that issued the command |
-| triggering_aggregate | [Cover](#angzarr-Cover) |  | Domain&#43;root of aggregate that triggered the saga |
-| triggering_event_sequence | uint32 |  | Sequence number of the triggering event |
+| target | [Cover](#angzarr_client-proto-angzarr-Cover) |  | Domain &#43; root of aggregate being revoked |
+| sequences | uint32 | repeated | Sequences being revoked |
+| cascade_id | string |  | Set for cascade rollbacks, empty for general revocation |
+| reason | string |  | &#34;saga_failed&#34;, &#34;timeout&#34;, &#34;compensation&#34;, etc. |
 
 
 
@@ -1346,8 +1570,8 @@ Track saga command origin for compensation flow
 
 
 
-### SequenceMismatchDetails {#angzarr-SequenceMismatchDetails}
-docs:start:dlq_details
+### SequenceMismatchDetails {#angzarr_client-proto-angzarr-SequenceMismatchDetails}
+region dlq_details
 Sequence mismatch details for DLQ entries.
 Contains expected vs actual sequence for debugging and replay.
 
@@ -1356,7 +1580,7 @@ Contains expected vs actual sequence for debugging and replay.
 | ----- | ---- | ----- | ----------- |
 | expected_sequence | uint32 |  | What the command expected |
 | actual_sequence | uint32 |  | What the aggregate was at |
-| merge_strategy | [MergeStrategy](#angzarr-MergeStrategy) |  | Strategy that triggered DLQ routing |
+| merge_strategy | [MergeStrategy](#angzarr_client-proto-angzarr-MergeStrategy) |  | Strategy that triggered DLQ routing |
 
 
 
@@ -1364,7 +1588,7 @@ Contains expected vs actual sequence for debugging and replay.
 
 
 
-### SequenceRange {#angzarr-SequenceRange}
+### SequenceRange {#angzarr_client-proto-angzarr-SequenceRange}
 Query types
 
 
@@ -1379,7 +1603,7 @@ Query types
 
 
 
-### SequenceSet {#angzarr-SequenceSet}
+### SequenceSet {#angzarr_client-proto-angzarr-SequenceSet}
 
 
 
@@ -1393,8 +1617,8 @@ Query types
 
 
 
-### Snapshot {#angzarr-Snapshot}
-docs:start:aggregate_snapshot
+### Snapshot {#angzarr_client-proto-angzarr-Snapshot}
+region aggregate_snapshot
 Snapshot of aggregate state at a given sequence number.
 State must be a protobuf Message to serialize into Any.
 
@@ -1403,7 +1627,7 @@ State must be a protobuf Message to serialize into Any.
 | ----- | ---- | ----- | ----------- |
 | sequence | uint32 |  |  |
 | state | [google.protobuf.Any](https://protobuf.dev/reference/protobuf/google.protobuf/#any) |  |  |
-| retention | [SnapshotRetention](#angzarr-SnapshotRetention) |  | Controls cleanup behavior |
+| retention | [SnapshotRetention](#angzarr_client-proto-angzarr-SnapshotRetention) |  | Controls cleanup behavior |
 
 
 
@@ -1411,7 +1635,7 @@ State must be a protobuf Message to serialize into Any.
 
 
 
-### Target {#angzarr-Target}
+### Target {#angzarr_client-proto-angzarr-Target}
 Describes what a component subscribes to.
 Topology edges derived from inputs: if A subscribes to domain X, edge X→A exists.
 
@@ -1426,7 +1650,7 @@ Topology edges derived from inputs: if A subscribes to domain X, edge X→A exis
 
 
 
-### TemporalQuery {#angzarr-TemporalQuery}
+### TemporalQuery {#angzarr_client-proto-angzarr-TemporalQuery}
 Temporal query: retrieve aggregate state at a point in history.
 Replays events from sequence 0 (no snapshots) to the specified point.
 
@@ -1442,7 +1666,7 @@ Replays events from sequence 0 (no snapshots) to the specified point.
 
 
 
-### UUID {#angzarr-UUID}
+### UUID {#angzarr_client-proto-angzarr-UUID}
 
 
 
@@ -1458,8 +1682,23 @@ Replays events from sequence 0 (no snapshots) to the specified point.
 
 
 
-### MergeStrategy {#angzarr-MergeStrategy}
-docs:start:merge_strategy
+### CascadeErrorMode {#angzarr_client-proto-angzarr-CascadeErrorMode}
+region cascade_error_mode
+Controls how CASCADE mode handles errors from sagas/PMs.
+Only relevant when sync_mode = CASCADE.
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| CASCADE_ERROR_FAIL_FAST | 0 | Stop on first error, fail request (default) |
+| CASCADE_ERROR_CONTINUE | 1 | Continue through all, return successes &#43; errors |
+| CASCADE_ERROR_COMPENSATE | 2 | On first error, compensate executed commands, fail request |
+| CASCADE_ERROR_DEAD_LETTER | 3 | On error, send to DLQ and continue with remaining |
+
+
+
+
+### MergeStrategy {#angzarr_client-proto-angzarr-MergeStrategy}
+region merge_strategy
 Controls how concurrent commands to the same aggregate are handled
 
 | Name | Number | Description |
@@ -1472,8 +1711,8 @@ Controls how concurrent commands to the same aggregate are handled
 
 
 
-### PayloadStorageType {#angzarr-PayloadStorageType}
-docs:start:payload_reference
+### PayloadStorageType {#angzarr_client-proto-angzarr-PayloadStorageType}
+region payload_reference
 Storage backend type for externally stored payloads (claim check pattern).
 
 | Name | Number | Description |
@@ -1486,8 +1725,8 @@ Storage backend type for externally stored payloads (claim check pattern).
 
 
 
-### SnapshotRetention {#angzarr-SnapshotRetention}
-docs:start:snapshot_retention
+### SnapshotRetention {#angzarr_client-proto-angzarr-SnapshotRetention}
+region snapshot_retention
 Controls snapshot retention during cleanup
 
 | Name | Number | Description |
@@ -1499,15 +1738,27 @@ Controls snapshot retention during cleanup
 
 
 
-### SyncMode {#angzarr-SyncMode}
-docs:start:sync_mode
-Controls synchronous processing behavior
+### SyncMode {#angzarr_client-proto-angzarr-SyncMode}
+region sync_mode
+Controls synchronous processing behavior.
+
+Impact ordering (lowest to highest):
+  ASYNC  &lt; DECISION &lt; SIMPLE &lt; CASCADE
+
+Primary caller of DECISION is process managers coordinating cross-aggregate
+flows: the PM issues a command to the target aggregate and needs to know
+*only* whether the aggregate accepted or rejected, without paying the cost
+of projector propagation or saga fan-out. The aggregate&#39;s accept path
+(events persisted &#43; returned) and reject path (CommandRejectedError) are
+both observable; everything downstream runs asynchronously.
 
 | Name | Number | Description |
 | ---- | ------ | ----------- |
-| SYNC_MODE_UNSPECIFIED | 0 | Async: fire and forget (default) |
+| SYNC_MODE_ASYNC | 0 | Async: fire and forget (default) |
 | SYNC_MODE_SIMPLE | 1 | Sync projectors only, no saga cascade |
 | SYNC_MODE_CASCADE | 2 | Full sync: projectors &#43; saga cascade (expensive) |
+| SYNC_MODE_DECISION | 3 | Sync aggregate accept/reject only; projectors &#43; sagas run async |
+| SYNC_MODE_ISOLATED | 4 | Sync accept/reject &#43; persist; NO downstream (sync OR async). Replay / migration / recovery writes that must not trigger reactions. Distinct from DECISION (which still publishes to bus for async downstream). |
 
 
  
@@ -1520,19 +1771,19 @@ Controls synchronous processing behavior
 
 <p align="right"><a href="#top">Top</a></p>
 
-## angzarr/upcaster.proto {#angzarr_upcaster-proto}
+## angzarr_client/proto/angzarr/upcaster.proto {#angzarr_client_proto_angzarr_upcaster-proto}
 
 
 
 
-### UpcastRequest {#angzarr-UpcastRequest}
+### UpcastRequest {#angzarr_client-proto-angzarr-UpcastRequest}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | domain | string |  |  |
-| events | [EventPage](#angzarr-EventPage) | repeated |  |
+| events | [EventPage](#angzarr_client-proto-angzarr-EventPage) | repeated |  |
 
 
 
@@ -1540,13 +1791,13 @@ Controls synchronous processing behavior
 
 
 
-### UpcastResponse {#angzarr-UpcastResponse}
+### UpcastResponse {#angzarr_client-proto-angzarr-UpcastResponse}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| events | [EventPage](#angzarr-EventPage) | repeated |  |
+| events | [EventPage](#angzarr_client-proto-angzarr-EventPage) | repeated |  |
 
 
 
@@ -1560,14 +1811,14 @@ Controls synchronous processing behavior
 
 
 
-### UpcasterService {#angzarr-UpcasterService}
+### UpcasterService {#angzarr_client-proto-angzarr-UpcasterService}
 UpcasterService: transforms old event versions to current versions
 Implemented by the client alongside AggregateService on the same gRPC server.
 Optionally can be deployed as a separate binary for testing or complex migrations.
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| Upcast | [UpcastRequest](#angzarr-UpcastRequest) | [UpcastResponse](#angzarr-UpcastResponse) | Transform events to current version Returns events in same order, transformed where applicable |
+| Upcast | [UpcastRequest](#angzarr_client-proto-angzarr-UpcastRequest) | [UpcastResponse](#angzarr_client-proto-angzarr-UpcastResponse) | Transform events to current version Returns events in same order, transformed where applicable |
 
  
 
@@ -1575,21 +1826,39 @@ Optionally can be deployed as a separate binary for testing or complex migration
 
 <p align="right"><a href="#top">Top</a></p>
 
-## examples/ai_sidecar.proto {#examples_ai_sidecar-proto}
+## angzarr_client/proto/examples/ai_sidecar.proto {#angzarr_client_proto_examples_ai_sidecar-proto}
 
 
 
 
-### ActionHistory {#examples-ActionHistory}
+### ActionContext {#angzarr_client-proto-examples-ActionContext}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| session_id | string |  |  |
+| player_root | bytes |  |  |
+| hand_id | bytes |  |  |
+| snapshot | [ActionRequest](#angzarr_client-proto-examples-ActionRequest) |  |  |
+| events | [HandEvent](#angzarr_client-proto-examples-HandEvent) | repeated |  |
+
+
+
+
+
+
+
+### ActionHistory {#angzarr_client-proto-examples-ActionHistory}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | player_root | bytes |  |  |
-| action | [ActionType](#examples-ActionType) |  |  |
+| action | [ActionType](#angzarr_client-proto-examples-ActionType) |  |  |
 | amount | int64 |  |  |
-| phase | [BettingPhase](#examples-BettingPhase) |  |  |
+| phase | [BettingPhase](#angzarr_client-proto-examples-BettingPhase) |  |  |
 
 
 
@@ -1597,20 +1866,18 @@ Optionally can be deployed as a separate binary for testing or complex migration
 
 
 
-### ActionRequest {#examples-ActionRequest}
+### ActionRequest {#angzarr_client-proto-examples-ActionRequest}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| model_id | string |  | Game state
-
-Which model to use |
-| game_variant | [GameVariant](#examples-GameVariant) |  |  |
-| phase | [BettingPhase](#examples-BettingPhase) |  |  |
-| hole_cards | [Card](#examples-Card) | repeated | Cards |
-| community_cards | [Card](#examples-Card) | repeated |  |
-| pot_size | int64 |  | Betting context |
+| model_id | string |  | Which model variant to use. Also used as session_id when GetAction is invoked outside an explicit session (backwards-compatible behavior). |
+| game_variant | [GameVariant](#angzarr_client-proto-examples-GameVariant) |  |  |
+| phase | [BettingPhase](#angzarr_client-proto-examples-BettingPhase) |  |  |
+| hole_cards | [Card](#angzarr_client-proto-examples-Card) | repeated | Cards |
+| community_cards | [Card](#angzarr_client-proto-examples-Card) | repeated |  |
+| pot_size | int64 |  | Betting context (chip amounts are int64; never uint64 for JS compat). |
 | stack_size | int64 |  |  |
 | amount_to_call | int64 |  |  |
 | min_raise | int64 |  |  |
@@ -1620,8 +1887,8 @@ Which model to use |
 0 = button, increasing = earlier |
 | players_remaining | int32 |  |  |
 | players_to_act | int32 |  |  |
-| action_history | [ActionHistory](#examples-ActionHistory) | repeated | Historical context (for recurrent models) |
-| opponents | [OpponentStats](#examples-OpponentStats) | repeated | Opponent modeling (optional) |
+| action_history | [ActionHistory](#angzarr_client-proto-examples-ActionHistory) | repeated | Historical context (for recurrent models). |
+| opponents | [OpponentStats](#angzarr_client-proto-examples-OpponentStats) | repeated | Opponent modeling snapshot (optional). |
 
 
 
@@ -1629,15 +1896,15 @@ Which model to use |
 
 
 
-### ActionResponse {#examples-ActionResponse}
+### ActionResponse {#angzarr_client-proto-examples-ActionResponse}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| recommended_action | [ActionType](#examples-ActionType) |  |  |
+| recommended_action | [ActionType](#angzarr_client-proto-examples-ActionType) |  |  |
 | amount | int64 |  | For bet/raise |
-| fold_probability | float |  | Confidence scores for each action (for analysis) |
+| fold_probability | float |  | Confidence scores for each action (for analysis). |
 | check_call_probability | float |  |  |
 | bet_raise_probability | float |  |  |
 | model_version | string |  | Model metadata |
@@ -1649,13 +1916,13 @@ Which model to use |
 
 
 
-### BatchActionRequest {#examples-BatchActionRequest}
+### BatchActionRequest {#angzarr_client-proto-examples-BatchActionRequest}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| requests | [ActionRequest](#examples-ActionRequest) | repeated |  |
+| requests | [ActionRequest](#angzarr_client-proto-examples-ActionRequest) | repeated |  |
 
 
 
@@ -1663,13 +1930,13 @@ Which model to use |
 
 
 
-### BatchActionResponse {#examples-BatchActionResponse}
+### BatchActionResponse {#angzarr_client-proto-examples-BatchActionResponse}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| responses | [ActionResponse](#examples-ActionResponse) | repeated |  |
+| responses | [ActionResponse](#angzarr_client-proto-examples-ActionResponse) | repeated |  |
 
 
 
@@ -1677,7 +1944,81 @@ Which model to use |
 
 
 
-### HealthRequest {#examples-HealthRequest}
+### EndSessionRequest {#angzarr_client-proto-examples-EndSessionRequest}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| session_id | string |  |  |
+| persist_stats | bool |  | If true, merge accumulated opponent stats into persistent profiles. |
+
+
+
+
+
+
+
+### EndSessionResponse {#angzarr_client-proto-examples-EndSessionResponse}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| success | bool |  |  |
+| hands_played | int32 |  |  |
+| total_result | int64 |  |  |
+
+
+
+
+
+
+
+### Experience {#angzarr_client-proto-examples-Experience}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| context | [ActionContext](#angzarr_client-proto-examples-ActionContext) |  |  |
+| action_taken | [ActionType](#angzarr_client-proto-examples-ActionType) |  |  |
+| amount | int64 |  |  |
+| log_prob | float |  |  |
+| value_estimate | float |  |  |
+| reward | float |  |  |
+| terminal | bool |  |  |
+
+
+
+
+
+
+
+### HandEvent {#angzarr_client-proto-examples-HandEvent}
+HandEvent uses a oneof over the canonical hand-domain event types defined
+in hand.proto. Reusing those shapes keeps one vocabulary across aggregates,
+sidecars, and language clients — the AI does not redefine what a &#34;deal&#34;
+or &#34;showdown&#34; means; it subscribes to the same events the hand aggregate
+emits. Readers switch on WhichOneof(&#39;event&#39;) in Python, EventCase in C#,
+etc.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| cards_dealt | [CardsDealt](#angzarr_client-proto-examples-CardsDealt) |  |  |
+| community_dealt | [CommunityCardsDealt](#angzarr_client-proto-examples-CommunityCardsDealt) |  |  |
+| action_taken | [ActionTaken](#angzarr_client-proto-examples-ActionTaken) |  |  |
+| showdown | [ShowdownStarted](#angzarr_client-proto-examples-ShowdownStarted) |  |  |
+| pot_awarded | [PotAwarded](#angzarr_client-proto-examples-PotAwarded) |  |  |
+
+
+
+
+
+
+
+### HealthRequest {#angzarr_client-proto-examples-HealthRequest}
 
 
 
@@ -1686,7 +2027,7 @@ Which model to use |
 
 
 
-### HealthResponse {#examples-HealthResponse}
+### HealthResponse {#angzarr_client-proto-examples-HealthResponse}
 
 
 
@@ -1704,7 +2045,43 @@ Which model to use |
 
 
 
-### OpponentStats {#examples-OpponentStats}
+### OpponentProfile {#angzarr_client-proto-examples-OpponentProfile}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| total_hands | int32 |  |  |
+| vpip | float |  |  |
+| pfr | float |  |  |
+| af | float |  |  |
+| wtsd | float |  |  |
+| w_sd | float |  |  |
+| avg_decision_time_ms | float |  |  |
+| hands_since_update | int32 |  |  |
+
+
+
+
+
+
+
+### OpponentQuery {#angzarr_client-proto-examples-OpponentQuery}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_roots | bytes | repeated |  |
+
+
+
+
+
+
+
+### OpponentStats {#angzarr_client-proto-examples-OpponentStats}
 
 
 
@@ -1722,22 +2099,120 @@ Which model to use |
 
 
 
- 
+
+
+### OpponentStatsResponse {#angzarr_client-proto-examples-OpponentStatsResponse}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| profiles | [OpponentProfile](#angzarr_client-proto-examples-OpponentProfile) | repeated |  |
+
+
+
+
+
+
+
+### RecordResponse {#angzarr_client-proto-examples-RecordResponse}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| success | bool |  |  |
+| message | string |  |  |
+| experience_id | int64 |  |  |
+
+
+
+
+
+
+
+### ReloadModelRequest {#angzarr_client-proto-examples-ReloadModelRequest}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| model_id | string |  | Target model slot; empty means &#34;default&#34; slot. |
+| model_path | string |  | Filesystem path to the checkpoint the sidecar should load. |
+
+
+
+
+
+
+
+### ReloadModelResponse {#angzarr_client-proto-examples-ReloadModelResponse}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| success | bool |  |  |
+| message | string |  |  |
+| model_version | string |  |  |
+
+
+
+
+
+
+
+### StartSessionRequest {#angzarr_client-proto-examples-StartSessionRequest}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| session_id | string |  |  |
+| ai_player_root | bytes |  |  |
+| model_id | string |  |  |
+
+
+
+
+
+
+
+### StartSessionResponse {#angzarr_client-proto-examples-StartSessionResponse}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| success | bool |  |  |
+| session_id | string |  |  |
+| model_version | string |  |  |
+
+
+
+
 
  
 
  
 
+ 
 
 
-### AiSidecar {#examples-AiSidecar}
+
+### AiSidecar {#angzarr_client-proto-examples-AiSidecar}
 
 
 | Method Name | Request Type | Response Type | Description |
 | ----------- | ------------ | ------------- | ------------|
-| GetAction | [ActionRequest](#examples-ActionRequest) | [ActionResponse](#examples-ActionResponse) | Get recommended action from the AI model |
-| Health | [HealthRequest](#examples-HealthRequest) | [HealthResponse](#examples-HealthResponse) | Health check |
-| GetActionsBatch | [BatchActionRequest](#examples-BatchActionRequest) | [BatchActionResponse](#examples-BatchActionResponse) | Batch inference for training/simulation |
+| GetAction | [ActionRequest](#angzarr_client-proto-examples-ActionRequest) | [ActionResponse](#angzarr_client-proto-examples-ActionResponse) | Get recommended action from the AI model for a single decision point. |
+| Health | [HealthRequest](#angzarr_client-proto-examples-HealthRequest) | [HealthResponse](#angzarr_client-proto-examples-HealthResponse) | Health check: reports model id, version, uptime, and request count. |
+| GetActionsBatch | [BatchActionRequest](#angzarr_client-proto-examples-BatchActionRequest) | [BatchActionResponse](#angzarr_client-proto-examples-BatchActionResponse) | Batch inference for training/simulation (N requests -&gt; N responses). |
+| StartSession | [StartSessionRequest](#angzarr_client-proto-examples-StartSessionRequest) | [StartSessionResponse](#angzarr_client-proto-examples-StartSessionResponse) | Start a training/play session. Sessions aggregate opponent statistics and bind a logical player_root to a session_id for experience recording. |
+| EndSession | [EndSessionRequest](#angzarr_client-proto-examples-EndSessionRequest) | [EndSessionResponse](#angzarr_client-proto-examples-EndSessionResponse) | End a session; optionally persist accumulated opponent stats to storage. |
+| RecordExperience | [Experience](#angzarr_client-proto-examples-Experience) | [RecordResponse](#angzarr_client-proto-examples-RecordResponse) | Record one experience tuple (state, action, reward) for replay / RL training. |
+| GetOpponentStats | [OpponentQuery](#angzarr_client-proto-examples-OpponentQuery) | [OpponentStatsResponse](#angzarr_client-proto-examples-OpponentStatsResponse) | Query persistent opponent profiles by player_root. |
+| ReloadModel | [ReloadModelRequest](#angzarr_client-proto-examples-ReloadModelRequest) | [ReloadModelResponse](#angzarr_client-proto-examples-ReloadModelResponse) | Reload model weights from a checkpoint path. Returns the new model version. Enables the offline trainer to publish updated weights without a restart. |
 
  
 
@@ -1745,19 +2220,283 @@ Which model to use |
 
 <p align="right"><a href="#top">Top</a></p>
 
-## examples/hand.proto {#examples_hand-proto}
+## angzarr_client/proto/examples/buy_in.proto {#angzarr_client_proto_examples_buy_in-proto}
 
 
 
 
-### ActionTaken {#examples-ActionTaken}
+### BuyInCompleted {#angzarr_client-proto-examples-BuyInCompleted}
+PM state: buy-in flow completed successfully
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| table_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| seat | int32 |  |  |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| completed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### BuyInConfirmed {#angzarr_client-proto-examples-BuyInConfirmed}
+Emitted when buy-in is confirmed
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+| table_root | bytes |  |  |
+| seat | int32 |  |  |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| confirmed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| player_root | bytes |  |  |
+
+
+
+
+
+
+
+### BuyInFailed {#angzarr_client-proto-examples-BuyInFailed}
+PM state: buy-in flow failed
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| table_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| failure | [OrchestrationFailure](#angzarr_client-proto-examples-OrchestrationFailure) |  |  |
+
+
+
+
+
+
+
+### BuyInInitiated {#angzarr_client-proto-examples-BuyInInitiated}
+PM state: buy-in flow initiated
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| table_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| seat | int32 |  |  |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| phase | [BuyInPhase](#angzarr_client-proto-examples-BuyInPhase) |  |  |
+| initiated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### BuyInOrchestratorState {#angzarr_client-proto-examples-BuyInOrchestratorState}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  | Correlation ID for this flow |
+| player_root | bytes |  |  |
+| table_root | bytes |  |  |
+| seat | int32 |  |  |
+| amount | int64 |  |  |
+| phase | [BuyInPhase](#angzarr_client-proto-examples-BuyInPhase) |  |  |
+| started_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### BuyInPhaseChanged {#angzarr_client-proto-examples-BuyInPhaseChanged}
+PM state: phase transition
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+| from_phase | [BuyInPhase](#angzarr_client-proto-examples-BuyInPhase) |  |  |
+| to_phase | [BuyInPhase](#angzarr_client-proto-examples-BuyInPhase) |  |  |
+| changed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### BuyInRequested {#angzarr_client-proto-examples-BuyInRequested}
+Emitted when buy-in is requested - triggers PM
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  | UUID for this buy-in flow |
+| table_root | bytes |  |  |
+| seat | int32 |  |  |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| requested_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| player_root | bytes |  |  |
+
+
+
+
+
+
+
+### BuyInReservationReleased {#angzarr_client-proto-examples-BuyInReservationReleased}
+Emitted when buy-in reservation is released
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+| reason | string |  |  |
+| released_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| player_root | bytes |  |  |
+| table_root | bytes |  |  |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+
+
+
+
+
+
+
+### ConfirmBuyIn {#angzarr_client-proto-examples-ConfirmBuyIn}
+PM confirms successful buy-in
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+
+
+
+
+
+
+
+### InitiateBuyIn {#angzarr_client-proto-examples-InitiateBuyIn}
+Client initiates buy-in - triggers PM orchestration
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| table_root | bytes |  |  |
+| seat | int32 |  | Preferred seat (-1 for any) |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| player_root | bytes |  |  |
+
+
+
+
+
+
+
+### PlayerSeated {#angzarr_client-proto-examples-PlayerSeated}
+Emitted when player is seated via PM flow
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| seat_position | int32 |  |  |
+| stack | int64 |  |  |
+| seated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### ReleaseBuyIn {#angzarr_client-proto-examples-ReleaseBuyIn}
+PM releases funds after failed seating
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+| reason | string |  |  |
+
+
+
+
+
+
+
+### SeatPlayer {#angzarr_client-proto-examples-SeatPlayer}
+PM seats player at table (separate from JoinTable for PM flow)
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  | Links to buy-in flow |
+| seat | int32 |  | Preferred seat (-1 for any) |
+| amount | int64 |  | Buy-in amount |
+
+
+
+
+
+
+
+### SeatingRejected {#angzarr_client-proto-examples-SeatingRejected}
+Emitted when seating is rejected
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| requested_seat | int32 |  |  |
+| reason | string |  | &#34;seat_occupied&#34;, &#34;invalid_amount&#34;, etc. |
+| rejected_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+ 
+
+ 
+
+ 
+
+ 
+
+
+
+<p align="right"><a href="#top">Top</a></p>
+
+## angzarr_client/proto/examples/hand.proto {#angzarr_client_proto_examples_hand-proto}
+
+
+
+
+### ActionTaken {#angzarr_client-proto-examples-ActionTaken}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | player_root | bytes |  |  |
-| action | [ActionType](#examples-ActionType) |  |  |
+| action | [ActionType](#angzarr_client-proto-examples-ActionType) |  |  |
 | amount | int64 |  |  |
 | player_stack | int64 |  | Absolute stack after action |
 | pot_total | int64 |  | Absolute pot after action |
@@ -1770,13 +2509,13 @@ Which model to use |
 
 
 
-### AwardPot {#examples-AwardPot}
+### AwardPot {#angzarr_client-proto-examples-AwardPot}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| awards | [PotAward](#examples-PotAward) | repeated |  |
+| awards | [PotAward](#angzarr_client-proto-examples-PotAward) | repeated |  |
 
 
 
@@ -1784,15 +2523,15 @@ Which model to use |
 
 
 
-### BettingRoundComplete {#examples-BettingRoundComplete}
+### BettingRoundComplete {#angzarr_client-proto-examples-BettingRoundComplete}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| completed_phase | [BettingPhase](#examples-BettingPhase) |  |  |
+| completed_phase | [BettingPhase](#angzarr_client-proto-examples-BettingPhase) |  |  |
 | pot_total | int64 |  |  |
-| stacks | [PlayerStackSnapshot](#examples-PlayerStackSnapshot) | repeated |  |
+| stacks | [PlayerStackSnapshot](#angzarr_client-proto-examples-PlayerStackSnapshot) | repeated |  |
 | completed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -1801,7 +2540,7 @@ Which model to use |
 
 
 
-### BlindPosted {#examples-BlindPosted}
+### BlindPosted {#angzarr_client-proto-examples-BlindPosted}
 
 
 
@@ -1820,7 +2559,7 @@ Which model to use |
 
 
 
-### CardsDealt {#examples-CardsDealt}
+### CardsDealt {#angzarr_client-proto-examples-CardsDealt}
 
 
 
@@ -1828,12 +2567,12 @@ Which model to use |
 | ----- | ---- | ----- | ----------- |
 | table_root | bytes |  |  |
 | hand_number | int64 |  |  |
-| game_variant | [GameVariant](#examples-GameVariant) |  |  |
-| player_cards | [PlayerHoleCards](#examples-PlayerHoleCards) | repeated |  |
+| game_variant | [GameVariant](#angzarr_client-proto-examples-GameVariant) |  |  |
+| player_cards | [PlayerHoleCards](#angzarr_client-proto-examples-PlayerHoleCards) | repeated |  |
 | dealer_position | int32 |  |  |
-| players | [PlayerInHand](#examples-PlayerInHand) | repeated |  |
+| players | [PlayerInHand](#angzarr_client-proto-examples-PlayerInHand) | repeated |  |
 | dealt_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
-| remaining_deck | [Card](#examples-Card) | repeated | Cards left after dealing hole cards |
+| remaining_deck | [Card](#angzarr_client-proto-examples-Card) | repeated | Cards left after dealing hole cards |
 
 
 
@@ -1841,7 +2580,7 @@ Which model to use |
 
 
 
-### CardsMucked {#examples-CardsMucked}
+### CardsMucked {#angzarr_client-proto-examples-CardsMucked}
 
 
 
@@ -1856,15 +2595,15 @@ Which model to use |
 
 
 
-### CardsRevealed {#examples-CardsRevealed}
+### CardsRevealed {#angzarr_client-proto-examples-CardsRevealed}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | player_root | bytes |  |  |
-| cards | [Card](#examples-Card) | repeated |  |
-| ranking | [HandRanking](#examples-HandRanking) |  |  |
+| cards | [Card](#angzarr_client-proto-examples-Card) | repeated |  |
+| ranking | [HandRanking](#angzarr_client-proto-examples-HandRanking) |  |  |
 | revealed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -1873,15 +2612,15 @@ Which model to use |
 
 
 
-### CommunityCardsDealt {#examples-CommunityCardsDealt}
+### CommunityCardsDealt {#angzarr_client-proto-examples-CommunityCardsDealt}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| cards | [Card](#examples-Card) | repeated |  |
-| phase | [BettingPhase](#examples-BettingPhase) |  | FLOP, TURN, or RIVER |
-| all_community_cards | [Card](#examples-Card) | repeated | Full board so far |
+| cards | [Card](#angzarr_client-proto-examples-Card) | repeated |  |
+| phase | [BettingPhase](#angzarr_client-proto-examples-BettingPhase) |  | FLOP, TURN, or RIVER |
+| all_community_cards | [Card](#angzarr_client-proto-examples-Card) | repeated | Full board so far |
 | dealt_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -1890,7 +2629,7 @@ Which model to use |
 
 
 
-### DealCards {#examples-DealCards}
+### DealCards {#angzarr_client-proto-examples-DealCards}
 
 
 
@@ -1898,8 +2637,8 @@ Which model to use |
 | ----- | ---- | ----- | ----------- |
 | table_root | bytes |  |  |
 | hand_number | int64 |  |  |
-| game_variant | [GameVariant](#examples-GameVariant) |  |  |
-| players | [PlayerInHand](#examples-PlayerInHand) | repeated |  |
+| game_variant | [GameVariant](#angzarr_client-proto-examples-GameVariant) |  |  |
+| players | [PlayerInHand](#angzarr_client-proto-examples-PlayerInHand) | repeated |  |
 | dealer_position | int32 |  |  |
 | small_blind | int64 |  |  |
 | big_blind | int64 |  |  |
@@ -1911,7 +2650,7 @@ Which model to use |
 
 
 
-### DealCommunityCards {#examples-DealCommunityCards}
+### DealCommunityCards {#angzarr_client-proto-examples-DealCommunityCards}
 
 
 
@@ -1925,7 +2664,7 @@ Which model to use |
 
 
 
-### DrawCompleted {#examples-DrawCompleted}
+### DrawCompleted {#angzarr_client-proto-examples-DrawCompleted}
 
 
 
@@ -1934,7 +2673,7 @@ Which model to use |
 | player_root | bytes |  |  |
 | cards_discarded | int32 |  |  |
 | cards_drawn | int32 |  |  |
-| new_cards | [Card](#examples-Card) | repeated | Only visible to this player |
+| new_cards | [Card](#angzarr_client-proto-examples-Card) | repeated | Only visible to this player |
 | drawn_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -1943,7 +2682,7 @@ Which model to use |
 
 
 
-### HandComplete {#examples-HandComplete}
+### HandComplete {#angzarr_client-proto-examples-HandComplete}
 
 
 
@@ -1951,8 +2690,8 @@ Which model to use |
 | ----- | ---- | ----- | ----------- |
 | table_root | bytes |  |  |
 | hand_number | int64 |  |  |
-| winners | [PotWinner](#examples-PotWinner) | repeated |  |
-| final_stacks | [PlayerStackSnapshot](#examples-PlayerStackSnapshot) | repeated |  |
+| winners | [PotWinner](#angzarr_client-proto-examples-PotWinner) | repeated |  |
+| final_stacks | [PlayerStackSnapshot](#angzarr_client-proto-examples-PlayerStackSnapshot) | repeated |  |
 | completed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -1961,7 +2700,7 @@ Which model to use |
 
 
 
-### HandState {#examples-HandState}
+### HandState {#angzarr_client-proto-examples-HandState}
 State (for snapshots)
 
 
@@ -1970,15 +2709,15 @@ State (for snapshots)
 | hand_id | string |  |  |
 | table_root | bytes |  |  |
 | hand_number | int64 |  |  |
-| game_variant | [GameVariant](#examples-GameVariant) |  |  |
-| remaining_deck | [Card](#examples-Card) | repeated | Deck state |
-| players | [PlayerHandState](#examples-PlayerHandState) | repeated | Player state |
-| community_cards | [Card](#examples-Card) | repeated | Community cards |
-| current_phase | [BettingPhase](#examples-BettingPhase) |  | Betting state |
+| game_variant | [GameVariant](#angzarr_client-proto-examples-GameVariant) |  |  |
+| remaining_deck | [Card](#angzarr_client-proto-examples-Card) | repeated | Deck state |
+| players | [PlayerHandState](#angzarr_client-proto-examples-PlayerHandState) | repeated | Player state |
+| community_cards | [Card](#angzarr_client-proto-examples-Card) | repeated | Community cards |
+| current_phase | [BettingPhase](#angzarr_client-proto-examples-BettingPhase) |  | Betting state |
 | action_on_position | int32 |  |  |
 | current_bet | int64 |  |  |
 | min_raise | int64 |  |  |
-| pots | [Pot](#examples-Pot) | repeated |  |
+| pots | [Pot](#angzarr_client-proto-examples-Pot) | repeated |  |
 | dealer_position | int32 |  | Positions |
 | small_blind_position | int32 |  |  |
 | big_blind_position | int32 |  |  |
@@ -1990,14 +2729,14 @@ State (for snapshots)
 
 
 
-### PlayerAction {#examples-PlayerAction}
+### PlayerAction {#angzarr_client-proto-examples-PlayerAction}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | player_root | bytes |  |  |
-| action | [ActionType](#examples-ActionType) |  |  |
+| action | [ActionType](#angzarr_client-proto-examples-ActionType) |  |  |
 | amount | int64 |  | For bet/raise/call |
 
 
@@ -2006,7 +2745,7 @@ State (for snapshots)
 
 
 
-### PlayerHandState {#examples-PlayerHandState}
+### PlayerHandState {#angzarr_client-proto-examples-PlayerHandState}
 
 
 
@@ -2014,7 +2753,7 @@ State (for snapshots)
 | ----- | ---- | ----- | ----------- |
 | player_root | bytes |  |  |
 | position | int32 |  |  |
-| hole_cards | [Card](#examples-Card) | repeated |  |
+| hole_cards | [Card](#angzarr_client-proto-examples-Card) | repeated |  |
 | stack | int64 |  |  |
 | bet_this_round | int64 |  |  |
 | total_invested | int64 |  |  |
@@ -2028,14 +2767,14 @@ State (for snapshots)
 
 
 
-### PlayerHoleCards {#examples-PlayerHoleCards}
+### PlayerHoleCards {#angzarr_client-proto-examples-PlayerHoleCards}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | player_root | bytes |  |  |
-| cards | [Card](#examples-Card) | repeated |  |
+| cards | [Card](#angzarr_client-proto-examples-Card) | repeated |  |
 
 
 
@@ -2043,7 +2782,7 @@ State (for snapshots)
 
 
 
-### PlayerInHand {#examples-PlayerInHand}
+### PlayerInHand {#angzarr_client-proto-examples-PlayerInHand}
 
 
 
@@ -2059,7 +2798,7 @@ State (for snapshots)
 
 
 
-### PlayerStackSnapshot {#examples-PlayerStackSnapshot}
+### PlayerStackSnapshot {#angzarr_client-proto-examples-PlayerStackSnapshot}
 
 
 
@@ -2076,14 +2815,14 @@ State (for snapshots)
 
 
 
-### PlayerTimedOut {#examples-PlayerTimedOut}
+### PlayerTimedOut {#angzarr_client-proto-examples-PlayerTimedOut}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | player_root | bytes |  |  |
-| default_action | [ActionType](#examples-ActionType) |  | Usually FOLD or CHECK |
+| default_action | [ActionType](#angzarr_client-proto-examples-ActionType) |  | Usually FOLD or CHECK |
 | timed_out_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -2092,7 +2831,7 @@ State (for snapshots)
 
 
 
-### PostBlind {#examples-PostBlind}
+### PostBlind {#angzarr_client-proto-examples-PostBlind}
 
 
 
@@ -2108,7 +2847,7 @@ State (for snapshots)
 
 
 
-### PotAward {#examples-PotAward}
+### PotAward {#angzarr_client-proto-examples-PotAward}
 
 
 
@@ -2124,13 +2863,13 @@ State (for snapshots)
 
 
 
-### PotAwarded {#examples-PotAwarded}
+### PotAwarded {#angzarr_client-proto-examples-PotAwarded}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| winners | [PotWinner](#examples-PotWinner) | repeated |  |
+| winners | [PotWinner](#angzarr_client-proto-examples-PotWinner) | repeated |  |
 | awarded_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -2139,7 +2878,7 @@ State (for snapshots)
 
 
 
-### PotWinner {#examples-PotWinner}
+### PotWinner {#angzarr_client-proto-examples-PotWinner}
 
 
 
@@ -2148,7 +2887,7 @@ State (for snapshots)
 | player_root | bytes |  |  |
 | amount | int64 |  |  |
 | pot_type | string |  |  |
-| winning_hand | [HandRanking](#examples-HandRanking) |  |  |
+| winning_hand | [HandRanking](#angzarr_client-proto-examples-HandRanking) |  |  |
 
 
 
@@ -2156,7 +2895,7 @@ State (for snapshots)
 
 
 
-### RequestDraw {#examples-RequestDraw}
+### RequestDraw {#angzarr_client-proto-examples-RequestDraw}
 
 
 
@@ -2171,7 +2910,7 @@ State (for snapshots)
 
 
 
-### RevealCards {#examples-RevealCards}
+### RevealCards {#angzarr_client-proto-examples-RevealCards}
 
 
 
@@ -2186,7 +2925,7 @@ State (for snapshots)
 
 
 
-### ShowdownStarted {#examples-ShowdownStarted}
+### ShowdownStarted {#angzarr_client-proto-examples-ShowdownStarted}
 
 
 
@@ -2211,12 +2950,93 @@ State (for snapshots)
 
 <p align="right"><a href="#top">Top</a></p>
 
-## examples/player.proto {#examples_player-proto}
+## angzarr_client/proto/examples/orchestration.proto {#angzarr_client_proto_examples_orchestration-proto}
 
 
 
 
-### ActionRequested {#examples-ActionRequested}
+### OrchestrationFailure {#angzarr_client-proto-examples-OrchestrationFailure}
+Reason for orchestration failure
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| code | string |  | Machine-readable code |
+| message | string |  | Human-readable message |
+| failed_at_phase | string |  | Which phase failed |
+| failed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+ 
+
+
+
+### BuyInPhase {#angzarr_client-proto-examples-BuyInPhase}
+Phase tracking for buy-in orchestration
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| BUY_IN_PHASE_UNSPECIFIED | 0 |  |
+| BUY_IN_REQUESTED | 1 | Initial request received |
+| BUY_IN_RESERVING | 2 | Funds being reserved |
+| BUY_IN_SEATING | 3 | Awaiting seat confirmation |
+| BUY_IN_CONFIRMING | 4 | Confirming with player |
+| BUY_IN_COMPLETED | 5 | Successfully completed |
+| BUY_IN_FAILED | 6 | Failed - funds released |
+
+
+
+
+### RebuyPhase {#angzarr_client-proto-examples-RebuyPhase}
+Phase tracking for rebuy orchestration
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| REBUY_PHASE_UNSPECIFIED | 0 |  |
+| REBUY_REQUESTED | 1 | Initial request received |
+| REBUY_RESERVING | 2 | Fee being reserved |
+| REBUY_APPROVING | 3 | Awaiting tournament approval |
+| REBUY_ADDING_CHIPS | 4 | Adding chips to table |
+| REBUY_CONFIRMING | 5 | Confirming with player |
+| REBUY_COMPLETED | 6 | Successfully completed |
+| REBUY_FAILED | 7 | Failed - fee released |
+
+
+
+
+### RegistrationPhase {#angzarr_client-proto-examples-RegistrationPhase}
+Phase tracking for tournament registration
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| REGISTRATION_PHASE_UNSPECIFIED | 0 |  |
+| REGISTRATION_REQUESTED | 1 | Initial request received |
+| REGISTRATION_RESERVING | 2 | Fee being reserved |
+| REGISTRATION_ENROLLING | 3 | Awaiting tournament confirmation |
+| REGISTRATION_CONFIRMING | 4 | Confirming with player |
+| REGISTRATION_COMPLETED | 5 | Successfully registered |
+| REGISTRATION_FAILED | 6 | Failed - fee released |
+
+
+ 
+
+ 
+
+ 
+
+
+
+<p align="right"><a href="#top">Top</a></p>
+
+## angzarr_client/proto/examples/player.proto {#angzarr_client_proto_examples_player-proto}
+
+
+
+
+### ActionRequested {#angzarr_client-proto-examples-ActionRequested}
 Emitted when action is needed - AI players respond via sidecar
 
 
@@ -2225,14 +3045,14 @@ Emitted when action is needed - AI players respond via sidecar
 | hand_root | bytes |  |  |
 | table_root | bytes |  |  |
 | player_root | bytes |  |  |
-| player_type | [PlayerType](#examples-PlayerType) |  |  |
+| player_type | [PlayerType](#angzarr_client-proto-examples-PlayerType) |  |  |
 | amount_to_call | int64 |  |  |
 | min_raise | int64 |  |  |
 | max_raise | int64 |  |  |
-| hole_cards | [Card](#examples-Card) | repeated |  |
-| community_cards | [Card](#examples-Card) | repeated |  |
+| hole_cards | [Card](#angzarr_client-proto-examples-Card) | repeated |  |
+| community_cards | [Card](#angzarr_client-proto-examples-Card) | repeated |  |
 | pot_size | int64 |  |  |
-| phase | [BettingPhase](#examples-BettingPhase) |  |  |
+| phase | [BettingPhase](#angzarr_client-proto-examples-BettingPhase) |  |  |
 | deadline | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -2241,13 +3061,31 @@ Emitted when action is needed - AI players respond via sidecar
 
 
 
-### DepositFunds {#examples-DepositFunds}
+### DeductReservedFunds {#angzarr_client-proto-examples-DeductReservedFunds}
+Settle a previously-reserved amount: reserved_funds AND bankroll both drop.
+Emitted by the reservation PM after a confirmed lifecycle action
+(BuyInConfirmed / RebuyFeeConfirmed / RegistrationFeeConfirmed).
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| key | bytes |  |  |
+| reservation_id | bytes |  |  |
+
+
+
+
+
+
+
+### DepositFunds {#angzarr_client-proto-examples-DepositFunds}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| amount | [Currency](#examples-Currency) |  |  |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
 
 
 
@@ -2255,14 +3093,33 @@ Emitted when action is needed - AI players respond via sidecar
 
 
 
-### FundsDeposited {#examples-FundsDeposited}
+### FundsDeducted {#angzarr_client-proto-examples-FundsDeducted}
+Emitted after DeductReservedFunds — settles a reservation permanently.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| key | bytes |  |  |
+| reservation_id | bytes |  |  |
+| new_balance | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| new_reserved_balance | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| deducted_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### FundsDeposited {#angzarr_client-proto-examples-FundsDeposited}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| amount | [Currency](#examples-Currency) |  |  |
-| new_balance | [Currency](#examples-Currency) |  | Absolute value after deposit |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| new_balance | [Currency](#angzarr_client-proto-examples-Currency) |  | Absolute value after deposit |
 | deposited_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -2271,16 +3128,16 @@ Emitted when action is needed - AI players respond via sidecar
 
 
 
-### FundsReleased {#examples-FundsReleased}
+### FundsReleased {#angzarr_client-proto-examples-FundsReleased}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| amount | [Currency](#examples-Currency) |  |  |
-| table_root | bytes |  |  |
-| new_available_balance | [Currency](#examples-Currency) |  |  |
-| new_reserved_balance | [Currency](#examples-Currency) |  |  |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| key | bytes |  |  |
+| new_available_balance | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| new_reserved_balance | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
 | released_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -2289,16 +3146,16 @@ Emitted when action is needed - AI players respond via sidecar
 
 
 
-### FundsReserved {#examples-FundsReserved}
+### FundsReserved {#angzarr_client-proto-examples-FundsReserved}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| amount | [Currency](#examples-Currency) |  |  |
-| table_root | bytes |  |  |
-| new_available_balance | [Currency](#examples-Currency) |  | Bankroll minus reserved |
-| new_reserved_balance | [Currency](#examples-Currency) |  | Total reserved across tables |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| key | bytes |  |  |
+| new_available_balance | [Currency](#angzarr_client-proto-examples-Currency) |  | Bankroll minus reserved |
+| new_reserved_balance | [Currency](#angzarr_client-proto-examples-Currency) |  | Total reserved across all keys |
 | reserved_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -2307,7 +3164,7 @@ Emitted when action is needed - AI players respond via sidecar
 
 
 
-### FundsTransferred {#examples-FundsTransferred}
+### FundsTransferred {#angzarr_client-proto-examples-FundsTransferred}
 
 
 
@@ -2315,10 +3172,10 @@ Emitted when action is needed - AI players respond via sidecar
 | ----- | ---- | ----- | ----------- |
 | from_player_root | bytes |  |  |
 | to_player_root | bytes |  |  |
-| amount | [Currency](#examples-Currency) |  |  |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
 | hand_root | bytes |  |  |
 | reason | string |  |  |
-| new_balance | [Currency](#examples-Currency) |  | Recipient&#39;s new balance |
+| new_balance | [Currency](#angzarr_client-proto-examples-Currency) |  | Recipient&#39;s new balance |
 | transferred_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -2327,14 +3184,14 @@ Emitted when action is needed - AI players respond via sidecar
 
 
 
-### FundsWithdrawn {#examples-FundsWithdrawn}
+### FundsWithdrawn {#angzarr_client-proto-examples-FundsWithdrawn}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| amount | [Currency](#examples-Currency) |  |  |
-| new_balance | [Currency](#examples-Currency) |  | Absolute value after withdrawal |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| new_balance | [Currency](#angzarr_client-proto-examples-Currency) |  | Absolute value after withdrawal |
 | withdrawn_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -2343,7 +3200,7 @@ Emitted when action is needed - AI players respond via sidecar
 
 
 
-### PlayerRegistered {#examples-PlayerRegistered}
+### PlayerRegistered {#angzarr_client-proto-examples-PlayerRegistered}
 
 
 
@@ -2351,7 +3208,7 @@ Emitted when action is needed - AI players respond via sidecar
 | ----- | ---- | ----- | ----------- |
 | display_name | string |  |  |
 | email | string |  |  |
-| player_type | [PlayerType](#examples-PlayerType) |  |  |
+| player_type | [PlayerType](#angzarr_client-proto-examples-PlayerType) |  |  |
 | ai_model_id | string |  |  |
 | registered_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
@@ -2361,7 +3218,7 @@ Emitted when action is needed - AI players respond via sidecar
 
 
 
-### PlayerReturningToPlay {#examples-PlayerReturningToPlay}
+### PlayerReturningToPlay {#angzarr_client-proto-examples-PlayerReturningToPlay}
 Player has chosen to return to play at a table
 
 
@@ -2376,7 +3233,7 @@ Player has chosen to return to play at a table
 
 
 
-### PlayerSittingOut {#examples-PlayerSittingOut}
+### PlayerSittingOut {#angzarr_client-proto-examples-PlayerSittingOut}
 Player has chosen to sit out at a table
 
 
@@ -2391,7 +3248,7 @@ Player has chosen to sit out at a table
 
 
 
-### PlayerState {#examples-PlayerState}
+### PlayerState {#angzarr_client-proto-examples-PlayerState}
 State (for snapshots)
 
 
@@ -2400,11 +3257,11 @@ State (for snapshots)
 | player_id | string |  |  |
 | display_name | string |  |  |
 | email | string |  |  |
-| player_type | [PlayerType](#examples-PlayerType) |  |  |
+| player_type | [PlayerType](#angzarr_client-proto-examples-PlayerType) |  |  |
 | ai_model_id | string |  |  |
-| bankroll | [Currency](#examples-Currency) |  |  |
-| reserved_funds | [Currency](#examples-Currency) |  |  |
-| table_reservations | [PlayerState.TableReservationsEntry](#examples-PlayerState-TableReservationsEntry) | repeated | table_root_hex -&gt; amount |
+| bankroll | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| reserved_funds | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| table_reservations | [PlayerState.TableReservationsEntry](#angzarr_client-proto-examples-PlayerState-TableReservationsEntry) | repeated | key_hex -&gt; amount (legacy name retained for on-disk compatibility) |
 | status | string |  | &#34;active&#34;, &#34;suspended&#34;, etc. |
 
 
@@ -2413,7 +3270,7 @@ State (for snapshots)
 
 
 
-### PlayerState.TableReservationsEntry {#examples-PlayerState-TableReservationsEntry}
+### PlayerState.TableReservationsEntry {#angzarr_client-proto-examples-PlayerState-TableReservationsEntry}
 
 
 
@@ -2428,7 +3285,7 @@ State (for snapshots)
 
 
 
-### RegisterPlayer {#examples-RegisterPlayer}
+### RegisterPlayer {#angzarr_client-proto-examples-RegisterPlayer}
 
 
 
@@ -2436,7 +3293,7 @@ State (for snapshots)
 | ----- | ---- | ----- | ----------- |
 | display_name | string |  |  |
 | email | string |  | Used for root derivation |
-| player_type | [PlayerType](#examples-PlayerType) |  | HUMAN or AI |
+| player_type | [PlayerType](#angzarr_client-proto-examples-PlayerType) |  | HUMAN or AI |
 | ai_model_id | string |  | For AI players: which model to use |
 
 
@@ -2445,13 +3302,13 @@ State (for snapshots)
 
 
 
-### ReleaseFunds {#examples-ReleaseFunds}
-Release reserved funds back to bankroll (leave table)
+### ReleaseFunds {#angzarr_client-proto-examples-ReleaseFunds}
+Release reserved funds back to bankroll (cancel / compensate).
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| table_root | bytes |  |  |
+| key | bytes |  |  |
 
 
 
@@ -2459,7 +3316,7 @@ Release reserved funds back to bankroll (leave table)
 
 
 
-### RequestAction {#examples-RequestAction}
+### RequestAction {#angzarr_client-proto-examples-RequestAction}
 Request action from player (triggers AI sidecar for AI players)
 
 
@@ -2470,10 +3327,10 @@ Request action from player (triggers AI sidecar for AI players)
 | amount_to_call | int64 |  |  |
 | min_raise | int64 |  |  |
 | max_raise | int64 |  | Player&#39;s remaining stack |
-| hole_cards | [Card](#examples-Card) | repeated |  |
-| community_cards | [Card](#examples-Card) | repeated |  |
+| hole_cards | [Card](#angzarr_client-proto-examples-Card) | repeated |  |
+| community_cards | [Card](#angzarr_client-proto-examples-Card) | repeated |  |
 | pot_size | int64 |  |  |
-| phase | [BettingPhase](#examples-BettingPhase) |  |  |
+| phase | [BettingPhase](#angzarr_client-proto-examples-BettingPhase) |  |  |
 | timeout_seconds | int32 |  |  |
 
 
@@ -2482,14 +3339,17 @@ Request action from player (triggers AI sidecar for AI players)
 
 
 
-### ReserveFunds {#examples-ReserveFunds}
-Reserve funds when joining a table (buy-in)
+### ReserveFunds {#angzarr_client-proto-examples-ReserveFunds}
+Reserve funds for a lifecycle action (buy-in, rebuy, tournament registration).
+``key`` identifies the reservation bucket — a table_root for buy-in / rebuy
+flows, a tournament_root for registration flows. Matches the ``key`` field on
+``DeductReservedFunds`` / ``FundsDeducted``.
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| amount | [Currency](#examples-Currency) |  |  |
-| table_root | bytes |  | Which table the funds are reserved for |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| key | bytes |  |  |
 
 
 
@@ -2497,7 +3357,7 @@ Reserve funds when joining a table (buy-in)
 
 
 
-### SitIn {#examples-SitIn}
+### SitIn {#angzarr_client-proto-examples-SitIn}
 Player decides to return to play at a table
 
 
@@ -2511,7 +3371,7 @@ Player decides to return to play at a table
 
 
 
-### SitOut {#examples-SitOut}
+### SitOut {#angzarr_client-proto-examples-SitOut}
 Player decides to sit out at a table (stop receiving hands)
 
 
@@ -2525,14 +3385,14 @@ Player decides to sit out at a table (stop receiving hands)
 
 
 
-### TransferFunds {#examples-TransferFunds}
+### TransferFunds {#angzarr_client-proto-examples-TransferFunds}
 Transfer funds from one player to another (pot award)
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | from_player_root | bytes |  | Source player (for reserved funds) |
-| amount | [Currency](#examples-Currency) |  |  |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
 | hand_root | bytes |  | Which hand this transfer is for |
 | reason | string |  | &#34;pot_win&#34;, &#34;side_pot_win&#34;, etc. |
 
@@ -2542,13 +3402,13 @@ Transfer funds from one player to another (pot award)
 
 
 
-### WithdrawFunds {#examples-WithdrawFunds}
+### WithdrawFunds {#angzarr_client-proto-examples-WithdrawFunds}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| amount | [Currency](#examples-Currency) |  |  |
+| amount | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
 
 
 
@@ -2566,19 +3426,19 @@ Transfer funds from one player to another (pot award)
 
 <p align="right"><a href="#top">Top</a></p>
 
-## examples/poker_types.proto {#examples_poker_types-proto}
+## angzarr_client/proto/examples/poker_types.proto {#angzarr_client_proto_examples_poker_types-proto}
 
 
 
 
-### Card {#examples-Card}
+### Card {#angzarr_client-proto-examples-Card}
 Card representation
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| suit | [Suit](#examples-Suit) |  |  |
-| rank | [Rank](#examples-Rank) |  |  |
+| suit | [Suit](#angzarr_client-proto-examples-Suit) |  |  |
+| rank | [Rank](#angzarr_client-proto-examples-Rank) |  |  |
 
 
 
@@ -2586,7 +3446,7 @@ Card representation
 
 
 
-### Currency {#examples-Currency}
+### Currency {#angzarr_client-proto-examples-Currency}
 Currency amount (in smallest unit, e.g., cents)
 
 
@@ -2601,14 +3461,14 @@ Currency amount (in smallest unit, e.g., cents)
 
 
 
-### HandRanking {#examples-HandRanking}
+### HandRanking {#angzarr_client-proto-examples-HandRanking}
 Hand ranking result
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
-| rank_type | [HandRankType](#examples-HandRankType) |  |  |
-| kickers | [Rank](#examples-Rank) | repeated | For tie-breaking |
+| rank_type | [HandRankType](#angzarr_client-proto-examples-HandRankType) |  |  |
+| kickers | [Rank](#angzarr_client-proto-examples-Rank) | repeated | For tie-breaking |
 | score | int32 |  | Numeric score for comparison |
 
 
@@ -2617,7 +3477,7 @@ Hand ranking result
 
 
 
-### Pot {#examples-Pot}
+### Pot {#angzarr_client-proto-examples-Pot}
 Pot structure (for side pots)
 
 
@@ -2633,7 +3493,7 @@ Pot structure (for side pots)
 
 
 
-### Seat {#examples-Seat}
+### Seat {#angzarr_client-proto-examples-Seat}
 Position at table
 
 
@@ -2641,7 +3501,7 @@ Position at table
 | ----- | ---- | ----- | ----------- |
 | position | int32 |  | 0-9 for 10-max table |
 | player_root | bytes |  | Player aggregate root |
-| stack | [Currency](#examples-Currency) |  | Current stack at table |
+| stack | [Currency](#angzarr_client-proto-examples-Currency) |  | Current stack at table |
 | is_active | bool |  | Still in current hand |
 | is_sitting_out | bool |  | Temporarily away |
 
@@ -2653,7 +3513,7 @@ Position at table
 
 
 
-### ActionType {#examples-ActionType}
+### ActionType {#angzarr_client-proto-examples-ActionType}
 Player action type
 
 | Name | Number | Description |
@@ -2669,7 +3529,7 @@ Player action type
 
 
 
-### BettingPhase {#examples-BettingPhase}
+### BettingPhase {#angzarr_client-proto-examples-BettingPhase}
 Betting round phase
 
 | Name | Number | Description |
@@ -2685,7 +3545,7 @@ Betting round phase
 
 
 
-### GameVariant {#examples-GameVariant}
+### GameVariant {#angzarr_client-proto-examples-GameVariant}
 Game variant configuration
 
 | Name | Number | Description |
@@ -2699,7 +3559,7 @@ Game variant configuration
 
 
 
-### HandRankType {#examples-HandRankType}
+### HandRankType {#angzarr_client-proto-examples-HandRankType}
 
 
 | Name | Number | Description |
@@ -2719,7 +3579,7 @@ Game variant configuration
 
 
 
-### PlayerType {#examples-PlayerType}
+### PlayerType {#angzarr_client-proto-examples-PlayerType}
 Player type - abstraction for human vs AI
 
 | Name | Number | Description |
@@ -2731,7 +3591,7 @@ Player type - abstraction for human vs AI
 
 
 
-### Rank {#examples-Rank}
+### Rank {#angzarr_client-proto-examples-Rank}
 
 
 | Name | Number | Description |
@@ -2754,7 +3614,7 @@ Player type - abstraction for human vs AI
 
 
 
-### Suit {#examples-Suit}
+### Suit {#angzarr_client-proto-examples-Suit}
 
 
 | Name | Number | Description |
@@ -2776,12 +3636,472 @@ Player type - abstraction for human vs AI
 
 <p align="right"><a href="#top">Top</a></p>
 
-## examples/table.proto {#examples_table-proto}
+## angzarr_client/proto/examples/rebuy.proto {#angzarr_client_proto_examples_rebuy-proto}
 
 
 
 
-### AddChips {#examples-AddChips}
+### AddRebuyChips {#angzarr_client-proto-examples-AddRebuyChips}
+PM adds chips to player&#39;s stack (fact-like - no validation)
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| seat | int32 |  |  |
+| amount | int64 |  |  |
+
+
+
+
+
+
+
+### ConfirmRebuyFee {#angzarr_client-proto-examples-ConfirmRebuyFee}
+PM confirms successful rebuy
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+
+
+
+
+
+
+
+### InitiateRebuy {#angzarr_client-proto-examples-InitiateRebuy}
+Client initiates rebuy - triggers PM orchestration
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| tournament_root | bytes |  |  |
+| table_root | bytes |  |  |
+| seat | int32 |  | Player&#39;s seat at table |
+| player_root | bytes |  |  |
+
+
+
+
+
+
+
+### RebuyChipsAdded {#angzarr_client-proto-examples-RebuyChipsAdded}
+Emitted when rebuy chips are added to player&#39;s stack
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| seat | int32 |  |  |
+| amount | int64 |  |  |
+| new_stack | int64 |  |  |
+| added_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### RebuyCompleted {#angzarr_client-proto-examples-RebuyCompleted}
+PM state: rebuy flow completed successfully
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| tournament_root | bytes |  |  |
+| table_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| fee | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| chips_added | int64 |  |  |
+| completed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### RebuyFailed {#angzarr_client-proto-examples-RebuyFailed}
+PM state: rebuy flow failed
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| tournament_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| failure | [OrchestrationFailure](#angzarr_client-proto-examples-OrchestrationFailure) |  |  |
+
+
+
+
+
+
+
+### RebuyFeeConfirmed {#angzarr_client-proto-examples-RebuyFeeConfirmed}
+Emitted when rebuy fee is confirmed
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+| tournament_root | bytes |  |  |
+| fee | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| chips_added | int64 |  |  |
+| confirmed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| player_root | bytes |  |  |
+| table_root | bytes |  |  |
+
+
+
+
+
+
+
+### RebuyFeeReleased {#angzarr_client-proto-examples-RebuyFeeReleased}
+Emitted when rebuy fee is released
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+| reason | string |  |  |
+| released_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| player_root | bytes |  |  |
+| tournament_root | bytes |  |  |
+| table_root | bytes |  |  |
+| fee | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+
+
+
+
+
+
+
+### RebuyInitiated {#angzarr_client-proto-examples-RebuyInitiated}
+PM state: rebuy flow initiated
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| tournament_root | bytes |  |  |
+| table_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| seat | int32 |  |  |
+| fee | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| chips_to_add | int64 |  |  |
+| phase | [RebuyPhase](#angzarr_client-proto-examples-RebuyPhase) |  |  |
+| initiated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### RebuyOrchestratorState {#angzarr_client-proto-examples-RebuyOrchestratorState}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  | Correlation ID for this flow |
+| player_root | bytes |  |  |
+| tournament_root | bytes |  |  |
+| table_root | bytes |  |  |
+| seat | int32 |  |  |
+| fee | int64 |  |  |
+| chips_to_add | int64 |  |  |
+| phase | [RebuyPhase](#angzarr_client-proto-examples-RebuyPhase) |  |  |
+| started_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### RebuyPhaseChanged {#angzarr_client-proto-examples-RebuyPhaseChanged}
+PM state: phase transition
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+| from_phase | [RebuyPhase](#angzarr_client-proto-examples-RebuyPhase) |  |  |
+| to_phase | [RebuyPhase](#angzarr_client-proto-examples-RebuyPhase) |  |  |
+| changed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### RebuyRequested {#angzarr_client-proto-examples-RebuyRequested}
+Emitted when rebuy is requested - triggers PM
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  | UUID for this rebuy flow |
+| tournament_root | bytes |  |  |
+| table_root | bytes |  |  |
+| seat | int32 |  |  |
+| fee | [Currency](#angzarr_client-proto-examples-Currency) |  | Looked up from tournament rebuy config |
+| requested_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| player_root | bytes |  |  |
+
+
+
+
+
+
+
+### ReleaseRebuyFee {#angzarr_client-proto-examples-ReleaseRebuyFee}
+PM releases fee after failed rebuy
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+| reason | string |  |  |
+
+
+
+
+
+ 
+
+ 
+
+ 
+
+ 
+
+
+
+<p align="right"><a href="#top">Top</a></p>
+
+## angzarr_client/proto/examples/registration.proto {#angzarr_client_proto_examples_registration-proto}
+
+
+
+
+### ConfirmRegistrationFee {#angzarr_client-proto-examples-ConfirmRegistrationFee}
+PM confirms successful registration
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+
+
+
+
+
+
+
+### InitiateTournamentRegistration {#angzarr_client-proto-examples-InitiateTournamentRegistration}
+Client initiates tournament registration - triggers PM orchestration
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| tournament_root | bytes |  |  |
+| player_root | bytes |  |  |
+
+
+
+
+
+
+
+### RegistrationCompleted {#angzarr_client-proto-examples-RegistrationCompleted}
+PM state: registration flow completed successfully
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| tournament_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| fee | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| starting_stack | int64 |  |  |
+| completed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### RegistrationFailed {#angzarr_client-proto-examples-RegistrationFailed}
+PM state: registration flow failed
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| tournament_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| failure | [OrchestrationFailure](#angzarr_client-proto-examples-OrchestrationFailure) |  |  |
+
+
+
+
+
+
+
+### RegistrationFeeConfirmed {#angzarr_client-proto-examples-RegistrationFeeConfirmed}
+Emitted when registration fee is confirmed
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+| tournament_root | bytes |  |  |
+| fee | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| confirmed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| player_root | bytes |  |  |
+
+
+
+
+
+
+
+### RegistrationFeeReleased {#angzarr_client-proto-examples-RegistrationFeeReleased}
+Emitted when registration fee is released
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+| reason | string |  |  |
+| released_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| player_root | bytes |  |  |
+| tournament_root | bytes |  |  |
+| fee | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+
+
+
+
+
+
+
+### RegistrationInitiated {#angzarr_client-proto-examples-RegistrationInitiated}
+PM state: registration flow initiated
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| tournament_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| fee | [Currency](#angzarr_client-proto-examples-Currency) |  |  |
+| phase | [RegistrationPhase](#angzarr_client-proto-examples-RegistrationPhase) |  |  |
+| initiated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### RegistrationOrchestratorState {#angzarr_client-proto-examples-RegistrationOrchestratorState}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  | Correlation ID for this flow |
+| player_root | bytes |  |  |
+| tournament_root | bytes |  |  |
+| fee | int64 |  |  |
+| phase | [RegistrationPhase](#angzarr_client-proto-examples-RegistrationPhase) |  |  |
+| started_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### RegistrationPhaseChanged {#angzarr_client-proto-examples-RegistrationPhaseChanged}
+PM state: phase transition
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+| from_phase | [RegistrationPhase](#angzarr_client-proto-examples-RegistrationPhase) |  |  |
+| to_phase | [RegistrationPhase](#angzarr_client-proto-examples-RegistrationPhase) |  |  |
+| changed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### RegistrationRequested {#angzarr_client-proto-examples-RegistrationRequested}
+Emitted when registration is requested - triggers PM
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  | UUID for this registration flow |
+| tournament_root | bytes |  |  |
+| fee | [Currency](#angzarr_client-proto-examples-Currency) |  | Looked up from tournament |
+| requested_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| player_root | bytes |  |  |
+
+
+
+
+
+
+
+### ReleaseRegistrationFee {#angzarr_client-proto-examples-ReleaseRegistrationFee}
+PM releases fee after failed registration
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reservation_id | bytes |  |  |
+| reason | string |  |  |
+
+
+
+
+
+ 
+
+ 
+
+ 
+
+ 
+
+
+
+<p align="right"><a href="#top">Top</a></p>
+
+## angzarr_client/proto/examples/table.proto {#angzarr_client_proto_examples_table-proto}
+
+
+
+
+### AddChips {#angzarr_client-proto-examples-AddChips}
 
 
 
@@ -2796,7 +4116,7 @@ Player type - abstraction for human vs AI
 
 
 
-### ChipsAdded {#examples-ChipsAdded}
+### ChipsAdded {#angzarr_client-proto-examples-ChipsAdded}
 
 
 
@@ -2813,14 +4133,14 @@ Player type - abstraction for human vs AI
 
 
 
-### CreateTable {#examples-CreateTable}
+### CreateTable {#angzarr_client-proto-examples-CreateTable}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | table_name | string |  |  |
-| game_variant | [GameVariant](#examples-GameVariant) |  |  |
+| game_variant | [GameVariant](#angzarr_client-proto-examples-GameVariant) |  |  |
 | small_blind | int64 |  |  |
 | big_blind | int64 |  |  |
 | min_buy_in | int64 |  |  |
@@ -2834,14 +4154,14 @@ Player type - abstraction for human vs AI
 
 
 
-### EndHand {#examples-EndHand}
+### EndHand {#angzarr_client-proto-examples-EndHand}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | hand_root | bytes |  |  |
-| results | [PotResult](#examples-PotResult) | repeated |  |
+| results | [PotResult](#angzarr_client-proto-examples-PotResult) | repeated |  |
 
 
 
@@ -2849,15 +4169,15 @@ Player type - abstraction for human vs AI
 
 
 
-### HandEnded {#examples-HandEnded}
+### HandEnded {#angzarr_client-proto-examples-HandEnded}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | hand_root | bytes |  |  |
-| results | [PotResult](#examples-PotResult) | repeated |  |
-| stack_changes | [HandEnded.StackChangesEntry](#examples-HandEnded-StackChangesEntry) | repeated | player_root_hex -&gt; delta |
+| results | [PotResult](#angzarr_client-proto-examples-PotResult) | repeated |  |
+| stack_changes | [HandEnded.StackChangesEntry](#angzarr_client-proto-examples-HandEnded-StackChangesEntry) | repeated | player_root_hex -&gt; delta |
 | ended_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
 
 
@@ -2866,7 +4186,7 @@ Player type - abstraction for human vs AI
 
 
 
-### HandEnded.StackChangesEntry {#examples-HandEnded-StackChangesEntry}
+### HandEnded.StackChangesEntry {#angzarr_client-proto-examples-HandEnded-StackChangesEntry}
 
 
 
@@ -2881,7 +4201,7 @@ Player type - abstraction for human vs AI
 
 
 
-### HandStarted {#examples-HandStarted}
+### HandStarted {#angzarr_client-proto-examples-HandStarted}
 
 
 
@@ -2892,8 +4212,8 @@ Player type - abstraction for human vs AI
 | dealer_position | int32 |  |  |
 | small_blind_position | int32 |  |  |
 | big_blind_position | int32 |  |  |
-| active_players | [SeatSnapshot](#examples-SeatSnapshot) | repeated |  |
-| game_variant | [GameVariant](#examples-GameVariant) |  |  |
+| active_players | [SeatSnapshot](#angzarr_client-proto-examples-SeatSnapshot) | repeated |  |
+| game_variant | [GameVariant](#angzarr_client-proto-examples-GameVariant) |  |  |
 | small_blind | int64 |  |  |
 | big_blind | int64 |  |  |
 | started_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
@@ -2904,7 +4224,7 @@ Player type - abstraction for human vs AI
 
 
 
-### JoinTable {#examples-JoinTable}
+### JoinTable {#angzarr_client-proto-examples-JoinTable}
 
 
 
@@ -2920,7 +4240,7 @@ Player type - abstraction for human vs AI
 
 
 
-### LeaveTable {#examples-LeaveTable}
+### LeaveTable {#angzarr_client-proto-examples-LeaveTable}
 
 
 
@@ -2934,7 +4254,7 @@ Player type - abstraction for human vs AI
 
 
 
-### PlayerJoined {#examples-PlayerJoined}
+### PlayerJoined {#angzarr_client-proto-examples-PlayerJoined}
 
 
 
@@ -2952,7 +4272,7 @@ Player type - abstraction for human vs AI
 
 
 
-### PlayerLeft {#examples-PlayerLeft}
+### PlayerLeft {#angzarr_client-proto-examples-PlayerLeft}
 
 
 
@@ -2969,7 +4289,7 @@ Player type - abstraction for human vs AI
 
 
 
-### PlayerSatIn {#examples-PlayerSatIn}
+### PlayerSatIn {#angzarr_client-proto-examples-PlayerSatIn}
 
 
 
@@ -2984,7 +4304,7 @@ Player type - abstraction for human vs AI
 
 
 
-### PlayerSatOut {#examples-PlayerSatOut}
+### PlayerSatOut {#angzarr_client-proto-examples-PlayerSatOut}
 
 
 
@@ -2999,7 +4319,7 @@ Player type - abstraction for human vs AI
 
 
 
-### PotResult {#examples-PotResult}
+### PotResult {#angzarr_client-proto-examples-PotResult}
 
 
 
@@ -3008,7 +4328,7 @@ Player type - abstraction for human vs AI
 | winner_root | bytes |  |  |
 | amount | int64 |  |  |
 | pot_type | string |  | &#34;main&#34; or &#34;side_N&#34; |
-| winning_hand | [HandRanking](#examples-HandRanking) |  |  |
+| winning_hand | [HandRanking](#angzarr_client-proto-examples-HandRanking) |  |  |
 
 
 
@@ -3016,7 +4336,7 @@ Player type - abstraction for human vs AI
 
 
 
-### SeatSnapshot {#examples-SeatSnapshot}
+### SeatSnapshot {#angzarr_client-proto-examples-SeatSnapshot}
 
 
 
@@ -3032,7 +4352,7 @@ Player type - abstraction for human vs AI
 
 
 
-### StartHand {#examples-StartHand}
+### StartHand {#angzarr_client-proto-examples-StartHand}
 No parameters - uses current table state
 Dealer button advances automatically
 
@@ -3042,14 +4362,14 @@ Dealer button advances automatically
 
 
 
-### TableCreated {#examples-TableCreated}
+### TableCreated {#angzarr_client-proto-examples-TableCreated}
 
 
 
 | Field | Type | Label | Description |
 | ----- | ---- | ----- | ----------- |
 | table_name | string |  |  |
-| game_variant | [GameVariant](#examples-GameVariant) |  |  |
+| game_variant | [GameVariant](#angzarr_client-proto-examples-GameVariant) |  |  |
 | small_blind | int64 |  |  |
 | big_blind | int64 |  |  |
 | min_buy_in | int64 |  |  |
@@ -3064,7 +4384,7 @@ Dealer button advances automatically
 
 
 
-### TableState {#examples-TableState}
+### TableState {#angzarr_client-proto-examples-TableState}
 State (for snapshots)
 
 
@@ -3072,14 +4392,14 @@ State (for snapshots)
 | ----- | ---- | ----- | ----------- |
 | table_id | string |  |  |
 | table_name | string |  |  |
-| game_variant | [GameVariant](#examples-GameVariant) |  |  |
+| game_variant | [GameVariant](#angzarr_client-proto-examples-GameVariant) |  |  |
 | small_blind | int64 |  |  |
 | big_blind | int64 |  |  |
 | min_buy_in | int64 |  |  |
 | max_buy_in | int64 |  |  |
 | max_players | int32 |  |  |
 | action_timeout_seconds | int32 |  |  |
-| seats | [Seat](#examples-Seat) | repeated |  |
+| seats | [Seat](#angzarr_client-proto-examples-Seat) | repeated |  |
 | dealer_position | int32 |  |  |
 | hand_count | int64 |  |  |
 | current_hand_root | bytes |  |  |
@@ -3090,6 +4410,607 @@ State (for snapshots)
 
 
  
+
+ 
+
+ 
+
+ 
+
+
+
+<p align="right"><a href="#top">Top</a></p>
+
+## angzarr_client/proto/examples/tournament.proto {#angzarr_client_proto_examples_tournament-proto}
+
+
+
+
+### AddonConfig {#angzarr_client-proto-examples-AddonConfig}
+Addon configuration
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| enabled | bool |  |  |
+| addon_level | int32 |  | Level when addon is available |
+| addon_cost | int64 |  |  |
+| addon_chips | int64 |  |  |
+
+
+
+
+
+
+
+### AddonProcessed {#angzarr_client-proto-examples-AddonProcessed}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| addon_cost | int64 |  |  |
+| chips_added | int64 |  |  |
+| processed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### AdvanceBlindLevel {#angzarr_client-proto-examples-AdvanceBlindLevel}
+Advance to next blind level
+
+No parameters - advances to next level in structure
+
+
+
+
+
+
+
+### BlindLevel {#angzarr_client-proto-examples-BlindLevel}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| level | int32 |  |  |
+| small_blind | int64 |  |  |
+| big_blind | int64 |  |  |
+| ante | int64 |  |  |
+| duration_minutes | int32 |  |  |
+
+
+
+
+
+
+
+### BlindLevelAdvanced {#angzarr_client-proto-examples-BlindLevelAdvanced}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| level | int32 |  |  |
+| small_blind | int64 |  |  |
+| big_blind | int64 |  |  |
+| ante | int64 |  |  |
+| advanced_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### CloseRegistration {#angzarr_client-proto-examples-CloseRegistration}
+No parameters
+
+
+
+
+
+
+
+### CompleteTournament {#angzarr_client-proto-examples-CompleteTournament}
+Complete the tournament — records the winner and closes the tournament.
+Typically issued after the last elimination leaves one player remaining.
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| winner_root | bytes |  |  |
+
+
+
+
+
+
+
+### CreateTournament {#angzarr_client-proto-examples-CreateTournament}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | string |  |  |
+| game_variant | [GameVariant](#angzarr_client-proto-examples-GameVariant) |  |  |
+| buy_in | int64 |  |  |
+| starting_stack | int64 |  |  |
+| max_players | int32 |  |  |
+| min_players | int32 |  |  |
+| scheduled_start | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| rebuy_config | [RebuyConfig](#angzarr_client-proto-examples-RebuyConfig) |  |  |
+| addon_config | [AddonConfig](#angzarr_client-proto-examples-AddonConfig) |  |  |
+| blind_structure | [BlindLevel](#angzarr_client-proto-examples-BlindLevel) | repeated |  |
+
+
+
+
+
+
+
+### EliminatePlayer {#angzarr_client-proto-examples-EliminatePlayer}
+Eliminate a player (from table event via saga)
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| hand_root | bytes |  | Hand where elimination occurred |
+
+
+
+
+
+
+
+### EnrollPlayer {#angzarr_client-proto-examples-EnrollPlayer}
+PM sends this command to register a player in tournament
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  | Links to registration flow |
+
+
+
+
+
+
+
+### OpenRegistration {#angzarr_client-proto-examples-OpenRegistration}
+No parameters - uses tournament config
+
+
+
+
+
+
+
+### PauseTournament {#angzarr_client-proto-examples-PauseTournament}
+Pause the tournament (break)
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reason | string |  |  |
+
+
+
+
+
+
+
+### PlayerEliminated {#angzarr_client-proto-examples-PlayerEliminated}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| finish_position | int32 |  |  |
+| hand_root | bytes |  |  |
+| payout | int64 |  | 0 if out of the money |
+| eliminated_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### PlayerRegistration {#angzarr_client-proto-examples-PlayerRegistration}
+Player registration record
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| fee_paid | int64 |  |  |
+| starting_stack | int64 |  |  |
+| rebuys_used | int32 |  |  |
+| addon_taken | bool |  |  |
+| table_assignment | int32 |  | Table number |
+| seat_assignment | int32 |  |  |
+| registered_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### PlayerUnregistered {#angzarr_client-proto-examples-PlayerUnregistered}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| refund_amount | int64 |  |  |
+| unregistered_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### ProcessAddon {#angzarr_client-proto-examples-ProcessAddon}
+PM sends this command to process an addon
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+
+
+
+
+
+
+
+### ProcessRebuy {#angzarr_client-proto-examples-ProcessRebuy}
+PM sends this command to process a rebuy
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  | Links to rebuy flow |
+
+
+
+
+
+
+
+### RebuyConfig {#angzarr_client-proto-examples-RebuyConfig}
+Rebuy configuration
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| enabled | bool |  |  |
+| max_rebuys | int32 |  | 0 = unlimited |
+| rebuy_level_cutoff | int32 |  | Last level allowing rebuys |
+| stack_threshold | int64 |  | Max stack to be eligible |
+| rebuy_cost | int64 |  |  |
+| rebuy_chips | int64 |  |  |
+
+
+
+
+
+
+
+### RebuyDenied {#angzarr_client-proto-examples-RebuyDenied}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| reason | string |  | &#34;window_closed&#34;, &#34;stack_too_high&#34;, &#34;max_reached&#34; |
+| denied_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### RebuyProcessed {#angzarr_client-proto-examples-RebuyProcessed}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| rebuy_cost | int64 |  |  |
+| chips_added | int64 |  |  |
+| rebuy_count | int32 |  | Player&#39;s total rebuys |
+| processed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### RegistrationClosed {#angzarr_client-proto-examples-RegistrationClosed}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| total_registrations | int32 |  |  |
+| closed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### RegistrationOpened {#angzarr_client-proto-examples-RegistrationOpened}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| opened_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### ResumeTournament {#angzarr_client-proto-examples-ResumeTournament}
+Resume the tournament
+
+No parameters
+
+
+
+
+
+
+
+### StartTournament {#angzarr_client-proto-examples-StartTournament}
+Start the tournament (requires min players)
+
+No parameters
+
+
+
+
+
+
+
+### TournamentCompleted {#angzarr_client-proto-examples-TournamentCompleted}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| winner_root | bytes |  |  |
+| total_prize_pool | int64 |  |  |
+| results | [TournamentResult](#angzarr_client-proto-examples-TournamentResult) | repeated |  |
+| completed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### TournamentCreated {#angzarr_client-proto-examples-TournamentCreated}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| name | string |  |  |
+| game_variant | [GameVariant](#angzarr_client-proto-examples-GameVariant) |  |  |
+| buy_in | int64 |  |  |
+| starting_stack | int64 |  |  |
+| max_players | int32 |  |  |
+| min_players | int32 |  |  |
+| scheduled_start | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| rebuy_config | [RebuyConfig](#angzarr_client-proto-examples-RebuyConfig) |  |  |
+| addon_config | [AddonConfig](#angzarr_client-proto-examples-AddonConfig) |  |  |
+| blind_structure | [BlindLevel](#angzarr_client-proto-examples-BlindLevel) | repeated |  |
+| created_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### TournamentEnrollmentRejected {#angzarr_client-proto-examples-TournamentEnrollmentRejected}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| reason | string |  | &#34;full&#34;, &#34;closed&#34;, &#34;already_registered&#34; |
+| rejected_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### TournamentPaused {#angzarr_client-proto-examples-TournamentPaused}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| reason | string |  |  |
+| paused_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### TournamentPlayerEnrolled {#angzarr_client-proto-examples-TournamentPlayerEnrolled}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+| reservation_id | bytes |  |  |
+| fee_paid | int64 |  |  |
+| starting_stack | int64 |  |  |
+| registration_number | int32 |  | Order of registration |
+| enrolled_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### TournamentResult {#angzarr_client-proto-examples-TournamentResult}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| position | int32 |  |  |
+| player_root | bytes |  |  |
+| payout | int64 |  |  |
+
+
+
+
+
+
+
+### TournamentResumed {#angzarr_client-proto-examples-TournamentResumed}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| resumed_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### TournamentStarted {#angzarr_client-proto-examples-TournamentStarted}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| total_players | int32 |  |  |
+| tables_created | int32 |  |  |
+| total_prize_pool | int64 |  |  |
+| started_at | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+
+
+
+
+
+
+
+### TournamentState {#angzarr_client-proto-examples-TournamentState}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| tournament_id | string |  |  |
+| name | string |  |  |
+| game_variant | [GameVariant](#angzarr_client-proto-examples-GameVariant) |  |  |
+| status | [TournamentStatus](#angzarr_client-proto-examples-TournamentStatus) |  |  |
+| buy_in | int64 |  |  |
+| starting_stack | int64 |  |  |
+| max_players | int32 |  |  |
+| min_players | int32 |  |  |
+| scheduled_start | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
+| rebuy_config | [RebuyConfig](#angzarr_client-proto-examples-RebuyConfig) |  |  |
+| addon_config | [AddonConfig](#angzarr_client-proto-examples-AddonConfig) |  |  |
+| blind_structure | [BlindLevel](#angzarr_client-proto-examples-BlindLevel) | repeated |  |
+| current_level | int32 |  |  |
+| registered_players | [TournamentState.RegisteredPlayersEntry](#angzarr_client-proto-examples-TournamentState-RegisteredPlayersEntry) | repeated | player_root_hex -&gt; registration |
+| players_remaining | int32 |  |  |
+| total_prize_pool | int64 |  |  |
+
+
+
+
+
+
+
+### TournamentState.RegisteredPlayersEntry {#angzarr_client-proto-examples-TournamentState-RegisteredPlayersEntry}
+
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| key | string |  |  |
+| value | [PlayerRegistration](#angzarr_client-proto-examples-PlayerRegistration) |  |  |
+
+
+
+
+
+
+
+### UnregisterPlayer {#angzarr_client-proto-examples-UnregisterPlayer}
+Player requests to unregister (refund if allowed)
+
+
+| Field | Type | Label | Description |
+| ----- | ---- | ----- | ----------- |
+| player_root | bytes |  |  |
+
+
+
+
+
+ 
+
+
+
+### TournamentStatus {#angzarr_client-proto-examples-TournamentStatus}
+Tournament status
+
+| Name | Number | Description |
+| ---- | ------ | ----------- |
+| TOURNAMENT_STATUS_UNSPECIFIED | 0 |  |
+| TOURNAMENT_CREATED | 1 | Created but not open |
+| TOURNAMENT_REGISTRATION_OPEN | 2 | Accepting registrations |
+| TOURNAMENT_RUNNING | 3 | In progress |
+| TOURNAMENT_PAUSED | 4 | On break |
+| TOURNAMENT_COMPLETED | 5 | Finished |
+| TOURNAMENT_CANCELLED | 6 | Cancelled |
+
 
  
 
@@ -3449,91 +5370,6 @@ NOTE: the referred field must be present at the top-level of the request message
 
 NOTE: The referred field must be present at the top-level of the response message type. |
 | additional_bindings | [HttpRule](#google-api-HttpRule) | repeated | Additional HTTP bindings for the selector. Nested bindings must not contain an `additional_bindings` field themselves (that is, the nesting may only be one level deep). |
-
-
-
-
-
- 
-
- 
-
- 
-
- 
-
-
-
-<p align="right"><a href="#top">Top</a></p>
-
-## io/cloudevents/v1/cloudevents.proto {#io_cloudevents_v1_cloudevents-proto}
-
-
-
-
-### CloudEvent {#io-cloudevents-v1-CloudEvent}
-CloudEvent represents a single CloudEvent in protobuf format.
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| id | string |  | Required Attributes |
-| source | string |  | URI-reference |
-| spec_version | string |  |  |
-| type | string |  |  |
-| attributes | [CloudEvent.AttributesEntry](#io-cloudevents-v1-CloudEvent-AttributesEntry) | repeated | Optional &amp; Extension Attributes |
-| binary_data | bytes |  | Binary data |
-| text_data | string |  | Text data |
-| proto_data | [google.protobuf.Any](https://protobuf.dev/reference/protobuf/google.protobuf/#any) |  | Protobuf message |
-
-
-
-
-
-
-
-### CloudEvent.AttributesEntry {#io-cloudevents-v1-CloudEvent-AttributesEntry}
-
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| key | string |  |  |
-| value | [CloudEventAttributeValue](#io-cloudevents-v1-CloudEventAttributeValue) |  |  |
-
-
-
-
-
-
-
-### CloudEventAttributeValue {#io-cloudevents-v1-CloudEventAttributeValue}
-CloudEventAttributeValue supports the CloudEvents type system.
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| ce_boolean | bool |  |  |
-| ce_integer | int32 |  |  |
-| ce_string | string |  |  |
-| ce_bytes | bytes |  |  |
-| ce_uri | string |  |  |
-| ce_uri_ref | string |  |  |
-| ce_timestamp | [google.protobuf.Timestamp](https://protobuf.dev/reference/protobuf/google.protobuf/#timestamp) |  |  |
-
-
-
-
-
-
-
-### CloudEventBatch {#io-cloudevents-v1-CloudEventBatch}
-CloudEventBatch is a container for multiple CloudEvents.
-
-
-| Field | Type | Label | Description |
-| ----- | ---- | ----- | ----------- |
-| events | [CloudEvent](#io-cloudevents-v1-CloudEvent) | repeated |  |
 
 
 

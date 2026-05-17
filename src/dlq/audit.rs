@@ -1,0 +1,111 @@
+//! Replay audit log — durable record of every DLQ replay.
+//!
+//! P1.3's handler currently logs replay metadata via `tracing` only,
+//! which is fine for live observability but disappears with log
+//! rotation and isn't queryable for "did anyone replay this dead
+//! letter before?". The plan calls for a `dlq_replay_audit` table
+//! and a non-unique key on `dlq_id` so multiple replays are
+//! recorded — the UI then warns operators when they're about to
+//! re-replay an already-successful entry.
+//!
+//! This module owns the trait + record shape. Backend impls live in
+//! `src/dlq/publishers/audit_writer.rs`. Plan reference: P1.4.
+
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+
+use super::error::DlqError;
+use super::replay::ReplayMode;
+
+/// Outcome stamped on every audit row. The handler always writes —
+/// successful replays AND failed replays both leave a trace so
+/// operators can investigate "why did this replay fail?"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplayOutcome {
+    Success,
+    Failure,
+}
+
+impl ReplayOutcome {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ReplayOutcome::Success => "success",
+            ReplayOutcome::Failure => "failure",
+        }
+    }
+}
+
+/// One row of replay history.
+#[derive(Debug, Clone)]
+pub struct ReplayAuditRecord {
+    pub dlq_id: i64,
+    pub replayed_at: DateTime<Utc>,
+    pub replay_mode: ReplayMode,
+    /// Fresh correlation_id the handler stamped on the replayed command.
+    pub new_correlation_id: String,
+    /// Original correlation_id (may be empty if the source row had none).
+    pub original_correlation_id: Option<String>,
+    pub outcome: ReplayOutcome,
+    /// Optional human-readable detail — e.g. publisher error message
+    /// on failure, empty on success.
+    pub result_message: Option<String>,
+}
+
+/// Persist a replay event to a durable audit log.
+///
+/// `dlq_id` is intentionally **not unique** in the underlying table —
+/// the same dead letter can be replayed multiple times (after fixes,
+/// upstream changes, etc.) and each replay leaves its own row. The
+/// UI inspects history when an operator clicks "Replay" on a row
+/// that has prior successful replays and warns them.
+#[async_trait]
+pub trait ReplayAuditWriter: Send + Sync {
+    async fn record(&self, record: ReplayAuditRecord) -> Result<(), DlqError>;
+
+    /// Whether this writer can persist. Used by the handler to decide
+    /// whether to skip audit (and log via tracing only) when no
+    /// durable backend is configured.
+    fn is_configured(&self) -> bool {
+        true
+    }
+
+    /// Identifier surfaced in operator-facing logs / tracing — lets
+    /// operators tell at a glance which backend served (or didn't
+    /// serve) an audit write.
+    fn source_id(&self) -> &'static str {
+        "unknown"
+    }
+}
+
+/// No-op writer for the bootstrap path. The handler degrades
+/// gracefully: it still emits a `tracing` event on every replay, but
+/// nothing persists.
+///
+/// Used when the status binary boots without DLQ-DB wiring — the
+/// `Health<T>` envelope on `ReplayDeadLetter` already carries the
+/// publisher's source, and operators see `audit: noop` in the
+/// trace.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NoopReplayAuditWriter;
+
+#[async_trait]
+impl ReplayAuditWriter for NoopReplayAuditWriter {
+    async fn record(&self, _record: ReplayAuditRecord) -> Result<(), DlqError> {
+        // Tolerance contract: noop is success at this layer. The
+        // handler's tracing event still captures the metadata for
+        // live observability.
+        Ok(())
+    }
+
+    fn is_configured(&self) -> bool {
+        false
+    }
+
+    fn source_id(&self) -> &'static str {
+        "noop"
+    }
+}
+
+#[cfg(test)]
+#[path = "audit.test.rs"]
+mod tests;

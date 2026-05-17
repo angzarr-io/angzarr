@@ -26,6 +26,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto/ ./proto/
 COPY angzarr-project/ ./angzarr-project/
+COPY sererr/ ./sererr/
 COPY crates/ ./crates/
 COPY xtask/ ./xtask/
 
@@ -65,6 +66,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto/ ./proto/
 COPY angzarr-project/ ./angzarr-project/
+COPY sererr/ ./sererr/
 COPY crates/ ./crates/
 COPY xtask/ ./xtask/
 
@@ -141,6 +143,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY proto/ ./proto/
 COPY angzarr-project/ ./angzarr-project/
+COPY sererr/ ./sererr/
 COPY crates/ ./crates/
 COPY xtask/ ./xtask/
 

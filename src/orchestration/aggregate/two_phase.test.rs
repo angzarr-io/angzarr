@@ -28,6 +28,7 @@ fn make_cover() -> Cover {
 fn make_event_page(sequence: u32, no_commit: bool, cascade_id: &str) -> EventPage {
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(page_header::SequenceType::Sequence(sequence)),
         }),
         created_at: None,
@@ -52,6 +53,7 @@ fn make_confirmation(sequences: Vec<u32>, cascade_id: &str, seq: u32) -> EventPa
     };
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(page_header::SequenceType::Sequence(seq)),
         }),
         created_at: None,
@@ -72,6 +74,7 @@ fn make_revocation(sequences: Vec<u32>, cascade_id: &str, reason: &str, seq: u32
     };
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(page_header::SequenceType::Sequence(seq)),
         }),
         created_at: None,

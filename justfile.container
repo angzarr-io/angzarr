@@ -38,6 +38,12 @@ test:
 # Run all checks (build + test + lint + fmt)
 check-all: build test lint fmt
 
+# Pre-commit gate: fmt-check + lint + test in a SINGLE container/cargo
+# invocation. Avoids the inter-container `.cargo-lock` race that bites
+# when lefthook runs `just fmt`, `just lint`, `just test` as three
+# separate host invocations under rootless docker bind-mounts.
+precommit: fmt lint test
+
 # === CI Integration Tests ===
 # These run in CI after unit tests pass
 

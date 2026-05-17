@@ -1,0 +1,37 @@
+{{- /*
+  angzarr-status — ClusterIP service.
+
+  Exposes the gRPC surface always; the HTTP port is wired only when the
+  envoy sidecar is enabled. Audit-only auth model (plan P2): future
+  auth lives at the LB/Ingress layer, never inside the binary. Default
+  is in-cluster only — operator port-forwards or layers an Ingress with
+  external auth.
+*/}}
+{{- if .Values.infrastructure.status.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "angzarr.fullname" . }}-status
+  labels:
+    {{- include "angzarr.labels" . | nindent 4 }}
+    app.kubernetes.io/component: infrastructure
+    angzarr.io/service: status
+spec:
+  type: ClusterIP
+  ports:
+    - name: grpc
+      port: {{ .Values.infrastructure.status.grpcPort }}
+      targetPort: grpc
+      protocol: TCP
+    {{- if .Values.infrastructure.status.rest.enabled }}
+    - name: http
+      port: {{ .Values.infrastructure.status.rest.port }}
+      targetPort: http
+      protocol: TCP
+    {{- end }}
+  selector:
+    {{- include "angzarr.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: infrastructure
+    angzarr.io/service: status
+{{- end }}

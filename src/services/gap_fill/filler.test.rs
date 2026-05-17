@@ -269,6 +269,7 @@ impl SnapshotStore for NoOpSnapshotStore {
 fn make_event_page(sequence: u32) -> EventPage {
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(sequence)),
         }),
         created_at: None,

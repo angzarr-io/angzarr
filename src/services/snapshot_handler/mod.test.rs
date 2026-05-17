@@ -8,6 +8,7 @@ use prost_types::Any;
 fn make_event_page(sequence: u32) -> EventPage {
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(page_header::SequenceType::Sequence(sequence)),
         }),
         payload: Some(event_page::Payload::Event(Any {

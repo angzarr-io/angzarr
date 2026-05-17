@@ -57,11 +57,15 @@
 //! dlq_publisher.publish(dead_letter).await?;
 //! ```
 
+pub mod audit;
 mod chained;
 pub mod config;
 pub mod error;
 pub mod factory;
+pub mod filter;
 mod publishers;
+pub mod reader;
+pub mod replay;
 
 use std::collections::HashMap;
 
@@ -73,12 +77,26 @@ use crate::proto::{
     PayloadRetrievalFailedDetails as ProtoPayloadRetrievalFailedDetails, PayloadStorageType,
     SequenceMismatchDetails as ProtoSequenceMismatchDetails,
 };
+// CapturedError / StackFrame / ExceptionMechanism proto types live in
+// the sererr-proto crate (see angzarr-project/.../types.proto's import).
+// They serialize on the wire as `sererr.v1.*` per the canonical schema
+// at sererr.fyi/spec/proto.
+use sererr_proto::ProtoCapturedError;
 
 // Re-export core types
 pub use chained::ChainedDlqPublisher;
 pub use config::{DlqConfig, DlqTargetConfig};
 pub use error::{errmsg, DlqError};
 pub use factory::{init_dlq_publisher, DlqBackend};
+pub use audit::{
+    NoopReplayAuditWriter, ReplayAuditRecord, ReplayAuditWriter, ReplayOutcome,
+};
+pub use filter::parse_filter;
+pub use reader::{
+    DeadLetterPage, DeadLetterReader, ListFilter, NoopDeadLetterReader, StoredDeadLetter,
+    DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
+};
+pub use replay::{NoopReplayPublisher, ReplayMode, ReplayPublisher};
 
 // Re-export publishers
 pub use publishers::ChannelDeadLetterPublisher;
@@ -94,8 +112,14 @@ pub use publishers::OffloadS3DlqPublisher;
 
 #[cfg(feature = "postgres")]
 pub use publishers::PostgresDlqPublisher;
+#[cfg(feature = "postgres")]
+pub use publishers::PostgresDlqReader;
+#[cfg(feature = "postgres")]
+pub use publishers::{run_postgres_migrations, PostgresReplayAuditWriter};
 // SQLite is always compiled
 pub use publishers::SqliteDlqPublisher;
+pub use publishers::SqliteDlqReader;
+pub use publishers::{run_sqlite_migrations, SqliteReplayAuditWriter};
 
 #[cfg(feature = "amqp")]
 pub use publishers::AmqpDeadLetterPublisher;
@@ -127,6 +151,11 @@ pub struct SequenceMismatchDetails {
     pub merge_strategy: MergeStrategy,
 }
 
+// Captured-trace types come from the `sererr` crate (plain types — no
+// proto dep). The to_proto conversion below copies into the
+// angzarr-project prost-generated forms.
+pub use sererr::{CapturedError, ExceptionMechanism, StackFrame};
+
 /// Event processing failure details for DLQ entries.
 ///
 /// Contains information about why a saga/projector failed to process events.
@@ -138,7 +167,15 @@ pub struct EventProcessingFailedDetails {
     pub retry_count: u32,
     /// Whether the failure is considered transient (retry might succeed).
     pub is_transient: bool,
+    /// Flat array of captured errors representing the cause chain
+    /// (most-causal-first; the originating caught error is the LAST
+    /// element). Empty `Vec` = no capture was attempted.
+    pub stack_trace: Vec<CapturedError>,
 }
+
+// Conversion from sererr's plain `CapturedError` to the prost-generated
+// `ProtoCapturedError` lives in the `sererr-proto` crate as a `From`
+// impl. Use `.into()` at call sites.
 
 /// Payload retrieval failure details for DLQ entries.
 ///
@@ -236,11 +273,22 @@ impl AngzarrDeadLetter {
     }
 
     /// Create a dead letter from failed event processing.
+    ///
+    /// `stack_trace` is a flat cause chain — most-causal-first, with the
+    /// originating caught error as the LAST element (Sentry's
+    /// `exception.values` shape). Build at the originating failure site
+    /// (e.g. walk `std::backtrace::Backtrace::force_capture()` into
+    /// structured `StackFrame`s, then `std::error::Error::source()` to
+    /// extend the chain). By the time we get here we've already unwound
+    /// past the interesting frames; capturing inside this function would
+    /// show the dispatch stack, not the failure stack. Pass an empty
+    /// `Vec` when no capture was attempted.
     pub fn from_event_processing_failure(
         events: &EventBook,
         error: &str,
         retry_count: u32,
         is_transient: bool,
+        stack_trace: Vec<CapturedError>,
         source_component: &str,
         source_component_type: &str,
     ) -> Self {
@@ -258,6 +306,7 @@ impl AngzarrDeadLetter {
                     error: error.to_string(),
                     retry_count,
                     is_transient,
+                    stack_trace,
                 },
             )),
             occurred_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
@@ -361,6 +410,14 @@ impl AngzarrDeadLetter {
                             error: d.error.clone(),
                             retry_count: d.retry_count,
                             is_transient: d.is_transient,
+                            // sererr::CapturedError → ProtoCapturedError
+                            // via the `From` impl exported by sererr-proto.
+                            stack_trace: d
+                                .stack_trace
+                                .iter()
+                                .cloned()
+                                .map(ProtoCapturedError::from)
+                                .collect(),
                         },
                     )
                 }

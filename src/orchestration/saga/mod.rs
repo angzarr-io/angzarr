@@ -443,6 +443,7 @@ pub async fn orchestrate_saga(
                     // Saga set angzarr_deferred - fill in source if missing, preserve source_seq
                     if existing.source.is_none() {
                         page.header = Some(PageHeader {
+                            sync_mode: None,
                             sequence_type: Some(SequenceType::AngzarrDeferred(
                                 AngzarrDeferredSequence {
                                     source: source_cover.clone(),
@@ -456,6 +457,7 @@ pub async fn orchestrate_saga(
                 _ => {
                     // Saga didn't set angzarr_deferred - use defaults
                     page.header = Some(PageHeader {
+                        sync_mode: None,
                         sequence_type: Some(SequenceType::AngzarrDeferred(
                             AngzarrDeferredSequence {
                                 source: source_cover.clone(),

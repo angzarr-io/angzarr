@@ -111,6 +111,7 @@ async fn start_mock_server(service: MockUpcasterService) -> SocketAddr {
 fn make_test_event(seq: u32, type_url: &str, value: Vec<u8>) -> EventPage {
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(page_header::SequenceType::Sequence(seq)),
         }),
         created_at: None,

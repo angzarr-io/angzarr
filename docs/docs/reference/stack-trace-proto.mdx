@@ -1,0 +1,318 @@
+# Stack-trace Proto (`CapturedError` / `StackFrame` / `ExceptionMechanism`)
+
+The structured stack-trace + error-chain proto lives in
+[**sererr**](https://sererr.fyi) — a portable, Sentry-compatible
+schema with hand-tuned producer libraries in seven languages. Angzarr
+consumes it via `import "sererr/sererr.proto";` in
+`angzarr-project/proto/angzarr_client/proto/angzarr/types.proto` and
+the [`sererr-proto`](https://crates.io/crates/sererr-proto) Rust crate.
+
+The schema is summarized here for convenience; the canonical
+definition is at
+[sererr/proto/sererr/sererr.proto](https://github.com/sererr/sererr/blob/main/proto/sererr/sererr.proto).
+
+## Why a new shape
+
+There is no widely-adopted protobuf standard for *structured* stack
+frames. The closest existing options are all flat text:
+
+| Option | Shape | Reason it falls short |
+|---|---|---|
+| `google.rpc.DebugInfo` (gRPC error model, AIP-193) | `repeated string stack_entries`, `string detail` | Each entry is a pre-rendered line — no `file` / `line` / `function` to render or filter on |
+| OpenTelemetry exception semantic conventions | `exception.stacktrace` = single language-formatted string | Deliberately unstructured; OTel chose cross-language compromise over richness |
+| Sentry SDK frame/exception schemas | `filename, function, module, lineno, colno, in_app, context_line, …` | The right shape, with field names battle-tested across many SDKs — but it's a JSON schema in the Sentry product, not a published `.proto` |
+| JVM `StackTraceElement`, Python `FrameSummary` | Language data types | Not wire formats |
+
+The status console (and any future UI / replay tooling) wants to render
+frames as a list, hide framework noise, link to source, and walk the
+cause chain. None of the above gives us that on the wire.
+
+**sererr** provides one, **field-named and numbered to be
+forward-compatible with Sentry's schema**. A thin proto→JSON adapter
+(snake_case names + one rename of `file`→`filename`) produces a payload
+Sentry can ingest as one entry of an `exception.values` array plus
+event-level metadata. The proto definitions live at
+[sererr/proto/sererr/sererr.proto](https://github.com/sererr/sererr/blob/main/proto/sererr/sererr.proto).
+
+## Shape
+
+```protobuf
+message StackFrame {
+  string function       = 1;   // demangled
+  string module         = 4;
+  string package        = 5;   // crate / library
+  string file           = 6;   // Sentry: filename
+  string abs_path       = 7;
+  uint32 line           = 8;
+  string context_line   = 10;  // the failing line itself
+  repeated string pre_context  = 11;
+  repeated string post_context = 12;
+  string source_link    = 13;
+  bool   in_app         = 14;
+  // 2,3,9,15,16,17–21,22 reserved with Sentry names (see proto)
+}
+
+message ExceptionMechanism {
+  string type                 = 1;   // "generic" | "panic" | "signal" | …
+  string description          = 2;
+  bool   handled              = 3;
+  bool   synthetic            = 4;
+  string help_link            = 5;
+  string source               = 6;
+  uint32 exception_id         = 7;   // chain linkage
+  uint32 parent_id            = 8;
+  bool   is_exception_group   = 9;
+  map<string, string> data    = 10;
+  // 11 reserved for "meta" (Sentry's native-OS sub-object)
+}
+
+message CapturedError {
+  string type           = 1;   // "sqlx::Error::PoolTimedOut"
+  string message        = 2;
+  repeated StackFrame frames     = 5;   // most-recent-call-first; REQUIRED
+  ExceptionMechanism  mechanism  = 6;
+  string release        = 9;   // build id; "binary@semver" or git SHA
+  string server_name    = 10;
+  // 3,4,7,8,11,12 reserved with Sentry names (see proto)
+}
+```
+
+`EventProcessingFailedDetails.stack_trace` is `repeated CapturedError`
+— a flat cause chain, **most-causal-first** (the originating caught
+error is the LAST element). Sentry's `exception.values` uses this same
+ordering; `mechanism.exception_id` and `mechanism.parent_id` carry the
+tree linkage.
+
+## Conventions
+
+1. **Frame ordering** — `frames` is most-recent-call-first. This matches
+   Python `traceback.format_exception` and is the **opposite** of Rust
+   `std::backtrace::Backtrace`'s default `Display`. Rust producers
+   normalize on encode.
+2. **Chain shape** — flat array on the enclosing message
+   (`EventProcessingFailedDetails.stack_trace`), most-causal-first.
+   Position is identified by `mechanism.exception_id`; parent by
+   `mechanism.parent_id`. Matches Sentry's `exception.values`.
+3. **`frames` is required.** If a producer can't structure frames,
+   that's a producer bug, not a fallback path — there is no
+   pre-rendered-text field. The `reserved 7; reserved "text";` block in
+   `CapturedError` pins the field name in case future non-Rust producers
+   need it.
+4. **`in_app` is a hint, not a contract.** Producers define the
+   heuristic (typically a crate / module prefix list). Consumers may
+   collapse `!in_app` frames by default but should let the operator
+   expand on demand.
+5. **All fields are optional in the proto3 sense.** Zero values mean
+   "unknown." Consumers tolerate missing data.
+6. **`release` is inherited.** When chained entries share a release,
+   only the root capture needs to set it; consumers walking the chain
+   take the nearest non-empty value.
+
+## Source context resolution
+
+Source-context fields (`context_line`, `pre_context`, `post_context`,
+`source_link`) can be populated two ways. The framework supports
+**both**, with embed-at-capture as the primary path and lazy
+resolution as a fallback for builds that don't embed.
+
+### Embed at capture time (recommended, ships per producer)
+
+Each producer (saga / projector / process-manager binary) embeds its
+own source tree at build time, gzip-compressed. At capture time the
+producer looks up each frame's `file` and slices ±N lines around
+`line` into `context_line` / `pre_context` / `post_context`.
+Captures are then **fully self-contained** — operators read source in
+the DLQ detail view with no runtime dependency on a source repo.
+
+Recommended tooling: [`rust-embed`](https://crates.io/crates/rust-embed)
+with the `include-flate` feature. Approximate cost: ~500 KB binary
+size per producer for angzarr-core's `src/` (~2–3 MB raw, ~80 % zstd
+compression).
+
+```rust
+#[derive(rust_embed::Embed)]
+#[folder = "src/"]
+#[include = "*.rs"]
+struct Source;
+
+fn populate_context(frame: &mut StackFrame) {
+    let Some(bytes) = Source::get(&frame.file) else { return };
+    let src = std::str::from_utf8(&bytes.data).unwrap_or("");
+    let lines: Vec<&str> = src.lines().collect();
+    let idx = (frame.line as usize).saturating_sub(1);
+    frame.context_line = lines.get(idx).copied().unwrap_or("").to_string();
+    frame.pre_context  = lines[idx.saturating_sub(5)..idx].iter().map(|s| s.to_string()).collect();
+    frame.post_context = lines.get(idx + 1..idx + 6).map(|s| s.iter().map(|l| l.to_string()).collect()).unwrap_or_default();
+}
+```
+
+### Lazy resolution (fallback at consumer)
+
+When a producer didn't embed (older build, third-party binary, etc.),
+context fields arrive empty. The status console may resolve them on
+read by fetching source from the repo at the capture's `release` SHA.
+This requires:
+
+- `release` to be a resolvable git SHA (or include one).
+- The status console to have repo access (token, mirror, etc.).
+- A cache so repeated reads of the same DLQ entry don't re-fetch.
+
+Lazy resolution is **best-effort** — if the repo isn't reachable or
+the SHA can't be resolved, the UI renders frames without source
+context, exactly as it would for an unembedded capture.
+
+### Mode selection
+
+The two modes coexist: a consumer reading a capture **prefers
+producer-populated context fields when present**, and **only attempts
+lazy resolution when they are empty**. Producers that embed shift the
+work to build time and remove runtime dependencies; producers that
+don't get a graceful read-time fallback.
+
+## Producer guidance
+
+Capture the trace at the **originating failure site**, not at the
+DLQ-publish call site. By the time the error has propagated up to the
+DLQ layer, the stack has already unwound past the frames the operator
+wants to see — the publish-time backtrace points to the dispatch
+plumbing, not the failure.
+
+### Use the `sererr` libraries (recommended)
+
+A dedicated library set, [`sererr`](https://sererr.fyi), ships hand-
+tuned producer libraries in Rust, Python, Go, Java, Kotlin, and C#.
+Each one walks the error chain, normalizes frame ordering, stamps
+`mechanism.exception_id` / `parent_id`, applies a sensible `in_app`
+heuristic, and ships source-bundle helpers. Producers write **one
+line** to capture a chain.
+
+| Language | Library | One-liner | Status |
+|---|---|---|---|
+| Rust | crates.io `sererr` | `sererr::capture(&err, type_name, release, server)` | bootstrapping |
+| Python | PyPI `sererr` | `sererr.capture(exc, release=R, server_name=S)` | bootstrapping |
+| Go | `sererr.fyi/sererr` | `sererr.Capture(err, frames, release)` | bootstrapping |
+| Java | Maven `fyi.sererr:sererr` | `Capture.capture(t, release, server)` | bootstrapping |
+| Kotlin | Maven `fyi.sererr:sererr-kotlin` | `capture(t, release, server)` | bootstrapping |
+| C# | NuGet `Sererr` | `StackTrace.Capture(ex, release)` | bootstrapping |
+
+Until sererr ships, producers can hand-roll capture using the manual
+recipes below. Every language section follows the same five-step
+recipe — what the library encapsulates:
+
+1. Walk the error chain (innermost-outermost) starting from the caught
+   error, populating a `CapturedError` per node.
+2. Extract `type` (runtime class/type name), `message`, and frames.
+3. Mark frames with `in_app` using a prefix heuristic.
+4. After walking, **reverse the list** so it's most-causal-first
+   (Sentry's `exception.values` shape).
+5. Stamp `mechanism.exception_id = i` and `mechanism.parent_id = i-1`
+   (with `0` at the root).
+
+Each example assumes:
+
+- A `release` string (build identifier — git SHA or `name@semver`).
+- A `server_name` (typically the pod / host name).
+- Access to the proto-generated `CapturedError` / `StackFrame` /
+  `ExceptionMechanism` types from each language's standard client
+  package.
+
+### Language idiosyncracies summary
+
+| Language | Stdlib frame order | Chain mechanism | Trap to watch |
+|---|---|---|---|
+| Python | oldest-first (reverse on encode) | `__cause__` preferred, `__context__` fallback | `__suppress_context__` flag when raise-from explicitly skips chain |
+| Java | most-recent-first ✓ | `getCause()` | `getSuppressed()` for try-with-resources — sibling errors with same parent |
+| Kotlin | most-recent-first ✓ | `cause` (Java interop) | Coroutine state-machine frames — needs `kotlinx-coroutines-debug` to demystify |
+| Rust | outermost-first (reverse on encode) | `Error::source()` or `anyhow::Error::chain()` | `Backtrace::frames()` is unstable; type-name impossible for `&dyn Error` |
+| Go | most-recent-first ✓ | `errors.Unwrap` | **Capture frames at originating site** — `runtime.Callers` reads current goroutine's stack |
+| C# | most-recent-first ✓ | `InnerException` | `AggregateException.InnerExceptions` (plural — multiple causes); needs PDBs for line numbers in release builds |
+
+### Per-language guides → sererr
+
+Each language's capture recipe, idiosyncracies, and source-bundle
+helper live in the **sererr** docs, organized per language:
+
+- [Rust](https://sererr.fyi/guides/rust/)
+- [Python](https://sererr.fyi/guides/python/)
+- [Go](https://sererr.fyi/guides/go/)
+- [Java](https://sererr.fyi/guides/java/)
+- [Kotlin](https://sererr.fyi/guides/kotlin/)
+- [C#](https://sererr.fyi/guides/csharp/)
+- [TypeScript / JavaScript](https://sererr.fyi/guides/typescript/)
+
+Angzarr-core's Rust producers consume the `sererr` crate from
+crates.io — `sererr::capture(&err, type_name, release, server)`. Other
+language clients can call their respective sererr packages.
+
+For the **`google.rpc.DebugInfo` adapter** (`.ToDebugInfo()` on each
+language's library — flattens frames to `stack_entries` strings for
+gRPC error-model tooling), see
+[sererr.fyi/spec/debuginfo-adapter](https://sererr.fyi/spec/debuginfo-adapter/).
+
+### Cross-language notes
+
+- **Frame ordering** is `most-recent-call-first`; every example above
+  emits in that order. If you're adapting an SDK that emits
+  oldest-first (Java's `StackTraceElement[]` is *innermost-first*,
+  which matches our convention; Python's `StackSummary` is
+  *oldest-first*, hence the `reversed()` call), normalize on encode.
+- **Reusing frames across chain entries** is the simplest path
+  (each `CapturedError` carries the same trace; `exception_id` tells
+  the consumer where in the chain it is). Languages that can capture
+  per-cause frames separately (Java/Kotlin/C# — each `Throwable` has
+  its own `getStackTrace()`) may emit distinct frames per entry; that
+  is preferable when available.
+- **`type` field** carries the fully-qualified class/type name in JVM
+  and .NET; in Python it carries the class's `__name__` (unqualified)
+  per convention; in Go it carries `package.Type`; in Rust it is
+  producer-supplied at the catch site.
+- **`mechanism.type`** is `"generic"` for caught errors; use
+  `"panic"` (Rust panic-catching), `"signal"` (UNIX signal handlers),
+  `"timeout"`, `"poisoned-mutex"`, etc. when a more specific category
+  applies. Sentry's tooling groups by this field.
+- **`in_app` heuristics** above are crude (prefix lists). Producers
+  with a better signal (build-time crate/package manifest, source map)
+  should use it.
+
+## Consumer guidance (UIs / clients)
+
+- The capture is the `repeated CapturedError stack_trace` field on
+  `EventProcessingFailedDetails`. Iterate it most-causal-first.
+- For each entry, render `frames` as a list. Hide `!in_app` frames
+  behind a "show framework frames" toggle.
+- If a frame has populated `context_line` / `pre_context` /
+  `post_context`, render the source snippet inline. Otherwise, attempt
+  lazy resolution from the `release` SHA (see above), and fall back to
+  no-snippet display when that fails.
+- The originating caught error is `stack_trace.last()`. Render it
+  prominently; the rest is the cause chain.
+- A capture with `frames: []` is a producer bug — surface it as a
+  warning in the UI so it gets fixed, but still render `type` and
+  `message`.
+
+## Adapter to Sentry
+
+A consumer producing a Sentry event payload from this proto:
+
+| Sentry path | Source |
+|---|---|
+| `exception.values[i].type` | `CapturedError.type` |
+| `exception.values[i].value` | `CapturedError.message` |
+| `exception.values[i].stacktrace.frames[j].filename` | `StackFrame.file` (rename) |
+| `exception.values[i].stacktrace.frames[j].*` (everything else) | same-named `StackFrame` field |
+| `exception.values[i].mechanism.*` | same-named `ExceptionMechanism` field |
+| event-level `release` | `CapturedError.release` (or inherit from chain) |
+| event-level `server_name` | `CapturedError.server_name` |
+
+## Limits & non-goals
+
+- **No locals (`vars`)** — Sentry has it; Rust can't populate it
+  without nightly/unsafe tooling. Reserved on the proto for future use.
+- **No native-debug fields** (`instruction_addr`, `image_addr`, etc.)
+  — relevant for minidumps; we always have symbols. Reserved.
+- **No `lock` (deadlock context)** — no runtime lock instrumentation
+  in the framework today. Reserved.
+- **Not a replacement for `google.rpc.DebugInfo`** in gRPC
+  `Status::details` — that surface stays as-is for spec compliance.
+  `CapturedError` is for durably-stored failure surfaces (DLQ, audit
+  log).

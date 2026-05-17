@@ -406,6 +406,7 @@ mod mock_integration {
     fn test_event(sequence: u32, event_type: &str) -> EventPage {
         EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(sequence)),
             }),
             created_at: Some(Timestamp {

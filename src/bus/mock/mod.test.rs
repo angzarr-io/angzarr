@@ -30,6 +30,7 @@ fn make_event_book(domain: &str, root: Uuid, event_count: usize) -> EventBook {
         pages: (0..event_count)
             .map(|i| EventPage {
                 header: Some(PageHeader {
+                    sync_mode: None,
                     sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(
                         i as u32,
                     )),

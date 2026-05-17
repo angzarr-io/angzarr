@@ -18,6 +18,7 @@ fn make_event_book(domain: &str, event_types: &[&str]) -> EventBook {
             .enumerate()
             .map(|(i, et)| EventPage {
                 header: Some(PageHeader {
+                    sync_mode: None,
                     sequence_type: Some(page_header::SequenceType::Sequence(i as u32)),
                 }),
                 created_at: None,

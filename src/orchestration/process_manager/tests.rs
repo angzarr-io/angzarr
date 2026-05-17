@@ -282,3 +282,140 @@ async fn test_orchestrate_pm_exhausts_retries() {
     // Initial + 3 retries = 4 attempts, then exhausted
     assert_eq!(ctx.persist_attempts.load(Ordering::SeqCst), 4);
 }
+
+// ============================================================================
+// Per-Command Sync Mode Override (PageHeader.sync_mode)
+// ============================================================================
+
+/// Executor that records the SyncMode each command was dispatched with so
+/// tests can assert the per-command override took effect.
+struct RecordingExecutor {
+    seen: tokio::sync::Mutex<Vec<SyncMode>>,
+}
+
+impl RecordingExecutor {
+    fn new() -> Self {
+        Self {
+            seen: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl CommandExecutor for RecordingExecutor {
+    async fn execute(&self, _command: CommandBook, sync_mode: SyncMode) -> CommandOutcome {
+        self.seen.lock().await.push(sync_mode);
+        CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+/// PM whose single emitted command tags `header.sync_mode = DECISION`.
+struct PmWithSyncOverride {
+    override_mode: Option<SyncMode>,
+}
+
+#[async_trait]
+impl ProcessManagerContext for PmWithSyncOverride {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        _pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::{
+            command_page::Payload as CmdPayload, page_header::SequenceType, CommandPage,
+            MergeStrategy, PageHeader,
+        };
+        let header = PageHeader {
+            sequence_type: Some(SequenceType::Sequence(0)),
+            sync_mode: self.override_mode.map(|m| m as i32),
+        };
+        let page = CommandPage {
+            header: Some(header),
+            merge_strategy: MergeStrategy::MergeCommutative as i32,
+            payload: Some(CmdPayload::Command(prost_types::Any {
+                type_url: "test.PmCommand".to_string(),
+                value: vec![],
+            })),
+        };
+        let cover = Cover {
+            domain: "fulfillment".to_string(),
+            root: None,
+            correlation_id: "corr-1".to_string(),
+            edition: None,
+        };
+        Ok(PmHandleResponse {
+            commands: vec![CommandBook {
+                cover: Some(cover),
+                pages: vec![page],
+                ..Default::default()
+            }],
+            process_events: vec![],
+            facts: vec![],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        _process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+/// Per-command override on PageHeader.sync_mode wins over the inherited
+/// flow sync_mode. Lets a PM tag a single emitted command (e.g.
+/// SYNC_MODE_DECISION when its accept/reject must surface synchronously)
+/// while the surrounding flow stays whatever the original caller asked.
+#[tokio::test]
+async fn test_per_command_sync_mode_override_is_honored() {
+    let ctx = PmWithSyncOverride {
+        override_mode: Some(SyncMode::Decision),
+    };
+    let executor = RecordingExecutor::new();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger_event(),
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async, // inherited mode is Async
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(result.is_ok());
+    let seen = executor.seen.lock().await;
+    assert_eq!(seen.as_slice(), &[SyncMode::Decision]);
+}
+
+/// When PageHeader.sync_mode is unset, the inherited flow sync_mode applies.
+/// Guards against the override path silently swallowing the inherited mode.
+#[tokio::test]
+async fn test_inherited_sync_mode_used_when_no_override() {
+    let ctx = PmWithSyncOverride {
+        override_mode: None,
+    };
+    let executor = RecordingExecutor::new();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger_event(),
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Cascade, // inherited mode
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(result.is_ok());
+    let seen = executor.seen.lock().await;
+    assert_eq!(seen.as_slice(), &[SyncMode::Cascade]);
+}

@@ -309,6 +309,7 @@ mod resource_limits_validation {
     fn make_page_with_payload(size: usize) -> CommandPage {
         CommandPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(0)),
             }),
             payload: Some(command_page::Payload::Command(Any {

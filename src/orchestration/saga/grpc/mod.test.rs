@@ -116,6 +116,7 @@ fn test_compensation_context_captures_saga_source() {
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::AngzarrDeferred(
                     AngzarrDeferredSequence {
                         source: Some(Cover {

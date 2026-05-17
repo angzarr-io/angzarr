@@ -14,6 +14,7 @@ fn make_test_event_book(correlation_id: &str) -> EventBook {
         }),
         pages: vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(0)),
             }),
             payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {

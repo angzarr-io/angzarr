@@ -42,6 +42,7 @@ fn make_command_book(domain: &str, root: Uuid, command_type: &str, data: Vec<u8>
         cover: Some(make_cover(domain, root, "test-correlation")),
         pages: vec![CommandPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(5)),
             }),
             payload: Some(command_page::Payload::Command(Any {
@@ -174,6 +175,7 @@ fn test_extract_command_regular_event_returns_none() {
         cover: Some(make_cover("player", Uuid::new_v4(), "corr-123")),
         pages: vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(1)),
             }),
             created_at: None,
@@ -198,6 +200,7 @@ fn test_extract_command_no_payload_returns_none() {
         cover: Some(make_cover("player", Uuid::new_v4(), "corr-123")),
         pages: vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(1)),
             }),
             created_at: None,
@@ -221,6 +224,7 @@ fn test_extract_command_invalid_protobuf_returns_none() {
         cover: Some(make_cover("player", Uuid::new_v4(), "corr-123")),
         pages: vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(1)),
             }),
             created_at: None,

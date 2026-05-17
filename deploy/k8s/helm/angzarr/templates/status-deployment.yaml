@@ -1,0 +1,171 @@
+{{- /*
+  angzarr-status — operations console backend.
+
+  Pod composition (Phase 0):
+    - status container (Rust binary, pure gRPC, :1390)
+    - [opt] envoy sidecar (when status.rest.enabled) doing REST↔gRPC
+      transcoding + static SPA serving on :8080
+    - [opt] web init-container (when status.rest.web.enabled) seeding the
+      SPA dist into a shared emptyDir for envoy to serve
+
+  Multi-replica per the plan's HA contract — pods are stateless across
+  one another; any pod serves any request. Paired with status-pdb.yaml
+  (minAvailable: 1) so rolling restarts never take the console offline.
+*/}}
+{{- if .Values.infrastructure.status.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "angzarr.fullname" . }}-status
+  labels:
+    {{- include "angzarr.labels" . | nindent 4 }}
+    app.kubernetes.io/component: infrastructure
+    angzarr.io/service: status
+  {{- if .Values.reloader.enabled }}
+  annotations:
+    reloader.stakater.com/auto: "true"
+  {{- end }}
+spec:
+  replicas: {{ .Values.infrastructure.status.replicas }}
+  selector:
+    matchLabels:
+      {{- include "angzarr.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: infrastructure
+      angzarr.io/service: status
+  template:
+    metadata:
+      labels:
+        {{- include "angzarr.labels" . | nindent 8 }}
+        app.kubernetes.io/component: infrastructure
+        angzarr.io/service: status
+    spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "angzarr.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      {{- if and .Values.infrastructure.status.rest.enabled .Values.infrastructure.status.rest.web.enabled }}
+      initContainers:
+        # Web init-container: copies the SPA bundle into a shared
+        # emptyDir at pod start, then exits. envoy mounts the same
+        # volume read-only and serves the assets.
+        - name: web-dist
+          image: "{{ .Values.infrastructure.status.rest.web.image.repository }}:{{ .Values.infrastructure.status.rest.web.image.tag }}"
+          imagePullPolicy: {{ .Values.infrastructure.status.rest.web.image.pullPolicy }}
+          command: ["sh", "-c", "cp -r /web-dist/. /shared/"]
+          volumeMounts:
+            - name: spa-dist
+              mountPath: /shared
+      {{- end }}
+      containers:
+        # The Rust binary itself. Pure gRPC, no HTTP.
+        - name: status
+          securityContext:
+            {{- include "angzarr.containerSecurityContext" . | nindent 12 }}
+          image: "{{ .Values.infrastructure.status.image.repository }}:{{ .Values.infrastructure.status.image.tag }}"
+          imagePullPolicy: {{ .Values.infrastructure.status.image.pullPolicy }}
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.infrastructure.status.grpcPort }}
+              protocol: TCP
+          env:
+            # Override default port (50051) to 1390 per the plan.
+            - name: ANGZARR__TRANSPORT__TCP__PORT
+              value: {{ .Values.infrastructure.status.grpcPort | quote }}
+            {{- if .Values.infrastructure.status.descriptors.configMapName }}
+            # Tell the binary where to find pre-staged proto descriptors.
+            # Empty / absent = framework + reflection-pulled descriptors
+            # only.
+            - name: ANGZARR_STATUS_DESCRIPTORS_DIR
+              value: "/etc/angzarr/descriptors"
+            {{- end }}
+          {{- if .Values.infrastructure.status.descriptors.configMapName }}
+          volumeMounts:
+            - name: domain-descriptors
+              mountPath: /etc/angzarr/descriptors
+              readOnly: true
+          {{- end }}
+          # gRPC health checks via tonic-health. The HA contract is
+          # explicit: liveness = "binary is up", NOT "downstream is up".
+          # ClusterHealthService (Phase 2) handles downstream rollup.
+          livenessProbe:
+            grpc:
+              port: {{ .Values.infrastructure.status.grpcPort }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            grpc:
+              port: {{ .Values.infrastructure.status.grpcPort }}
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.infrastructure.status.resources | nindent 12 }}
+        {{- if .Values.infrastructure.status.rest.enabled }}
+        # envoy sidecar — REST↔gRPC transcoder + static-asset server.
+        # Config delivered via ConfigMap (status-envoy-configmap.yaml).
+        # Phase 0: config is a minimal proxy; transcoder filter is added
+        # once protos have google.api.http annotations (Phase 1+).
+        - name: envoy
+          securityContext:
+            {{- include "angzarr.containerSecurityContext" . | nindent 12 }}
+          image: "{{ .Values.infrastructure.status.rest.envoyImage.repository }}:{{ .Values.infrastructure.status.rest.envoyImage.tag }}"
+          imagePullPolicy: {{ .Values.infrastructure.status.rest.envoyImage.pullPolicy }}
+          args:
+            - "-c"
+            - "/etc/envoy/envoy.yaml"
+            - "--service-cluster"
+            - "angzarr-status"
+          ports:
+            - name: http
+              containerPort: {{ .Values.infrastructure.status.rest.port }}
+              protocol: TCP
+            - name: admin
+              containerPort: 9901
+              protocol: TCP
+          volumeMounts:
+            - name: envoy-config
+              mountPath: /etc/envoy
+              readOnly: true
+            {{- if .Values.infrastructure.status.rest.web.enabled }}
+            - name: spa-dist
+              mountPath: /usr/share/angzarr-web
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: admin
+            initialDelaySeconds: 2
+            periodSeconds: 5
+        {{- end }}
+      {{- if or .Values.infrastructure.status.rest.enabled .Values.infrastructure.status.descriptors.configMapName }}
+      volumes:
+        {{- if .Values.infrastructure.status.rest.enabled }}
+        - name: envoy-config
+          configMap:
+            name: {{ include "angzarr.fullname" . }}-status-envoy
+        {{- end }}
+        {{- if and .Values.infrastructure.status.rest.enabled .Values.infrastructure.status.rest.web.enabled }}
+        - name: spa-dist
+          emptyDir: {}
+        {{- end }}
+        {{- if .Values.infrastructure.status.descriptors.configMapName }}
+        - name: domain-descriptors
+          configMap:
+            name: {{ .Values.infrastructure.status.descriptors.configMapName }}
+        {{- end }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+{{- end }}

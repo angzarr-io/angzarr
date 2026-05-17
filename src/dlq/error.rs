@@ -8,6 +8,8 @@ pub mod errmsg {
     pub const CONNECTION_ERROR: &str = "Connection error: ";
     pub const INVALID_DEAD_LETTER: &str = "Invalid dead letter: ";
     pub const UNKNOWN_TYPE: &str = "Unknown DLQ backend type: ";
+    pub const QUERY_FAILED: &str = "DLQ query failed: ";
+    pub const INVALID_ARGUMENT: &str = "Invalid DLQ query argument: ";
 }
 
 /// Errors that can occur during DLQ operations.
@@ -30,6 +32,12 @@ pub enum DlqError {
 
     #[error("{}{}", errmsg::UNKNOWN_TYPE, .0)]
     UnknownType(String),
+
+    #[error("{}{}", errmsg::QUERY_FAILED, .0)]
+    QueryFailed(String),
+
+    #[error("{}{}", errmsg::INVALID_ARGUMENT, .0)]
+    InvalidArgument(String),
 }
 
 /// Result type for DLQ operations.

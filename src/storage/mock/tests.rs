@@ -32,6 +32,7 @@ async fn test_mock_event_store_add_and_get() {
 
     let events = vec![EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -68,6 +69,7 @@ async fn test_mock_event_store_get_by_correlation() {
 
     let event1 = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -80,6 +82,7 @@ async fn test_mock_event_store_get_by_correlation() {
 
     let event2 = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -127,6 +130,7 @@ async fn test_get_until_timestamp_filters_by_created_at() {
     let events = vec![
         EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
             }),
             payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -141,6 +145,7 @@ async fn test_get_until_timestamp_filters_by_created_at() {
         },
         EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(1)),
             }),
             payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -155,6 +160,7 @@ async fn test_get_until_timestamp_filters_by_created_at() {
         },
         EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(2)),
             }),
             payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -214,6 +220,7 @@ async fn test_get_until_timestamp_excludes_events_without_timestamp() {
 
     let events = vec![EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -329,6 +336,7 @@ async fn test_add_idempotency_returns_duplicate() {
 
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(5)),
         }),
         payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -387,6 +395,7 @@ async fn test_add_empty_external_id_no_idempotency() {
 
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -425,6 +434,7 @@ async fn test_get_next_sequence_increments_from_max() {
     let events: Vec<EventPage> = (0..3)
         .map(|i| EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(i)),
             }),
             payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -458,6 +468,7 @@ async fn test_get_next_sequence_edition_fallback() {
     let events: Vec<EventPage> = (0..5)
         .map(|i| EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(i)),
             }),
             payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -492,6 +503,7 @@ async fn test_get_next_sequence_edition_with_events() {
     let main_events: Vec<EventPage> = (0..5)
         .map(|i| EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(i)),
             }),
             payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -512,6 +524,7 @@ async fn test_get_next_sequence_edition_with_events() {
     let branch_events: Vec<EventPage> = (5..8)
         .map(|i| EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(i)),
             }),
             payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -551,6 +564,7 @@ async fn test_delete_edition_events_removes_and_counts() {
     let events1: Vec<EventPage> = (0..3)
         .map(|i| EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(i)),
             }),
             payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -566,6 +580,7 @@ async fn test_delete_edition_events_removes_and_counts() {
     let events2: Vec<EventPage> = (0..2)
         .map(|i| EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(i)),
             }),
             payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -608,6 +623,7 @@ async fn test_delete_edition_events_scoped_correctly() {
 
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -682,6 +698,7 @@ async fn test_find_by_source_returns_matching_events() {
 
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -730,6 +747,7 @@ async fn test_find_by_source_returns_none_for_mismatch() {
 
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -804,6 +822,7 @@ async fn test_find_by_source_checks_all_fields() {
 
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
@@ -907,6 +926,7 @@ async fn test_query_stale_cascades_timestamp_boundary() {
 
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {

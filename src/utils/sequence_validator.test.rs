@@ -146,6 +146,7 @@ fn test_sequence_mismatch_error_with_state_roundtrip() {
         }),
         pages: vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(5)),
             }),
             created_at: None,

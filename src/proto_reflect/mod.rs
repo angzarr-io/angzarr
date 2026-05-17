@@ -5,6 +5,21 @@
 //! - State diff (commutative merge detection)
 //! - Logging projectors (human-readable event/state logging)
 //! - Debug tooling (inspect Any-packed messages)
+//! - **Operator-facing payload rendering** ([`decode_to_json`],
+//!   [`decode_any_to_json`], [`dynamic_to_json`]) — single reusable
+//!   primitive for any consumer that needs to surface decoded
+//!   payloads to humans. Used by:
+//!     - DLQ admin (`StoredDeadLetter.payload_view`, P1.2.5)
+//!     - Event-store browsing (planned, P3 / GraphQL gateway)
+//!     - Future user-domain command / projection viewers
+//!   Tolerance contract: every JSON decoder returns an empty string
+//!   on failure (pool not initialized, type unknown, bad bytes,
+//!   serialization error). Callers fall back to raw bytes — no panic,
+//!   no failed RPC.
+//!
+//! Descriptor advertisement to peers uses the **standard**
+//! `grpc.reflection.v1.ServerReflection` service, wired via
+//! [`reflection_service`]. See `plans/virtual-spinning-flute.md` P8.
 
 use prost_reflect::ReflectMessage;
 use prost_types::Any;
@@ -99,6 +114,134 @@ pub const EMBEDDED_DESCRIPTOR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "
 /// Returns error if pool is already initialized or if descriptor is invalid.
 pub fn init_from_embedded() -> Result<(), ReflectError> {
     init_pool(EMBEDDED_DESCRIPTOR)
+}
+
+/// Initialize the pool from the embedded descriptor set, idempotently.
+///
+/// Calls [`init_from_embedded`] but treats the
+/// already-initialized case as success. Suitable as the very first
+/// thing a binary does after `startup()` when payload decoding is
+/// needed (DLQ admin handler, GraphQL gateway, etc.).
+pub fn ensure_initialized() -> Result<(), ReflectError> {
+    if is_initialized() {
+        return Ok(());
+    }
+    match init_from_embedded() {
+        Ok(()) => Ok(()),
+        // Already-init race: someone else won the OnceLock between
+        // our check and our set. Still a success outcome.
+        Err(ReflectError::AlreadyInitialized) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Decode proto-encoded bytes of a fully-qualified message type to a
+/// JSON string using the global [`DescriptorPool`].
+///
+/// Returns the empty string when:
+///   - the pool isn't initialized,
+///   - the requested type isn't in the pool,
+///   - the bytes don't decode against that descriptor,
+///   - JSON serialization fails.
+///
+/// This is the tolerance contract from the plan's resilience section:
+/// payload rendering must NEVER fail an entire row — callers fall
+/// back to the raw bytes when decode returns empty. Nested
+/// `google.protobuf.Any` payloads are auto-decoded when their
+/// `type_url` is in the pool (prost-reflect follows the canonical
+/// proto3 JSON encoding for Any).
+///
+/// `full_type_name` is the dotted protobuf type name, e.g.
+/// `"angzarr_client.proto.angzarr.AngzarrDeadLetter"`.
+pub fn decode_to_json(full_type_name: &str, encoded: &[u8]) -> String {
+    let Ok(pool) = pool() else {
+        return String::new();
+    };
+    let Some(descriptor) = pool.get_message_by_name(full_type_name) else {
+        return String::new();
+    };
+    let Ok(msg) = prost_reflect::DynamicMessage::decode(descriptor, encoded) else {
+        return String::new();
+    };
+    dynamic_to_json(&msg)
+}
+
+/// Serialize an already-decoded [`prost_reflect::DynamicMessage`] to
+/// JSON using the canonical proto3 JSON encoding. Returns the empty
+/// string on serialization failure.
+///
+/// Reusable primitive: callers who already hold a `DynamicMessage`
+/// (e.g. obtained from [`decode_any`]) use this directly without
+/// going through the bytes → decode round trip.
+pub fn dynamic_to_json(msg: &prost_reflect::DynamicMessage) -> String {
+    use serde::Serialize as _;
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
+    let mut serializer = serde_json::Serializer::new(&mut buf);
+    if msg.serialize(&mut serializer).is_err() {
+        return String::new();
+    }
+    String::from_utf8(buf).unwrap_or_default()
+}
+
+/// Decode a [`prost_types::Any`] to a JSON string via the global
+/// pool.
+///
+/// The convenience entry point for the most common operator-rendering
+/// case: event-store payloads (`EventPage.event`), command payloads
+/// (`CommandPage.command`), projection state, etc. — every framework
+/// payload site uses `Any`, and operators want JSON.
+///
+/// Equivalent to `decode_to_json(type_name_from_url(&any.type_url), &any.value)`
+/// but cheaper to call: no string allocation for the type name.
+/// Same tolerance contract as the other decoders: empty string when
+/// the type isn't in the pool or decoding fails.
+pub fn decode_any_to_json(any: &Any) -> String {
+    let Ok(msg) = decode_any(any) else {
+        return String::new();
+    };
+    dynamic_to_json(&msg)
+}
+
+/// Build a `tonic-reflection` v1 service over the framework's embedded
+/// `FileDescriptorSet`.
+///
+/// Adds `grpc.reflection.v1.ServerReflection` to a tonic server so
+/// `grpcurl` and the envoy `grpc_json_transcoder` filter's reflection
+/// path work without shipping descriptor files separately.
+///
+/// Returns the configured server. Caller chains it into
+/// `Server::builder().add_service(reflection_service())`.
+///
+/// # Panics
+///
+/// Panics if the embedded descriptor bytes are malformed — that would
+/// indicate a broken `build.rs`, which should fail compilation long
+/// before a `cargo run`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let router = Server::builder()
+///     .layer(grpc_trace_layer())
+///     .add_service(health_service)
+///     .add_service(proto_reflect::reflection_service());
+/// ```
+pub fn reflection_service() -> tonic_reflection::server::v1::ServerReflectionServer<
+    impl tonic_reflection::server::v1::ServerReflection,
+> {
+    tonic_reflection::server::Builder::configure()
+        .register_encoded_file_descriptor_set(EMBEDDED_DESCRIPTOR)
+        // Standard cross-cutting services every angzarr bin exposes.
+        // Their descriptors live in their own crates; we splice them
+        // into the reflection registry so `grpcurl :PORT list` shows
+        // everything that can be called on the server, not just
+        // framework protos. Without this, callers that resolve via
+        // reflection ("grpcurl ... grpc.health.v1.Health/Check") get
+        // "target server does not expose service" even though the
+        // service is wired up — they couldn't *find* the proto.
+        .register_encoded_file_descriptor_set(tonic_health::pb::FILE_DESCRIPTOR_SET)
+        .build_v1()
+        .expect("framework + health descriptor sets are well-formed")
 }
 
 /// Extract type name from Any.type_url.

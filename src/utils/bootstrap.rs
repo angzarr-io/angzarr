@@ -283,6 +283,33 @@ fn parse_config_path_from_args(args: &[String]) -> Option<String> {
     None
 }
 
+/// One-shot startup: initialize tracing and load configuration.
+///
+/// Combines [`init_tracing`], [`parse_config_path`], and
+/// [`crate::config::Config::load`] into a single call. Used at the
+/// top of every angzarr `main()` to replace the standard three-line
+/// boilerplate.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// #[tokio::main]
+/// async fn main() -> Result<(), Box<dyn std::error::Error>> {
+///     let config = angzarr::utils::bootstrap::startup()?;
+///     // ... build services, serve_with_transport ...
+///     Ok(())
+/// }
+/// ```
+///
+/// Returns the loaded [`crate::config::Config`] on success, or the
+/// underlying load error on failure.
+pub fn startup() -> Result<crate::config::Config, Box<dyn std::error::Error>> {
+    init_tracing();
+    let path = parse_config_path();
+    let config = crate::config::Config::load(path.as_deref())?;
+    Ok(config)
+}
+
 #[cfg(test)]
 #[path = "bootstrap.test.rs"]
 mod tests;

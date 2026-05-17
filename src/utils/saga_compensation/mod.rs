@@ -409,6 +409,7 @@ pub fn build_notification_command_book(context: &CompensationContext) -> Result<
         pages: vec![crate::proto::CommandPage {
             // Notifications use deferred sequence - the aggregate will stamp on receipt
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(SequenceType::AngzarrDeferred(AngzarrDeferredSequence {
                     // Source is the same aggregate receiving this notification
                     // (compensation loops back to source)
@@ -467,6 +468,7 @@ pub fn build_compensation_failed_event_book(
         }),
         pages: vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(SequenceType::Sequence(0)),
             }),
             created_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),

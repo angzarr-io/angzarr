@@ -158,6 +158,7 @@ impl<S: EventStore + 'static> CascadeReaper<S> {
         let now = Utc::now();
         let page = EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: None, // Framework will assign sequence
             }),
             created_at: Some(prost_types::Timestamp {

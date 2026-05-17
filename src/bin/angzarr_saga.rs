@@ -208,6 +208,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let coordinator_server = Server::builder()
         .layer(grpc_trace_layer())
         .add_service(health_service)
+        .add_service(angzarr::proto_reflect::reflection_service())
         .add_service(
             SagaCoordinatorServiceServer::new(saga_coord)
                 .max_decoding_message_size(msg_size)

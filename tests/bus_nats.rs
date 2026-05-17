@@ -97,6 +97,7 @@ fn make_event_book_with_seq(domain: &str, root: Uuid, first_seq: u32, count: u32
     let pages: Vec<EventPage> = (0..count)
         .map(|i| EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(SequenceType::Sequence(first_seq + i)),
             }),
             created_at: None,
@@ -132,6 +133,7 @@ fn make_event_pages(first_seq: u32, count: u32) -> Vec<EventPage> {
     (0..count)
         .map(|i| EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(SequenceType::Sequence(first_seq + i)),
             }),
             created_at: None,

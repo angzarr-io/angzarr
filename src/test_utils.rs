@@ -57,6 +57,7 @@ pub fn make_cover_full(domain: &str, root: Uuid, correlation_id: &str) -> Cover 
 pub fn make_event_page(seq: u32) -> EventPage {
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(SequenceType::Sequence(seq)),
         }),
         payload: Some(event_page::Payload::Event(Any {
@@ -73,6 +74,7 @@ pub fn make_event_page(seq: u32) -> EventPage {
 pub fn make_event_page_typed(seq: u32, type_url: &str) -> EventPage {
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(SequenceType::Sequence(seq)),
         }),
         payload: Some(event_page::Payload::Event(Any {
@@ -89,6 +91,7 @@ pub fn make_event_page_typed(seq: u32, type_url: &str) -> EventPage {
 pub fn make_uncommitted_event_page(seq: u32, cascade_id: &str) -> EventPage {
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(SequenceType::Sequence(seq)),
         }),
         payload: Some(event_page::Payload::Event(Any {
@@ -170,6 +173,7 @@ pub fn make_command_book_with_sequence(domain: &str, root: Uuid, sequence: u32) 
         cover: Some(make_cover_with_root(domain, root)),
         pages: vec![CommandPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(SequenceType::Sequence(sequence)),
             }),
             payload: Some(command_page::Payload::Command(Any {
@@ -196,6 +200,7 @@ pub fn make_command_book_correlated(with_correlation: bool) -> CommandBook {
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(SequenceType::Sequence(0)),
             }),
             payload: Some(command_page::Payload::Command(Any {

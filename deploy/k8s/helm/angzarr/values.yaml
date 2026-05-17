@@ -152,6 +152,70 @@ infrastructure:
         cpu: 100m
         memory: 128Mi
 
+  # Operations console - cluster-wide DLQ admin / health / event browser /
+  # command injection / projection viewer / load metrics.
+  # See plans/virtual-spinning-flute.md.
+  status:
+    # ON by default in gRPC-only mode — the operations console is a
+    # first-class framework component. gRPC-only is a minimal footprint
+    # (ClusterIP only, no Ingress, ~50m CPU per replica) so it's safe to
+    # ship by default; operators always have grpcurl access. The richer
+    # REST/SPA surface is opt-in via `rest.enabled` below.
+    #
+    # To disable entirely (e.g., minimal CI deployments): set
+    # `infrastructure.status.enabled=false`.
+    enabled: true
+    # Multi-replica for HA per the plan's resilience contract.
+    # Stateless across pods; any pod can serve any request.
+    replicas: 2
+    # gRPC bind port (status::DEFAULT_GRPC_PORT). 1390 = framework-level
+    # service slot per CLAUDE.md port standards.
+    grpcPort: 1390
+    image:
+      repository: ghcr.io/angzarr-io/angzarr-status
+      tag: latest
+      pullPolicy: IfNotPresent
+    # Optional pre-staged proto descriptors for user-domain types. The
+    # status binary primarily discovers descriptors via gRPC Server
+    # Reflection (P8); this mount is the bootstrap path for clusters
+    # that come up before any coordinator does, or that intentionally
+    # run the status console alone. Create a ConfigMap with one or
+    # more `.protoset` (FileDescriptorSet) entries and set the name
+    # here. inotify watch rebuilds the descriptor pool on change.
+    #
+    # Example:
+    #   kubectl create configmap angzarr-domain-descriptors \
+    #     --from-file=poker.protoset --from-file=inventory.protoset
+    descriptors:
+      configMapName: ""  # empty = no mount, framework descriptors only
+    # REST/HTTP surface via envoy sidecar. Opt-in — the gRPC-only mode
+    # above is sufficient for ops teams comfortable with grpcurl/CLI.
+    # Flip this when you want the web console / browser access /
+    # external REST callers.
+    rest:
+      enabled: false
+      # HTTP port served by the envoy sidecar (status::DEFAULT_HTTP_PORT).
+      port: 8080
+      envoyImage:
+        repository: envoyproxy/envoy
+        tag: v1.32-latest
+        pullPolicy: IfNotPresent
+      # SPA static-asset init-container (Astro+Vue). Off until Phase 0
+      # actually ships a frontend artifact; templated for future use.
+      web:
+        enabled: false
+        image:
+          repository: ghcr.io/angzarr-io/angzarr-status-web
+          tag: latest
+          pullPolicy: IfNotPresent
+    resources:
+      limits:
+        cpu: 500m
+        memory: 256Mi
+      requests:
+        cpu: 50m
+        memory: 64Mi
+
   # gRPC Gateway - REST proxy for aggregate coordinators
   gateway:
     enabled: true

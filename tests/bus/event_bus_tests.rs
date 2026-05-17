@@ -31,6 +31,7 @@ pub fn make_event_book(domain: &str) -> EventBook {
         }),
         pages: vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(SequenceType::Sequence(0)),
             }),
             created_at: None,
@@ -434,6 +435,7 @@ pub async fn test_payload_bytes_exact<B: EventBus>(
         }),
         pages: vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(SequenceType::Sequence(0)),
             }),
             created_at: None,

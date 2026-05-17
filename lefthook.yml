@@ -12,17 +12,15 @@
 pre-commit:
   parallel: false
   commands:
-    # Rust - runs in container via just
-    rust-fmt:
+    # Rust - fmt + clippy + test in a SINGLE container invocation.
+    # Running them as three separate `just _container ...` calls under
+    # rootless docker triggers a `.cargo-lock` permission race because
+    # each container's cargo creates/holds the lockfile on a bind mount
+    # and the next container can't reopen it cleanly. One container,
+    # one cargo lifecycle, no race.
+    rust-precommit:
       glob: "**/*.rs"
-      run: just fmt
-      stage_fixed: true
-    rust-clippy:
-      glob: "**/*.rs"
-      run: just lint
-    rust-test:
-      glob: "**/*.rs"
-      run: just test
+      run: just precommit
 
     # Python - runs in container via just (scripts only, client/examples extracted)
     python-fmt:

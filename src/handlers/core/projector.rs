@@ -199,6 +199,7 @@ fn create_projection_event_book(
         cover,
         pages: vec![crate::proto::EventPage {
             header: Some(crate::proto::PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(
                     projection.sequence,
                 )),

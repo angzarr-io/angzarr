@@ -23,13 +23,13 @@
 use tonic::transport::Server;
 use tonic::{Request, Response, Status};
 use tonic_health::server::health_reporter;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
-use angzarr::config::Config;
 use angzarr::proto::upcaster_service_server::{UpcasterService, UpcasterServiceServer};
 use angzarr::proto::{UpcastRequest, UpcastResponse};
+use angzarr::proto_reflect;
 use angzarr::transport::{grpc_trace_layer, serve_with_transport};
-use angzarr::utils::bootstrap::init_tracing;
+use angzarr::utils::bootstrap::startup;
 
 /// No-op upcaster service that passes events through unchanged.
 #[derive(Debug, Default)]
@@ -56,13 +56,7 @@ impl UpcasterService for NoOpUpcaster {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    init_tracing();
-
-    let config_path = angzarr::utils::bootstrap::parse_config_path();
-    let config = Config::load(config_path.as_deref()).map_err(|e| {
-        error!("Failed to load configuration: {}", e);
-        e
-    })?;
+    let config = startup()?;
 
     let upcaster_service = NoOpUpcaster;
 
@@ -77,6 +71,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = Server::builder()
         .layer(grpc_trace_layer())
         .add_service(health_service)
+        .add_service(proto_reflect::reflection_service())
         .add_service(UpcasterServiceServer::new(upcaster_service));
 
     serve_with_transport(router, &config.transport, "upcaster", None).await?;

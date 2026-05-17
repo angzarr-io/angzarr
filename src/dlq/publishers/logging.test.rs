@@ -33,6 +33,7 @@ fn make_test_command(domain: &str) -> CommandBook {
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(0)),
             }),
             payload: Some(command_page::Payload::Command(prost_types::Any {

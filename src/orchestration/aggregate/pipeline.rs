@@ -607,6 +607,7 @@ pub async fn execute_fact_pipeline(
     for page in processed_events.pages {
         let new_page = crate::proto::EventPage {
             header: Some(crate::proto::PageHeader {
+                sync_mode: None,
                 sequence_type: Some(SequenceType::Sequence(current_seq)),
             }),
             created_at: page

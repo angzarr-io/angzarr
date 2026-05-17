@@ -14,6 +14,7 @@ use angzarr::storage::EventStore;
 pub fn make_event(seq: u32, event_type: &str) -> EventPage {
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(SequenceType::Sequence(seq)),
         }),
         created_at: None,
@@ -217,6 +218,7 @@ pub async fn test_get_preserves_event_data<S: EventStore>(store: &S) {
 
     let original = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(SequenceType::Sequence(0)),
         }),
         created_at: None,
@@ -1216,6 +1218,7 @@ pub async fn test_get_until_timestamp_filters<S: EventStore>(store: &S) {
 
     let event_old = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(SequenceType::Sequence(0)),
         }),
         created_at: Some(ts_old),
@@ -1228,6 +1231,7 @@ pub async fn test_get_until_timestamp_filters<S: EventStore>(store: &S) {
 
     let event_new = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(SequenceType::Sequence(1)),
         }),
         created_at: Some(ts_new),
@@ -1275,6 +1279,7 @@ pub async fn test_get_until_timestamp_returns_all_when_recent<S: EventStore>(sto
 
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(SequenceType::Sequence(0)),
         }),
         created_at: Some(ts),
@@ -1313,6 +1318,7 @@ pub async fn test_timestamp_preservation<S: EventStore>(store: &S) {
 
     let event = EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(SequenceType::Sequence(0)),
         }),
         created_at: Some(timestamp),
@@ -1559,6 +1565,7 @@ pub fn make_cascade_event(
 ) -> EventPage {
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(SequenceType::Sequence(seq)),
         }),
         created_at: Some(prost_types::Timestamp {

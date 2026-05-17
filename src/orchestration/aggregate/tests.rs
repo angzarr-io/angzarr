@@ -52,6 +52,7 @@ fn make_command_book_with_strategy(
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(sequence)),
             }),
             payload: Some(command_page::Payload::Command(Any {
@@ -69,6 +70,7 @@ fn make_event_book(domain: &str, root: Uuid, last_sequence: Option<u32>) -> Even
     let pages = if let Some(seq) = last_sequence {
         vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(seq)),
             }),
             payload: Some(event_page::Payload::Event(Any {
@@ -315,6 +317,7 @@ fn test_build_combined_events_merges_pages() {
         pages: vec![
             crate::proto::EventPage {
                 header: Some(PageHeader {
+                    sync_mode: None,
                     sequence_type: Some(page_header::SequenceType::Sequence(0)),
                 }),
                 payload: None,
@@ -323,6 +326,7 @@ fn test_build_combined_events_merges_pages() {
             },
             crate::proto::EventPage {
                 header: Some(PageHeader {
+                    sync_mode: None,
                     sequence_type: Some(page_header::SequenceType::Sequence(1)),
                 }),
                 payload: None,
@@ -338,6 +342,7 @@ fn test_build_combined_events_merges_pages() {
         cover: cover.clone(),
         pages: vec![crate::proto::EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(2)),
             }),
             payload: None,
@@ -426,6 +431,7 @@ fn test_build_events_up_to_sequence_filters_correctly() {
         pages: vec![
             crate::proto::EventPage {
                 header: Some(PageHeader {
+                    sync_mode: None,
                     sequence_type: Some(page_header::SequenceType::Sequence(0)),
                 }),
                 payload: None,
@@ -434,6 +440,7 @@ fn test_build_events_up_to_sequence_filters_correctly() {
             },
             crate::proto::EventPage {
                 header: Some(PageHeader {
+                    sync_mode: None,
                     sequence_type: Some(page_header::SequenceType::Sequence(1)),
                 }),
                 payload: None,
@@ -442,6 +449,7 @@ fn test_build_events_up_to_sequence_filters_correctly() {
             },
             crate::proto::EventPage {
                 header: Some(PageHeader {
+                    sync_mode: None,
                     sequence_type: Some(page_header::SequenceType::Sequence(2)),
                 }),
                 payload: None,
@@ -450,6 +458,7 @@ fn test_build_events_up_to_sequence_filters_correctly() {
             },
             crate::proto::EventPage {
                 header: Some(PageHeader {
+                    sync_mode: None,
                     sequence_type: Some(page_header::SequenceType::Sequence(3)),
                 }),
                 payload: None,
@@ -481,6 +490,7 @@ fn test_build_events_up_to_sequence_zero_returns_empty() {
         }),
         pages: vec![crate::proto::EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(0)),
             }),
             payload: None,
@@ -772,6 +782,7 @@ fn make_cascade_event_page(
 ) -> crate::proto::EventPage {
     crate::proto::EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(page_header::SequenceType::Sequence(sequence)),
         }),
         payload: Some(event_page::Payload::Event(Any {

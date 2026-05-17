@@ -200,6 +200,7 @@ pub fn wrap_command_for_bus(command: &CommandBook) -> EventBook {
         cover: command.cover.clone(),
         pages: vec![EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(SequenceType::Sequence(0)),
             }),
             created_at: None,

@@ -175,6 +175,7 @@ fn test_context_with_sync_mode() {
 fn test_extract_sequence_from_some() {
     let page = crate::proto::EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(5)),
         }),
         payload: None,
@@ -205,6 +206,7 @@ fn test_build_event_book_with_pages() {
     let pages = vec![
         crate::proto::EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
             }),
             payload: None,
@@ -213,6 +215,7 @@ fn test_build_event_book_with_pages() {
         },
         crate::proto::EventPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(1)),
             }),
             payload: None,
@@ -280,6 +283,7 @@ async fn test_check_deferred_idempotency_returns_cached_events_on_redelivery() {
 
     let event = crate::proto::EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         ..Default::default()
@@ -330,6 +334,7 @@ async fn test_persist_events_propagates_source_info_for_deferred_commands() {
     let prior = build_event_book("hand", "", target_root, vec![], None);
     let received_pages = vec![EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         ..Default::default()
@@ -394,6 +399,7 @@ async fn test_check_external_idempotency_returns_cached_events_on_redelivery() {
     let target_root = Uuid::new_v4();
     let event = crate::proto::EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         ..Default::default()
@@ -429,6 +435,7 @@ async fn test_check_external_idempotency_distinguishes_external_id() {
     let target_root = Uuid::new_v4();
     let event = crate::proto::EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         ..Default::default()
@@ -484,6 +491,7 @@ async fn test_check_deferred_idempotency_distinguishes_source_seq() {
     let source_root = Uuid::new_v4();
     let event = crate::proto::EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         ..Default::default()

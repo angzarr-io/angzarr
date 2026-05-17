@@ -1,0 +1,244 @@
+// Dead Letter Queue admin service for the `angzarr-status` operations
+// console.
+//
+// Surface follows Google AIPs for resource naming + pagination +
+// filtering. Every external-facing method returns a `Health<T>`-style
+// envelope (concrete `oneof state` shape per the plan's resilience
+// contract) so a degraded backend renders as a tile-level error in
+// the SPA without breaking adjacent panels.
+//
+// Plan reference: P1.1 / S1 in `plans/virtual-spinning-flute.md`.
+//
+// Replay lives in P1.3 (separate proto: dlq_replay.proto) because it
+// touches the bus dispatch layer.
+
+syntax = "proto3";
+
+package angzarr_client.proto.angzarr.status;
+
+option go_package = "github.com/angzarr/angzarr/proto/angzarr/status";
+
+import "google/api/annotations.proto";
+import "google/protobuf/timestamp.proto";
+
+// Discriminator for `AngzarrDeadLetter.rejection_details` oneof.
+// Stored as a string in `dlq_entries.rejection_type` by the existing
+// publishers; surfaced typed here for filter ergonomics.
+enum RejectionType {
+  REJECTION_TYPE_UNSPECIFIED = 0;
+  REJECTION_TYPE_SEQUENCE_MISMATCH = 1;
+  REJECTION_TYPE_EVENT_PROCESSING_FAILED = 2;
+  REJECTION_TYPE_PAYLOAD_RETRIEVAL_FAILED = 3;
+}
+
+// One row from `dlq_entries`, surfaced via the API. The `payload`
+// bytes are the proto-encoded `AngzarrDeadLetter` exactly as the
+// publisher wrote it; replay (P1.3) reuses these bytes.
+//
+// The `payload_view` field carries a server-side descriptor-decoded
+// JSON rendering of the same data, so operators see structured
+// content in one round-trip without writing client-side decode logic.
+// Nested `Any` payloads (rejected_command.pages[].command,
+// rejected_events.pages[].event) are recursively decoded via the
+// framework `DescriptorPool`. User-domain types not yet in the pool
+// stay as `{"@type": type_url, "value_b64": "..."}` placeholders;
+// once descriptor advertisement via gRPC reflection (P8) reaches the
+// status binary, those resolve to typed JSON too.
+//
+// Operator requirement (plan P1.2.5): "need to be able to see
+// messages."
+message StoredDeadLetter {
+  int64 id = 1;
+  string domain = 2;
+  string correlation_id = 3;
+  bytes payload = 4;
+  string rejection_reason = 5;
+  RejectionType rejection_type = 6;
+  string details = 7;             // free-form debug detail
+  string source_component = 8;
+  string source_component_type = 9;
+  google.protobuf.Timestamp occurred_at = 10;
+  google.protobuf.Timestamp created_at = 11;
+  // JSON string. Empty when decoding failed entirely (the row is still
+  // surfaced — clients can fall back to `payload` bytes).
+  string payload_view = 12;
+}
+
+// RFC 7807 — Problem Details for HTTP APIs. Used when a tile's
+// backend is unreachable so the UI can render an in-place error
+// without crashing the page. Standards conformance: same shape the
+// REST sidecar emits for envoy-side errors.
+message ProblemDetails {
+  // URI identifying the error type (RFC 7807). Default:
+  // "about:blank" when not classified.
+  string type = 1;
+  string title = 2;       // human-readable summary
+  int32 status = 3;       // HTTP-equivalent status code
+  string detail = 4;      // human-readable per-occurrence detail
+  string instance = 5;    // URI of the failing call (optional)
+}
+
+// ----- ListDeadLetters --------------------------------------------------
+
+message ListDeadLettersRequest {
+  // AIP-160 filter string. Grammar (simple AND-only for v1):
+  //   field "=" string-literal { "AND" field "=" string-literal }
+  // Recognised fields: domain, correlation_id, rejection_type,
+  // source_component, occurred_after, occurred_before.
+  // Example: `domain = "player" AND rejection_type = "sequence_mismatch"`
+  string filter = 1;
+
+  // AIP-158 pagination. `page_size = 0` → server picks the default;
+  // values above the server cap are silently clamped (no error).
+  int32 page_size = 2;
+  string page_token = 3;
+}
+
+// "ok" payload for ListDeadLettersResponse.
+message ListDeadLettersOk {
+  repeated StoredDeadLetter entries = 1;
+  string next_page_token = 2;
+}
+
+// Envelope per the resilience contract — Health<T> concrete form.
+// `state.ok` populated on success, `state.degraded` on backend
+// unavailability. The SPA's per-tile fetch layer keys off this
+// discriminator.
+message ListDeadLettersResponse {
+  oneof state {
+    ListDeadLettersOk ok = 1;
+    ProblemDetails degraded = 2;
+  }
+  google.protobuf.Timestamp checked_at = 3;
+  // Backend identifier, e.g. "postgres-dlq" / "sqlite-dlq" /
+  // "noop". Lets the UI show which backend served the answer.
+  string source = 4;
+}
+
+// ----- GetDeadLetter ----------------------------------------------------
+
+message GetDeadLetterRequest {
+  int64 id = 1;
+}
+
+// Wrapper retains the `state` discriminator pattern: an "ok"
+// response with `entry` unset means "no row matches" (gRPC NOT_FOUND
+// is the wire-level signal — see status code mapping in the handler).
+message GetDeadLetterOk {
+  StoredDeadLetter entry = 1;
+}
+
+message GetDeadLetterResponse {
+  oneof state {
+    GetDeadLetterOk ok = 1;
+    ProblemDetails degraded = 2;
+  }
+  google.protobuf.Timestamp checked_at = 3;
+  string source = 4;
+}
+
+// ----- ReplayDeadLetter -------------------------------------------------
+
+// Replay semantics. Plan P5.
+//
+//   AS_IS           — preserve the original sequence on the rejected
+//                     command. Likely to fail again with
+//                     FAILED_PRECONDITION when state has moved on;
+//                     useful as a diagnostic "reproduce the failure"
+//                     mode.
+//   FRESH_SEQUENCE  — fetch the aggregate's current next_sequence
+//                     via EventQueryService and rewrite the command's
+//                     PageHeader.sequence before publishing. Best
+//                     chance of success but the payload may still
+//                     depend on stale state (operator's judgment).
+enum ReplayMode {
+  REPLAY_MODE_UNSPECIFIED = 0;
+  REPLAY_MODE_AS_IS = 1;
+  REPLAY_MODE_FRESH_SEQUENCE = 2;
+}
+
+message ReplayDeadLetterRequest {
+  int64 id = 1;
+  ReplayMode replay_mode = 2;
+}
+
+// Successful replay outcome. The dead-letter row stays in
+// `dlq_entries` (the operator can `Delete` it explicitly when
+// they've confirmed the new command flow); the replayed command
+// gets a NEW correlation_id and a `replayed_from_dlq_id` +
+// `original_correlation_id` metadata pair so downstream observers
+// can trace the lineage.
+message ReplayDeadLetterOk {
+  // Fresh correlation_id stamped on the replayed command.
+  string new_correlation_id = 1;
+  // RFC-3339 timestamp of when the replay was published.
+  google.protobuf.Timestamp replayed_at = 2;
+  // The mode that was applied. Echoed back so callers can confirm
+  // (esp. when REPLAY_MODE_UNSPECIFIED was sent → server defaults).
+  ReplayMode applied_mode = 3;
+}
+
+message ReplayDeadLetterResponse {
+  oneof state {
+    ReplayDeadLetterOk ok = 1;
+    ProblemDetails degraded = 2;
+  }
+  google.protobuf.Timestamp checked_at = 3;
+  string source = 4;
+}
+
+// ----- DeleteDeadLetter -------------------------------------------------
+
+message DeleteDeadLetterRequest {
+  int64 id = 1;
+}
+
+// Idempotent: `deleted = true` if a row was removed, `false` if no
+// row matched. Either is a success outcome.
+message DeleteDeadLetterOk {
+  bool deleted = 1;
+}
+
+message DeleteDeadLetterResponse {
+  oneof state {
+    DeleteDeadLetterOk ok = 1;
+    ProblemDetails degraded = 2;
+  }
+  google.protobuf.Timestamp checked_at = 3;
+  string source = 4;
+}
+
+// ----- Service ----------------------------------------------------------
+
+service DlqAdminService {
+  // List dead letters matching `filter`, paginated.
+  rpc ListDeadLetters(ListDeadLettersRequest) returns (ListDeadLettersResponse) {
+    option (google.api.http) = {
+      get: "/api/dlq"
+    };
+  }
+
+  // Fetch a single entry by primary key.
+  rpc GetDeadLetter(GetDeadLetterRequest) returns (GetDeadLetterResponse) {
+    option (google.api.http) = {
+      get: "/api/dlq/{id}"
+    };
+  }
+
+  // Delete a single entry. Idempotent.
+  rpc DeleteDeadLetter(DeleteDeadLetterRequest) returns (DeleteDeadLetterResponse) {
+    option (google.api.http) = {
+      delete: "/api/dlq/{id}"
+    };
+  }
+
+  // Replay a dead-letter entry through the command bus. The
+  // original row is left in place — operators delete explicitly
+  // after confirming the replay's downstream outcome.
+  rpc ReplayDeadLetter(ReplayDeadLetterRequest) returns (ReplayDeadLetterResponse) {
+    option (google.api.http) = {
+      post: "/api/dlq/{id}/replay"
+      body: "*"
+    };
+  }
+}

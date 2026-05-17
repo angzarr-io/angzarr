@@ -117,6 +117,7 @@ fn make_command_book(domain: &str, root: Uuid, sequence: u32) -> CommandBook {
         cover: Some(make_cover(domain, root)),
         pages: vec![CommandPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(sequence)),
             }),
             payload: Some(command_page::Payload::Command(Any {
@@ -131,6 +132,7 @@ fn make_command_book(domain: &str, root: Uuid, sequence: u32) -> CommandBook {
 fn make_event_page(seq: u32) -> EventPage {
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(page_header::SequenceType::Sequence(seq)),
         }),
         payload: Some(event_page::Payload::Event(Any {
@@ -146,6 +148,7 @@ fn make_fact_page() -> EventPage {
     use crate::proto::ExternalDeferredSequence;
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(page_header::SequenceType::ExternalDeferred(
                 ExternalDeferredSequence {
                     external_id: "test-external-id".to_string(),

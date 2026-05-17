@@ -26,6 +26,7 @@ pub mod proto_reflect;
 pub mod registration;
 pub mod repository;
 pub mod services;
+pub mod status;
 pub mod storage;
 pub mod transport;
 pub mod utils;

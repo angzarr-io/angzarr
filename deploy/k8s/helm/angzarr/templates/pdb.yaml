@@ -139,4 +139,24 @@ spec:
       angzarr.io/service: stream
 {{- end }}
 
+{{- /* Status PDB — keeps the ops console reachable during rolling
+       restarts and node drains. Multi-instance HA per the plan. */}}
+{{- if and .Values.infrastructure.status.enabled (gt (int (.Values.infrastructure.status.replicas | default 1)) 1) }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "angzarr.fullname" $ }}-status-pdb
+  labels:
+    {{- include "angzarr.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: infrastructure
+    angzarr.io/service: status
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "angzarr.selectorLabels" $ | nindent 6 }}
+      angzarr.io/service: status
+{{- end }}
+
 {{- end }}

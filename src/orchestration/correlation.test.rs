@@ -29,6 +29,7 @@ fn make_command_book(with_correlation: bool) -> CommandBook {
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(0)),
             }),
             payload: Some(command_page::Payload::Command(Any {

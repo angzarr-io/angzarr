@@ -31,6 +31,7 @@ fn make_test_command(domain: &str, root: Uuid) -> CommandBook {
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
+                sync_mode: None,
                 sequence_type: Some(page_header::SequenceType::Sequence(0)),
             }),
             payload: Some(command_page::Payload::Command(prost_types::Any {
@@ -136,11 +137,66 @@ fn test_from_event_processing_failure() {
         ..Default::default()
     };
 
+    let root_cause = CapturedError {
+        r#type: "tokio::time::error::Elapsed".to_string(),
+        message: "downstream timeout".to_string(),
+        frames: vec![StackFrame {
+            function: "tokio::time::sleep".to_string(),
+            module: "tokio".to_string(),
+            file: "tokio/src/time/sleep.rs".to_string(),
+            line: 100,
+            in_app: false,
+            ..StackFrame::default()
+        }],
+        mechanism: Some(ExceptionMechanism {
+            r#type: "chained".to_string(),
+            handled: true,
+            exception_id: 0,
+            parent_id: 0,
+            ..ExceptionMechanism::default()
+        }),
+        release: "angzarr-saga-orders@2.4.1".to_string(),
+        server_name: "saga-orders-0".to_string(),
+    };
+    let outer = CapturedError {
+        r#type: "saga::HandlerError".to_string(),
+        message: "Saga handler failed".to_string(),
+        frames: vec![
+            StackFrame {
+                function: "saga::handle_event".to_string(),
+                module: "orders_saga".to_string(),
+                file: "src/saga.rs".to_string(),
+                line: 42,
+                in_app: true,
+                ..StackFrame::default()
+            },
+            StackFrame {
+                function: "dispatch".to_string(),
+                module: "angzarr_core".to_string(),
+                file: "src/orchestration/saga/mod.rs".to_string(),
+                line: 318,
+                in_app: false,
+                ..StackFrame::default()
+            },
+        ],
+        mechanism: Some(ExceptionMechanism {
+            r#type: "generic".to_string(),
+            handled: true,
+            exception_id: 1,
+            parent_id: 0,
+            ..ExceptionMechanism::default()
+        }),
+        release: "angzarr-saga-orders@2.4.1".to_string(),
+        server_name: "saga-orders-0".to_string(),
+    };
+    let chain = vec![root_cause, outer];
+
     let dl = AngzarrDeadLetter::from_event_processing_failure(
         &events,
         "Saga handler failed",
         3,
         false,
+        chain.clone(),
         "saga-order-fulfillment",
         "saga",
     );
@@ -156,6 +212,17 @@ fn test_from_event_processing_failure() {
             assert_eq!(details.error, "Saga handler failed");
             assert_eq!(details.retry_count, 3);
             assert!(!details.is_transient);
+            assert_eq!(details.stack_trace, chain);
+            // chain is most-causal-first; the originating caught error
+            // is the last element.
+            assert_eq!(
+                details.stack_trace.last().unwrap().r#type,
+                "saga::HandlerError"
+            );
+            assert_eq!(
+                details.stack_trace.first().unwrap().r#type,
+                "tokio::time::error::Elapsed"
+            );
         }
         _ => panic!("Expected EventProcessingFailed details"),
     }
@@ -322,6 +389,123 @@ fn test_to_proto_sequence_mismatch() {
     assert_eq!(proto.source_component_type, "aggregate");
 }
 
+/// Proto conversion preserves the flat captured-error chain.
+///
+/// Operators read the chain from the status console; frames, `in_app`,
+/// mechanism linkage (exception_id / parent_id), release, and
+/// server_name must all survive the Rust→proto encode. Chain order is
+/// most-causal-first; the originating caught error is the LAST element.
+#[test]
+fn test_to_proto_preserves_captured_stack_trace() {
+    let events = EventBook::default();
+    let root_cause = CapturedError {
+        r#type: "DbError".to_string(),
+        message: "inner".to_string(),
+        frames: vec![StackFrame {
+            function: "lookup".to_string(),
+            module: "db".to_string(),
+            file: "src/db.rs".to_string(),
+            line: 100,
+            in_app: false,
+            ..StackFrame::default()
+        }],
+        mechanism: Some(ExceptionMechanism {
+            r#type: "chained".to_string(),
+            handled: true,
+            exception_id: 0,
+            parent_id: 0,
+            ..ExceptionMechanism::default()
+        }),
+        release: "angzarr-saga@1.0.0".to_string(),
+        server_name: "pod-a".to_string(),
+    };
+    let outer = CapturedError {
+        r#type: "HandlerError".to_string(),
+        message: "outer".to_string(),
+        frames: vec![StackFrame {
+            function: "handle_event".to_string(),
+            module: "orders_saga".to_string(),
+            file: "src/saga.rs".to_string(),
+            line: 42,
+            context_line: "    handle(evt)?;".to_string(),
+            in_app: true,
+            ..StackFrame::default()
+        }],
+        mechanism: Some(ExceptionMechanism {
+            r#type: "generic".to_string(),
+            handled: true,
+            exception_id: 1,
+            parent_id: 0,
+            ..ExceptionMechanism::default()
+        }),
+        release: "angzarr-saga@1.0.0".to_string(),
+        server_name: "pod-a".to_string(),
+    };
+
+    let dl = AngzarrDeadLetter::from_event_processing_failure(
+        &events,
+        "outer",
+        1,
+        false,
+        vec![root_cause, outer],
+        "saga",
+        "saga",
+    );
+
+    let proto = dl.to_proto();
+
+    let proto_details = match proto.rejection_details {
+        Some(crate::proto::angzarr_dead_letter::RejectionDetails::EventProcessingFailed(d)) => d,
+        _ => panic!("Expected EventProcessingFailed proto details"),
+    };
+    assert_eq!(proto_details.stack_trace.len(), 2);
+
+    let proto_root = &proto_details.stack_trace[0];
+    assert_eq!(proto_root.r#type, "DbError");
+    assert_eq!(proto_root.message, "inner");
+    assert_eq!(proto_root.frames.len(), 1);
+    assert_eq!(proto_root.frames[0].function, "lookup");
+    assert!(!proto_root.frames[0].in_app);
+    assert_eq!(proto_root.mechanism.as_ref().unwrap().exception_id, 0);
+    assert_eq!(proto_root.release, "angzarr-saga@1.0.0");
+    assert_eq!(proto_root.server_name, "pod-a");
+
+    let proto_outer = &proto_details.stack_trace[1];
+    assert_eq!(proto_outer.r#type, "HandlerError");
+    assert_eq!(proto_outer.frames[0].context_line, "    handle(evt)?;");
+    assert!(proto_outer.frames[0].in_app);
+    let mech = proto_outer.mechanism.as_ref().unwrap();
+    assert_eq!(mech.exception_id, 1);
+    assert_eq!(mech.parent_id, 0);
+}
+
+/// Absent capture round-trips as an empty repeated field.
+///
+/// Producers may legitimately have no backtrace (e.g., the handler
+/// returned a bare error). An empty Rust `Vec` must encode as an
+/// empty proto repeated field — not a single default-valued entry.
+#[test]
+fn test_to_proto_omits_absent_stack_trace() {
+    let events = EventBook::default();
+    let dl = AngzarrDeadLetter::from_event_processing_failure(
+        &events,
+        "err",
+        1,
+        false,
+        Vec::new(),
+        "saga",
+        "saga",
+    );
+
+    let proto = dl.to_proto();
+
+    let proto_details = match proto.rejection_details {
+        Some(crate::proto::angzarr_dead_letter::RejectionDetails::EventProcessingFailed(d)) => d,
+        _ => panic!("Expected EventProcessingFailed proto details"),
+    };
+    assert!(proto_details.stack_trace.is_empty());
+}
+
 // ============================================================================
 // Reason Type Tests
 // ============================================================================
@@ -341,8 +525,15 @@ fn test_reason_type_sequence_mismatch() {
 #[test]
 fn test_reason_type_event_processing_failed() {
     let events = EventBook::default();
-    let dl =
-        AngzarrDeadLetter::from_event_processing_failure(&events, "err", 1, false, "saga", "saga");
+    let dl = AngzarrDeadLetter::from_event_processing_failure(
+        &events,
+        "err",
+        1,
+        false,
+        Vec::new(),
+        "saga",
+        "saga",
+    );
     assert_eq!(dl.reason_type(), "event_processing_failed");
 }
 

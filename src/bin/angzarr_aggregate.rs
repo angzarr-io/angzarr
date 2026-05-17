@@ -216,6 +216,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = Server::builder()
         .layer(grpc_trace_layer())
         .add_service(health_service)
+        .add_service(angzarr::proto_reflect::reflection_service())
         .add_service(
             CommandHandlerCoordinatorServiceServer::new(aggregate_service)
                 .max_decoding_message_size(msg_size)

@@ -29,6 +29,7 @@ fn make_test_event(
 
     EventPage {
         header: Some(PageHeader {
+            sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(sequence)),
         }),
         created_at: Some(prost_types::Timestamp {
