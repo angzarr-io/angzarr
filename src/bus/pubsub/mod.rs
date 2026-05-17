@@ -27,6 +27,7 @@ use super::traits::EventBus;
 
 pub use bus::PubSubEventBus;
 pub use config::PubSubConfig;
+pub use consumer::build_subscription_config;
 
 /// Attribute name for domain (for filtering).
 const DOMAIN_ATTR: &str = "domain";

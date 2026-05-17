@@ -586,3 +586,636 @@ mod ipc_bus_construction_tests {
         assert!(config.subscriber_pipe().is_none());
     }
 }
+
+// ============================================================================
+// Handler Failure Checkpoint Gating Tests (C-10)
+// ============================================================================
+//
+// The IPC consumer must NOT advance the checkpoint when a handler returns
+// `Err`. Advancing on failure permanently loses the event: a restarted
+// subscriber would skip past the failed event entirely (checkpoint says
+// "already processed seq=N"), so the broker-equivalent property of
+// at-least-once delivery is silently broken.
+//
+// The canonical correct pattern lives in `src/bus/kafka/bus.rs:149` — the
+// Kafka consumer only commits the offset when `dispatch_to_handlers`
+// returns `true`. Before C-10, IPC's local `dispatch_to_handlers` helper
+// discarded the return value of the shared `bus::dispatch::dispatch_to_handlers`
+// (in fact didn't call the shared helper at all — it called handlers
+// directly and unconditionally `checkpoint.update`d afterwards).
+//
+// These tests pin down: handler `Err` ⇒ checkpoint stays at the prior
+// value; handler `Ok` ⇒ checkpoint advances.
+mod handler_failure_checkpoint_tests {
+    use super::*;
+    use crate::bus::BusError;
+    use crate::proto::{event_page, page_header::SequenceType, Cover, EventPage, PageHeader, Uuid};
+    use futures::future::BoxFuture;
+    use prost_types::Any;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+    use std::sync::Arc as StdArc;
+    use tempfile::tempdir;
+
+    /// Test handler that always succeeds, tracking call count.
+    struct AlwaysOkHandler {
+        call_count: StdArc<AtomicUsize>,
+    }
+
+    impl EventHandler for AlwaysOkHandler {
+        fn handle(
+            &self,
+            _book: Arc<EventBook>,
+        ) -> BoxFuture<'static, std::result::Result<(), BusError>> {
+            let count = self.call_count.clone();
+            Box::pin(async move {
+                count.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(())
+            })
+        }
+    }
+
+    /// Test handler that always fails, tracking call count.
+    struct AlwaysErrHandler {
+        call_count: StdArc<AtomicUsize>,
+    }
+
+    impl EventHandler for AlwaysErrHandler {
+        fn handle(
+            &self,
+            _book: Arc<EventBook>,
+        ) -> BoxFuture<'static, std::result::Result<(), BusError>> {
+            let count = self.call_count.clone();
+            Box::pin(async move {
+                count.fetch_add(1, AtomicOrdering::SeqCst);
+                Err(BusError::ProjectorFailed {
+                    name: "ipc-c10-test".to_string(),
+                    message: "synthetic handler failure".to_string(),
+                })
+            })
+        }
+    }
+
+    /// Build an EventBook carrying a stable root and a known sequence number,
+    /// so the checkpoint key (`{domain}.{root_hex}` -> last seq) is well-defined.
+    fn make_book_with_sequence(domain: &str, root: &[u8], sequence: u32) -> EventBook {
+        EventBook {
+            cover: Some(Cover {
+                domain: domain.to_string(),
+                root: Some(Uuid {
+                    value: root.to_vec(),
+                }),
+                correlation_id: "c10-test".to_string(),
+                edition: None,
+            }),
+            pages: vec![EventPage {
+                header: Some(PageHeader {
+                    sync_mode: None,
+                    sequence_type: Some(SequenceType::Sequence(sequence)),
+                }),
+                created_at: None,
+                payload: Some(event_page::Payload::Event(Any {
+                    type_url: "type.example/TestEvent".to_string(),
+                    value: vec![1, 2, 3, sequence as u8],
+                })),
+                ..Default::default()
+            }],
+            snapshot: None,
+            next_sequence: sequence + 1,
+        }
+    }
+
+    fn make_checkpoint() -> (tempfile::TempDir, StdArc<Checkpoint>) {
+        let dir = tempdir().unwrap();
+        let config = CheckpointConfig::for_subscriber(dir.path(), "c10-handler-tests");
+        let checkpoint = StdArc::new(Checkpoint::new(config));
+        (dir, checkpoint)
+    }
+
+    /// Run the synchronous `dispatch_to_handlers` helper on a blocking task
+    /// so its inner `rt.block_on(...)` doesn't trip "Cannot start a runtime
+    /// from within a runtime" when called from a `#[tokio::test]`.
+    async fn run_dispatch(
+        book: Arc<EventBook>,
+        handlers: Arc<RwLock<Vec<Box<dyn EventHandler>>>>,
+        checkpoint: StdArc<Checkpoint>,
+    ) {
+        let rt = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            dispatch_to_handlers(book, &handlers, &checkpoint, &rt);
+        })
+        .await
+        .expect("spawn_blocking join")
+    }
+
+    /// Baseline behavior: when ALL handlers succeed, the checkpoint advances
+    /// to the event's max sequence. This is the "ack" semantic — equivalent
+    /// to Kafka's `commit_message` on a successful dispatch.
+    #[tokio::test]
+    async fn handler_ok_advances_checkpoint() {
+        let (_dir, checkpoint) = make_checkpoint();
+
+        let count = StdArc::new(AtomicUsize::new(0));
+        let handlers: Arc<RwLock<Vec<Box<dyn EventHandler>>>> =
+            Arc::new(RwLock::new(vec![Box::new(AlwaysOkHandler {
+                call_count: count.clone(),
+            })]));
+
+        let root = b"c10-root-ok".to_vec();
+        let book = Arc::new(make_book_with_sequence("orders", &root, 42));
+
+        run_dispatch(book, handlers, checkpoint.clone()).await;
+
+        assert_eq!(
+            count.load(AtomicOrdering::SeqCst),
+            1,
+            "handler must be invoked exactly once"
+        );
+
+        let stored = checkpoint.get("orders", &root).await;
+        assert_eq!(
+            stored,
+            Some(42),
+            "successful handler must advance checkpoint to event sequence"
+        );
+    }
+
+    /// C-10 REGRESSION: when a handler returns `Err`, the checkpoint must
+    /// NOT advance — otherwise the consumer permanently skips past a
+    /// never-processed event on the next restart.
+    ///
+    /// Baseline (pre-fix) advances the checkpoint regardless of the handler
+    /// result, so this test fails until the fix gates the
+    /// `checkpoint.update(...)` call on the dispatch success bool.
+    #[tokio::test]
+    async fn handler_err_does_not_advance_checkpoint() {
+        let (_dir, checkpoint) = make_checkpoint();
+
+        let count = StdArc::new(AtomicUsize::new(0));
+        let handlers: Arc<RwLock<Vec<Box<dyn EventHandler>>>> =
+            Arc::new(RwLock::new(vec![Box::new(AlwaysErrHandler {
+                call_count: count.clone(),
+            })]));
+
+        let root = b"c10-root-err".to_vec();
+        let book = Arc::new(make_book_with_sequence("orders", &root, 99));
+
+        run_dispatch(book, handlers, checkpoint.clone()).await;
+
+        assert_eq!(
+            count.load(AtomicOrdering::SeqCst),
+            1,
+            "handler must be invoked exactly once even on failure"
+        );
+
+        let stored = checkpoint.get("orders", &root).await;
+        assert_eq!(
+            stored, None,
+            "failed handler must NOT advance checkpoint — restarted consumer \
+             must re-deliver this event, not skip past it (C-10 regression)"
+        );
+    }
+
+    /// Mixed: one handler succeeds, one fails. The whole dispatch counts as
+    /// failed (the failed handler hasn't processed this event), so the
+    /// checkpoint must still NOT advance. This matches the documented
+    /// contract on `bus::dispatch::dispatch_to_handlers`: "Returns `true`
+    /// if all handlers succeeded, `false` if any failed."
+    ///
+    /// Operational note: the successful handler will see the event again
+    /// on redelivery. Idempotency at the handler level (sequence dedup,
+    /// external_id) is what makes this safe — that's the same property
+    /// Kafka relies on (per `kafka/bus.rs:148`).
+    #[tokio::test]
+    async fn mixed_ok_err_does_not_advance_checkpoint() {
+        let (_dir, checkpoint) = make_checkpoint();
+
+        let ok_count = StdArc::new(AtomicUsize::new(0));
+        let err_count = StdArc::new(AtomicUsize::new(0));
+        let handlers: Arc<RwLock<Vec<Box<dyn EventHandler>>>> = Arc::new(RwLock::new(vec![
+            Box::new(AlwaysOkHandler {
+                call_count: ok_count.clone(),
+            }),
+            Box::new(AlwaysErrHandler {
+                call_count: err_count.clone(),
+            }),
+        ]));
+
+        let root = b"c10-root-mixed".to_vec();
+        let book = Arc::new(make_book_with_sequence("orders", &root, 7));
+
+        run_dispatch(book, handlers, checkpoint.clone()).await;
+
+        assert_eq!(ok_count.load(AtomicOrdering::SeqCst), 1);
+        assert_eq!(err_count.load(AtomicOrdering::SeqCst), 1);
+
+        assert_eq!(
+            checkpoint.get("orders", &root).await,
+            None,
+            "any handler failure must block checkpoint advance (C-10)"
+        );
+    }
+}
+
+// ============================================================================
+// Concurrent Publisher Framing Tests (C-09)
+// ============================================================================
+//
+// POSIX guarantees write() atomicity on a pipe only for buffers ≤ PIPE_BUF
+// (4 KiB on Linux). The publish path performs TWO sequential `write_all` calls
+// per message (4-byte length prefix, then body). When multiple tokio tasks
+// publish concurrently to the same pipe, the kernel may interleave those
+// writes, corrupting the frame and desyncing the reader indefinitely.
+//
+// The second variant: when the first `write_all(&len_bytes)` succeeds and the
+// second `write_all(&serialized)` fails with `WouldBlock`, the publisher
+// returns Err but leaves a 4-byte phantom prefix in the pipe. The reader then
+// reads the next publisher's frame body as if it were a new message length.
+//
+// These tests verify that N concurrent publishers each emit intact,
+// length-prefixed, decode-clean EventBook frames to a shared pipe.
+mod concurrent_publisher_framing_tests {
+    use super::*;
+    use crate::proto::Cover;
+    use std::io::Read as IoRead;
+    use std::sync::Arc as StdArc;
+    use std::thread;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    /// Build an EventBook whose encoded size is well above PIPE_BUF (4 KiB).
+    ///
+    /// The cover's correlation_id is the test marker — each publisher uses a
+    /// distinct prefix so the reader can verify every message arrived intact
+    /// and originated from a known publisher.
+    fn make_large_event_book(marker: &str, padding_bytes: usize) -> EventBook {
+        // Pad correlation_id with a recognizable filler so the encoded message
+        // exceeds PIPE_BUF.
+        let mut correlation_id = String::with_capacity(marker.len() + padding_bytes);
+        correlation_id.push_str(marker);
+        correlation_id.extend(std::iter::repeat_n('x', padding_bytes));
+        EventBook {
+            cover: Some(Cover {
+                domain: "publisher-test".to_string(),
+                root: None,
+                correlation_id,
+                edition: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Read every length-prefixed frame from `reader` until EOF.
+    ///
+    /// Returns the list of decoded body bytes for each frame. If a length
+    /// prefix points beyond the available bytes (truncation) or the body
+    /// cannot be fully read, returns an Err describing the desync.
+    fn drain_frames(reader: &mut impl IoRead) -> std::io::Result<Vec<Vec<u8>>> {
+        let mut frames = Vec::new();
+        loop {
+            let mut len_buf = [0u8; 4];
+            match reader.read_exact(&mut len_buf) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e),
+            }
+            let len = u32::from_be_bytes(len_buf) as usize;
+            // 10 MB matches the production MAX_MESSAGE_SIZE — anything larger
+            // proves the framing is corrupt (interleaved bytes happened to
+            // form a plausible-looking length prefix).
+            if len > 10 * 1024 * 1024 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("frame length {} exceeds MAX_MESSAGE_SIZE", len),
+                ));
+            }
+            let mut body = vec![0u8; len];
+            reader.read_exact(&mut body)?;
+            frames.push(body);
+        }
+        Ok(frames)
+    }
+
+    /// Concurrent publishers writing >PIPE_BUF messages must not corrupt
+    /// the length-prefixed framing.
+    ///
+    /// Spawns N publisher *OS threads* (not tokio tasks — we want real
+    /// parallelism on multiple cores, with a barrier to synchronize the
+    /// start of each publisher's write). Each publisher publishes one
+    /// EventBook ≫ PIPE_BUF (so the kernel cannot serve any single
+    /// `write()` atomically). A blocking reader thread reads the pipe
+    /// until EOF.
+    ///
+    /// On baseline (before C-09), the 4-byte length prefix and body are
+    /// two separate `write_all` calls on an `O_NONBLOCK` pipe; the kernel
+    /// may interleave them so the reader sees a length prefix followed by
+    /// the WRONG body and desyncs. Many iterations are used to make the
+    /// race deterministic — even a small race window will manifest given
+    /// enough trips through the critical section.
+    ///
+    /// After the C-09 fix (per-pipe mutex + single-buffer write), each
+    /// frame lands in the pipe intact regardless of contention.
+    #[test]
+    fn test_concurrent_publishers_preserve_framing() {
+        // Multi-thread tokio runtime so `bus.publish().await` can resolve
+        // its synchronous syscalls without forcing tasks onto one OS thread.
+        let rt = StdArc::new(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(8)
+                .enable_all()
+                .build()
+                .unwrap(),
+        );
+
+        // N=8 publisher threads, each publishing M=32 iterations. The wider
+        // the bus contention AND the more trips through the critical
+        // section, the more reliably the interleave bug manifests. Even a
+        // small per-write race window will fire within 256 frames.
+        //
+        // Each message is padded to ~6 KiB body — bigger than PIPE_BUF
+        // (4 KiB on Linux) so the kernel cannot guarantee atomicity on a
+        // single `write()`, but small enough that the kernel typically
+        // accepts each `write_all` in one syscall when the pipe has space.
+        // The reader drains the pipe in a tight loop so back-pressure
+        // (which would trigger the orthogonal WouldBlock phantom-prefix
+        // variant) is avoided here — that variant has its own dedicated
+        // test below.
+        const NUM_PUBLISHERS: usize = 8;
+        const ITERATIONS: usize = 32;
+        const PADDING: usize = 6 * 1024;
+        const TOTAL_FRAMES: usize = NUM_PUBLISHERS * ITERATIONS;
+
+        let dir = tempdir().unwrap();
+        let pipe_path = dir.path().join("subscriber-c09.pipe");
+
+        // Create the FIFO. The broker uses mkfifo with S_IRUSR|S_IWUSR.
+        {
+            use nix::sys::stat::Mode;
+            use nix::unistd::mkfifo;
+            mkfifo(&pipe_path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+        }
+
+        // Pre-build the SubscriberInfo so the publisher knows where to write.
+        let subscriber = SubscriberInfo {
+            name: "c09".to_string(),
+            domains: vec![], // accept all
+            pipe_path: pipe_path.clone(),
+        };
+        let config = IpcConfig::publisher_with_subscribers(dir.path(), vec![subscriber]);
+        let bus = StdArc::new(IpcEventBus::new(config));
+
+        // Reader: open the FIFO in blocking mode in a std thread. The open()
+        // call blocks until at least one writer connects.
+        let pipe_path_reader = pipe_path.clone();
+        let reader_handle = thread::spawn(move || -> std::io::Result<Vec<Vec<u8>>> {
+            let mut reader = File::open(&pipe_path_reader)?;
+            // Enlarge the kernel pipe buffer so producers don't have to
+            // wait for the reader between every write — keeps the test
+            // focused on the framing-interleave bug, not throughput.
+            // Linux F_SETPIPE_SZ; capped at /proc/sys/fs/pipe-max-size
+            // (typically 1 MiB).
+            unsafe {
+                use std::os::unix::io::AsRawFd;
+                const F_SETPIPE_SZ: i32 = 1031;
+                let _ = libc::fcntl(reader.as_raw_fd(), F_SETPIPE_SZ, 1024 * 1024);
+            }
+            drain_frames(&mut reader)
+        });
+
+        // Hold one writer FD open from the test thread for the entire
+        // duration of the test. The IpcEventBus opens a fresh writer FD
+        // per publish; under serialization-by-mutex, there are brief
+        // windows where the previous publisher's FD has closed but the
+        // next has not yet opened. POSIX FIFO semantics make the reader
+        // see EOF in any such window, which would prematurely terminate
+        // `drain_frames` even though many more writes are coming. The
+        // sentinel writer FD prevents this without interfering with the
+        // test's writes (it never writes anything). Retry the open until
+        // the reader's open() lands (open with O_NONBLOCK returns ENXIO
+        // if no reader is yet attached).
+        let sentinel_writer = {
+            let mut attempt = 0;
+            loop {
+                match OpenOptions::new()
+                    .write(true)
+                    .custom_flags(libc::O_NONBLOCK)
+                    .open(&pipe_path)
+                {
+                    Ok(f) => break f,
+                    Err(e) if attempt < 50 => {
+                        attempt += 1;
+                        thread::sleep(Duration::from_millis(10));
+                        if attempt == 50 {
+                            panic!("sentinel writer open never succeeded: {}", e);
+                        }
+                    }
+                    Err(e) => panic!("sentinel writer open never succeeded: {}", e),
+                }
+            }
+        };
+
+        // Brief additional pause for stability of the publishers' own opens.
+        thread::sleep(Duration::from_millis(20));
+
+        // Barrier so all publisher threads start their write loop together
+        // (maximizes race-window overlap).
+        let barrier = StdArc::new(std::sync::Barrier::new(NUM_PUBLISHERS));
+
+        let mut worker_handles = Vec::with_capacity(NUM_PUBLISHERS);
+        for pub_idx in 0..NUM_PUBLISHERS {
+            let bus = bus.clone();
+            let rt = rt.clone();
+            let barrier = barrier.clone();
+            worker_handles.push(thread::spawn(move || -> Result<()> {
+                barrier.wait();
+                for iter in 0..ITERATIONS {
+                    let marker = format!("PUB-{:02}-{:02}:", pub_idx, iter);
+                    let book = Arc::new(make_large_event_book(&marker, PADDING));
+                    rt.block_on(bus.publish(book))?;
+                }
+                Ok(())
+            }));
+        }
+
+        // Collect publisher results.
+        for (idx, h) in worker_handles.into_iter().enumerate() {
+            h.join()
+                .unwrap_or_else(|_| panic!("publisher thread {} panicked", idx))
+                .unwrap_or_else(|e| panic!("publisher thread {} failed: {}", idx, e));
+        }
+
+        // Drop the bus AND the sentinel writer so all writer FDs close
+        // and the reader sees EOF.
+        drop(bus);
+        drop(sentinel_writer);
+
+        let frames = reader_handle
+            .join()
+            .expect("reader thread panicked")
+            .expect("reader saw desynced framing");
+
+        // Every frame must decode as a valid EventBook AND carry a unique
+        // publisher marker. Missing or duplicate frames would point at a
+        // fix that drops or duplicates messages.
+        assert_eq!(
+            frames.len(),
+            TOTAL_FRAMES,
+            "expected exactly {} intact frames, got {}",
+            TOTAL_FRAMES,
+            frames.len()
+        );
+
+        let mut seen = std::collections::HashSet::new();
+        for (idx, body) in frames.iter().enumerate() {
+            let book = EventBook::decode(&body[..])
+                .unwrap_or_else(|e| panic!("frame {} failed to decode: {}", idx, e));
+            let corr = book
+                .cover
+                .as_ref()
+                .map(|c| c.correlation_id.as_str())
+                .unwrap_or("");
+            // Marker format "PUB-NN-MM:" is 10 chars.
+            let marker = corr.get(0..10).unwrap_or("");
+            assert!(
+                marker.starts_with("PUB-") && marker.ends_with(':'),
+                "frame {} marker {:?} not a recognized publisher",
+                idx,
+                marker
+            );
+            assert!(
+                seen.insert(marker.to_string()),
+                "frame {} duplicates publisher iteration {}",
+                idx,
+                marker
+            );
+        }
+    }
+
+    /// Back-pressure: when the pipe fills (slow reader), publishers must
+    /// block rather than leave a half-written frame in the pipe.
+    ///
+    /// On baseline (before C-09 fix), the publish path opened the FIFO
+    /// O_NONBLOCK and did TWO sequential `write_all` calls — when the
+    /// pipe filled between the two writes, the publisher returned Err
+    /// having already written the 4-byte length prefix. The reader read
+    /// those 4 bytes as the length of the NEXT frame and ran off the end
+    /// of available data (or worse, decoded garbage indefinitely).
+    ///
+    /// After the C-09 fix, the FD has O_NONBLOCK cleared before any
+    /// `write_all`, so the publisher blocks on a full pipe until the
+    /// reader drains — no half-written frame is ever left behind.
+    ///
+    /// This test fills the pipe with a slow reader, publishes many
+    /// frames bigger than the pipe buffer (forcing back-pressure), then
+    /// asserts every frame is read intact and in publisher order.
+    #[test]
+    fn test_publish_blocks_on_full_pipe_without_corruption() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        let pipe_path = dir.path().join("subscriber-c09-bp.pipe");
+
+        {
+            use nix::sys::stat::Mode;
+            use nix::unistd::mkfifo;
+            mkfifo(&pipe_path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+        }
+
+        let subscriber = SubscriberInfo {
+            name: "c09-bp".to_string(),
+            domains: vec![],
+            pipe_path: pipe_path.clone(),
+        };
+        let config = IpcConfig::publisher_with_subscribers(dir.path(), vec![subscriber]);
+        let bus = StdArc::new(IpcEventBus::new(config));
+
+        // Reader: open the FIFO, then drain SLOWLY — 8 ms between every
+        // 4-byte read attempt of the length prefix and every body read.
+        // This pace is well below the publisher's throughput, so the pipe
+        // fills repeatedly and the publisher must block.
+        let pipe_path_reader = pipe_path.clone();
+        let reader_handle = thread::spawn(move || -> std::io::Result<Vec<Vec<u8>>> {
+            let mut reader = File::open(&pipe_path_reader)?;
+            let mut frames = Vec::new();
+            loop {
+                let mut len_buf = [0u8; 4];
+                match reader.read_exact(&mut len_buf) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(e) => return Err(e),
+                }
+                let len = u32::from_be_bytes(len_buf) as usize;
+                if len > 10 * 1024 * 1024 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!("frame length {} exceeds MAX_MESSAGE_SIZE", len),
+                    ));
+                }
+                let mut body = vec![0u8; len];
+                reader.read_exact(&mut body)?;
+                frames.push(body);
+                // Throttle the reader.
+                thread::sleep(Duration::from_millis(8));
+            }
+            Ok(frames)
+        });
+
+        thread::sleep(Duration::from_millis(50));
+
+        // Publish many large frames so the pipe stays saturated for the
+        // duration of the test. Each frame body is ~32 KiB; default pipe
+        // buffer is 64 KiB, so the publisher will routinely have to wait
+        // for the reader to drain.
+        const NUM_FRAMES: usize = 12;
+        const PADDING: usize = 32 * 1024;
+
+        rt.block_on(async {
+            for i in 0..NUM_FRAMES {
+                let marker = format!("BP-{:02}:", i);
+                let book = Arc::new(make_large_event_book(&marker, PADDING));
+                bus.publish(book)
+                    .await
+                    .unwrap_or_else(|e| panic!("publish under back-pressure must not fail: {}", e));
+            }
+        });
+
+        // Closing all writers releases the reader from its `read_exact`.
+        drop(bus);
+
+        let frames = reader_handle
+            .join()
+            .expect("reader thread panicked")
+            .expect("reader saw desynced framing under back-pressure");
+
+        // Every frame must be intact and in publisher order — back-pressure
+        // must not drop, duplicate, or reorder messages from a single
+        // publisher.
+        assert_eq!(
+            frames.len(),
+            NUM_FRAMES,
+            "expected exactly {} intact frames, got {}",
+            NUM_FRAMES,
+            frames.len()
+        );
+        for (idx, body) in frames.iter().enumerate() {
+            let book = EventBook::decode(&body[..])
+                .unwrap_or_else(|e| panic!("frame {} failed to decode: {}", idx, e));
+            let corr = book
+                .cover
+                .as_ref()
+                .map(|c| c.correlation_id.as_str())
+                .unwrap_or("");
+            let expected = format!("BP-{:02}:", idx);
+            assert!(
+                corr.starts_with(&expected),
+                "frame {} marker {:?} does not start with {:?} (ordering broken under back-pressure)",
+                idx,
+                corr.get(0..expected.len()).unwrap_or(""),
+                expected
+            );
+        }
+    }
+}

@@ -3,10 +3,11 @@
 //! Publishers: Read subscriber list from env var, write directly to pipes.
 //! Subscribers: Read from their named pipe.
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -14,7 +15,7 @@ use nix::libc;
 
 use async_trait::async_trait;
 use prost::Message;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
 use tracing::{debug, error, info, warn};
 
@@ -109,7 +110,24 @@ fn should_process_message(
     true
 }
 
-/// Dispatch an EventBook to handlers and update checkpoint.
+/// Dispatch an EventBook to handlers and (conditionally) advance the checkpoint.
+///
+/// C-10 contract: the checkpoint advances ONLY when every handler returns
+/// `Ok`. A failing handler must leave the checkpoint at its prior value
+/// so that, on consumer restart, the event is re-delivered rather than
+/// silently skipped. This matches Kafka's `commit_message`-on-success
+/// pattern (`src/bus/kafka/bus.rs:149`).
+///
+/// Note that, unlike the broker-backed transports, the IPC pipe has no
+/// "redeliver this message" semantic on its own — the kernel pipe is a
+/// one-shot byte stream. Holding back the checkpoint here means that
+/// after a crash/restart, the consumer relies on the broker side (or
+/// the upstream EventStore) to replay the event from its persisted
+/// position. In practice, for in-process IPC the checkpoint IS the
+/// retry boundary: not advancing on failure is the only mechanism we
+/// have to avoid silent loss, but it does NOT cause immediate
+/// re-delivery from the current pipe stream — that's a broker
+/// limitation, not a bug in this fix.
 fn dispatch_to_handlers(
     book: Arc<EventBook>,
     handlers: &Arc<RwLock<Vec<Box<dyn EventHandler>>>>,
@@ -125,14 +143,22 @@ fn dispatch_to_handlers(
     let max_sequence = max_page_sequence(&book);
 
     rt.block_on(async {
-        let handlers_guard = handlers.read().await;
-        for handler in handlers_guard.iter() {
-            if let Err(e) = handler.handle(book.clone()).await {
-                error!(error = %e, "Handler failed");
-            }
+        // Delegate to the shared dispatch helper so the success bool is
+        // computed the same way every transport computes it.
+        let all_succeeded = crate::bus::dispatch::dispatch_to_handlers(handlers, &book).await;
+
+        // Advance the checkpoint only on full success. Any handler
+        // failure leaves the checkpoint at its prior value so the event
+        // is eligible for re-processing.
+        if !all_succeeded {
+            warn!(
+                routing_key = %routing_key,
+                sequence = ?max_sequence,
+                "Handler failure: leaving checkpoint unadvanced for redelivery (C-10)"
+            );
+            return;
         }
 
-        // Update checkpoint after successful handler dispatch
         if let (Some(root), Some(seq)) = (&root_bytes, max_sequence) {
             checkpoint.update(&routing_key, root, seq).await;
         }
@@ -394,6 +420,27 @@ pub struct IpcEventBus {
     checkpoint: Arc<Checkpoint>,
     /// Shutdown signal for the consumer task.
     shutdown: Arc<AtomicBool>,
+    /// Per-subscriber-pipe write mutex.
+    ///
+    /// Serializes the length-prefix + body write so intra-process publishers
+    /// can't interleave their frames. POSIX guarantees atomic pipe writes only
+    /// for buffers ≤ PIPE_BUF (4 KiB on Linux); event books routinely exceed
+    /// that. Holding this mutex around a single-buffer `write_all` (length
+    /// prefix concatenated with body) ensures that intra-process publishers
+    /// emit complete frames atomically with respect to each other and that a
+    /// partial-failure (WouldBlock) cannot leave a phantom length prefix in
+    /// the pipe. See C-09 in plans/deep-review-remediation.md.
+    ///
+    /// Per-subscriber granularity means publishes to different subscribers
+    /// stay parallel; only writes to the SAME pipe are serialized.
+    ///
+    /// **Cross-process scope**: this mutex serializes ONLY publishers within
+    /// the same process. When multiple processes publish to the same FIFO,
+    /// the kernel still guarantees atomicity only for writes ≤ PIPE_BUF.
+    /// In practice the framework's in-process bus is the dominant contention
+    /// model; cross-process publishers should use a transport with native
+    /// fan-out semantics (AMQP, Kafka, NATS).
+    pipe_locks: Arc<RwLock<HashMap<PathBuf, Arc<Mutex<()>>>>>,
 }
 
 impl IpcEventBus {
@@ -409,7 +456,25 @@ impl IpcEventBus {
             handlers: Arc::new(RwLock::new(Vec::new())),
             consumer_task: Arc::new(RwLock::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
+            pipe_locks: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Get (or lazily create) the per-pipe write mutex for `pipe_path`.
+    ///
+    /// Used to serialize length-prefix + body writes within this process so
+    /// concurrent publishers cannot interleave their frames. See C-09.
+    async fn pipe_lock(&self, pipe_path: &Path) -> Arc<Mutex<()>> {
+        // Fast path: read lock — the common case is "lock exists, just return
+        // a clone of the Arc". Slow path on first publish to this pipe takes
+        // a write lock to insert.
+        if let Some(lock) = self.pipe_locks.read().await.get(pipe_path) {
+            return lock.clone();
+        }
+        let mut map = self.pipe_locks.write().await;
+        map.entry(pipe_path.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
     }
 
     /// Create a publisher bus (loads subscribers from env var).
@@ -501,9 +566,21 @@ impl EventBus for IpcEventBus {
 
         let routing_key = book.routing_key();
 
-        // Serialize once
+        // Serialize once.
+        //
+        // To prevent length+body splits from interleaving with concurrent
+        // publishers on the same pipe (C-09 framing-interleave bug), and to
+        // prevent a `WouldBlock` between the prefix and body writes from
+        // leaving a phantom 4-byte prefix in the pipe (C-09 half-written
+        // frame variant), build ONE buffer containing the length prefix
+        // concatenated with the body and write it under a per-pipe mutex
+        // with a single `write_all` call. A partial failure now leaves
+        // either zero bytes (no kernel write progressed) or all bytes in
+        // the pipe — never a stranded length prefix.
         let serialized = book.encode_to_vec();
-        let len_bytes = (serialized.len() as u32).to_be_bytes();
+        let mut framed: Vec<u8> = Vec::with_capacity(4 + serialized.len());
+        framed.extend_from_slice(&(serialized.len() as u32).to_be_bytes());
+        framed.extend_from_slice(&serialized);
 
         for subscriber in &self.config.subscribers {
             // Check domain filter using routing key
@@ -511,25 +588,45 @@ impl EventBus for IpcEventBus {
                 continue;
             }
 
-            // Open pipe and write (non-blocking to avoid deadlock)
+            // Acquire the per-pipe write mutex BEFORE opening the FD so
+            // that the open() + write_all() pair is sequenced with respect
+            // to any other publisher within this process targeting the
+            // same FIFO. Holding it across the open is a defensive choice:
+            // it adds no contention beyond the write itself (the open is
+            // O_NONBLOCK and returns immediately) but eliminates an
+            // entire class of FD-ordering races that would otherwise need
+            // separate reasoning.
+            let pipe_lock = self.pipe_lock(&subscriber.pipe_path).await;
+            let _write_guard = pipe_lock.lock().await;
+
+            // Open the pipe O_NONBLOCK so we get ENXIO (rather than hang)
+            // if no reader is attached. Once `open()` succeeds, we know a
+            // reader IS attached for this FD; clear O_NONBLOCK on the FD
+            // so the subsequent `write_all` BLOCKS on a full pipe instead
+            // of returning WouldBlock. That kept-in-the-pipe partial state
+            // is what created the C-09 "half-written frame" desync: the
+            // failed publisher would return Err leaving a length prefix
+            // (and possibly some body bytes) in the pipe with no way to
+            // resync the reader. Blocking writes give back-pressure
+            // instead of corruption.
             match OpenOptions::new()
                 .write(true)
                 .custom_flags(libc::O_NONBLOCK)
                 .open(&subscriber.pipe_path)
             {
                 Ok(mut file) => {
-                    if let Err(e) = file
-                        .write_all(&len_bytes)
-                        .and_then(|_| file.write_all(&serialized))
-                    {
-                        if e.kind() == std::io::ErrorKind::WouldBlock {
-                            // Return error instead of silently dropping.
-                            // Caller can decide retry strategy.
-                            return Err(BusError::Publish(format!(
-                                "IPC pipe buffer full for subscriber '{}', event not delivered",
-                                subscriber.name
-                            )));
-                        } else if e.kind() == std::io::ErrorKind::BrokenPipe {
+                    // Clear O_NONBLOCK on this FD so write_all blocks on a
+                    // full pipe (back-pressure) instead of leaving a
+                    // half-written frame.
+                    if let Err(e) = clear_nonblock(&file) {
+                        return Err(BusError::Publish(format!(
+                            "Failed to clear O_NONBLOCK for subscriber '{}': {}",
+                            subscriber.name, e
+                        )));
+                    }
+
+                    if let Err(e) = file.write_all(&framed) {
+                        if e.kind() == std::io::ErrorKind::BrokenPipe {
                             // Broken pipe means reader disconnected - not an error
                             debug!(
                                 subscriber = %subscriber.name,
@@ -559,6 +656,7 @@ impl EventBus for IpcEventBus {
                     }
                 }
             }
+            // _write_guard drops here, releasing the per-pipe mutex.
         }
 
         Ok(PublishResult::default())
@@ -606,6 +704,30 @@ impl EventBus for IpcEventBus {
 /// Extract the highest sequence number from an EventBook's pages.
 fn max_page_sequence(book: &EventBook) -> Option<u32> {
     book.pages.iter().map(|p| p.sequence_num()).max()
+}
+
+/// Clear `O_NONBLOCK` on an open file descriptor.
+///
+/// The publish path opens the FIFO with `O_NONBLOCK` so the `open()` call
+/// doesn't hang when no reader is attached (instead returns `ENXIO`). Once
+/// the open succeeds we know a reader IS attached on the *kernel* side, and
+/// we want subsequent `write_all` calls to BLOCK on a full pipe (back
+/// pressure) rather than returning `WouldBlock` mid-frame. Returning
+/// mid-frame is what created the C-09 "half-written frame" desync.
+fn clear_nonblock(file: &File) -> std::io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    let fd = file.as_raw_fd();
+    // SAFETY: fd is owned by `file` for the duration of this call.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    let new_flags = flags & !libc::O_NONBLOCK;
+    // SAFETY: same as above.
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, new_flags) } < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(())
 }
 
 /// Domain filter helper for testing - checks if routing_key matches domain list.

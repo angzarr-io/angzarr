@@ -199,7 +199,7 @@ async fn execute_mode(
 
     // For angzarr_deferred, check idempotency first
     if let Some(deferred) = extract_angzarr_deferred(&command_book) {
-        if let Some(existing_events) = ctx
+        if let Some(mut existing_events) = ctx
             .check_deferred_idempotency(&domain, &edition, root_uuid, deferred)
             .await?
         {
@@ -208,6 +208,21 @@ async fn execute_mode(
                 source_seq = deferred.source_seq,
                 "Deferred command already processed, returning cached result"
             );
+
+            // Stamp the in-flight command's correlation_id onto the rebuilt
+            // EventBook before republishing. The storage layer's
+            // `find_by_source` returns the event pages but the rebuilt
+            // EventBook's cover comes from `build_event_book`, which
+            // hardcodes `correlation_id: ""`. PMs filter by correlation_id
+            // and never fire on events with empty correlation_id, so
+            // republishing without this stamp defeats the
+            // "republish-on-redelivery recovers from prior bus failure"
+            // semantic (C-04).
+            if let Some(ref mut cover) = existing_events.cover {
+                if cover.correlation_id.is_empty() {
+                    cover.correlation_id = correlation_id.clone();
+                }
+            }
 
             // Re-publish: if the first attempt persisted events but failed to
             // publish (e.g., bus was temporarily unavailable), this ensures
@@ -268,46 +283,30 @@ async fn execute_mode(
     // Transform events (upcasting)
     let prior_events = ctx.transform_events(&domain, prior_events).await?;
 
-    // 2PC: Apply cascade transformation and conflict detection
+    // 2PC: Apply cascade transformation. The cascade-conflict gate
+    // (`check_cascade_conflict`) is deferred to AFTER `business.invoke`
+    // so it can observe what fields the command actually touched. The
+    // earlier implementation invoked the gate here with an empty
+    // `command_events` book, which made `command_fields` always empty
+    // and let every collision through (C-03).
+    //
+    // Note: the gate needs to see the *pre-transform* `prior_events`
+    // (with uncommitted pages still flagged `no_commit=true`) so it can
+    // partition committed-vs-uncommitted. The business handler instead
+    // sees the 2PC-transformed view (own cascade visible, others as
+    // NoOp). We keep both forms alive.
+    let prior_events_with_uncommitted = prior_events.clone();
+    let has_uncommitted_other_cascades;
     let prior_events = if let Some(cascade_id) = ctx.cascade_id() {
         let two_phase_ctx = TwoPhaseContext::for_handler(cascade_id);
         let two_phase_result = transform_for_two_phase(&prior_events, &two_phase_ctx);
-
-        // Check for cascade field conflicts with uncommitted events from other cascades
-        if !two_phase_result.uncommitted_cascade_ids.is_empty() {
-            match check_cascade_conflict(business, &prior_events, &EventBook::default()).await {
-                Ok(CascadeConflictResult::Conflict {
-                    cascade_ids,
-                    overlapping_fields,
-                }) => {
-                    tracing::warn!(
-                        ?cascade_ids,
-                        ?overlapping_fields,
-                        "CASCADE: field conflict with uncommitted events"
-                    );
-                    return Err(Status::aborted(format!(
-                        "Cascade conflict: fields {:?} locked by cascades {:?}",
-                        overlapping_fields, cascade_ids
-                    )));
-                }
-                Ok(CascadeConflictResult::NoConflict) => {
-                    tracing::debug!("CASCADE: no field conflicts with uncommitted events");
-                }
-                Err(e) => {
-                    // Degrade gracefully - proceed without conflict detection
-                    tracing::debug!(
-                        error = %e,
-                        "CASCADE: conflict detection unavailable, proceeding optimistically"
-                    );
-                }
-            }
-        }
-
+        has_uncommitted_other_cascades = !two_phase_result.uncommitted_cascade_ids.is_empty();
         // Business logic sees 2PC-transformed events (own cascade visible, others as NoOp)
         two_phase_result.events
     } else {
         // Non-cascade: apply standard 2PC transform to hide any uncommitted events
         let two_phase_result = transform_for_two_phase(&prior_events, &TwoPhaseContext::standard());
+        has_uncommitted_other_cascades = false;
         two_phase_result.events
     };
 
@@ -376,6 +375,49 @@ async fn execute_mode(
         e
     })?;
     let received_events = extract_events_from_response(response, &correlation_id)?;
+
+    // Post-execution cascade-conflict gate (C-03 fix). Runs AFTER the
+    // handler so `received_events` carries the events the command
+    // actually produced; `check_cascade_conflict` can now compute the
+    // command's touched fields by replaying `prior + received` and
+    // diffing against the pre-command state.
+    //
+    // The gate is purely observational: it must not modify
+    // `received_events`. A Conflict result returns Err immediately;
+    // NoConflict proceeds; Err (e.g., replay unimplemented) degrades
+    // gracefully — we'd rather risk an incorrect cascade merge than
+    // wedge the whole pipeline on a missing replay. (Same degradation
+    // pattern as the commutative check below.)
+    if has_uncommitted_other_cascades {
+        match check_cascade_conflict(business, &prior_events_with_uncommitted, &received_events)
+            .await
+        {
+            Ok(CascadeConflictResult::Conflict {
+                cascade_ids,
+                overlapping_fields,
+            }) => {
+                tracing::warn!(
+                    ?cascade_ids,
+                    ?overlapping_fields,
+                    "CASCADE: field conflict with uncommitted events"
+                );
+                return Err(Status::aborted(format!(
+                    "Cascade conflict: fields {:?} locked by cascades {:?}",
+                    overlapping_fields, cascade_ids
+                )));
+            }
+            Ok(CascadeConflictResult::NoConflict) => {
+                tracing::debug!("CASCADE: no field conflicts with uncommitted events");
+            }
+            Err(e) => {
+                // Degrade gracefully - proceed without conflict detection
+                tracing::debug!(
+                    error = %e,
+                    "CASCADE: conflict detection unavailable, proceeding optimistically"
+                );
+            }
+        }
+    }
 
     // Post-execution commutative check: verify field overlap after we know what changed
     if needs_commutative_check {
@@ -538,7 +580,7 @@ pub async fn execute_fact_pipeline(
     // return the cached events without invoking `business.invoke_fact`.
     // Storage-level dedup at persist remains the safety net regardless.
     if !external_id.is_empty() {
-        if let Some(cached) = ctx
+        if let Some(mut cached) = ctx
             .check_external_idempotency(&domain, &edition, root_uuid, &external_id)
             .await?
         {
@@ -546,6 +588,17 @@ pub async fn execute_fact_pipeline(
                 external_id = external_id.as_str(),
                 "Fact already processed (external_id pre-handler hit), returning cached result"
             );
+            // Stamp the in-flight fact's correlation_id onto the rebuilt
+            // EventBook before republishing — same rationale as the
+            // deferred-idempotency hit above (C-04). The rebuilt cover
+            // from `build_event_book` carries an empty correlation_id;
+            // PMs filter by correlation_id and miss redeliveries
+            // otherwise.
+            if let Some(ref mut cover) = cached.cover {
+                if cover.correlation_id.is_empty() {
+                    cover.correlation_id = correlation_id.clone();
+                }
+            }
             let projections = ctx.post_persist(&cached).await?;
             return Ok(FactResponse {
                 events: cached,

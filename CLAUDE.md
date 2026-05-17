@@ -29,20 +29,33 @@ CQRS-ES poker system. Player domain: functional aggregates. Others: object-orien
 **Run after every new test.** Tests must kill mutants to be meaningful.
 
 ```bash
-cargo mutants --in-place --timeout 120 --build-timeout 240 -f <file> -- --lib
+just mutants <file>           # single file
+just mutants-core             # handlers/core
+just mutants-bus              # bus module
+just mutants-orchestration    # saga/aggregate/PM
 ```
 
-**Why `--in-place`:** the repo has a git submodule (`angzarr-project`) and out-of-tree
-path-deps (`../../prj-event/main` etc.). cargo-mutants' copy mode handles neither —
-it would clone source files but not init the submodule or follow sibling paths. The
-maintainer recommends `--in-place` for these layouts ([issue #348][m1]).
+**Host cargo-mutants is FORBIDDEN.** Always invoke via `just`. The host-side
+`mutants*` targets route through `_container-ephemeral`, which mounts the
+workspace read-only and runs `cargo mutants --in-place` against an rsync'd
+copy in the container's writable overlay layer. `--rm` destroys the overlay
+(and any mutated source) on every exit, so a crashed run cannot leak mutated
+files into your working tree. The only host artifact is
+`mutants.out/outcomes.json`, copied out on success.
 
-**Caveats while it runs:** don't commit, edit files, or run cargo concurrently —
-mutated source briefly lives in your working tree. On crash, mutations may be left
-behind; grep for `cargo-mutants` to find the markers. `--jobs` is disabled in this
-mode.
+**Why `--in-place` (inside the copy):** the repo has a git submodule
+(`angzarr-project`). cargo-mutants' copy mode does not init submodules; the
+maintainer recommends `--in-place` for these layouts ([issue #348][m1]). We
+preserve that, but isolate the working tree by running it inside an
+ephemeral container copy of the workspace.
 
-**Workflow:** Write test → run mutants → verify kills → improve or delete if none killed.
+**Cache:** `.mutants-cache/{cargo-home,cargo-target}` (gitignored) holds the
+dep registry and compiled artifacts across runs so mutation iteration is
+fast. It contains NO mutated source — only build artifacts. Purge with
+`just mutants-purge-cache` to reclaim disk.
+
+**Workflow:** Write test → `just mutants <file>` → verify kills via
+`just mutants-summary` → improve or delete if none killed.
 
 [m1]: https://github.com/sourcefrog/cargo-mutants/issues/348
 

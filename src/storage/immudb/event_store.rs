@@ -247,6 +247,39 @@ impl ImmudbEventStore {
         Ok(result)
     }
 
+    /// C-18 helper: scan for an existing external_id claim on this aggregate.
+    /// Returns `Some((first_sequence, last_sequence))` of the prior batch
+    /// when found, `None` otherwise. Mirrors `SqliteEventStore::check_idempotency`.
+    async fn find_external_id_sequences(
+        &self,
+        domain: &str,
+        edition: &str,
+        root_str: &str,
+        external_id: &str,
+    ) -> Result<Option<(u32, u32)>> {
+        let query = Query::select()
+            .expr(Expr::col(Events::Sequence).min())
+            .expr(Expr::col(Events::Sequence).max())
+            .from(Events::Table)
+            .and_where(Expr::col(Events::Edition).eq(edition))
+            .and_where(Expr::col(Events::Domain).eq(domain))
+            .and_where(Expr::col(Events::Root).eq(root_str))
+            .and_where(Expr::col(Events::ExternalId).eq(external_id))
+            .to_string(PostgresQueryBuilder);
+
+        let rows = sqlx::raw_sql(&query).fetch_all(&self.pool).await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let row = &rows[0];
+        let min_seq: Option<i64> = row.try_get(0).ok().flatten();
+        let max_seq: Option<i64> = row.try_get(1).ok().flatten();
+        match (min_seq, max_seq) {
+            (Some(min), Some(max)) => Ok(Some((min as u32, max as u32))),
+            _ => Ok(None),
+        }
+    }
+
     /// Get max sequence number for an aggregate.
     /// Uses raw_sql for immudb simple query mode compatibility.
     async fn get_max_sequence(
@@ -308,8 +341,8 @@ impl EventStore for ImmudbEventStore {
         root: Uuid,
         events: Vec<EventPage>,
         correlation_id: &str,
-        _external_id: Option<&str>,
-        _source_info: Option<&SourceInfo>,
+        external_id: Option<&str>,
+        source_info: Option<&SourceInfo>,
     ) -> Result<AddOutcome> {
         if events.is_empty() {
             return Ok(AddOutcome::Added {
@@ -319,6 +352,23 @@ impl EventStore for ImmudbEventStore {
         }
 
         let root_str = root.to_string();
+        let external_id = external_id.unwrap_or("");
+
+        // C-18: external_id idempotency check, parity with SQLite/Postgres.
+        // If a prior call recorded this external_id on this aggregate, return
+        // `AddOutcome::Duplicate` with the original sequence range instead
+        // of re-persisting.
+        if !external_id.is_empty() {
+            if let Some((first, last)) = self
+                .find_external_id_sequences(domain, edition, &root_str, external_id)
+                .await?
+            {
+                return Ok(AddOutcome::Duplicate {
+                    first_sequence: first,
+                    last_sequence: last,
+                });
+            }
+        }
 
         // Get base sequence for this aggregate
         let base_sequence = self
@@ -330,6 +380,25 @@ impl EventStore for ImmudbEventStore {
         let mut auto_sequence = base_sequence;
         let mut first_sequence = None;
         let mut last_sequence = 0u32;
+
+        // C-19: Per-row INSERTs must be wrapped in a transaction so a
+        // partial failure (concurrent writer collided on the PRIMARY KEY
+        // at any sequence in the batch) rolls back the whole batch
+        // instead of leaving a partial stream behind. We issue
+        // BEGIN/COMMIT/ROLLBACK by hand on a single pooled connection
+        // rather than via `pool.begin()` because sqlx's transaction
+        // wrapper sends extended-query bookkeeping that immudb's
+        // pgsql-wire server rejects (immudb is simple-query-only — see
+        // the module doc). Holding the connection ourselves keeps every
+        // statement on the same session so BEGIN/INSERT/COMMIT actually
+        // serialize. The PRIMARY KEY (domain, edition, root, sequence)
+        // on the events table is the CAS fence: a losing writer hits a
+        // UNIQUE-violation that we map to
+        // `StorageError::SequenceConflict`; the aggregate pipeline
+        // retries with a fresh sequence read.
+        let mut conn = self.pool.acquire().await?;
+        let conn_ref: &mut sqlx::PgConnection = &mut conn;
+        conn_ref.execute(sqlx::raw_sql("BEGIN")).await?;
 
         // Insert events one by one (immudb may not support multi-row INSERT well)
         for event in events {
@@ -363,21 +432,85 @@ impl EventStore for ImmudbEventStore {
 
             // Build INSERT manually since sea-query doesn't handle immudb BLOB format
             // Note: immudb requires CAST for string timestamps
+            // NOTE: this builds SQL via string concatenation with single-quote
+            // doubling. That is a separate SQL-injection-class concern tracked
+            // alongside C-19 (see `plans/deep-review-remediation.md` for the
+            // C-19 NOTE pointing at this site).
+            //
+            // C-18 (this finding): always include the external_id and
+            // source_info columns. NULL-equivalents (empty string for
+            // external_id; NULL for source_*) are written so the
+            // round-trip lookup contracts hold.
+            let ext_lit = if external_id.is_empty() {
+                "NULL".to_string()
+            } else {
+                format!("'{}'", external_id.replace('\'', "''"))
+            };
+            let (source_edition_lit, source_domain_lit, source_root_lit, source_seq_lit) =
+                if let Some(info) = source_info.filter(|s| !s.is_empty()) {
+                    (
+                        format!("'{}'", info.edition.replace('\'', "''")),
+                        format!("'{}'", info.domain.replace('\'', "''")),
+                        format!("'{}'", info.root),
+                        info.seq.to_string(),
+                    )
+                } else {
+                    (
+                        "NULL".to_string(),
+                        "NULL".to_string(),
+                        "NULL".to_string(),
+                        "NULL".to_string(),
+                    )
+                };
+
             let query = format!(
-                "INSERT INTO events (edition, domain, root, sequence, created_at, event_data, correlation_id) \
-                 VALUES ('{}', '{}', '{}', {}, CAST('{}' AS TIMESTAMP), {}, '{}')",
+                "INSERT INTO events (edition, domain, root, sequence, created_at, event_data, correlation_id, external_id, source_edition, source_domain, source_root, source_seq) \
+                 VALUES ('{}', '{}', '{}', {}, CAST('{}' AS TIMESTAMP), {}, '{}', {}, {}, {}, {}, {})",
                 edition.replace('\'', "''"),
                 domain.replace('\'', "''"),
                 root_str.replace('\'', "''"),
                 sequence,
                 timestamp_simple,
                 event_data_hex,
-                correlation_id.replace('\'', "''")
+                correlation_id.replace('\'', "''"),
+                ext_lit,
+                source_edition_lit,
+                source_domain_lit,
+                source_root_lit,
+                source_seq_lit,
             );
 
-            // Use raw_sql for immudb simple query mode compatibility
-            self.pool.execute(sqlx::raw_sql(&query)).await?;
+            // Use raw_sql for immudb simple query mode compatibility.
+            let conn_ref: &mut sqlx::PgConnection = &mut conn;
+            match conn_ref.execute(sqlx::raw_sql(&query)).await {
+                Ok(_) => {}
+                Err(err) => {
+                    // Roll back the entire batch before propagating.
+                    let conn_ref: &mut sqlx::PgConnection = &mut conn;
+                    let _ = conn_ref.execute(sqlx::raw_sql("ROLLBACK")).await;
+                    // Detect PRIMARY-KEY duplicate-key violation across
+                    // immudb's pgsql-wire error messages. immudb returns
+                    // generic SQL errors without sqlstate codes, so match
+                    // on substrings that consistently appear in
+                    // duplicate-key responses (case-insensitive).
+                    let msg = format!("{}", err).to_lowercase();
+                    let is_pk_violation = msg.contains("primary key")
+                        || msg.contains("duplicate")
+                        || msg.contains("unique")
+                        || msg.contains("already exists");
+                    if is_pk_violation {
+                        return Err(StorageError::SequenceConflict {
+                            expected: base_sequence,
+                            actual: sequence,
+                        });
+                    }
+                    return Err(err.into());
+                }
+            }
         }
+
+        let conn_ref: &mut sqlx::PgConnection = &mut conn;
+        conn_ref.execute(sqlx::raw_sql("COMMIT")).await?;
 
         Ok(AddOutcome::Added {
             first_sequence: first_sequence.unwrap_or(0),
@@ -579,26 +712,113 @@ impl EventStore for ImmudbEventStore {
 
     async fn find_by_source(
         &self,
-        _domain: &str,
-        _edition: &str,
-        _root: Uuid,
-        _source_info: &SourceInfo,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        source_info: &SourceInfo,
     ) -> Result<Option<Vec<EventPage>>> {
-        // ImmuDB doesn't store source tracking - saga idempotency not supported
-        // Use SQLite or PostgreSQL for saga source tracking
-        Ok(None)
+        // C-18: Saga idempotency. Pre-fix this returned `Ok(None)`
+        // unconditionally, violating the trait contract. Query the
+        // events table on the C-18 source_* columns persisted by
+        // `add()`. Uses raw_sql for immudb simple-query-mode compat.
+        if source_info.is_empty() {
+            return Ok(None);
+        }
+        let root_str = root.to_string();
+        let query = Query::select()
+            .column(Events::EventData)
+            .from(Events::Table)
+            .and_where(Expr::col(Events::Edition).eq(edition))
+            .and_where(Expr::col(Events::Domain).eq(domain))
+            .and_where(Expr::col(Events::Root).eq(&root_str))
+            .and_where(Expr::col(Events::SourceEdition).eq(source_info.edition.as_str()))
+            .and_where(Expr::col(Events::SourceDomain).eq(source_info.domain.as_str()))
+            .and_where(Expr::col(Events::SourceRoot).eq(source_info.root.to_string()))
+            .and_where(Expr::col(Events::SourceSeq).eq(source_info.seq as i32))
+            .order_by(Events::Sequence, Order::Asc)
+            .to_string(PostgresQueryBuilder);
+
+        let rows = sqlx::raw_sql(&query).fetch_all(&self.pool).await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let event_data = decode_blob_column(&row, 0)?;
+            let event = EventPage::decode(event_data.as_slice())?;
+            events.push(event);
+        }
+        Ok(Some(events))
     }
 
     async fn find_by_external_id(
         &self,
-        _domain: &str,
-        _edition: &str,
-        _root: Uuid,
-        _external_id: &str,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        external_id: &str,
     ) -> Result<Option<Vec<EventPage>>> {
-        // ImmuDB doesn't store external_id tracking — fact pre-handler
-        // idempotency not supported. Use SQLite or PostgreSQL.
-        Ok(None)
+        // C-18: fact-injection idempotency. Pre-fix this returned
+        // `Ok(None)` unconditionally, violating the trait contract.
+        // Query on the C-18 `external_id` column persisted by `add()`.
+        // Empty external_id returns None per contract.
+        if external_id.is_empty() {
+            return Ok(None);
+        }
+        let root_str = root.to_string();
+        let query = Query::select()
+            .column(Events::EventData)
+            .from(Events::Table)
+            .and_where(Expr::col(Events::Edition).eq(edition))
+            .and_where(Expr::col(Events::Domain).eq(domain))
+            .and_where(Expr::col(Events::Root).eq(&root_str))
+            .and_where(Expr::col(Events::ExternalId).eq(external_id))
+            .order_by(Events::Sequence, Order::Asc)
+            .to_string(PostgresQueryBuilder);
+
+        let rows = sqlx::raw_sql(&query).fetch_all(&self.pool).await?;
+        if rows.is_empty() {
+            return Ok(None);
+        }
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let event_data = decode_blob_column(&row, 0)?;
+            let event = EventPage::decode(event_data.as_slice())?;
+            events.push(event);
+        }
+        Ok(Some(events))
+    }
+
+    // -------------------------------------------------------------------------
+    // Cascade query methods.
+    //
+    // NOTE (out of scope for C-19): the immudb EventStore does not yet store
+    // the cascade-tracking columns (`committed`, `cascade_id`) that the
+    // `query_stale_cascades` / `query_cascade_participants` trait methods
+    // depend on — the schema in `super::schema::CREATE_EVENTS_TABLE` predates
+    // the Phase-5 cascade trait additions. These stub implementations exist
+    // ONLY so the `immudb` feature compiles against the current trait shape;
+    // they do not provide cascade reaper coverage on this backend. Proper
+    // implementation belongs to whichever finding picks up immudb's missing
+    // cascade-tracking columns (related to C-02 / C-18). C-19's responsibility
+    // is the missing-transaction race in `add()`, which IS fixed above.
+    async fn query_stale_cascades(&self, _threshold: &str) -> Result<Vec<String>> {
+        Err(StorageError::NotImplemented(
+            "immudb EventStore does not yet store cascade tracking columns; \
+             see C-19 NOTE in plans/deep-review-remediation.md"
+                .to_string(),
+        ))
+    }
+
+    async fn query_cascade_participants(
+        &self,
+        _cascade_id: &str,
+    ) -> Result<Vec<crate::storage::CascadeParticipant>> {
+        Err(StorageError::NotImplemented(
+            "immudb EventStore does not yet store cascade tracking columns; \
+             see C-19 NOTE in plans/deep-review-remediation.md"
+                .to_string(),
+        ))
     }
 }
 

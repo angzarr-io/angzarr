@@ -106,8 +106,10 @@ spec:
         {{- if .Values.infrastructure.status.rest.enabled }}
         # envoy sidecar — REST↔gRPC transcoder + static-asset server.
         # Config delivered via ConfigMap (status-envoy-configmap.yaml).
-        # Phase 0: config is a minimal proxy; transcoder filter is added
-        # once protos have google.api.http annotations (Phase 1+).
+        # Uses grpc_json_transcoder against a pre-built proto descriptor
+        # set, with an explicit `services` allowlist (C-14). Health,
+        # ServerReflection, and any non-annotated admin RPC are NOT
+        # reachable via the HTTP listener.
         - name: envoy
           securityContext:
             {{- include "angzarr.containerSecurityContext" . | nindent 12 }}
@@ -128,6 +130,13 @@ spec:
           volumeMounts:
             - name: envoy-config
               mountPath: /etc/envoy
+              readOnly: true
+            # Proto descriptors for envoy's grpc_json_transcoder. The
+            # configmap name is mandatory when rest.enabled=true (see
+            # values.yaml infrastructure.status.rest.descriptor and the
+            # fail-closed guard in status-envoy-configmap.yaml).
+            - name: envoy-descriptors
+              mountPath: /etc/envoy/descriptors
               readOnly: true
             {{- if .Values.infrastructure.status.rest.web.enabled }}
             - name: spa-dist
@@ -153,6 +162,9 @@ spec:
         - name: envoy-config
           configMap:
             name: {{ include "angzarr.fullname" . }}-status-envoy
+        - name: envoy-descriptors
+          configMap:
+            name: {{ .Values.infrastructure.status.rest.descriptor.configMapName }}
         {{- end }}
         {{- if and .Values.infrastructure.status.rest.enabled .Values.infrastructure.status.rest.web.enabled }}
         - name: spa-dist

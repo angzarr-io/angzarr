@@ -405,3 +405,356 @@ async fn test_reaper_revocation_uses_canonical_type_url() {
         any.type_url,
     );
 }
+
+// ============================================================================
+// C-02 regression tests: per-participant idempotency / partial-failure leak
+// ============================================================================
+
+/// EventStore proxy that selectively fails `add()` calls carrying a
+/// Revocation page, for the C-02 partial-failure tests.
+///
+/// The reaper writes one Revocation page per participant — when the proxy is
+/// configured with `fail_revocation_after = Some(N)`, the (N+1)-th Revocation
+/// `add()` call returns `Err` (so the FIRST N succeed and the (N+1)-th fails).
+/// Non-Revocation pages (test fixture setup) always pass through.
+///
+/// Used to simulate "reaper crashed / network blip after writing M of N
+/// Revocations" — the C-02 scenario that strands the remaining participants
+/// under the original per-cascade resolution semantics.
+struct FailingAddStore {
+    inner: Arc<MockEventStore>,
+    revocation_attempts: tokio::sync::Mutex<usize>,
+    fail_revocations_after: Option<usize>, // fail every Revocation `add()` after the Nth (1-based)
+}
+
+impl FailingAddStore {
+    fn new(inner: Arc<MockEventStore>, fail_revocations_after: Option<usize>) -> Self {
+        Self {
+            inner,
+            revocation_attempts: tokio::sync::Mutex::new(0),
+            fail_revocations_after,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EventStore for FailingAddStore {
+    async fn add(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        events: Vec<crate::proto::EventPage>,
+        correlation_id: &str,
+        external_id: Option<&str>,
+        source_info: Option<&crate::storage::SourceInfo>,
+    ) -> crate::storage::Result<crate::storage::AddOutcome> {
+        // Detect whether this add carries a Revocation page.
+        let has_revocation = events.iter().any(|page| match &page.payload {
+            Some(crate::proto::event_page::Payload::Event(any)) => {
+                any.type_url == crate::proto_ext::type_url::REVOCATION
+            }
+            _ => false,
+        });
+
+        if has_revocation {
+            let mut count = self.revocation_attempts.lock().await;
+            *count += 1;
+            if let Some(threshold) = self.fail_revocations_after {
+                if *count > threshold {
+                    return Err(crate::storage::StorageError::NotFound {
+                        domain: domain.to_string(),
+                        root,
+                    });
+                }
+            }
+        }
+
+        self.inner
+            .add(
+                domain,
+                edition,
+                root,
+                events,
+                correlation_id,
+                external_id,
+                source_info,
+            )
+            .await
+    }
+
+    async fn get(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+    ) -> crate::storage::Result<Vec<crate::proto::EventPage>> {
+        self.inner.get(domain, edition, root).await
+    }
+
+    async fn get_from(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        from: u32,
+    ) -> crate::storage::Result<Vec<crate::proto::EventPage>> {
+        self.inner.get_from(domain, edition, root, from).await
+    }
+
+    async fn get_from_to(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        from: u32,
+        to: u32,
+    ) -> crate::storage::Result<Vec<crate::proto::EventPage>> {
+        self.inner
+            .get_from_to(domain, edition, root, from, to)
+            .await
+    }
+
+    async fn list_roots(&self, domain: &str, edition: &str) -> crate::storage::Result<Vec<Uuid>> {
+        self.inner.list_roots(domain, edition).await
+    }
+
+    async fn list_domains(&self) -> crate::storage::Result<Vec<String>> {
+        self.inner.list_domains().await
+    }
+
+    async fn get_next_sequence(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+    ) -> crate::storage::Result<u32> {
+        self.inner.get_next_sequence(domain, edition, root).await
+    }
+
+    async fn get_until_timestamp(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        until: &str,
+    ) -> crate::storage::Result<Vec<crate::proto::EventPage>> {
+        self.inner
+            .get_until_timestamp(domain, edition, root, until)
+            .await
+    }
+
+    async fn get_by_correlation(
+        &self,
+        correlation_id: &str,
+    ) -> crate::storage::Result<Vec<crate::proto::EventBook>> {
+        self.inner.get_by_correlation(correlation_id).await
+    }
+
+    async fn find_by_source(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        source_info: &crate::storage::SourceInfo,
+    ) -> crate::storage::Result<Option<Vec<crate::proto::EventPage>>> {
+        self.inner
+            .find_by_source(domain, edition, root, source_info)
+            .await
+    }
+
+    async fn find_by_external_id(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        external_id: &str,
+    ) -> crate::storage::Result<Option<Vec<crate::proto::EventPage>>> {
+        self.inner
+            .find_by_external_id(domain, edition, root, external_id)
+            .await
+    }
+
+    async fn delete_edition_events(
+        &self,
+        domain: &str,
+        edition: &str,
+    ) -> crate::storage::Result<u32> {
+        self.inner.delete_edition_events(domain, edition).await
+    }
+
+    async fn query_stale_cascades(&self, threshold: &str) -> crate::storage::Result<Vec<String>> {
+        self.inner.query_stale_cascades(threshold).await
+    }
+
+    async fn query_cascade_participants(
+        &self,
+        cascade_id: &str,
+    ) -> crate::storage::Result<Vec<crate::storage::CascadeParticipant>> {
+        self.inner.query_cascade_participants(cascade_id).await
+    }
+}
+
+/// Helper: count how many committed Revocation pages exist across all
+/// (domain, edition, root) for a given cascade_id, by reading directly from
+/// storage. Used to assert idempotency (no duplicate Revocations on repeat
+/// reaper runs).
+async fn count_committed_revocations(
+    store: &MockEventStore,
+    domain: &str,
+    edition: &str,
+    roots: &[Uuid],
+    cascade_id: &str,
+) -> usize {
+    use crate::proto::event_page;
+    use crate::proto_ext::type_url;
+
+    let mut count = 0;
+    for root in roots {
+        let pages = store.get(domain, edition, *root).await.unwrap();
+        for page in pages {
+            if page.no_commit {
+                continue;
+            }
+            if page.cascade_id.as_deref() != Some(cascade_id) {
+                continue;
+            }
+            if let Some(event_page::Payload::Event(any)) = &page.payload {
+                if any.type_url == type_url::REVOCATION {
+                    count += 1;
+                }
+            }
+        }
+    }
+    count
+}
+
+/// C-02 regression test: when the reaper's `add()` fails partway through a
+/// multi-participant cascade, the *remaining* participants must still be
+/// revoked on a subsequent reaper run.
+///
+/// Reproduces the bug at `src/cascade/reaper.rs:88–127`: `query_stale_cascades`
+/// excludes any cascade with ANY committed row. Once Revocation #1 (committed)
+/// has been written for participant 1, the cascade is "resolved" globally —
+/// participants 2..N (still uncommitted, no Revocation) are stranded forever,
+/// regardless of how many reaper cycles run.
+///
+/// Setup: 3 participants share `cascade_id = X`. The store is wrapped so that
+/// the SECOND Revocation `add()` returns Err — simulating a crash, network
+/// blip, or sqlx connection drop between participant 1 and participant 2.
+/// After the first reaper run only participant 1 has a committed Revocation;
+/// participants 2 and 3 are still uncommitted. A second reaper run must
+/// catch up and write Revocations for participants 2 and 3.
+#[tokio::test]
+async fn test_reaper_recovers_after_partial_failure() {
+    let inner = Arc::new(MockEventStore::new());
+    let cascade_id = "cascade-partial";
+    let old_time = Utc::now() - chrono::Duration::hours(2);
+
+    let root1 = Uuid::new_v4();
+    let root2 = Uuid::new_v4();
+    let root3 = Uuid::new_v4();
+    let roots = [root1, root2, root3];
+
+    for root in &roots {
+        let event = make_test_event(0, true, Some(cascade_id), old_time);
+        inner
+            .add("test", "angzarr", *root, vec![event], "", None, None)
+            .await
+            .unwrap();
+    }
+
+    // First reaper run with proxy that allows ONLY the first Revocation
+    // through; every subsequent Revocation `add()` fails.
+    let failing_store = Arc::new(FailingAddStore::new(Arc::clone(&inner), Some(1)));
+    let reaper = CascadeReaper::new(Arc::clone(&failing_store), Duration::from_secs(60));
+    let _ = reaper.run_once().await; // ignore overall result; we assert on storage state
+
+    // After 1st run: exactly 1 participant has a committed Revocation;
+    // the remaining 2 are stranded (`continue` on add error in the loop).
+    let committed_after_first =
+        count_committed_revocations(&inner, "test", "angzarr", &roots, cascade_id).await;
+    assert_eq!(
+        committed_after_first, 1,
+        "first reaper run should have written exactly 1 Revocation \
+         (subsequent adds were forced to fail)"
+    );
+
+    // Second reaper run with a fresh, non-failing wrapper.
+    let healthy_store = Arc::new(FailingAddStore::new(Arc::clone(&inner), None));
+    let reaper2 = CascadeReaper::new(Arc::clone(&healthy_store), Duration::from_secs(60));
+    reaper2.run_once().await.unwrap();
+
+    let committed_after_second =
+        count_committed_revocations(&inner, "test", "angzarr", &roots, cascade_id).await;
+
+    // With the bug: still 1 — query_stale_cascades sees the cascade has a
+    // committed row (the first Revocation) and excludes it globally, so the
+    // second reaper run revokes nothing.
+    // After fix: should be 3 — participants 2 and 3 are independently stale
+    // and the reaper recovers them on the second pass.
+    assert_eq!(
+        committed_after_second, 3,
+        "second reaper run must revoke remaining 2 stranded participants \
+         (got {}). Bug C-02: per-cascade resolution semantics treat any \
+         committed row as 'cascade resolved', stranding participants 2..N \
+         when add() fails mid-loop.",
+        committed_after_second
+    );
+}
+
+/// C-02 regression test: re-running the reaper on a clean, already-revoked
+/// cascade must NOT write duplicate Revocations.
+///
+/// After the fix, `query_cascade_participants` should filter out participants
+/// whose root already has a committed Revocation/Confirmation for the cascade;
+/// `query_stale_cascades` should not return cascades with zero unresolved
+/// participants. End-to-end: a second reaper pass over an already-revoked
+/// cascade is a no-op (zero new pages written).
+#[tokio::test]
+async fn test_reaper_second_run_is_noop_on_clean_cascade() {
+    let store = Arc::new(MockEventStore::new());
+    let cascade_id = "cascade-noop";
+    let old_time = Utc::now() - chrono::Duration::hours(2);
+
+    let root1 = Uuid::new_v4();
+    let root2 = Uuid::new_v4();
+    let root3 = Uuid::new_v4();
+    let roots = [root1, root2, root3];
+
+    for root in &roots {
+        let event = make_test_event(0, true, Some(cascade_id), old_time);
+        store
+            .add("test", "angzarr", *root, vec![event], "", None, None)
+            .await
+            .unwrap();
+    }
+
+    let reaper = CascadeReaper::new(Arc::clone(&store), Duration::from_secs(60));
+
+    // First run: revoke all three participants.
+    let first_count = reaper.run_once().await.unwrap();
+    assert_eq!(first_count, 3, "first run should revoke all 3 participants");
+
+    let after_first =
+        count_committed_revocations(&store, "test", "angzarr", &roots, cascade_id).await;
+    assert_eq!(after_first, 3);
+
+    // Second run: must be a no-op.
+    let second_count = reaper.run_once().await.unwrap();
+    assert_eq!(
+        second_count, 0,
+        "second reaper run must revoke 0 participants (cascade already \
+         resolved); got {}",
+        second_count
+    );
+
+    let after_second =
+        count_committed_revocations(&store, "test", "angzarr", &roots, cascade_id).await;
+    assert_eq!(
+        after_second, 3,
+        "second reaper run must not write duplicate Revocations; \
+         expected 3 committed Revocations, got {}",
+        after_second
+    );
+}

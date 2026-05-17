@@ -2,10 +2,55 @@
 //!
 //! Uses a macro to generate implementations for each SQL backend,
 //! eliminating code duplication while maintaining type safety.
+//!
+//! ## Edition NULL polarity (C-15)
+//!
+//! Both Postgres (migration 0007) and SQLite (migration 0006) made the
+//! `edition` column nullable and normalized pre-existing rows where
+//! `edition IN ('angzarr', '')` to SQL NULL. The API surface keeps two
+//! sentinel forms — `""` and `"angzarr"` — for "main timeline" per
+//! `is_main_timeline`. To preserve that equivalence at the storage layer
+//! we MUST:
+//!
+//!   * Insert SQL NULL whenever the caller passes either main-timeline form.
+//!   * Match `IS NULL` (not `edition = ''`/`edition = 'angzarr'`) when reading.
+//!
+//! Both rules apply uniformly through `edition_to_db_value` and
+//! `edition_predicate_expr` below; a bare `Expr::col(Edition).eq(edition)`
+//! is a polarity-split bug.
 
 use std::marker::PhantomData;
 
 use super::SqlDatabase;
+
+/// Translate the API-layer edition string to a sea-query `SimpleExpr` value
+/// suitable for INSERT. Both main-timeline sentinels (`""`, `"angzarr"`)
+/// become SQL NULL; named editions become a string literal.
+pub(crate) fn edition_to_db_value(edition: &str) -> sea_query::SimpleExpr {
+    if crate::storage::helpers::is_main_timeline(edition) {
+        // `Option::<String>::None.into()` lowers to SQL NULL in both
+        // PostgresQueryBuilder and SqliteQueryBuilder.
+        let none: Option<String> = None;
+        sea_query::SimpleExpr::Value(sea_query::Value::String(none.map(Box::new)))
+    } else {
+        sea_query::SimpleExpr::Value(sea_query::Value::String(Some(Box::new(
+            edition.to_string(),
+        ))))
+    }
+}
+
+/// Build an `edition` column WHERE predicate. Either main-timeline sentinel
+/// translates to `IS NULL`; named editions to `= <name>`.
+pub(crate) fn edition_predicate_expr<T: sea_query::Iden + 'static>(
+    col: T,
+    edition: &str,
+) -> sea_query::SimpleExpr {
+    if crate::storage::helpers::is_main_timeline(edition) {
+        sea_query::Expr::col(col).is_null()
+    } else {
+        sea_query::Expr::col(col).eq(edition)
+    }
+}
 
 /// SQL-based implementation of SnapshotStore.
 ///
@@ -55,12 +100,18 @@ macro_rules! impl_snapshot_store {
 
                 let root_str = root.to_string();
 
-                // Get the snapshot with highest sequence (latest)
+                // C-15: main-timeline sentinels map to SQL NULL via
+                // `edition_predicate_expr`.
                 let stmt = Query::select()
                     .column(Snapshots::StateData)
                     .column(Snapshots::Sequence)
                     .from(Snapshots::Table)
-                    .and_where(Expr::col(Snapshots::Edition).eq(edition))
+                    .and_where(
+                        $crate::storage::sql::snapshot_store::edition_predicate_expr(
+                            Snapshots::Edition,
+                            edition,
+                        ),
+                    )
                     .and_where(Expr::col(Snapshots::Domain).eq(domain))
                     .and_where(Expr::col(Snapshots::Root).eq(&root_str))
                     .order_by(Snapshots::Sequence, sea_query::Order::Desc)
@@ -95,12 +146,17 @@ macro_rules! impl_snapshot_store {
 
                 let root_str = root.to_string();
 
-                // Get snapshot with highest sequence <= requested seq
+                // C-15: main-timeline sentinels map to SQL NULL.
                 let stmt = Query::select()
                     .column(Snapshots::StateData)
                     .column(Snapshots::Sequence)
                     .from(Snapshots::Table)
-                    .and_where(Expr::col(Snapshots::Edition).eq(edition))
+                    .and_where(
+                        $crate::storage::sql::snapshot_store::edition_predicate_expr(
+                            Snapshots::Edition,
+                            edition,
+                        ),
+                    )
                     .and_where(Expr::col(Snapshots::Domain).eq(domain))
                     .and_where(Expr::col(Snapshots::Root).eq(&root_str))
                     .and_where(Expr::col(Snapshots::Sequence).lte(seq))
@@ -142,6 +198,9 @@ macro_rules! impl_snapshot_store {
 
                 // Step 1: Insert or update the snapshot at this sequence
                 // PK is (domain, edition, root, sequence)
+                // C-15: edition is stored as SQL NULL for main-timeline writes.
+                let edition_value =
+                    $crate::storage::sql::snapshot_store::edition_to_db_value(edition);
                 let stmt = Query::insert()
                     .into_table(Snapshots::Table)
                     .columns([
@@ -154,7 +213,7 @@ macro_rules! impl_snapshot_store {
                         Snapshots::CreatedAt,
                     ])
                     .values_panic([
-                        edition.into(),
+                        edition_value.clone(),
                         domain.into(),
                         root_str.clone().into(),
                         sequence.into(),
@@ -185,7 +244,12 @@ macro_rules! impl_snapshot_store {
                 // Keep PERSIST (1) and DEFAULT (0) snapshots
                 let cleanup_stmt = Query::delete()
                     .from_table(Snapshots::Table)
-                    .and_where(Expr::col(Snapshots::Edition).eq(edition))
+                    .and_where(
+                        $crate::storage::sql::snapshot_store::edition_predicate_expr(
+                            Snapshots::Edition,
+                            edition,
+                        ),
+                    )
                     .and_where(Expr::col(Snapshots::Domain).eq(domain))
                     .and_where(Expr::col(Snapshots::Root).eq(&root_str))
                     .and_where(Expr::col(Snapshots::Sequence).lt(sequence))
@@ -213,9 +277,15 @@ macro_rules! impl_snapshot_store {
 
                 let root_str = root.to_string();
 
+                // C-15: main-timeline sentinels map to SQL NULL.
                 let stmt = Query::delete()
                     .from_table(Snapshots::Table)
-                    .and_where(Expr::col(Snapshots::Edition).eq(edition))
+                    .and_where(
+                        $crate::storage::sql::snapshot_store::edition_predicate_expr(
+                            Snapshots::Edition,
+                            edition,
+                        ),
+                    )
                     .and_where(Expr::col(Snapshots::Domain).eq(domain))
                     .and_where(Expr::col(Snapshots::Root).eq(&root_str))
                     .to_owned();

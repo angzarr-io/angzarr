@@ -7,17 +7,19 @@
 
 mod bus;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use angzarr::bus::nats::NatsEventBus;
-use angzarr::bus::EventBus;
+use angzarr::bus::{BusError, EventBus, EventHandler};
 use angzarr::proto::{
     event_page, page_header::SequenceType, Cover, Edition, EventBook, EventPage, PageHeader,
 };
 use angzarr::storage::nats::NatsEventStore;
 use angzarr::storage::EventStore;
 use angzarr::test_utils::CapturingHandler;
+use futures::future::BoxFuture;
 use prost_types::Any;
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
@@ -105,6 +107,7 @@ fn make_event_book_with_seq(domain: &str, root: Uuid, first_seq: u32, count: u32
                 type_url: format!("type.example/{}Event", domain),
                 value: vec![1, 2, 3, (first_seq + i) as u8],
             })),
+            ..Default::default()
         })
         .collect();
 
@@ -141,6 +144,7 @@ fn make_event_pages(first_seq: u32, count: u32) -> Vec<EventPage> {
                 type_url: "type.example/TestEvent".to_string(),
                 value: vec![10, 20, 30, (first_seq + i) as u8],
             })),
+            ..Default::default()
         })
         .collect()
 }
@@ -346,4 +350,114 @@ async fn test_eventstore_eventbus_interoperability() {
     println!("    get_next_sequence() returned {}", next_seq);
 
     println!("  PASSED");
+}
+
+/// Handler that fails its first N invocations and succeeds afterwards.
+///
+/// Used to drive the C-10 redelivery test against JetStream: after the
+/// consumer leaves the message unacked, JetStream's `ack-pending`
+/// timeout (default 30s) or an explicit `msg.nak()` re-delivers the
+/// message and the handler's call count crosses N+1.
+struct FlakyHandler {
+    fail_until: usize,
+    calls: Arc<AtomicUsize>,
+}
+
+impl EventHandler for FlakyHandler {
+    fn handle(&self, _book: Arc<EventBook>) -> BoxFuture<'static, Result<(), BusError>> {
+        let fail_until = self.fail_until;
+        let calls = self.calls.clone();
+        Box::pin(async move {
+            let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if attempt <= fail_until {
+                Err(BusError::ProjectorFailed {
+                    name: "nats-c10-flaky".to_string(),
+                    message: format!("synthetic failure (attempt {})", attempt),
+                })
+            } else {
+                Ok(())
+            }
+        })
+    }
+}
+
+/// Regression test for finding C-10 (NATS transport): when a handler
+/// returns `Err`, the NATS JetStream consumer must NOT `ack` the message;
+/// JetStream must re-deliver it.
+///
+/// Baseline (pre-C-10) calls `msg.ack().await` unconditionally after
+/// dispatch, so JetStream marks the message delivered and never retries.
+/// A failing handler observes one invocation and the event is silently
+/// lost.
+///
+/// After the fix, the consumer issues `msg.ack_with(NakWithDelay)` (or
+/// equivalently leaves the message unacked so it redelivers after the
+/// ack-pending timeout) on failure. We use a low-latency redelivery path
+/// — `msg.ack_with(AckKind::Nak(None))` requests immediate redelivery —
+/// so the test terminates quickly.
+#[tokio::test]
+async fn test_handler_err_triggers_nats_redelivery() {
+    println!("=== NATS handler-failure redelivery test (C-10) ===");
+
+    let (_container, client) = start_nats().await;
+    let prefix = test_prefix();
+    let domain = "c10domain"; // NATS stream subjects don't tolerate '-' in component
+
+    let publisher = NatsEventBus::new(client.clone(), Some(&prefix))
+        .await
+        .expect("Failed to create NATS EventBus publisher");
+
+    let subscriber = publisher
+        .create_subscriber("c10-flaky-sub", Some(domain))
+        .await
+        .expect("Failed to create NATS subscriber");
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    subscriber
+        .subscribe(Box::new(FlakyHandler {
+            fail_until: 1,
+            calls: calls.clone(),
+        }))
+        .await
+        .expect("Failed to subscribe");
+
+    subscriber
+        .start_consuming()
+        .await
+        .expect("Failed to start consuming");
+
+    // Let the consumer attach to the stream.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let book = Arc::new(make_event_book_with_seq(domain, uuid::Uuid::new_v4(), 0, 1));
+    publisher
+        .publish(book)
+        .await
+        .expect("Failed to publish event");
+
+    // JetStream's nak-based redelivery should land attempt #2 within a
+    // couple of seconds. Poll up to 10s to absorb scheduler/network
+    // jitter; the baseline behavior is "stuck at 1" indefinitely.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if calls.load(Ordering::SeqCst) >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let observed = calls.load(Ordering::SeqCst);
+    assert!(
+        observed >= 2,
+        "expected handler to observe >= 2 invocations after failing the \
+         first (JetStream must redeliver unacked messages), but saw {}. \
+         Baseline (pre-C-10) acks unconditionally and the message is \
+         silently lost — observed = 1.",
+        observed
+    );
+
+    println!(
+        "=== NATS handler-failure redelivery: PASSED (observed {} invocations) ===",
+        observed
+    );
 }

@@ -68,6 +68,12 @@ RUN cargo install --locked \
 RUN rustup component add llvm-tools-preview && \
     cargo install cargo-llvm-cov --locked
 
+# Install cargo-mutants. Always invoked via `just mutants*` inside the
+# ephemeral container helper (see core justfile / CLAUDE.md "Mutation
+# Testing"). Bundling it in the image avoids a `cargo install` on every
+# CI mutation job.
+RUN cargo install cargo-mutants --locked
+
 # Configure cargo to use mold linker by default
 RUN mkdir -p /usr/local/cargo && \
     echo '[target.x86_64-unknown-linux-gnu]' >> /usr/local/cargo/config.toml && \

@@ -10,8 +10,8 @@ use deadpool_lapin::{Manager, Pool, PoolError};
 use hex;
 use lapin::{
     options::{
-        BasicConsumeOptions, BasicPublishOptions, ConfirmSelectOptions, ExchangeDeclareOptions,
-        QueueBindOptions, QueueDeclareOptions,
+        BasicConsumeOptions, BasicNackOptions, BasicPublishOptions, ConfirmSelectOptions,
+        ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
     },
     publisher_confirm::Confirmation,
     types::FieldTable,
@@ -458,6 +458,20 @@ impl AmqpEventBus {
     }
 
     /// Process a single delivery from the consumer.
+    ///
+    /// Ack/nack decision (C-10):
+    /// - Decode error → `reject(requeue: false)`: malformed payload, no
+    ///   retry will help. (Pre-existing behavior, unchanged.)
+    /// - Dispatch success → `ack`.
+    /// - Dispatch failure (any handler returned `Err`) → `nack` with
+    ///   `requeue: true` so RabbitMQ re-queues the delivery. We choose
+    ///   `requeue: true` rather than DLX routing here because the
+    ///   framework's idempotency surface (sequence numbers, external_id,
+    ///   handler-side dedup) makes the simple-retry path safe and
+    ///   matches the Kafka transport's "don't commit on failure"
+    ///   pattern (`src/bus/kafka/bus.rs:149`). DLX routing on
+    ///   poison-pill messages is C-08 territory and orthogonal to the
+    ///   transient-failure case C-10 addresses.
     async fn process_delivery(
         delivery: lapin::message::Delivery,
         handlers: &Arc<RwLock<Vec<Box<dyn EventHandler>>>>,
@@ -480,16 +494,34 @@ impl AmqpEventBus {
                 // Wrap in Arc for sharing across handlers
                 let book = Arc::new(book);
 
-                // Call all handlers within the consume span
-                async {
-                    crate::bus::dispatch::dispatch_to_handlers(handlers, &book).await;
-                }
-                .instrument(consume_span)
-                .await;
+                // Call all handlers within the consume span. Capture the
+                // bool so the ack/nack decision honors handler outcomes
+                // (C-10).
+                let all_succeeded =
+                    async { crate::bus::dispatch::dispatch_to_handlers(handlers, &book).await }
+                        .instrument(consume_span)
+                        .await;
 
-                // Acknowledge message
-                if let Err(e) = delivery.ack(Default::default()).await {
-                    error!(error = %e, "Failed to ack message");
+                if all_succeeded {
+                    if let Err(e) = delivery.ack(Default::default()).await {
+                        error!(error = %e, "Failed to ack message");
+                    }
+                } else {
+                    // Handler failure: nack with requeue so the broker
+                    // re-delivers. Do not advance through to ack — that
+                    // would silently lose the event.
+                    let nack_opts = BasicNackOptions {
+                        requeue: true,
+                        multiple: false,
+                    };
+                    if let Err(e) = delivery.nack(nack_opts).await {
+                        error!(
+                            error = %e,
+                            "Failed to nack message after handler failure"
+                        );
+                    } else {
+                        debug!("Handler failed; nacked with requeue=true for redelivery (C-10)");
+                    }
                 }
             }
             Err(e) => {

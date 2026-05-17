@@ -22,7 +22,8 @@ use bigtable_rs::bigtable::{BigTable, BigTableConnection};
 use bigtable_rs::google::bigtable::v2::mutation::SetCell;
 use bigtable_rs::google::bigtable::v2::row_filter::Filter;
 use bigtable_rs::google::bigtable::v2::{
-    MutateRowRequest, Mutation, ReadRowsRequest, RowFilter, RowRange, RowSet,
+    CheckAndMutateRowRequest, MutateRowRequest, Mutation, ReadRowsRequest, RowFilter, RowRange,
+    RowSet,
 };
 use prost::Message;
 use tokio::sync::Mutex;
@@ -43,9 +44,22 @@ const COL_CREATED_AT: &[u8] = b"created_at";
 const COL_CORRELATION_ID: &[u8] = b"correlation_id";
 const COL_COMMITTED: &[u8] = b"committed";
 const COL_CASCADE_ID: &[u8] = b"cascade_id";
+// C-18 columns: persist external_id + source_info on each event row so the
+// `find_by_external_id` and `find_by_source` trait contracts hold. Bigtable
+// has no secondary index — lookups are scoped to the aggregate row-key
+// prefix and filtered in-app on these columns.
+const COL_EXTERNAL_ID: &[u8] = b"external_id";
+const COL_SOURCE_EDITION: &[u8] = b"source_edition";
+const COL_SOURCE_DOMAIN: &[u8] = b"source_domain";
+const COL_SOURCE_ROOT: &[u8] = b"source_root";
+const COL_SOURCE_SEQ: &[u8] = b"source_seq";
 
 /// Column family for cascade index table.
 const CASCADE_INDEX_FAMILY: &str = "ref";
+
+/// C-18 helper return type: (sequence, cells_by_qualifier).
+/// Aliased to satisfy `clippy::type_complexity`.
+type AggregateRowSnapshot = (u32, HashMap<Vec<u8>, Vec<u8>>);
 
 /// Bigtable implementation of EventStore.
 ///
@@ -190,6 +204,24 @@ impl BigtableEventStore {
 
     /// Build mutations for an event.
     pub fn build_event_mutations(event: &EventPage, correlation_id: &str) -> Vec<Mutation> {
+        Self::build_event_mutations_full(event, correlation_id, "", None)
+    }
+
+    /// Build mutations for an event, including C-18 external_id and
+    /// source_info columns when present.
+    ///
+    /// `external_id`: empty string means "no claim recorded" — column is
+    /// omitted. `source_info`: `None` or `Some(info)` with `info.is_empty()`
+    /// means "no source claim recorded" — source columns are omitted.
+    /// Lookups (`find_by_external_id`, `find_by_source`) prefix-scan the
+    /// aggregate row range and filter on these columns in-app (Bigtable
+    /// has no secondary indexes).
+    pub fn build_event_mutations_full(
+        event: &EventPage,
+        correlation_id: &str,
+        external_id: &str,
+        source_info: Option<&SourceInfo>,
+    ) -> Vec<Mutation> {
         let mut mutations = Vec::new();
 
         // Event data
@@ -215,6 +247,37 @@ impl BigtableEventStore {
                 COLUMN_FAMILY,
                 COL_CORRELATION_ID,
                 correlation_id.as_bytes(),
+            ));
+        }
+
+        // C-18: external_id + source_info columns.
+        if !external_id.is_empty() {
+            mutations.push(Self::build_set_cell(
+                COLUMN_FAMILY,
+                COL_EXTERNAL_ID,
+                external_id.as_bytes(),
+            ));
+        }
+        if let Some(info) = source_info.filter(|s| !s.is_empty()) {
+            mutations.push(Self::build_set_cell(
+                COLUMN_FAMILY,
+                COL_SOURCE_EDITION,
+                info.edition.as_bytes(),
+            ));
+            mutations.push(Self::build_set_cell(
+                COLUMN_FAMILY,
+                COL_SOURCE_DOMAIN,
+                info.domain.as_bytes(),
+            ));
+            mutations.push(Self::build_set_cell(
+                COLUMN_FAMILY,
+                COL_SOURCE_ROOT,
+                info.root.to_string().as_bytes(),
+            ));
+            mutations.push(Self::build_set_cell(
+                COLUMN_FAMILY,
+                COL_SOURCE_SEQ,
+                info.seq.to_string().as_bytes(),
             ));
         }
 
@@ -537,6 +600,103 @@ impl BigtableEventStore {
 
         Ok(max_seq)
     }
+
+    /// C-18 helper: prefix-scan the aggregate row range and collect
+    /// per-row cells indexed by column qualifier. Returns
+    /// `Vec<(sequence, cells_by_qualifier)>` sorted by sequence asc.
+    /// Bigtable has no secondary indexes; lookups are scoped to the
+    /// aggregate (so the scan is bounded by the aggregate history, not
+    /// the whole table) and filtered in-app on the C-18 columns.
+    async fn scan_aggregate_rows(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+    ) -> Result<Vec<AggregateRowSnapshot>> {
+        let prefix = Self::row_key_prefix(domain, edition, root);
+
+        let mut client = self.client.lock().await;
+        let table_name = client.get_full_table_name(&self.table_name);
+
+        let request = ReadRowsRequest {
+            table_name,
+            rows: Some(RowSet {
+                row_keys: vec![],
+                row_ranges: vec![RowRange {
+                    start_key: Some(
+                        bigtable_rs::google::bigtable::v2::row_range::StartKey::StartKeyClosed(
+                            prefix.clone(),
+                        ),
+                    ),
+                    end_key: Some(
+                        bigtable_rs::google::bigtable::v2::row_range::EndKey::EndKeyOpen({
+                            let mut end = prefix;
+                            if let Some(last) = end.last_mut() {
+                                *last = last.saturating_add(1);
+                            }
+                            end
+                        }),
+                    ),
+                }],
+            }),
+            filter: Some(RowFilter {
+                filter: Some(Filter::FamilyNameRegexFilter(COLUMN_FAMILY.to_string())),
+            }),
+            ..Default::default()
+        };
+
+        let result = client.read_rows(request).await.map_err(|e| {
+            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
+        })?;
+
+        let mut rows: Vec<AggregateRowSnapshot> = Vec::new();
+        for (row_key, cells) in result {
+            let Some((_, _, _, seq)) = Self::parse_row_key(&row_key) else {
+                continue;
+            };
+            let mut by_qual: HashMap<Vec<u8>, Vec<u8>> = HashMap::new();
+            for cell in cells {
+                // For repeated cells on the same qualifier (historical
+                // versions), the most-recent version overwrites. That's
+                // what we want for lookup-by-value semantics — the
+                // current `add()` writes a single version per qualifier.
+                by_qual.insert(cell.qualifier, cell.value);
+            }
+            rows.push((seq, by_qual));
+        }
+        rows.sort_by_key(|(seq, _)| *seq);
+        Ok(rows)
+    }
+
+    /// C-18 helper: check if any row in the aggregate already carries
+    /// the given `external_id`. Returns the (first, last) sequence of
+    /// matching rows so the caller can return `AddOutcome::Duplicate`
+    /// with the original range.
+    async fn scan_aggregate_for_external_id(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        external_id: &str,
+    ) -> Result<Option<(u32, u32)>> {
+        let rows = self.scan_aggregate_rows(domain, edition, root).await?;
+        let matched: Vec<u32> = rows
+            .iter()
+            .filter_map(|(seq, cells)| {
+                let value = cells.get::<[u8]>(COL_EXTERNAL_ID)?;
+                if value.as_slice() == external_id.as_bytes() {
+                    Some(*seq)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        if matched.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some((*matched.first().unwrap(), *matched.last().unwrap())))
+        }
+    }
 }
 
 #[async_trait]
@@ -548,14 +708,34 @@ impl EventStore for BigtableEventStore {
         root: Uuid,
         events: Vec<EventPage>,
         correlation_id: &str,
-        _external_id: Option<&str>,
-        _source_info: Option<&SourceInfo>,
+        external_id: Option<&str>,
+        source_info: Option<&SourceInfo>,
     ) -> Result<AddOutcome> {
         if events.is_empty() {
             return Ok(AddOutcome::Added {
                 first_sequence: 0,
                 last_sequence: 0,
             });
+        }
+
+        let external_id = external_id.unwrap_or("");
+
+        // C-18: external_id idempotency check. When external_id is
+        // non-empty and a row in this aggregate already carries that
+        // external_id, return `Duplicate` instead of re-persisting. We
+        // scan the aggregate row-key range (bounded by the aggregate
+        // history; not a full-table scan) and check the `external_id`
+        // column in-app.
+        if !external_id.is_empty() {
+            if let Some((first, last)) = self
+                .scan_aggregate_for_external_id(domain, edition, root, external_id)
+                .await?
+            {
+                return Ok(AddOutcome::Duplicate {
+                    first_sequence: first,
+                    last_sequence: last,
+                });
+            }
         }
 
         // Validate sequence continuity
@@ -578,18 +758,39 @@ impl EventStore for BigtableEventStore {
         for event in &events {
             let seq = Self::get_sequence(event);
             let row_key = Self::row_key(domain, edition, root, seq);
-            let mutations = Self::build_event_mutations(event, correlation_id);
+            let mutations =
+                Self::build_event_mutations_full(event, correlation_id, external_id, source_info);
 
-            let request = MutateRowRequest {
+            // C-19: CheckAndMutateRow fences the read-then-write race.
+            // The predicate matches if there is ANY cell in the event
+            // column family at this row key — i.e. the row already
+            // exists. When matched, we apply NO mutations (true_mutations
+            // is empty); when not matched, we apply the event mutations
+            // (false_mutations). A concurrent writer that lost the race
+            // will see `predicate_matched == true` and surface as
+            // `StorageError::SequenceConflict`, which the aggregate
+            // pipeline retries with a fresh sequence read.
+            let request = CheckAndMutateRowRequest {
                 table_name: table_name.clone(),
                 row_key,
-                mutations,
+                predicate_filter: Some(RowFilter {
+                    filter: Some(Filter::FamilyNameRegexFilter(COLUMN_FAMILY.to_string())),
+                }),
+                true_mutations: vec![],
+                false_mutations: mutations,
                 ..Default::default()
             };
 
-            client.mutate_row(request).await.map_err(|e| {
-                StorageError::NotImplemented(format!("Bigtable mutate_row failed: {}", e))
+            let response = client.check_and_mutate_row(request).await.map_err(|e| {
+                StorageError::NotImplemented(format!("Bigtable check_and_mutate_row failed: {}", e))
             })?;
+
+            if response.predicate_matched {
+                return Err(StorageError::SequenceConflict {
+                    expected: expected_next,
+                    actual: seq,
+                });
+            }
 
             // Dual-write to cascade index table if event has cascade_id
             if let Some(ref cid) = event.cascade_id {
@@ -969,26 +1170,97 @@ impl EventStore for BigtableEventStore {
 
     async fn find_by_source(
         &self,
-        _domain: &str,
-        _edition: &str,
-        _root: Uuid,
-        _source_info: &SourceInfo,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        source_info: &SourceInfo,
     ) -> Result<Option<Vec<EventPage>>> {
-        // Bigtable doesn't store source tracking - saga idempotency not supported
-        // Use SQLite or PostgreSQL for saga source tracking
-        Ok(None)
+        // C-18: Saga idempotency. Pre-fix this method returned
+        // `Ok(None)` unconditionally, silently violating the trait
+        // contract. Bigtable has no secondary indexes — we prefix-scan
+        // the aggregate row range (bounded by the aggregate history,
+        // not the whole table) and filter in-app on the C-18
+        // source_* columns persisted by `add()`.
+        if source_info.is_empty() {
+            return Ok(None);
+        }
+
+        let rows = self.scan_aggregate_rows(domain, edition, root).await?;
+        let mut events: Vec<EventPage> = Vec::new();
+        let target_root = source_info.root.to_string();
+        let target_seq = source_info.seq.to_string();
+        for (_seq, cells) in &rows {
+            let matches = cells
+                .get::<[u8]>(COL_SOURCE_EDITION)
+                .map(|v| v.as_slice() == source_info.edition.as_bytes())
+                .unwrap_or(false)
+                && cells
+                    .get::<[u8]>(COL_SOURCE_DOMAIN)
+                    .map(|v| v.as_slice() == source_info.domain.as_bytes())
+                    .unwrap_or(false)
+                && cells
+                    .get::<[u8]>(COL_SOURCE_ROOT)
+                    .map(|v| v.as_slice() == target_root.as_bytes())
+                    .unwrap_or(false)
+                && cells
+                    .get::<[u8]>(COL_SOURCE_SEQ)
+                    .map(|v| v.as_slice() == target_seq.as_bytes())
+                    .unwrap_or(false);
+            if !matches {
+                continue;
+            }
+            let Some(blob) = cells.get::<[u8]>(COL_DATA) else {
+                continue;
+            };
+            let event = EventPage::decode(blob.as_slice()).map_err(StorageError::ProtobufDecode)?;
+            events.push(event);
+        }
+        if events.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(events))
+        }
     }
 
     async fn find_by_external_id(
         &self,
-        _domain: &str,
-        _edition: &str,
-        _root: Uuid,
-        _external_id: &str,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        external_id: &str,
     ) -> Result<Option<Vec<EventPage>>> {
-        // Bigtable doesn't store external_id tracking — fact pre-handler
-        // idempotency not supported. Use SQLite or PostgreSQL.
-        Ok(None)
+        // C-18: fact-injection idempotency. Pre-fix this method returned
+        // `Ok(None)` unconditionally, silently violating the trait
+        // contract. Bigtable has no secondary indexes — we prefix-scan
+        // the aggregate row range (bounded by the aggregate history,
+        // not the whole table) and filter in-app on the
+        // `external_id` column persisted by `add()`. Empty external_id
+        // returns None per contract.
+        if external_id.is_empty() {
+            return Ok(None);
+        }
+
+        let rows = self.scan_aggregate_rows(domain, edition, root).await?;
+        let mut events: Vec<EventPage> = Vec::new();
+        for (_seq, cells) in &rows {
+            let matches = cells
+                .get::<[u8]>(COL_EXTERNAL_ID)
+                .map(|v| v.as_slice() == external_id.as_bytes())
+                .unwrap_or(false);
+            if !matches {
+                continue;
+            }
+            let Some(blob) = cells.get::<[u8]>(COL_DATA) else {
+                continue;
+            };
+            let event = EventPage::decode(blob.as_slice()).map_err(StorageError::ProtobufDecode)?;
+            events.push(event);
+        }
+        if events.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(events))
+        }
     }
 
     async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {

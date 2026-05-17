@@ -411,6 +411,67 @@ pub async fn test_edition_isolation<S: SnapshotStore>(store: &S) {
     assert_eq!(v2_snap.sequence, 20);
 }
 
+// =============================================================================
+// Main-timeline sentinel polarity tests (C-15)
+// =============================================================================
+//
+// SnapshotStore must treat `""` and `"angzarr"` as interchangeable forms of
+// the main-timeline sentinel. Otherwise a snapshot written under one form is
+// silently invisible when read under the other — which breaks aggregate
+// restore after edition migration normalizes the column to NULL.
+
+/// C-15: snapshot written with empty-string sentinel must be readable via
+/// both main-timeline forms.
+pub async fn test_main_timeline_sentinel_write_empty_read_both<S: SnapshotStore>(store: &S) {
+    let domain = "test_snap_sentinel_empty";
+    let root = Uuid::new_v4();
+
+    store
+        .put(domain, "", root, make_snapshot(7))
+        .await
+        .expect("put with empty-string main-timeline sentinel should succeed");
+
+    let via_empty = store
+        .get(domain, "", root)
+        .await
+        .expect("get via empty sentinel should succeed")
+        .expect("snapshot written via empty sentinel must be readable via empty sentinel");
+    assert_eq!(via_empty.sequence, 7);
+
+    let via_angzarr = store
+        .get(domain, "angzarr", root)
+        .await
+        .expect("get via 'angzarr' sentinel should succeed")
+        .expect("snapshot written via empty sentinel must be readable via 'angzarr' sentinel");
+    assert_eq!(via_angzarr.sequence, 7);
+}
+
+/// C-15: snapshot written with `"angzarr"` sentinel must be readable via
+/// both main-timeline forms.
+pub async fn test_main_timeline_sentinel_write_angzarr_read_both<S: SnapshotStore>(store: &S) {
+    let domain = "test_snap_sentinel_angzarr";
+    let root = Uuid::new_v4();
+
+    store
+        .put(domain, "angzarr", root, make_snapshot(11))
+        .await
+        .expect("put with 'angzarr' main-timeline sentinel should succeed");
+
+    let via_angzarr = store
+        .get(domain, "angzarr", root)
+        .await
+        .expect("get via 'angzarr' sentinel should succeed")
+        .expect("snapshot written via 'angzarr' must be readable via 'angzarr'");
+    assert_eq!(via_angzarr.sequence, 11);
+
+    let via_empty = store
+        .get(domain, "", root)
+        .await
+        .expect("get via empty sentinel should succeed")
+        .expect("snapshot written via 'angzarr' must be readable via empty sentinel");
+    assert_eq!(via_empty.sequence, 11);
+}
+
 pub async fn test_edition_delete_independence<S: SnapshotStore>(store: &S) {
     let domain = "test_snap_ed_del";
     let root = Uuid::new_v4();
@@ -534,6 +595,13 @@ macro_rules! run_snapshot_store_tests {
 
         test_edition_delete_independence($store).await;
         println!("  test_edition_delete_independence: PASSED");
+
+        // main-timeline sentinel polarity tests (C-15)
+        test_main_timeline_sentinel_write_empty_read_both($store).await;
+        println!("  test_main_timeline_sentinel_write_empty_read_both: PASSED");
+
+        test_main_timeline_sentinel_write_angzarr_read_both($store).await;
+        println!("  test_main_timeline_sentinel_write_angzarr_read_both: PASSED");
 
         // large state tests
         test_large_state_100kb($store).await;

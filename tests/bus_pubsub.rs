@@ -7,11 +7,23 @@
 
 #![cfg(feature = "pubsub")]
 
+// The emulator-driven contract tests below pull `CapturingHandler` from
+// `angzarr::test_utils`, which is gated on the `test-utils` feature. The pure
+// unit test in this file (`pubsub_subscription_config_enables_message_ordering`)
+// does not need `test_utils`, so we gate the shared bus suite separately to
+// keep the unit test compilable under `--features pubsub` alone (e.g. for
+// cargo-mutants runs against `src/bus/pubsub/*`).
+#[cfg(feature = "test-utils")]
 mod bus;
 
+use angzarr::bus::pubsub::build_subscription_config;
+
+#[cfg(feature = "test-utils")]
 use std::time::Duration;
 
+#[cfg(feature = "test-utils")]
 use angzarr::bus::pubsub::{PubSubConfig, PubSubEventBus};
+#[cfg(feature = "test-utils")]
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
@@ -21,6 +33,7 @@ use testcontainers::{
 /// Start GCP Pub/Sub emulator container.
 ///
 /// Returns (container, emulator_host) where emulator_host is suitable for PUBSUB_EMULATOR_HOST.
+#[cfg(feature = "test-utils")]
 async fn start_pubsub_emulator() -> (testcontainers::ContainerAsync<GenericImage>, String) {
     // Use the official gcloud CLI image with Pub/Sub emulator
     let image = GenericImage::new(
@@ -64,6 +77,7 @@ async fn start_pubsub_emulator() -> (testcontainers::ContainerAsync<GenericImage
     (container, emulator_host)
 }
 
+#[cfg(feature = "test-utils")]
 fn test_prefix() -> String {
     format!(
         "test_{}",
@@ -71,6 +85,34 @@ fn test_prefix() -> String {
     )
 }
 
+/// Regression guard for bug C-11.
+///
+/// The publisher in `src/bus/pubsub/bus.rs` stamps `ordering_key = root_id` on
+/// every message so GCP Pub/Sub serializes delivery per aggregate root. Pub/Sub
+/// honors that key ONLY when the subscription has
+/// `enable_message_ordering == true`. With the flag off, the broker is free to
+/// reorder events for the same root, violating the CQRS-ES per-root ordering
+/// invariant the rest of the framework assumes.
+///
+/// A behavioural ordered-delivery test against the emulator cannot reliably
+/// reproduce this bug — the single-process broker tends to deliver in publish
+/// order even with the flag off, so the test flake-passes on baseline. Pinning
+/// the config flag itself is the deterministic property that prevents
+/// regression.
+#[test]
+fn pubsub_subscription_config_enables_message_ordering() {
+    let config = build_subscription_config();
+    assert!(
+        config.enable_message_ordering,
+        "Pub/Sub SubscriptionConfig must set enable_message_ordering=true so \
+         the broker honors the publisher's ordering_key=root_id. With the flag \
+         off (the gcloud-pubsub default), events for the same aggregate root \
+         are delivered out of order, violating the CQRS-ES per-root ordering \
+         invariant (bug C-11)."
+    );
+}
+
+#[cfg(feature = "test-utils")]
 #[tokio::test]
 async fn test_pubsub_event_bus() {
     println!("=== Pub/Sub EventBus Tests ===");

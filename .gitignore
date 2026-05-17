@@ -102,6 +102,7 @@ build/images/build.json
 mutants.out/
 mutants.out.*
 **/mutants/
+.mutants-cache/
 
 # Coverage files
 *.coverage

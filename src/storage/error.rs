@@ -21,6 +21,7 @@ pub mod errmsg {
     pub const NOT_IMPLEMENTED: &str = "Not implemented: ";
     pub const NATS_ERROR: &str = "NATS error: ";
     pub const UNKNOWN_TYPE: &str = "Unknown storage type: ";
+    pub const MAIN_TIMELINE_PROTECTED: &str = "Main timeline is protected: ";
 }
 
 /// Errors that can occur during storage operations.
@@ -70,4 +71,13 @@ pub enum StorageError {
 
     #[error("{}{}", errmsg::UNKNOWN_TYPE, .0)]
     UnknownType(String),
+
+    /// Caller attempted a destructive operation against the main timeline.
+    ///
+    /// The main timeline (`""` or `"angzarr"` at the API layer; SQL NULL in
+    /// the column) is append-only. `delete_edition_events` on a main-timeline
+    /// sentinel raises this. Both client-side and stored-procedure guards
+    /// enforce it for SQL backends (C-15).
+    #[error("{}{}", errmsg::MAIN_TIMELINE_PROTECTED, .0)]
+    MainTimelineProtected(String),
 }

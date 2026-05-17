@@ -23,6 +23,7 @@ use crate::storage::StorageError;
 
 use crate::storage::AddOutcome;
 
+use super::sync_policy::{should_call_sync_projectors, should_skip_post_persist};
 use super::{
     AggregateContext, AggregateContextFactory, ClientLogic, PersistOutcome, TemporalQuery,
 };
@@ -468,6 +469,16 @@ impl AggregateContext for LocalAggregateContext {
 
     #[tracing::instrument(name = "aggregate.post_persist", skip_all)]
     async fn post_persist(&self, events: &EventBook) -> Result<Vec<Projection>, Status> {
+        if should_skip_post_persist(self.sync_mode) {
+            // ISOLATED mode short-circuit: recovery / migration / replay
+            // writes must not republish historical events nor trigger sync
+            // projectors. Policy is centralized in `super::sync_policy` so
+            // it cannot drift from the gRPC context's identical decision.
+            // C-05 was exactly this drift: the local context only handled
+            // Async and let Isolated fall through to publish.
+            return Ok(vec![]);
+        }
+
         // Publish FIRST — ensures events reach the bus even if sync projectors fail.
         tracing::info!(
             pages = events.pages.len(),
@@ -481,12 +492,12 @@ impl AggregateContext for LocalAggregateContext {
             .await
             .map_err(|e| Status::unavailable(format!("Failed to publish events: {e}")))?;
 
-        // ASYNC mode: fire-and-forget — no sync projectors
-        // SIMPLE and CASCADE: call sync projectors
-        let projections = if self.sync_mode == Some(crate::proto::SyncMode::Async) {
-            vec![]
-        } else {
+        // SIMPLE and CASCADE wait on sync projectors; ASYNC, DECISION, and
+        // None publish but don't wait. (ISOLATED short-circuits above.)
+        let projections = if should_call_sync_projectors(self.sync_mode) {
             self.call_sync_projectors(events).await
+        } else {
+            vec![]
         };
 
         Ok(projections)

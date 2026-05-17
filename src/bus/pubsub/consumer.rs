@@ -66,6 +66,31 @@ pub(super) async fn process_message_payload(
     }
 }
 
+/// Build the [`SubscriptionConfig`] used when creating a new Pub/Sub subscription.
+///
+/// Pulled out of [`ensure_subscription_exists`] so the framework's
+/// ordering invariant — `enable_message_ordering == true` — can be unit-asserted
+/// without standing up an emulator.
+///
+/// # Why message ordering must be enabled
+///
+/// The publisher in `bus.rs` sets `ordering_key = root_id` on every message so
+/// GCP Pub/Sub will serialize delivery per aggregate root. Pub/Sub honors that
+/// ordering key ONLY when the consuming subscription has
+/// `enable_message_ordering == true`. Without it, the broker is free to deliver
+/// events for the same root out of order, breaking the CQRS-ES per-root
+/// ordering invariant the rest of the framework assumes.
+///
+/// Locking the flag in a dedicated builder keeps the invariant visible and
+/// regression-testable; the alternative (an inline `SubscriptionConfig::default()`
+/// call) had already drifted (bug C-11) before being caught.
+pub fn build_subscription_config() -> SubscriptionConfig {
+    SubscriptionConfig {
+        enable_message_ordering: true,
+        ..SubscriptionConfig::default()
+    }
+}
+
 /// Ensure topic and subscription exist, creating them if needed.
 pub(super) async fn ensure_subscription_exists(
     client: &Client,
@@ -90,11 +115,13 @@ pub(super) async fn ensure_subscription_exists(
             info!(topic = %topic_name, "Created Pub/Sub topic");
         }
 
-        // Create subscription
+        // Create subscription. `build_subscription_config()` enforces
+        // `enable_message_ordering=true` so the broker honors the
+        // publisher's `ordering_key=root_id` and preserves per-root order.
         subscription
             .create(
                 topic.fully_qualified_name(),
-                SubscriptionConfig::default(),
+                build_subscription_config(),
                 None,
             )
             .await
@@ -114,3 +141,7 @@ pub(super) async fn ensure_subscription_exists(
 
     Ok(subscription)
 }
+
+#[cfg(test)]
+#[path = "consumer.test.rs"]
+mod tests;

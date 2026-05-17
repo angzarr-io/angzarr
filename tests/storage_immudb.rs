@@ -97,6 +97,11 @@ async fn connect_and_init(connection_string: &str) -> (sqlx::PgPool, ImmudbEvent
             created_at     TIMESTAMP NOT NULL,
             event_data     BLOB NOT NULL,
             correlation_id VARCHAR(128),
+            external_id    VARCHAR(128),
+            source_edition VARCHAR(32),
+            source_domain  VARCHAR(64),
+            source_root    VARCHAR(36),
+            source_seq     INTEGER,
             PRIMARY KEY (domain, edition, root, sequence)
         )
     "#;
@@ -156,7 +161,10 @@ async fn test_immudb_correlation_queries() {
     let root1 = Uuid::new_v4();
     let root2 = Uuid::new_v4();
 
-    // Add events with same correlation ID across different aggregates
+    // Add events with same correlation ID across different aggregates.
+    // C-18 fix: trait `add()` now takes 7 args (added `external_id`,
+    // `source_info` for idempotency claims). Pass None for both — these
+    // tests don't exercise the claim paths.
     store
         .add(
             "domain_a",
@@ -164,6 +172,8 @@ async fn test_immudb_correlation_queries() {
             root1,
             vec![storage::event_store_tests::make_event(0, "EventA")],
             &correlation_id,
+            None,
+            None,
         )
         .await
         .expect("add to domain_a failed");
@@ -175,6 +185,8 @@ async fn test_immudb_correlation_queries() {
             root2,
             vec![storage::event_store_tests::make_event(0, "EventB")],
             &correlation_id,
+            None,
+            None,
         )
         .await
         .expect("add to domain_b failed");
@@ -215,7 +227,8 @@ async fn test_immudb_edition_composite_read() {
     let root = Uuid::new_v4();
     let domain = "test_edition";
 
-    // Add events to main timeline (angzarr edition)
+    // Add events to main timeline (angzarr edition).
+    // C-18 fix: trait `add()` now takes 7 args.
     store
         .add(
             domain,
@@ -223,6 +236,8 @@ async fn test_immudb_edition_composite_read() {
             root,
             storage::event_store_tests::make_events(0, 5),
             "",
+            None,
+            None,
         )
         .await
         .expect("add to main timeline failed");
@@ -235,6 +250,8 @@ async fn test_immudb_edition_composite_read() {
             root,
             storage::event_store_tests::make_events(3, 3), // sequences 3, 4, 5
             "",
+            None,
+            None,
         )
         .await
         .expect("add to feature edition failed");
@@ -251,12 +268,18 @@ async fn test_immudb_edition_composite_read() {
         "should have 6 events total (3 main + 3 feature)"
     );
 
-    // Verify sequence continuity
+    // Verify sequence continuity. Use the proto extension trait
+    // `sequence_num()` because `EventPage` now stores the sequence
+    // inside its `header.sequence_type` oneof rather than a top-level
+    // field.
+    use angzarr::proto_ext::EventPageExt;
     for (i, event) in events.iter().enumerate() {
         assert_eq!(
-            event.sequence, i as u32,
+            event.sequence_num(),
+            i as u32,
             "sequence {} should match index {}",
-            event.sequence, i
+            event.sequence_num(),
+            i
         );
     }
 
@@ -289,7 +312,8 @@ async fn test_immudb_delete_not_supported() {
     println!("  next_sequence for new aggregate: {}", next);
     assert_eq!(next, 0, "new aggregate should have next_sequence 0");
 
-    // Add some events
+    // Add some events.
+    // C-18 fix: trait `add()` now takes 7 args.
     store
         .add(
             domain,
@@ -297,6 +321,8 @@ async fn test_immudb_delete_not_supported() {
             root,
             storage::event_store_tests::make_events(0, 3),
             "",
+            None,
+            None,
         )
         .await
         .expect("add should succeed");

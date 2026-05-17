@@ -106,12 +106,35 @@ pub(super) fn spawn_message_consumer(
                 super::otel::nats_extract_trace_context(headers, &consume_span);
             }
 
-            // Dispatch to handlers
-            crate::bus::dispatch::dispatch_to_handlers(&handlers, &book).await;
+            // Dispatch to handlers and capture the success bool so the
+            // ack/nak decision honors handler outcomes (C-10).
+            let all_succeeded = crate::bus::dispatch::dispatch_to_handlers(&handlers, &book).await;
 
-            // Acknowledge message
-            if let Err(e) = msg.ack().await {
-                tracing::error!("Failed to ack message: {}", e);
+            if all_succeeded {
+                if let Err(e) = msg.ack().await {
+                    tracing::error!("Failed to ack message: {}", e);
+                }
+            } else {
+                // Handler failure: ask JetStream to redeliver. We use
+                // `AckKind::Nak(None)` for immediate redelivery rather
+                // than relying on the ack-pending timeout (default 30s),
+                // because transient handler failures are typically
+                // worth retrying as quickly as the broker allows. The
+                // framework's idempotency surface (sequence numbers,
+                // external_id, handler-side dedup) makes simple-retry
+                // safe; this matches the Kafka transport's
+                // "don't commit on failure" pattern
+                // (`src/bus/kafka/bus.rs:149`).
+                if let Err(e) = msg
+                    .ack_with(async_nats::jetstream::AckKind::Nak(None))
+                    .await
+                {
+                    tracing::error!("Failed to nak message after handler failure: {}", e);
+                } else {
+                    tracing::debug!(
+                        "Handler failed; naked message for JetStream redelivery (C-10)"
+                    );
+                }
             }
         }
     });

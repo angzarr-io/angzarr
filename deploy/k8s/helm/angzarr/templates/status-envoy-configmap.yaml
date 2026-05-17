@@ -1,18 +1,39 @@
 {{- /*
   Envoy configuration for the angzarr-status REST sidecar.
 
-  Phase 0 scope: serve the SPA static bundle (when present) and proxy
-  /api/* HTTP requests to the local gRPC server via grpc_http1_bridge.
-  No JSON transcoding yet — that lands when status protos carry
-  google.api.http annotations (Phase 1+).
+  Phase 1+: serve the SPA static bundle (when present) and transcode
+  /api/* HTTP requests to the local gRPC server via
+  grpc_json_transcoder. The transcoder honours `(google.api.http)`
+  annotations declared on each service (e.g. DlqAdminService's
+  `GET /api/dlq`, `POST /api/dlq/{id}/replay`).
+
+  SECURITY POSTURE (C-14 remediation): we DO NOT use a wildcard
+  `prefix_rewrite: "/"` + `grpc_http1_bridge`. That pattern silently
+  exposed the FULL gRPC surface (Health, ServerReflection, internal
+  admin RPCs) at `http://host:8080/<service>/<Method>` because the
+  bridge filter forwards anything matching the prefix. We now declare
+  an EXPLICIT `services` allowlist on the transcoder so only the
+  whitelisted gRPC services are reachable over HTTP. Unlisted services
+  (reflection, health, future admin RPCs) return 404 at the listener.
+
+  The transcoder requires a proto FileDescriptorSet (built via
+  `buf build` or `protoc --descriptor_set_out`) provided out-of-band
+  in a ConfigMap (see `infrastructure.status.rest.descriptor.configMapName`
+  in values.yaml). When that ConfigMap name is unset and `rest.enabled`
+  is true, template rendering FAILS — fail-closed by design, so a
+  half-configured chart never ships the open surface.
 
   Listening surfaces:
     :8080 — HTTP entry point for browsers / external REST clients
     :9901 — envoy admin (readiness / config dump / metrics)
 
-  Reference: plans/virtual-spinning-flute.md (P6 transcoder sidecar).
+  Reference: plans/virtual-spinning-flute.md (P6 transcoder sidecar)
+             plans/deep-review-remediation.md (C-14)
 */}}
 {{- if and .Values.infrastructure.status.enabled .Values.infrastructure.status.rest.enabled }}
+{{- if not .Values.infrastructure.status.rest.descriptor.configMapName }}
+{{- fail "infrastructure.status.rest.enabled=true requires infrastructure.status.rest.descriptor.configMapName to be set (a ConfigMap providing a FileDescriptorSet for the gRPC services exposed over HTTP). See C-14 in plans/deep-review-remediation.md." }}
+{{- end }}
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -50,15 +71,17 @@ data:
                         - name: angzarr_status
                           domains: ["*"]
                           routes:
-                            # /api/* → forward to the local Rust binary's gRPC
-                            # surface. Phase 0: plain HTTP/2 forward (gRPC over
-                            # the wire). When protos gain google.api.http
-                            # annotations, swap in grpc_json_transcoder here.
+                            # /api/* → transcode to local gRPC. The
+                            # grpc_json_transcoder filter (declared
+                            # below) only forwards calls that match a
+                            # `(google.api.http)` annotation on a
+                            # service in its `services` allowlist;
+                            # anything else returns 404 before reaching
+                            # the upstream cluster.
                             - match:
                                 prefix: "/api/"
                               route:
                                 cluster: status_grpc
-                                prefix_rewrite: "/"
                                 # grpc-status carries on the response trailer
                                 grpc_timeout_header_max: 30s
                             {{- if .Values.infrastructure.status.rest.web.enabled }}
@@ -69,13 +92,44 @@ data:
                                 cluster: spa_static
                             {{- end }}
                     http_filters:
-                      # Bridges gRPC over HTTP/1.1 from the browser-side
-                      # to HTTP/2 toward the upstream. Cheap to keep
-                      # enabled; gets us gRPC-Web-style access today
-                      # without the transcoder build-out.
-                      - name: envoy.filters.http.grpc_http1_bridge
+                      # grpc_json_transcoder: honours (google.api.http)
+                      # annotations declared on the proto services in
+                      # the `services` allowlist below. Calls that do
+                      # not match an annotated method are NOT forwarded
+                      # — the filter rejects them at the listener.
+                      #
+                      # The `proto_descriptor` path is mounted from a
+                      # ConfigMap referenced by
+                      # `infrastructure.status.rest.descriptor.configMapName`.
+                      # Build the descriptor with:
+                      #   buf build -o angzarr-status-descriptors.pb
+                      # then:
+                      #   kubectl create configmap angzarr-status-descriptors \
+                      #     --from-file=descriptors.pb=angzarr-status-descriptors.pb
+                      - name: envoy.filters.http.grpc_json_transcoder
                         typed_config:
-                          "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_http1_bridge.v3.Config
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.grpc_json_transcoder.v3.GrpcJsonTranscoder
+                          proto_descriptor: {{ printf "/etc/envoy/descriptors/%s" .Values.infrastructure.status.rest.descriptor.fileName | quote }}
+                          # Explicit allowlist — ANY service NOT in this
+                          # list is unreachable over the HTTP listener.
+                          # Append to this list when a new admin RPC
+                          # ships with a (google.api.http) annotation.
+                          # Health, ServerReflection, and any internal
+                          # gRPC are intentionally absent.
+                          services:
+                            - angzarr_client.proto.angzarr.status.DlqAdminService
+                          print_options:
+                            add_whitespace: false
+                            always_print_primitive_fields: false
+                            always_print_enums_as_ints: false
+                            preserve_proto_field_names: false
+                          # Reject requests that don't match a known
+                          # transcoder method (the alternative would
+                          # forward them as raw gRPC — defeats the
+                          # allowlist).
+                          request_validation_options:
+                            reject_unknown_method: true
+                            reject_unknown_query_parameters: true
                       - name: envoy.filters.http.router
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

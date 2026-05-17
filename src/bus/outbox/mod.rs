@@ -76,6 +76,7 @@ use uuid::Uuid;
 use super::{BusError, EventBus, EventHandler, PublishResult, Result};
 use crate::config::OUTBOX_ENABLED_ENV_VAR;
 use crate::proto::EventBook;
+use crate::proto_ext::pages::EventPageExt;
 use crate::proto_ext::CoverExt;
 
 // ============================================================================
@@ -98,6 +99,46 @@ enum Outbox {
     CreatedAt,
     #[iden = "retry_count"]
     RetryCount,
+}
+
+/// Per-root max-published-sequence watermark.
+///
+/// Each successful publish (normal path or recovery path) bumps the
+/// watermark for `(domain, root)`. Recovery consults this table before
+/// republishing an orphaned row: if the orphaned event's max page
+/// sequence is `<=` the stored watermark, the row is superseded and is
+/// deleted from the outbox without republishing.
+///
+/// This guards CQRS-ES per-root monotonicity across the
+/// persist-then-publish boundary. Without it, an orphaned seq=N for
+/// root X can be recovered AFTER seq=N+k for X has already gone out the
+/// normal path, regressing downstream consumer state. See C-13 in
+/// `plans/deep-review-remediation.md`.
+#[derive(Iden)]
+enum OutboxPublishedSeq {
+    #[iden = "outbox_published_seq"]
+    Table,
+    #[iden = "domain"]
+    Domain,
+    #[iden = "root"]
+    Root,
+    #[iden = "max_sequence"]
+    MaxSequence,
+}
+
+/// Extract `(domain, root_hex, max_page_sequence)` from an EventBook.
+///
+/// `max_page_sequence` is the last page's sequence (pages are ordered
+/// by sequence). An empty book yields `max_page_sequence = 0`. A book
+/// with no root yields `root_hex = ""` — root-less events all share a
+/// single bucket per domain, which is acceptable for this transport
+/// (root-less ordering is undefined; sister-transport policy lives in
+/// C-12 / H-09 / H-10 / C-11).
+fn extract_routing_key(book: &EventBook) -> (String, String, u32) {
+    let domain = book.domain().to_string();
+    let root = book.root_id_hex().unwrap_or_default();
+    let max_seq = book.pages.last().map(|p| p.sequence_num()).unwrap_or(0);
+    (domain, root, max_seq)
 }
 
 // ============================================================================
@@ -197,8 +238,88 @@ impl PostgresOutboxEventBus {
 
         sqlx::query(&create_index).execute(&self.pool).await?;
 
+        // Per-root max-published-sequence watermark (C-13). Composite PK on
+        // (domain, root) so each aggregate root in each domain has at most
+        // one watermark row. Root-less events collapse to a single bucket
+        // per domain — acceptable since their relative ordering is
+        // undefined on this transport.
+        let create_published_seq = Table::create()
+            .table(OutboxPublishedSeq::Table)
+            .if_not_exists()
+            .col(ColumnDef::new(OutboxPublishedSeq::Domain).text().not_null())
+            .col(ColumnDef::new(OutboxPublishedSeq::Root).text().not_null())
+            .col(
+                ColumnDef::new(OutboxPublishedSeq::MaxSequence)
+                    .big_integer()
+                    .not_null(),
+            )
+            .primary_key(
+                sea_query::Index::create()
+                    .col(OutboxPublishedSeq::Domain)
+                    .col(OutboxPublishedSeq::Root),
+            )
+            .to_string(PostgresQueryBuilder);
+
+        sqlx::query(&create_published_seq)
+            .execute(&self.pool)
+            .await?;
+
         info!("Outbox table initialized (PostgreSQL)");
         Ok(())
+    }
+
+    /// Bump the per-root published-sequence watermark.
+    ///
+    /// Called after a successful publish (normal path or recovery path).
+    /// The watermark moves monotonically upward — `GREATEST(existing, new)`
+    /// in SQL — so a recovery republish of an older event can never reset
+    /// it backwards. A failure to write the watermark is logged but does
+    /// not fail the publish: at-least-once is preserved, the worst case is
+    /// that a future recovery cycle re-emits a slightly stale event before
+    /// the watermark catches up — still bounded by per-root monotonicity
+    /// because the seq=N row will not be in the outbox anymore.
+    async fn bump_published_watermark(&self, domain: &str, root: &str, max_seq: u32) {
+        // Use raw SQL for the UPSERT — sea-query's expression builder
+        // doesn't have a portable GREATEST(...) helper across PG/SQLite.
+        let sql = "INSERT INTO outbox_published_seq (domain, root, max_sequence) \
+                   VALUES ($1, $2, $3) \
+                   ON CONFLICT (domain, root) DO UPDATE SET \
+                   max_sequence = GREATEST(outbox_published_seq.max_sequence, EXCLUDED.max_sequence)";
+        if let Err(e) = sqlx::query(sql)
+            .bind(domain)
+            .bind(root)
+            .bind(max_seq as i64)
+            .execute(&self.pool)
+            .await
+        {
+            warn!(domain = %domain, root = %root, max_seq = %max_seq, error = %e,
+                  "Failed to bump outbox published-sequence watermark; recovery may still emit a stale event for this root");
+        }
+    }
+
+    /// Read the per-root published-sequence watermark.
+    ///
+    /// Returns `None` if no watermark has ever been recorded for this
+    /// `(domain, root)` — i.e., no event for this root has ever been
+    /// successfully published. Recovery treats that as "not superseded"
+    /// and proceeds to republish.
+    async fn read_published_watermark(
+        &self,
+        domain: &str,
+        root: &str,
+    ) -> std::result::Result<Option<u32>, sqlx::Error> {
+        use sqlx::Row;
+        let select =
+            "SELECT max_sequence FROM outbox_published_seq WHERE domain = $1 AND root = $2";
+        let row = sqlx::query(select)
+            .bind(domain)
+            .bind(root)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| {
+            let v: i64 = r.get("max_sequence");
+            v.max(0) as u32
+        }))
     }
 
     /// Recover orphaned events (events that were written but not published).
@@ -243,8 +364,47 @@ impl PostgresOutboxEventBus {
 
             match EventBook::decode(event_data.as_slice()) {
                 Ok(book) => {
+                    // C-13: per-root ordering guard. If this root has
+                    // already seen a successful publish at seq >=
+                    // max_page_seq, this orphaned event is superseded;
+                    // emitting it now would regress the consumer past
+                    // newer state. Drop the row from the outbox without
+                    // republishing.
+                    let (domain, root, max_seq) = extract_routing_key(&book);
+                    let superseded = match self.read_published_watermark(&domain, &root).await {
+                        Ok(Some(watermark)) => watermark >= max_seq,
+                        Ok(None) => false,
+                        Err(e) => {
+                            // Fail-safe: on a watermark read error, treat
+                            // as not-superseded and proceed to republish.
+                            // Preserves at-least-once at the cost of a
+                            // possible duplicate (consumer should be
+                            // idempotent — sequence-based dedup).
+                            warn!(id = %id, domain = %domain, root = %root, error = %e,
+                                  "Failed to read outbox published-sequence watermark; proceeding with republish (at-least-once preserved)");
+                            false
+                        }
+                    };
+
+                    if superseded {
+                        info!(id = %id, domain = %domain, root = %root, max_seq = %max_seq,
+                              "Outbox recovery skipping superseded event (C-13): newer event for this root has already been published");
+                        let delete = Query::delete()
+                            .from_table(Outbox::Table)
+                            .and_where(Expr::col(Outbox::Id).eq(id.to_string()))
+                            .to_string(PostgresQueryBuilder);
+                        let _ = sqlx::query(&delete).execute(&self.pool).await;
+                        continue;
+                    }
+
                     match self.inner.publish(Arc::new(book)).await {
                         Ok(_) => {
+                            // Bump the watermark BEFORE deleting the row so
+                            // a concurrent recovery pass (or restart between
+                            // these statements) cannot later re-emit a
+                            // superseded event past a fresh watermark.
+                            self.bump_published_watermark(&domain, &root, max_seq).await;
+
                             // Delete from outbox
                             let delete = Query::delete()
                                 .from_table(Outbox::Table)
@@ -308,19 +468,9 @@ impl EventBus for PostgresOutboxEventBus {
         let id = Uuid::new_v4();
         let event_data = book.encode_to_vec();
 
-        let (domain, root) = book
-            .cover
-            .as_ref()
-            .map(|c| {
-                (
-                    c.domain.clone(),
-                    c.root
-                        .as_ref()
-                        .map(|r| hex::encode(&r.value))
-                        .unwrap_or_default(),
-                )
-            })
-            .unwrap_or_default();
+        // Extract routing key + max page sequence up front; the book
+        // moves into `self.inner.publish` below.
+        let (domain, root, max_seq) = extract_routing_key(&book);
 
         // Step 1: Write to outbox
         let insert = Query::insert()
@@ -346,6 +496,16 @@ impl EventBus for PostgresOutboxEventBus {
 
         // Step 3: Delete from outbox on success
         if result.is_ok() {
+            // Bump the per-root published-sequence watermark BEFORE
+            // deleting the outbox row. If the process crashes between
+            // these two statements, the row will appear orphaned to a
+            // future recovery — but the watermark will also be at this
+            // event's sequence, so recovery will see seq <= watermark
+            // and drop the row (C-13 invariant). Order matters here:
+            // bump first so the watermark is monotone-correct from the
+            // moment the outbox row could re-surface.
+            self.bump_published_watermark(&domain, &root, max_seq).await;
+
             let delete = Query::delete()
                 .from_table(Outbox::Table)
                 .and_where(Expr::col(Outbox::Id).eq(id.to_string()))
@@ -437,8 +597,74 @@ impl SqliteOutboxEventBus {
 
         sqlx::query(&create_index).execute(&self.pool).await?;
 
+        // Per-root max-published-sequence watermark (C-13). Same shape
+        // as the Postgres twin; SQLite supports `ON CONFLICT ... DO UPDATE`
+        // and `MAX(a, b)` so the upsert is portable.
+        let create_published_seq = Table::create()
+            .table(OutboxPublishedSeq::Table)
+            .if_not_exists()
+            .col(ColumnDef::new(OutboxPublishedSeq::Domain).text().not_null())
+            .col(ColumnDef::new(OutboxPublishedSeq::Root).text().not_null())
+            .col(
+                ColumnDef::new(OutboxPublishedSeq::MaxSequence)
+                    .big_integer()
+                    .not_null(),
+            )
+            .primary_key(
+                sea_query::Index::create()
+                    .col(OutboxPublishedSeq::Domain)
+                    .col(OutboxPublishedSeq::Root),
+            )
+            .to_string(SqliteQueryBuilder);
+
+        sqlx::query(&create_published_seq)
+            .execute(&self.pool)
+            .await?;
+
         info!("Outbox table initialized (SQLite)");
         Ok(())
+    }
+
+    /// Bump the per-root published-sequence watermark.
+    ///
+    /// See `PostgresOutboxEventBus::bump_published_watermark` for the
+    /// monotonicity contract and at-least-once trade-off. SQLite uses
+    /// `MAX(a, b)` rather than PG's `GREATEST(a, b)` — same semantics.
+    async fn bump_published_watermark(&self, domain: &str, root: &str, max_seq: u32) {
+        let sql = "INSERT INTO outbox_published_seq (domain, root, max_sequence) \
+                   VALUES (?, ?, ?) \
+                   ON CONFLICT (domain, root) DO UPDATE SET \
+                   max_sequence = MAX(outbox_published_seq.max_sequence, excluded.max_sequence)";
+        if let Err(e) = sqlx::query(sql)
+            .bind(domain)
+            .bind(root)
+            .bind(max_seq as i64)
+            .execute(&self.pool)
+            .await
+        {
+            warn!(domain = %domain, root = %root, max_seq = %max_seq, error = %e,
+                  "Failed to bump outbox published-sequence watermark; recovery may still emit a stale event for this root");
+        }
+    }
+
+    /// Read the per-root published-sequence watermark, or None if no
+    /// publish for this `(domain, root)` has ever been recorded.
+    async fn read_published_watermark(
+        &self,
+        domain: &str,
+        root: &str,
+    ) -> std::result::Result<Option<u32>, sqlx::Error> {
+        use sqlx::Row;
+        let select = "SELECT max_sequence FROM outbox_published_seq WHERE domain = ? AND root = ?";
+        let row = sqlx::query(select)
+            .bind(domain)
+            .bind(root)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(row.map(|r| {
+            let v: i64 = r.get("max_sequence");
+            v.max(0) as u32
+        }))
     }
 
     /// Recover orphaned events (events that were written but not published).
@@ -484,6 +710,16 @@ impl SqliteOutboxEventBus {
     /// Attempt to recover a single orphaned event.
     ///
     /// Returns true if the event was successfully recovered and deleted.
+    ///
+    /// C-13 invariant: before republishing, this checks the per-root
+    /// published-sequence watermark. If a newer event for the same root
+    /// has already been published, the orphaned event is **superseded**
+    /// — re-emitting it would regress the consumer past newer state.
+    /// Superseded rows are deleted from the outbox WITHOUT publishing.
+    /// This intentionally trades the strict at-least-once contract for
+    /// monotonic per-root ordering on the success-and-superseded
+    /// branch; the consumer has already observed seq > max_page_seq, so
+    /// the redundant delivery would be both useless and harmful.
     async fn try_recover_event(&self, id: &str, event_data: &[u8], retry_count: i32) -> bool {
         let book = match EventBook::decode(event_data) {
             Ok(b) => b,
@@ -495,8 +731,34 @@ impl SqliteOutboxEventBus {
             }
         };
 
+        let (domain, root, max_seq) = extract_routing_key(&book);
+
+        // C-13 ordering guard.
+        let superseded = match self.read_published_watermark(&domain, &root).await {
+            Ok(Some(watermark)) => watermark >= max_seq,
+            Ok(None) => false,
+            Err(e) => {
+                // Fail-safe: on a watermark read error, treat as
+                // not-superseded and proceed to republish — preserves
+                // at-least-once at the cost of a possible duplicate.
+                warn!(id = %id, domain = %domain, root = %root, error = %e,
+                      "Failed to read outbox published-sequence watermark; proceeding with republish (at-least-once preserved)");
+                false
+            }
+        };
+        if superseded {
+            info!(id = %id, domain = %domain, root = %root, max_seq = %max_seq,
+                  "Outbox recovery skipping superseded event (C-13): newer event for this root has already been published");
+            self.delete_outbox_entry(id).await;
+            return false;
+        }
+
         match self.inner.publish(Arc::new(book)).await {
             Ok(_) => {
+                // Bump watermark BEFORE deleting so a crash between
+                // these two writes leaves the row still subject to the
+                // C-13 guard on the next recovery pass.
+                self.bump_published_watermark(&domain, &root, max_seq).await;
                 if self.delete_outbox_entry(id).await {
                     debug!(id = %id, "Recovered orphaned event");
                     true
@@ -547,19 +809,9 @@ impl EventBus for SqliteOutboxEventBus {
         let id = Uuid::new_v4();
         let event_data = book.encode_to_vec();
 
-        let (domain, root) = book
-            .cover
-            .as_ref()
-            .map(|c| {
-                (
-                    c.domain.clone(),
-                    c.root
-                        .as_ref()
-                        .map(|r| hex::encode(&r.value))
-                        .unwrap_or_default(),
-                )
-            })
-            .unwrap_or_default();
+        // Extract routing key + max page sequence up front; the book
+        // moves into `self.inner.publish` below.
+        let (domain, root, max_seq) = extract_routing_key(&book);
 
         // Step 1: Write to outbox
         let insert = Query::insert()
@@ -585,6 +837,12 @@ impl EventBus for SqliteOutboxEventBus {
 
         // Step 3: Delete from outbox on success
         if result.is_ok() {
+            // Bump the per-root published-sequence watermark BEFORE
+            // deleting the outbox row. See the Postgres twin's comment
+            // for the crash-safety rationale; the order matters for
+            // C-13's per-root ordering invariant.
+            self.bump_published_watermark(&domain, &root, max_seq).await;
+
             let delete = Query::delete()
                 .from_table(Outbox::Table)
                 .and_where(Expr::col(Outbox::Id).eq(id.to_string()))

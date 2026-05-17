@@ -56,6 +56,55 @@ pub async fn test_put_update<S: PositionStore>(store: &S) {
     assert_eq!(result, 25, "should return updated sequence");
 }
 
+/// C-17 regression: `put` must never let the stored sequence move backwards.
+///
+/// PositionStore is a checkpoint: projectors and sagas resume from the last
+/// recorded position. A stale or replayed `put` with a sequence lower than
+/// the current one (e.g., from an out-of-order checkpoint flush, a replayed
+/// message on a redrive, or a slow-to-converge replica) must be a no-op,
+/// not a regression. Letting it regress causes the projector to re-process
+/// events on restart — silent duplicate side effects.
+///
+/// Contract: after `put(seq=10); put(seq=5)`, `get` returns `Some(10)`.
+pub async fn test_put_monotonic_no_regression<S: PositionStore>(store: &S) {
+    let handler = "test_pos_monotonic";
+    let domain = "test_domain";
+    let root = b"root_monotonic";
+
+    store.put(handler, domain, "test", root, 10).await.unwrap();
+
+    // Stale checkpoint — must be ignored.
+    store
+        .put(handler, domain, "test", root, 5)
+        .await
+        .expect("stale put must not error; it should silently no-op");
+
+    let result = store
+        .get(handler, domain, "test", root)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result, 10, "stale put(5) must not regress position from 10");
+
+    // Equal-sequence put is also a no-op (idempotent re-checkpoint).
+    store.put(handler, domain, "test", root, 10).await.unwrap();
+    let result = store
+        .get(handler, domain, "test", root)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result, 10, "equal put must leave position at 10");
+
+    // Forward put still advances (monotonicity is one-directional, not frozen).
+    store.put(handler, domain, "test", root, 15).await.unwrap();
+    let result = store
+        .get(handler, domain, "test", root)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(result, 15, "forward put must advance position");
+}
+
 pub async fn test_put_zero_sequence<S: PositionStore>(store: &S) {
     let handler = "test_pos_zero";
     let domain = "test_domain";
@@ -159,6 +208,70 @@ pub async fn test_root_isolation<S: PositionStore>(store: &S) {
     assert_eq!(b, 200, "root_b should be 200");
 }
 
+// =============================================================================
+// Main-timeline sentinel polarity tests (C-15)
+// =============================================================================
+//
+// PositionStore must treat `""` and `"angzarr"` as interchangeable forms of
+// the main-timeline sentinel. Projectors save positions via one form, but the
+// caller that subsequently reads (post-restart, post-migration) may use the
+// other — both must hit the same row. Otherwise the projector "loses" its
+// position on restart and re-processes events.
+
+/// C-15: position written via empty-string sentinel must be readable via
+/// both main-timeline forms.
+pub async fn test_main_timeline_sentinel_write_empty_read_both<S: PositionStore>(store: &S) {
+    let handler = "test_pos_sentinel_empty";
+    let domain = "test_domain";
+    let root = b"root_sentinel_empty";
+
+    store
+        .put(handler, domain, "", root, 42)
+        .await
+        .expect("put with empty-string main-timeline sentinel should succeed");
+
+    let via_empty = store
+        .get(handler, domain, "", root)
+        .await
+        .expect("get via empty sentinel should succeed")
+        .expect("position written via empty sentinel must be readable via empty sentinel");
+    assert_eq!(via_empty, 42);
+
+    let via_angzarr = store
+        .get(handler, domain, "angzarr", root)
+        .await
+        .expect("get via 'angzarr' sentinel should succeed")
+        .expect("position written via empty sentinel must be readable via 'angzarr' sentinel");
+    assert_eq!(via_angzarr, 42);
+}
+
+/// C-15: position written via `"angzarr"` sentinel must be readable via
+/// both main-timeline forms.
+pub async fn test_main_timeline_sentinel_write_angzarr_read_both<S: PositionStore>(store: &S) {
+    let handler = "test_pos_sentinel_angzarr";
+    let domain = "test_domain";
+    let root = b"root_sentinel_angzarr";
+
+    store
+        .put(handler, domain, "angzarr", root, 99)
+        .await
+        .expect("put with 'angzarr' main-timeline sentinel should succeed");
+
+    let via_angzarr = store
+        .get(handler, domain, "angzarr", root)
+        .await
+        .expect("get via 'angzarr' sentinel should succeed")
+        .expect("position written via 'angzarr' must be readable via 'angzarr'");
+    assert_eq!(via_angzarr, 99);
+
+    let via_empty = store
+        .get(handler, domain, "", root)
+        .await
+        .expect("get via empty sentinel should succeed")
+        .expect("position written via 'angzarr' must be readable via empty sentinel");
+    assert_eq!(via_empty, 99);
+}
+
 pub async fn test_multiple_handlers_same_root<S: PositionStore>(store: &S) {
     let domain = "test_domain";
     let root = b"shared_root";
@@ -203,6 +316,9 @@ macro_rules! run_position_store_tests {
         test_put_update($store).await;
         println!("  test_put_update: PASSED");
 
+        test_put_monotonic_no_regression($store).await;
+        println!("  test_put_monotonic_no_regression: PASSED");
+
         test_put_zero_sequence($store).await;
         println!("  test_put_zero_sequence: PASSED");
 
@@ -218,5 +334,12 @@ macro_rules! run_position_store_tests {
 
         test_multiple_handlers_same_root($store).await;
         println!("  test_multiple_handlers_same_root: PASSED");
+
+        // main-timeline sentinel polarity tests (C-15)
+        test_main_timeline_sentinel_write_empty_read_both($store).await;
+        println!("  test_main_timeline_sentinel_write_empty_read_both: PASSED");
+
+        test_main_timeline_sentinel_write_angzarr_read_both($store).await;
+        println!("  test_main_timeline_sentinel_write_angzarr_read_both: PASSED");
     };
 }

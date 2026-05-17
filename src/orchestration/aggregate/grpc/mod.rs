@@ -28,6 +28,7 @@ use crate::utils::sequence_validator::sequence_mismatch_error_with_state;
 
 use crate::storage::AddOutcome;
 
+use super::sync_policy::{should_call_sync_projectors, should_skip_post_persist};
 use super::{
     AggregateContext, AggregateContextFactory, ClientLogic, PersistOutcome, TemporalQuery,
 };
@@ -586,16 +587,20 @@ impl AggregateContext for GrpcAggregateContext {
             .await
             .map_err(|e| Status::unavailable(format!("Failed to publish events: {e}")))?;
 
-        // ASYNC mode: fire-and-forget — no sync projectors
-        // SIMPLE and CASCADE: call sync projectors
-        let projections = match self.sync_mode {
-            Some(crate::proto::SyncMode::Simple) | Some(crate::proto::SyncMode::Cascade) => {
-                self.call_sync_projectors(events, self.sync_mode.unwrap())
-                    .await?
-            }
-            // ASYNC, DECISION, ISOLATED, or None: skip sync projectors.
-            // (ISOLATED short-circuits above.)
-            _ => vec![],
+        // ASYNC mode: fire-and-forget — no sync projectors.
+        // SIMPLE and CASCADE: call sync projectors. DECISION / None / ISOLATED:
+        // skip (ISOLATED short-circuits above before reaching here). The
+        // policy is centralized in `super::sync_policy` so it cannot drift
+        // from the local context's identical decision; that drift was bug
+        // C-05.
+        let projections = if should_call_sync_projectors(self.sync_mode) {
+            // Unwrap is safe: should_call_sync_projectors returns true only
+            // for Some(Simple) / Some(Cascade), both of which carry a
+            // concrete SyncMode.
+            self.call_sync_projectors(events, self.sync_mode.unwrap())
+                .await?
+        } else {
+            vec![]
         };
 
         // CASCADE mode: call sync sagas and PMs after publishing to bus
@@ -828,19 +833,6 @@ impl AggregateContextFactory for GrpcAggregateContextFactory {
     fn client_logic(&self) -> Arc<dyn ClientLogic> {
         self.client_logic.clone()
     }
-}
-
-/// Should the `post_persist` callback short-circuit (skip bus publish +
-/// sync projector / saga / PM invocation)?
-///
-/// Returns `true` only for [`SyncMode::Isolated`] — the mode whose
-/// purpose is "persist + return without touching downstream." Replay /
-/// migration / recovery writes call this with `Isolated` so historical
-/// events don't trigger reactions. Every other mode (including
-/// [`SyncMode::Async`] and [`SyncMode::Decision`], which both let
-/// downstream run asynchronously via the bus) returns `false`.
-fn should_skip_post_persist(sync_mode: Option<crate::proto::SyncMode>) -> bool {
-    sync_mode == Some(crate::proto::SyncMode::Isolated)
 }
 
 #[cfg(test)]

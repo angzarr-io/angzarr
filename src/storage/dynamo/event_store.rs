@@ -232,8 +232,8 @@ impl EventStore for DynamoEventStore {
         root: Uuid,
         events: Vec<EventPage>,
         correlation_id: &str,
-        _external_id: Option<&str>,
-        _source_info: Option<&SourceInfo>,
+        external_id: Option<&str>,
+        source_info: Option<&SourceInfo>,
     ) -> Result<AddOutcome> {
         if events.is_empty() {
             return Ok(AddOutcome::Added {
@@ -243,6 +243,52 @@ impl EventStore for DynamoEventStore {
         }
 
         let pk = Self::pk(domain, edition, root);
+        let external_id = external_id.unwrap_or("");
+
+        // C-18: external_id idempotency check (parity with SQLite/Postgres
+        // `check_idempotency`). When external_id is non-empty and a row
+        // already carries that external_id for this aggregate, return
+        // `Duplicate` instead of re-persisting. Scan the aggregate
+        // partition (pk-only Query is server-side filtered) for any item
+        // with the same external_id. The scan is bounded by the
+        // aggregate's history (single root, single edition) rather than
+        // the whole table.
+        if !external_id.is_empty() {
+            let dup_query = self
+                .client
+                .query()
+                .table_name(&self.table_name)
+                .key_condition_expression("pk = :pk")
+                .filter_expression("external_id = :eid")
+                .expression_attribute_values(":pk", AttributeValue::S(pk.clone()))
+                .expression_attribute_values(":eid", AttributeValue::S(external_id.to_string()))
+                .send()
+                .await
+                .map_err(|e| {
+                    StorageError::NotImplemented(format!(
+                        "DynamoDB external_id idempotency query failed: {}",
+                        e
+                    ))
+                })?;
+            if let Some(items) = dup_query.items {
+                if !items.is_empty() {
+                    let mut seqs: Vec<u32> = items
+                        .iter()
+                        .filter_map(|it| match it.get("seq") {
+                            Some(AttributeValue::N(s)) => s.parse::<u32>().ok(),
+                            _ => None,
+                        })
+                        .collect();
+                    seqs.sort_unstable();
+                    if let (Some(&first), Some(&last)) = (seqs.first(), seqs.last()) {
+                        return Ok(AddOutcome::Duplicate {
+                            first_sequence: first,
+                            last_sequence: last,
+                        });
+                    }
+                }
+            }
+        }
 
         // Validate sequence continuity
         let expected_next = self.get_next_sequence(domain, edition, root).await?;
@@ -284,6 +330,44 @@ impl EventStore for DynamoEventStore {
                 item.insert("gsi_sk".to_string(), AttributeValue::S(gsi_sk));
             }
 
+            // C-18: persist external_id + source_info attributes so the
+            // `find_by_external_id` and `find_by_source` trait contracts
+            // actually hold on DynamoDB. Storage is per-event because the
+            // SQL backends store these per-row; behavior parity is what
+            // the contract tests pin. Lookups (below) Query the aggregate
+            // partition and FilterExpression in-app — no GSI required.
+            //
+            // **Operator note**: large aggregates with many `find_by_*`
+            // calls per second will benefit from GSIs keyed on
+            // `external_id` and the composite source fields. The current
+            // implementation prefers no-infra-required correctness over
+            // index-required scale; provisioning GSIs is the operator's
+            // call when call volume justifies the write amplification.
+            if !external_id.is_empty() {
+                item.insert(
+                    "external_id".to_string(),
+                    AttributeValue::S(external_id.to_string()),
+                );
+            }
+            if let Some(info) = source_info.filter(|s| !s.is_empty()) {
+                item.insert(
+                    "source_edition".to_string(),
+                    AttributeValue::S(info.edition.clone()),
+                );
+                item.insert(
+                    "source_domain".to_string(),
+                    AttributeValue::S(info.domain.clone()),
+                );
+                item.insert(
+                    "source_root".to_string(),
+                    AttributeValue::S(info.root.to_string()),
+                );
+                item.insert(
+                    "source_seq".to_string(),
+                    AttributeValue::N(info.seq.to_string()),
+                );
+            }
+
             // Cascade tracking: extract from EventPage for GSI queries
             item.insert(
                 "committed".to_string(),
@@ -294,15 +378,48 @@ impl EventStore for DynamoEventStore {
                 item.insert("cascade_id".to_string(), AttributeValue::S(cid.clone()));
             }
 
-            self.client
+            // C-19: ConditionExpression fences the read-then-write race.
+            // Without this, two writers that both observed
+            // `get_next_sequence() == N` would both succeed `put_item` at
+            // seq=N — the later one would silently overwrite the earlier.
+            // `attribute_not_exists(pk)` is DynamoDB's idiom for "fail if
+            // an item with this composite key already exists" (the
+            // expression is evaluated against the composite key, not the
+            // `pk` attribute alone). The loser surfaces as
+            // `ConditionalCheckFailedException` which we map to
+            // `StorageError::SequenceConflict` so the aggregate pipeline
+            // retries with a fresh sequence read.
+            let put_result = self
+                .client
                 .put_item()
                 .table_name(&self.table_name)
                 .set_item(Some(item))
+                .condition_expression("attribute_not_exists(pk)")
                 .send()
-                .await
-                .map_err(|e| {
-                    StorageError::NotImplemented(format!("DynamoDB put_item failed: {}", e))
-                })?;
+                .await;
+
+            if let Err(err) = put_result {
+                // Detect ConditionalCheckFailedException via both the
+                // modeled `as_service_error()` path AND a string-match
+                // fallback so this fix survives SDK shape drift (the AWS
+                // SDK has moved this enum around across major versions).
+                let modeled = err
+                    .as_service_error()
+                    .map(|svc| svc.is_conditional_check_failed_exception())
+                    .unwrap_or(false);
+                let err_str = format!("{:?} {}", err, err);
+                let stringy = err_str.contains("ConditionalCheckFailed");
+                if modeled || stringy {
+                    return Err(StorageError::SequenceConflict {
+                        expected: expected_next,
+                        actual: seq,
+                    });
+                }
+                return Err(StorageError::NotImplemented(format!(
+                    "DynamoDB put_item failed: {}",
+                    err
+                )));
+            }
         }
 
         debug!(
@@ -656,26 +773,132 @@ impl EventStore for DynamoEventStore {
 
     async fn find_by_source(
         &self,
-        _domain: &str,
-        _edition: &str,
-        _root: Uuid,
-        _source_info: &SourceInfo,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        source_info: &SourceInfo,
     ) -> Result<Option<Vec<EventPage>>> {
-        // DynamoDB doesn't store source tracking - saga idempotency not supported
-        // Use SQLite or PostgreSQL for saga source tracking
-        Ok(None)
+        // C-18: Saga idempotency. Pre-fix this method returned `Ok(None)`
+        // unconditionally, silently violating the trait contract documented
+        // at `src/storage/event_store.rs:236-248`. Now we Query the
+        // aggregate partition (server-side restricted to a single
+        // domain/edition/root) and FilterExpression on the source
+        // attributes that `add()` persists. The empty-source short-circuit
+        // mirrors the SQLite/Postgres implementations.
+        if source_info.is_empty() {
+            return Ok(None);
+        }
+
+        let pk = Self::pk(domain, edition, root);
+        let result = self
+            .client
+            .query()
+            .table_name(&self.table_name)
+            .key_condition_expression("pk = :pk")
+            .filter_expression(
+                "source_edition = :sed AND source_domain = :sdo \
+                 AND source_root = :sro AND source_seq = :sseq",
+            )
+            .expression_attribute_values(":pk", AttributeValue::S(pk))
+            .expression_attribute_values(":sed", AttributeValue::S(source_info.edition.clone()))
+            .expression_attribute_values(":sdo", AttributeValue::S(source_info.domain.clone()))
+            .expression_attribute_values(":sro", AttributeValue::S(source_info.root.to_string()))
+            .expression_attribute_values(":sseq", AttributeValue::N(source_info.seq.to_string()))
+            .send()
+            .await
+            .map_err(|e| {
+                StorageError::NotImplemented(format!("DynamoDB find_by_source query failed: {}", e))
+            })?;
+
+        let Some(items) = result.items else {
+            return Ok(None);
+        };
+        if items.is_empty() {
+            return Ok(None);
+        }
+
+        let mut events_with_seq: Vec<(u32, EventPage)> = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(AttributeValue::B(blob)) = item.get("event") else {
+                continue;
+            };
+            let seq = match item.get("seq") {
+                Some(AttributeValue::N(s)) => s.parse::<u32>().unwrap_or(0),
+                _ => 0,
+            };
+            let event = EventPage::decode(blob.as_ref()).map_err(StorageError::ProtobufDecode)?;
+            events_with_seq.push((seq, event));
+        }
+        events_with_seq.sort_by_key(|(s, _)| *s);
+        let events: Vec<EventPage> = events_with_seq.into_iter().map(|(_, e)| e).collect();
+        if events.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(events))
+        }
     }
 
     async fn find_by_external_id(
         &self,
-        _domain: &str,
-        _edition: &str,
-        _root: Uuid,
-        _external_id: &str,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        external_id: &str,
     ) -> Result<Option<Vec<EventPage>>> {
-        // DynamoDB doesn't store external_id tracking — fact pre-handler
-        // idempotency not supported. Use SQLite or PostgreSQL.
-        Ok(None)
+        // C-18: fact-injection idempotency. Pre-fix this method returned
+        // `Ok(None)` unconditionally, silently violating the trait
+        // contract documented at `src/storage/event_store.rs:250-267`. We
+        // Query the aggregate partition (server-side restricted) and
+        // FilterExpression on the `external_id` attribute that `add()`
+        // now persists. Empty external_id returns None per contract.
+        if external_id.is_empty() {
+            return Ok(None);
+        }
+
+        let pk = Self::pk(domain, edition, root);
+        let result = self
+            .client
+            .query()
+            .table_name(&self.table_name)
+            .key_condition_expression("pk = :pk")
+            .filter_expression("external_id = :eid")
+            .expression_attribute_values(":pk", AttributeValue::S(pk))
+            .expression_attribute_values(":eid", AttributeValue::S(external_id.to_string()))
+            .send()
+            .await
+            .map_err(|e| {
+                StorageError::NotImplemented(format!(
+                    "DynamoDB find_by_external_id query failed: {}",
+                    e
+                ))
+            })?;
+
+        let Some(items) = result.items else {
+            return Ok(None);
+        };
+        if items.is_empty() {
+            return Ok(None);
+        }
+
+        let mut events_with_seq: Vec<(u32, EventPage)> = Vec::with_capacity(items.len());
+        for item in items {
+            let Some(AttributeValue::B(blob)) = item.get("event") else {
+                continue;
+            };
+            let seq = match item.get("seq") {
+                Some(AttributeValue::N(s)) => s.parse::<u32>().unwrap_or(0),
+                _ => 0,
+            };
+            let event = EventPage::decode(blob.as_ref()).map_err(StorageError::ProtobufDecode)?;
+            events_with_seq.push((seq, event));
+        }
+        events_with_seq.sort_by_key(|(s, _)| *s);
+        let events: Vec<EventPage> = events_with_seq.into_iter().map(|(_, e)| e).collect();
+        if events.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(events))
+        }
     }
 
     async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {

@@ -278,23 +278,36 @@ pub trait EventStore: Send + Sync {
     // Cascade (2PC) Query Methods - Phase 5
     // =========================================================================
 
-    /// Query cascade IDs that have uncommitted events older than the threshold.
+    /// Query cascade IDs that have at least one unresolved participant past
+    /// the threshold.
     ///
-    /// Used by the CascadeReaper background job to find stale cascades that need
-    /// timeout-based revocation. Returns cascade_ids that:
-    /// - Have uncommitted events (committed=false)
-    /// - Have a created_at older than the threshold
-    /// - Do NOT already have a Confirmation or Revocation event
+    /// Used by the CascadeReaper background job to find stale cascades that
+    /// need timeout-based revocation. Resolution is **per-participant** (per
+    /// `(cascade_id, domain, edition, root)` tuple) — a participant is
+    /// resolved when there is a committed cascade row (Confirmation or
+    /// Revocation) on the same `(domain, edition, root)` for that cascade.
+    /// A cascade is therefore "stale" when:
+    /// - It has at least one uncommitted (`committed=false`) row
+    /// - That row's `created_at` is older than `threshold`
+    /// - That participant's `(domain, edition, root)` has no committed
+    ///   cascade row for the same cascade_id
+    ///
+    /// Pre-C-02 semantics excluded the cascade globally when ANY committed
+    /// row existed for that cascade_id; that stranded participants 2..N
+    /// after participant 1's Revocation succeeded.
     ///
     /// # Arguments
     /// * `threshold` - ISO 8601 timestamp string. Events older than this are considered stale.
     async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>>;
 
-    /// Query all participants (aggregates) in a cascade.
+    /// Query unresolved participants (aggregates) in a cascade.
     ///
-    /// Returns a list of (domain, edition, root, sequences) tuples for all aggregates
-    /// that have uncommitted events for the given cascade_id. Used to write
-    /// Revocation events for all participants when a cascade times out.
+    /// Returns a list of `(domain, edition, root, sequences)` tuples for all
+    /// aggregates that have uncommitted events for the given cascade_id AND
+    /// have not yet been resolved (no committed cascade row on that
+    /// `(domain, edition, root)` for the same cascade_id). Used by the
+    /// CascadeReaper to write Revocation events without re-revoking
+    /// participants that previous reaper passes already resolved.
     async fn query_cascade_participants(&self, cascade_id: &str)
         -> Result<Vec<CascadeParticipant>>;
 }

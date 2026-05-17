@@ -53,6 +53,7 @@ mod client;
 mod merge;
 mod parsing;
 mod pipeline;
+mod sync_policy;
 mod traits;
 pub mod two_phase;
 mod types;

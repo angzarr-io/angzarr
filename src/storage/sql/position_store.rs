@@ -53,11 +53,19 @@ macro_rules! impl_position_store {
 
                 use crate::storage::schema::Positions;
 
+                // C-15: both main-timeline sentinels ("" and "angzarr") map
+                // to SQL NULL on the positions.edition column. Reads MUST
+                // use `IS NULL` instead of `= ''` to find them.
                 let stmt = Query::select()
                     .column(Positions::Sequence)
                     .from(Positions::Table)
                     .and_where(Expr::col(Positions::Handler).eq(handler))
-                    .and_where(Expr::col(Positions::Edition).eq(edition))
+                    .and_where(
+                        $crate::storage::sql::snapshot_store::edition_predicate_expr(
+                            Positions::Edition,
+                            edition,
+                        ),
+                    )
                     .and_where(Expr::col(Positions::Domain).eq(domain))
                     .and_where(Expr::col(Positions::Root).eq(root))
                     .to_owned();
@@ -82,12 +90,26 @@ macro_rules! impl_position_store {
                 root: &[u8],
                 sequence: u32,
             ) -> crate::storage::Result<()> {
-                use sea_query::{OnConflict, Query};
+                use sea_query::{Alias, Expr, OnConflict, Query};
 
                 use crate::storage::schema::Positions;
 
                 let updated_at = chrono::Utc::now().to_rfc3339();
 
+                // C-17: positions are a *monotonic* checkpoint. A stale or
+                // replayed `put` with a sequence < the current one (e.g.,
+                // out-of-order flush, replayed message after redrive, slow
+                // replica) must be a no-op, not a regression — otherwise the
+                // projector re-processes events on next start. The UPSERT
+                // therefore only updates when the new sequence strictly beats
+                // the existing one: `WHERE positions.sequence < excluded.sequence`.
+                // Equal-sequence puts also no-op (idempotent re-checkpoint).
+                // Both PostgresQueryBuilder and SqliteQueryBuilder emit
+                // `ON CONFLICT ... DO UPDATE ... WHERE ...`; the `excluded`
+                // alias references the candidate row in both dialects.
+                // C-15: edition stored as SQL NULL for main-timeline writes.
+                let edition_value =
+                    $crate::storage::sql::snapshot_store::edition_to_db_value(edition);
                 let stmt = Query::insert()
                     .into_table(Positions::Table)
                     .columns([
@@ -100,7 +122,7 @@ macro_rules! impl_position_store {
                     ])
                     .values_panic([
                         handler.into(),
-                        edition.into(),
+                        edition_value,
                         domain.into(),
                         root.into(),
                         sequence.into(),
@@ -114,6 +136,10 @@ macro_rules! impl_position_store {
                             Positions::Root,
                         ])
                         .update_columns([Positions::Sequence, Positions::UpdatedAt])
+                        .action_and_where(
+                            Expr::col((Positions::Table, Positions::Sequence))
+                                .lt(Expr::col((Alias::new("excluded"), Positions::Sequence))),
+                        )
                         .to_owned(),
                     )
                     .to_owned();

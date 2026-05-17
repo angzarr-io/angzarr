@@ -772,6 +772,57 @@ pub async fn test_correlation_id_empty_query<S: EventStore>(store: &S) {
     assert!(books.is_empty(), "unknown correlation should return empty");
 }
 
+/// C-16 regression: `get_by_correlation` must tolerate main-timeline rows on
+/// SQL backends that normalize the edition column to NULL (per Postgres
+/// migration 0007). Before the fix, `row.get::<String, _>("edition")` panicked
+/// (sqlx decode error: "unexpected null") and the whole query failed for any
+/// caller whose correlation set crossed the main timeline.
+pub async fn test_correlation_id_query_main_timeline_null_edition<S: EventStore>(store: &S) {
+    let domain = "test_corr_main_null";
+    let root = Uuid::new_v4();
+    let correlation_id = format!("corr-main-null-{}", Uuid::new_v4());
+
+    // Write an event on the main timeline (`""` at the API layer). Postgres
+    // stores this as `edition = NULL`; SQLite stores it as the literal empty
+    // string. Either way, the call must not panic and must return the row.
+    store
+        .add(
+            domain,
+            "",
+            root,
+            vec![make_event(0, "MainEvent")],
+            &correlation_id,
+            None,
+            None,
+        )
+        .await
+        .expect("add to main timeline should succeed");
+
+    let books = store
+        .get_by_correlation(&correlation_id)
+        .await
+        .expect("get_by_correlation must not panic on main-timeline rows");
+
+    assert_eq!(books.len(), 1, "should find the main-timeline event");
+    let cover = books[0].cover.as_ref().expect("book must have a cover");
+    assert_eq!(cover.domain, domain);
+    assert_eq!(
+        cover.correlation_id, correlation_id,
+        "correlation_id must round-trip"
+    );
+    let edition_name = cover
+        .edition
+        .as_ref()
+        .map(|e| e.name.as_str())
+        .unwrap_or("");
+    // Main-timeline rows surface as empty-string edition at the API. NULL ↔ ""
+    // is the normalization contract; the wire form must not leak.
+    assert_eq!(
+        edition_name, "",
+        "main-timeline edition should round-trip as empty string at the API"
+    );
+}
+
 pub async fn test_correlation_id_preserved<S: EventStore>(store: &S) {
     let domain = "test_corr_preserved";
     let root = Uuid::new_v4();
@@ -1096,6 +1147,197 @@ pub async fn test_edition_filtered_roots<S: EventStore>(store: &S) {
     assert!(!main_roots.contains(&root_v2));
     assert!(v2_roots.contains(&root_v2));
     assert!(!v2_roots.contains(&root_main));
+}
+
+// =============================================================================
+// Main-timeline sentinel polarity tests (C-15)
+// =============================================================================
+//
+// The "main timeline" has TWO documented sentinel forms at the API boundary:
+// the empty string `""` and the literal `"angzarr"` (per `is_main_timeline`).
+// These MUST be interchangeable on both writes and reads. Otherwise the same
+// caller writing `edition=""` then reading `edition="angzarr"` (or vice versa)
+// silently misses the row.
+//
+// On SQL backends with a nullable edition column (Postgres + SQLite both have
+// the migration that normalizes `""` and `"angzarr"` to SQL NULL), the storage
+// layer must:
+//   1. Normalize BOTH `""` and `"angzarr"` to `NULL` on writes.
+//   2. Match `NULL` on reads when the caller passes either sentinel.
+//
+// Pre-fix bug: Postgres `edition_to_db` only normalized `""` → NULL, leaving
+// `"angzarr"` to land as a literal `"angzarr"` row that `is_main_timeline()`
+// reads then went looking for as NULL — so the round-trip silently lost data.
+// SQLite stored every form raw, so legacy rows that the migration 0006
+// already converted to NULL were invisible to any query.
+
+/// C-15: round-trip via the empty-string sentinel must be visible via BOTH
+/// main-timeline forms.
+pub async fn test_main_timeline_sentinel_write_empty_read_both<S: EventStore>(store: &S) {
+    let domain = "test_main_sentinel_empty";
+    let root = Uuid::new_v4();
+
+    // Write using `""`.
+    store
+        .add(
+            domain,
+            "",
+            root,
+            vec![make_event(0, "MainEmpty")],
+            "",
+            None,
+            None,
+        )
+        .await
+        .expect("add with empty-string main-timeline sentinel should succeed");
+
+    let via_empty = store
+        .get(domain, "", root)
+        .await
+        .expect("get with empty sentinel should succeed");
+    assert_eq!(
+        via_empty.len(),
+        1,
+        "read via empty-string sentinel must find the row written with empty-string sentinel"
+    );
+
+    let via_angzarr = store
+        .get(domain, "angzarr", root)
+        .await
+        .expect("get with angzarr sentinel should succeed");
+    assert_eq!(
+        via_angzarr.len(),
+        1,
+        "read via 'angzarr' sentinel must find the row written with empty-string sentinel"
+    );
+}
+
+/// C-15: round-trip via the `"angzarr"` sentinel must be visible via BOTH
+/// main-timeline forms.
+pub async fn test_main_timeline_sentinel_write_angzarr_read_both<S: EventStore>(store: &S) {
+    let domain = "test_main_sentinel_angzarr";
+    let root = Uuid::new_v4();
+
+    // Write using `"angzarr"`.
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(0, "MainAngzarr")],
+            "",
+            None,
+            None,
+        )
+        .await
+        .expect("add with 'angzarr' main-timeline sentinel should succeed");
+
+    let via_angzarr = store
+        .get(domain, "angzarr", root)
+        .await
+        .expect("get with angzarr sentinel should succeed");
+    assert_eq!(
+        via_angzarr.len(),
+        1,
+        "read via 'angzarr' sentinel must find the row written with 'angzarr' sentinel"
+    );
+
+    let via_empty = store
+        .get(domain, "", root)
+        .await
+        .expect("get with empty sentinel should succeed");
+    assert_eq!(
+        via_empty.len(),
+        1,
+        "read via empty-string sentinel must find the row written with 'angzarr' sentinel"
+    );
+}
+
+/// C-15: `find_by_external_id` must also honor the polarity equivalence.
+/// An aggregate written with idempotency key on `""` must be discoverable
+/// when the lookup uses `"angzarr"`.
+pub async fn test_main_timeline_external_id_sentinel_polarity<S: EventStore>(store: &S) {
+    let domain = "test_main_sentinel_extid";
+    let root = Uuid::new_v4();
+    let external_id = format!("ext-c15-{}", Uuid::new_v4());
+
+    store
+        .add(
+            domain,
+            "",
+            root,
+            vec![make_event(0, "ExtClaim")],
+            "",
+            Some(&external_id),
+            None,
+        )
+        .await
+        .expect("add with external_id on empty sentinel should succeed");
+
+    // Look up via "angzarr" — the saga idempotency contract must not depend
+    // on which form of the sentinel the original caller used.
+    let result = store
+        .find_by_external_id(domain, "angzarr", root, &external_id)
+        .await
+        .expect("find_by_external_id should succeed");
+    assert!(
+        result.is_some(),
+        "find_by_external_id via 'angzarr' sentinel must find the row written with empty-string sentinel"
+    );
+    assert_eq!(result.unwrap().len(), 1);
+}
+
+/// C-15: `delete_edition_events` must reject BOTH main-timeline sentinels.
+///
+/// Previously the Postgres stored proc only raised on NULL/empty `p_edition`;
+/// a caller passing `"angzarr"` would bypass that guard and the proc would
+/// silently delete zero rows (because main-timeline rows are stored as NULL).
+/// That's a confusing no-op, but more importantly the documented contract is
+/// "main timeline ('angzarr' or empty edition) protection" — `"angzarr"`
+/// must raise the same as `""`/NULL.
+pub async fn test_delete_edition_events_rejects_main_timeline_sentinels<S: EventStore>(store: &S) {
+    let domain = "test_del_main_sentinel";
+    let root = Uuid::new_v4();
+
+    store
+        .add(
+            domain,
+            "",
+            root,
+            vec![make_event(0, "Main")],
+            "",
+            None,
+            None,
+        )
+        .await
+        .expect("seed main-timeline event");
+
+    // Delete with `"angzarr"` MUST raise.
+    let result = store.delete_edition_events(domain, "angzarr").await;
+    assert!(
+        result.is_err(),
+        "delete_edition_events('angzarr') must raise to protect the main timeline; got Ok({:?})",
+        result.ok(),
+    );
+
+    // The seeded event must still be there.
+    let after = store
+        .get(domain, "", root)
+        .await
+        .expect("main-timeline read after rejected delete");
+    assert_eq!(
+        after.len(),
+        1,
+        "main-timeline event must survive a rejected delete_edition_events('angzarr')"
+    );
+
+    // Delete with `""` MUST also raise (unchanged behavior).
+    let result_empty = store.delete_edition_events(domain, "").await;
+    assert!(
+        result_empty.is_err(),
+        "delete_edition_events('') must raise to protect the main timeline; got Ok({:?})",
+        result_empty.ok(),
+    );
 }
 
 // =============================================================================
@@ -1553,6 +1795,175 @@ pub async fn test_find_by_source_no_match<S: EventStore>(store: &S) {
 }
 
 // =============================================================================
+// find_by_external_id round-trip tests (C-18)
+//
+// Trait contract (`src/storage/event_store.rs:250-267`): `find_by_external_id`
+// returns Some(events) for matches recorded by `add(..., Some(external_id), _)`,
+// None otherwise. Backends that silently drop `_external_id` at add() time
+// pass `test_find_by_external_id_no_match` (None is correctly returned for a
+// claim that was never recorded) but fail `_round_trip` (the claim that
+// SHOULD have been recorded was thrown away).
+// =============================================================================
+
+pub async fn test_find_by_external_id_round_trip<S: EventStore>(store: &S) {
+    let domain = "test_find_ext_rt";
+    let root = Uuid::new_v4();
+    let external_id = "ext-roundtrip-abc";
+
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(0, "Claimed")],
+            "",
+            Some(external_id),
+            None,
+        )
+        .await
+        .expect("add with external_id should succeed");
+
+    let result = store
+        .find_by_external_id(domain, "angzarr", root, external_id)
+        .await
+        .expect("find_by_external_id should succeed");
+
+    assert!(
+        result.is_some(),
+        "find_by_external_id should return the persisted claim — the backend \
+         silently dropped external_id at add() time if this fails (see C-18)"
+    );
+    let events = result.unwrap();
+    assert_eq!(
+        events.len(),
+        1,
+        "should retrieve the event that carried the external_id"
+    );
+}
+
+pub async fn test_find_by_external_id_no_match<S: EventStore>(store: &S) {
+    let domain = "test_find_ext_nomatch";
+    let root = Uuid::new_v4();
+
+    // Persist an event WITHOUT external_id
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(0, "NoClaim")],
+            "",
+            None,
+            None,
+        )
+        .await
+        .expect("add should succeed");
+
+    let result = store
+        .find_by_external_id(domain, "angzarr", root, "ext-never-stored")
+        .await
+        .expect("find_by_external_id should succeed");
+
+    assert!(
+        result.is_none(),
+        "find_by_external_id should return None when the claim was never recorded"
+    );
+}
+
+pub async fn test_find_by_external_id_empty_returns_none<S: EventStore>(store: &S) {
+    let domain = "test_find_ext_empty";
+    let root = Uuid::new_v4();
+
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(0, "NoClaim")],
+            "",
+            None,
+            None,
+        )
+        .await
+        .expect("add should succeed");
+
+    let result = store
+        .find_by_external_id(domain, "angzarr", root, "")
+        .await
+        .expect("find_by_external_id should succeed");
+
+    assert!(
+        result.is_none(),
+        "find_by_external_id with empty external_id must return None per trait contract"
+    );
+}
+
+// =============================================================================
+// find_by_source round-trip test (C-18)
+//
+// Distinct from `test_find_by_source_returns_match` above: this variant pins
+// the **multi-field** round trip — every field of `SourceInfo` (edition,
+// domain, root, seq) must survive `add()` and be matched on by
+// `find_by_source`. Backends that drop `_source_info` at add() time pass
+// `test_find_by_source_no_match` (None is correctly returned for a
+// non-existent claim) but fail this test (the claim that SHOULD have been
+// stored was thrown away — and additionally, every SourceInfo field is
+// exercised distinctly).
+// =============================================================================
+
+pub async fn test_find_by_source_round_trip<S: EventStore>(store: &S) {
+    let domain = "test_find_src_rt";
+    let root = Uuid::new_v4();
+    let source_root = Uuid::new_v4();
+
+    let source_info = angzarr::storage::SourceInfo {
+        domain: "orders".to_string(),
+        edition: "angzarr".to_string(),
+        root: source_root,
+        seq: 42,
+    };
+
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(0, "Translated")],
+            "",
+            None,
+            Some(&source_info),
+        )
+        .await
+        .expect("add with source_info should succeed");
+
+    let result = store
+        .find_by_source(domain, "angzarr", root, &source_info)
+        .await
+        .expect("find_by_source should succeed");
+
+    assert!(
+        result.is_some(),
+        "find_by_source should return the persisted source claim — the backend \
+         silently dropped source_info at add() time if this fails (see C-18)"
+    );
+    assert_eq!(result.unwrap().len(), 1);
+
+    // Mismatch on seq must NOT match — confirms ALL fields are stored, not just one.
+    let mismatched_seq = angzarr::storage::SourceInfo {
+        seq: source_info.seq + 1,
+        ..source_info.clone()
+    };
+    let result_wrong = store
+        .find_by_source(domain, "angzarr", root, &mismatched_seq)
+        .await
+        .expect("find_by_source should succeed");
+    assert!(
+        result_wrong.is_none(),
+        "different source seq must not match — backend isn't storing seq correctly"
+    );
+}
+
+// =============================================================================
 // query_stale_cascades tests
 // =============================================================================
 
@@ -1790,6 +2201,172 @@ pub async fn test_query_cascade_participants_multiple_aggregates<S: EventStore>(
 }
 
 // =============================================================================
+// Concurrent writes — sequence integrity under race
+// =============================================================================
+//
+// Bug C-19: DynamoDB/Bigtable/ImmuDB EventStore backends compute the next
+// sequence via a read-then-write pattern with no conditional write or
+// transactional fence. Concurrent writers on the same `(domain, edition, root)`
+// can both observe `get_next_sequence() == N`, then both write seq=N — the
+// second write OVERWRITES the first (Dynamo/Bigtable) or duplicates the row
+// (ImmuDB without PRIMARY KEY enforcement on its writes), corrupting the
+// event stream.
+//
+// SQLite and Postgres pass this test because they use `BEGIN IMMEDIATE` /
+// proper transactions plus a PRIMARY KEY on `(domain, edition, root, sequence)`:
+// the race is serialized at the storage layer and a colliding insert fails
+// with a UNIQUE-violation that surfaces as `StorageError`.
+//
+// The test contract is: when N concurrent writers each pick the next free
+// sequence and call `add()`, the store MUST contain exactly N events at the
+// expected `0..N` sequences (each writer retries on its own conflict). A
+// store that silently overwrites or duplicates will fail one of:
+//   - `events.len() == N` (overwrite collapses to <N events)
+//   - the sequence set equals `{0, 1, ..., N-1}` (duplicate sequences or gaps)
+//   - per-sequence event-type uniqueness (overwrite changes content under
+//     a sequence "owned" by an earlier writer).
+
+/// Concurrent writes must yield exactly N distinct sequences with no
+/// overwrites or duplicates.
+///
+/// Each writer:
+///   1. Reads `get_next_sequence` to pick the next available slot.
+///   2. Constructs an event at that slot.
+///   3. Calls `add()`. On error (race lost), retries.
+///
+/// After all writers complete, the aggregate must have exactly N events at
+/// sequences `0..N`, and every sequence must contain the writer's unique
+/// payload (no silent overwrites).
+pub async fn test_add_concurrent_writes_unique_sequences<S>(store: std::sync::Arc<S>)
+where
+    S: EventStore + 'static,
+{
+    let domain = "test_concurrent_seq";
+    let root = Uuid::new_v4();
+    // N is small enough to keep the test fast, large enough to provoke
+    // races on backends without transactional fencing.
+    const N: u32 = 8;
+    // Bounded retry budget per writer: prevents the test from hanging if a
+    // backend is broken in a way that makes progress impossible. Real
+    // contention should resolve in O(N) retries per writer.
+    const MAX_RETRIES: u32 = 256;
+
+    let mut handles = Vec::with_capacity(N as usize);
+    for writer_id in 0..N {
+        let store = std::sync::Arc::clone(&store);
+        let domain = domain.to_string();
+        handles.push(tokio::spawn(async move {
+            for _attempt in 0..MAX_RETRIES {
+                // Read the next free sequence.
+                let next = match store.get_next_sequence(&domain, "test", root).await {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                // Tag the event payload with this writer's id so an overwrite
+                // is detectable post-hoc by inspecting the stored payload.
+                let event_type = format!("Writer{}@Seq{}", writer_id, next);
+                let event = make_event(next, &event_type);
+                match store
+                    .add(&domain, "test", root, vec![event], "", None, None)
+                    .await
+                {
+                    Ok(_) => return Some((writer_id, next, event_type)),
+                    Err(_) => continue, // race lost; retry
+                }
+            }
+            None
+        }));
+    }
+
+    let mut successes: Vec<(u32, u32, String)> = Vec::new();
+    for h in handles {
+        if let Ok(Some(record)) = h.await {
+            successes.push(record);
+        }
+    }
+
+    assert_eq!(
+        successes.len(),
+        N as usize,
+        "all {} writers should have eventually allocated a sequence (got {})",
+        N,
+        successes.len(),
+    );
+
+    // Read back the persisted stream.
+    let events = store
+        .get(domain, "test", root)
+        .await
+        .expect("get should succeed");
+
+    // Property 1: row count must match successful writers.
+    // An overwrite-on-race backend will have fewer rows than N.
+    assert_eq!(
+        events.len(),
+        N as usize,
+        "store contains {} events but {} writers succeeded — overwrite or duplicate on concurrent add()",
+        events.len(),
+        N,
+    );
+
+    // Property 2: sequences must be exactly {0, 1, ..., N-1} with no
+    // duplicates and no gaps. A backend that allows two writes at the same
+    // sequence will either show duplicates or, if it deduped on PRIMARY KEY,
+    // gaps where the loser was discarded.
+    let mut seqs: Vec<u32> = events.iter().map(|e| e.sequence_num()).collect();
+    seqs.sort_unstable();
+    let unique_seqs: std::collections::HashSet<_> = seqs.iter().copied().collect();
+    assert_eq!(
+        unique_seqs.len(),
+        seqs.len(),
+        "duplicate sequences in store: {:?}",
+        seqs,
+    );
+    assert_eq!(
+        seqs,
+        (0..N).collect::<Vec<_>>(),
+        "sequences should be {:?} but got {:?}",
+        (0..N).collect::<Vec<_>>(),
+        seqs,
+    );
+
+    // Property 3: each sequence must contain the payload from the writer
+    // that claimed it. If a later writer overwrote an earlier write at the
+    // same sequence (the silent-overwrite bug on Dynamo/Bigtable), the
+    // stored type_url will not match the writer's `Writer{i}@Seq{n}` tag
+    // for the writer recorded in `successes`.
+    let stored_types_by_seq: std::collections::HashMap<u32, String> = events
+        .iter()
+        .filter_map(|e| {
+            let seq = e.sequence_num();
+            e.payload.as_ref().and_then(|p| match p {
+                angzarr::proto::event_page::Payload::Event(any) => {
+                    // type_url format from make_event: "type.example/{event_type}"
+                    let suffix = any.type_url.rsplit('/').next().unwrap_or("");
+                    Some((seq, suffix.to_string()))
+                }
+                _ => None,
+            })
+        })
+        .collect();
+
+    for (writer_id, seq, expected_type) in &successes {
+        let stored = stored_types_by_seq.get(seq).unwrap_or_else(|| {
+            panic!(
+                "writer {} reported success at seq {} but no event found at that sequence",
+                writer_id, seq
+            )
+        });
+        assert_eq!(
+            stored, expected_type,
+            "writer {} reported success at seq {} with payload {:?}, \
+             but store has {:?} at that sequence — silent overwrite on concurrent add()",
+            writer_id, seq, expected_type, stored,
+        );
+    }
+}
+
+// =============================================================================
 // Test runner macro
 // =============================================================================
 
@@ -1898,6 +2475,9 @@ macro_rules! run_event_store_tests {
         test_correlation_id_empty_query($store).await;
         println!("  test_correlation_id_empty_query: PASSED");
 
+        test_correlation_id_query_main_timeline_null_edition($store).await;
+        println!("  test_correlation_id_query_main_timeline_null_edition: PASSED");
+
         test_correlation_id_preserved($store).await;
         println!("  test_correlation_id_preserved: PASSED");
 
@@ -1922,6 +2502,19 @@ macro_rules! run_event_store_tests {
 
         test_edition_explicit_divergence_new_branch($store).await;
         println!("  test_edition_explicit_divergence_new_branch: PASSED");
+
+        // main-timeline sentinel polarity tests (C-15)
+        test_main_timeline_sentinel_write_empty_read_both($store).await;
+        println!("  test_main_timeline_sentinel_write_empty_read_both: PASSED");
+
+        test_main_timeline_sentinel_write_angzarr_read_both($store).await;
+        println!("  test_main_timeline_sentinel_write_angzarr_read_both: PASSED");
+
+        test_main_timeline_external_id_sentinel_polarity($store).await;
+        println!("  test_main_timeline_external_id_sentinel_polarity: PASSED");
+
+        test_delete_edition_events_rejects_main_timeline_sentinels($store).await;
+        println!("  test_delete_edition_events_rejects_main_timeline_sentinels: PASSED");
 
         // idempotency tests
         test_add_with_external_id_returns_duplicate($store).await;
@@ -1958,6 +2551,20 @@ macro_rules! run_event_store_tests {
         test_find_by_source_no_match($store).await;
         println!("  test_find_by_source_no_match: PASSED");
 
+        // C-18: round-trip tests for external_id + source_info. These pin the
+        // claim-survives-add() contract that several backends silently violated.
+        test_find_by_source_round_trip($store).await;
+        println!("  test_find_by_source_round_trip: PASSED");
+
+        test_find_by_external_id_round_trip($store).await;
+        println!("  test_find_by_external_id_round_trip: PASSED");
+
+        test_find_by_external_id_no_match($store).await;
+        println!("  test_find_by_external_id_no_match: PASSED");
+
+        test_find_by_external_id_empty_returns_none($store).await;
+        println!("  test_find_by_external_id_empty_returns_none: PASSED");
+
         // cascade tests
         test_query_stale_cascades_finds_old_uncommitted($store).await;
         println!("  test_query_stale_cascades_finds_old_uncommitted: PASSED");
@@ -1976,5 +2583,23 @@ macro_rules! run_event_store_tests {
 
         test_query_cascade_participants_multiple_aggregates($store).await;
         println!("  test_query_cascade_participants_multiple_aggregates: PASSED");
+    };
+}
+
+/// Run concurrent-write contract tests against a store implementation.
+///
+/// Separate from `run_event_store_tests!` because the concurrent test
+/// requires an owned `Arc<S>` to satisfy `tokio::spawn`'s `'static` bound,
+/// whereas the rest of the suite takes a borrowed `&S`. Invoke after the
+/// main suite, with a freshly-built store to avoid coupling to prior state.
+///
+/// Bug context: C-19 in `plans/deep-review-remediation.md`.
+#[macro_export]
+macro_rules! run_event_store_concurrent_tests {
+    ($arc_store:expr) => {
+        use $crate::storage::event_store_tests::*;
+
+        test_add_concurrent_writes_unique_sequences($arc_store).await;
+        println!("  test_add_concurrent_writes_unique_sequences: PASSED");
     };
 }

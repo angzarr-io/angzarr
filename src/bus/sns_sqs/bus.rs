@@ -1,6 +1,7 @@
 //! AWS SNS/SQS event bus implementation.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -34,6 +35,78 @@ pub struct SnsSqsEventBus {
     topic_arns: Arc<RwLock<HashMap<String, String>>>,
     /// Cache of SQS queue URLs by domain.
     queue_urls: Arc<RwLock<HashMap<String, String>>>,
+    /// Monotonic publish counter (per-bus-instance). Mixed into the SNS
+    /// MessageDeduplicationId so legitimate retries of the same logical event
+    /// (which would otherwise produce identical `{domain}-{root}-{max_seq}`
+    /// dedup IDs) are not silently dropped by AWS's 5-minute FIFO dedup
+    /// window. AWS dedup-id length cap is 128 chars — a u64 counter fits
+    /// comfortably alongside the rest of the key.
+    publish_counter: Arc<AtomicU64>,
+}
+
+/// Build the FIFO `(MessageGroupId, MessageDeduplicationId)` pair for an
+/// SNS publish.
+///
+/// # Contract
+///
+/// **Root-less EventBooks are rejected with `BusError::Publish`.** FIFO
+/// topics require a non-empty MessageGroupId. The only non-empty fallback
+/// we could compute is a per-event UUID, which would guarantee every
+/// root-less event lands in its OWN ordering group — i.e., no ordering at
+/// all. That silently weakens the documented "ordering by aggregate root"
+/// FIFO guarantee. AWS would reject an empty MessageGroupId on the wire
+/// regardless; surfacing the misuse here as `BusError::Publish` produces a
+/// clear, root-cause-naming error at the boundary instead of an opaque
+/// AWS validation failure several layers down.
+///
+/// **MessageDeduplicationId includes a per-bus monotonic publish counter.**
+/// Without it, legitimate retries of the same logical event (same
+/// `{domain}-{root}-{max_seq}` triple) would collide inside AWS's 5-minute
+/// FIFO dedup window and be silently dropped — defeating the framework's
+/// at-least-once republish flows (outbox recovery, persist-and-publish
+/// retry). AWS allows up to 128 characters in the dedup_id; a u64 counter
+/// fits comfortably alongside the rest of the key.
+///
+/// # Purity
+///
+/// This helper is a pure function (no AWS SDK, no I/O, no time) so it can
+/// be unit-tested directly without LocalStack / Floci / mocks. See
+/// `bus.test.rs` for the C-12 regression suite.
+pub(crate) fn build_fifo_attributes(
+    book: &EventBook,
+    publish_counter: u64,
+) -> Result<(String, String)> {
+    let root_id = book.root_id_hex().ok_or_else(|| {
+        BusError::Publish(
+            "EventBook missing root: SNS FIFO requires a non-empty MessageGroupId. \
+             Falling back to a per-event UUID would silently disable ordering. \
+             Provide a root on the EventBook cover, or route root-less events \
+             through a non-FIFO transport."
+                .to_string(),
+        )
+    })?;
+
+    // Defense-in-depth: `root_id_hex` returns `Some` whenever a root
+    // ProtoUuid is present, even if its `value` bytes are empty. An
+    // empty hex string would still be rejected by AWS; reject it here
+    // with the same explicit error so the framework's failure mode is
+    // identical across both shapes of "no root".
+    if root_id.is_empty() {
+        return Err(BusError::Publish(
+            "EventBook root_id is empty: SNS FIFO MessageGroupId must be non-empty".to_string(),
+        ));
+    }
+
+    let domain = book.domain();
+    let max_seq = book
+        .pages
+        .iter()
+        .map(|p| p.sequence_num())
+        .max()
+        .unwrap_or(0);
+    let dedup_id = format!("{}-{}-{}-{}", domain, root_id, max_seq, publish_counter);
+
+    Ok((root_id, dedup_id))
 }
 
 impl SnsSqsEventBus {
@@ -69,6 +142,7 @@ impl SnsSqsEventBus {
             handlers: Arc::new(RwLock::new(Vec::new())),
             topic_arns: Arc::new(RwLock::new(HashMap::new())),
             queue_urls: Arc::new(RwLock::new(HashMap::new())),
+            publish_counter: Arc::new(AtomicU64::new(0)),
         })
     }
 
@@ -196,8 +270,13 @@ impl EventBus for SnsSqsEventBus {
     #[tracing::instrument(name = "bus.publish", skip_all, fields(domain = %book.domain()))]
     async fn publish(&self, book: Arc<EventBook>) -> Result<PublishResult> {
         let domain = book.domain();
-        let root_id = book.root_id_hex().unwrap_or_default();
         let correlation_id = book.correlation_id().to_string();
+
+        // Compute FIFO ordering/dedup attributes BEFORE creating the topic.
+        // Failing early on a root-less EventBook avoids the wasteful side
+        // effect of provisioning a topic for a publish we cannot perform.
+        let counter = self.publish_counter.fetch_add(1, Ordering::Relaxed);
+        let (root_id, dedup_id) = build_fifo_attributes(&book, counter)?;
 
         let topic_arn = self.get_or_create_topic(domain).await?;
 
@@ -237,23 +316,16 @@ impl EventBus for SnsSqsEventBus {
         #[cfg(feature = "otel")]
         super::otel::sns_inject_trace_context(&mut attrs);
 
-        // Publish to SNS
+        // Publish to SNS. FIFO ordering by aggregate root; dedup_id includes
+        // a per-bus publish counter (see `build_fifo_attributes`) so
+        // legitimate retries survive AWS's 5-minute dedup window.
         self.sns
             .publish()
             .topic_arn(&topic_arn)
             .message(&message)
             .set_message_attributes(Some(attrs))
-            .message_group_id(&root_id) // FIFO ordering by aggregate root
-            .message_deduplication_id(format!(
-                "{}-{}-{}",
-                domain,
-                root_id,
-                book.pages
-                    .iter()
-                    .map(|p| p.sequence_num())
-                    .max()
-                    .unwrap_or(0)
-            ))
+            .message_group_id(&root_id)
+            .message_deduplication_id(&dedup_id)
             .send()
             .await
             .map_err(|e| BusError::Publish(format!("Failed to publish to SNS: {}", e)))?;
@@ -339,3 +411,7 @@ impl EventBus for SnsSqsEventBus {
         Ok(Arc::new(bus))
     }
 }
+
+#[cfg(test)]
+#[path = "bus.test.rs"]
+mod tests;

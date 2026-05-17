@@ -3,10 +3,23 @@
 //! Implements composite reads for editions: query edition events first to derive
 //! the implicit divergence point, then query main timeline up to that point,
 //! then merge the results.
+//!
+//! ## Edition NULL polarity (C-15)
+//!
+//! Since migration 0006 the SQLite `events` table has a nullable `edition`
+//! column with the literal `'angzarr'` / `''` rows backfilled to NULL. The
+//! API surface keeps two sentinel forms for "main timeline" — `""` and
+//! `"angzarr"` (per `is_main_timeline`). To keep both forms interchangeable
+//! and not split data across `NULL` / `''` / `'angzarr'` rows, writes and
+//! reads MUST normalize through `edition_to_db` (write side) and
+//! `edition_predicate` (read side) below. A bare
+//! `Expr::col(Events::Edition).eq(edition)` is a polarity-split bug — it
+//! misses NULL rows that the migration backfilled, and creates fragmented
+//! storage when callers alternate between sentinels.
 
 use async_trait::async_trait;
 use prost::Message;
-use sea_query::{Expr, Order, Query, SqliteQueryBuilder};
+use sea_query::{Expr, Iden, Order, Query, SimpleExpr, SqliteQueryBuilder};
 use sqlx::{Row, SqliteConnection, SqlitePool};
 use uuid::Uuid;
 
@@ -14,7 +27,41 @@ use crate::orchestration::aggregate::DEFAULT_EDITION;
 use crate::proto::EventPage;
 use crate::storage::helpers::{assemble_event_books, is_main_timeline};
 use crate::storage::schema::Events;
-use crate::storage::{AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo};
+use crate::storage::{
+    AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo, StorageError,
+};
+
+/// Build an `edition` column WHERE predicate. Both main-timeline sentinels
+/// (`""` and `"angzarr"`) translate to `IS NULL`; named editions to `= <name>`.
+fn edition_predicate<T: Iden + 'static>(col: T, edition: &str) -> SimpleExpr {
+    if is_main_timeline(edition) {
+        Expr::col(col).is_null()
+    } else {
+        Expr::col(col).eq(edition)
+    }
+}
+
+/// Convert the API-layer edition to a sea-query `SimpleExpr` value.
+///
+/// BOTH `""` and `"angzarr"` normalize to SQL NULL so a caller-side polarity
+/// flip does not silently split storage.
+fn edition_to_db(edition: &str) -> SimpleExpr {
+    if is_main_timeline(edition) {
+        let none: Option<String> = None;
+        SimpleExpr::Value(sea_query::Value::String(none.map(Box::new)))
+    } else {
+        SimpleExpr::Value(sea_query::Value::String(Some(Box::new(
+            edition.to_string(),
+        ))))
+    }
+}
+
+/// Inverse of `edition_to_db`: SQL NULL surfaces as the empty-string sentinel
+/// at the API boundary. (`""` is the more conventional form; `"angzarr"`
+/// remains accepted on input.)
+fn edition_from_db(value: Option<String>) -> String {
+    value.unwrap_or_default()
+}
 
 /// SQLite implementation of EventStore.
 pub struct SqliteEventStore {
@@ -35,10 +82,11 @@ impl SqliteEventStore {
         root_str: &str,
         from: u32,
     ) -> Result<Vec<EventPage>> {
+        // C-15: main-timeline sentinels map to SQL NULL via `edition_predicate`.
         let query = Query::select()
             .column(Events::EventData)
             .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(edition))
+            .and_where(edition_predicate(Events::Edition, edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(root_str))
             .and_where(Expr::col(Events::Sequence).gte(from))
@@ -67,7 +115,7 @@ impl SqliteEventStore {
         let query = Query::select()
             .expr(Expr::col(Events::Sequence).min())
             .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(edition))
+            .and_where(edition_predicate(Events::Edition, edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(root_str))
             .to_string(SqliteQueryBuilder);
@@ -90,10 +138,11 @@ impl SqliteEventStore {
         root_str: &str,
         until_seq: u32,
     ) -> Result<Vec<EventPage>> {
+        // Main-timeline rows store edition as SQL NULL (C-15).
         let query = Query::select()
             .column(Events::EventData)
             .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(DEFAULT_EDITION))
+            .and_where(edition_predicate(Events::Edition, DEFAULT_EDITION))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(root_str))
             .and_where(Expr::col(Events::Sequence).lt(until_seq))
@@ -204,7 +253,7 @@ impl SqliteEventStore {
             let query = Query::select()
                 .expr(Expr::col(Events::Sequence).max())
                 .from(Events::Table)
-                .and_where(Expr::col(Events::Edition).eq(edition))
+                .and_where(edition_predicate(Events::Edition, edition))
                 .and_where(Expr::col(Events::Domain).eq(domain))
                 .and_where(Expr::col(Events::Root).eq(root_str))
                 .to_string(SqliteQueryBuilder);
@@ -248,7 +297,13 @@ impl SqliteEventStore {
             }
             last_sequence = sequence;
 
-            // Build insert with source columns if provided
+            // C-15: edition + source_edition normalize to SQL NULL when the
+            // caller passes a main-timeline sentinel. Splitting storage
+            // between NULL/`""`/`"angzarr"` is the polarity bug this fix
+            // closes; treat the value as a sea_query Value, not a `&str`.
+            let edition_value = edition_to_db(edition);
+            let source_edition_value = edition_to_db(source_edition);
+
             let query = if source_info.is_some() && !source_edition.is_empty() {
                 Query::insert()
                     .into_table(Events::Table)
@@ -269,7 +324,7 @@ impl SqliteEventStore {
                         Events::CascadeId,
                     ])
                     .values_panic([
-                        edition.into(),
+                        edition_value.clone(),
                         domain.into(),
                         root_str.to_string().into(),
                         sequence.into(),
@@ -277,7 +332,7 @@ impl SqliteEventStore {
                         event_data.into(),
                         correlation_id.into(),
                         external_id.into(),
-                        source_edition.into(),
+                        source_edition_value.clone(),
                         source_domain.into(),
                         source_root.clone().into(),
                         source_seq.into(),
@@ -301,7 +356,7 @@ impl SqliteEventStore {
                         Events::CascadeId,
                     ])
                     .values_panic([
-                        edition.into(),
+                        edition_value.clone(),
                         domain.into(),
                         root_str.to_string().into(),
                         sequence.into(),
@@ -334,7 +389,7 @@ impl SqliteEventStore {
             .expr(Expr::col(Events::Sequence).min())
             .expr(Expr::col(Events::Sequence).max())
             .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(edition))
+            .and_where(edition_predicate(Events::Edition, edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(root_str))
             .and_where(Expr::col(Events::ExternalId).eq(external_id))
@@ -481,7 +536,7 @@ impl EventStore for SqliteEventStore {
         let query = Query::select()
             .column(Events::EventData)
             .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(edition))
+            .and_where(edition_predicate(Events::Edition, edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(&root_str))
             .and_where(Expr::col(Events::Sequence).gte(from))
@@ -513,7 +568,7 @@ impl EventStore for SqliteEventStore {
         let query = Query::select()
             .column(Events::EventData)
             .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(edition))
+            .and_where(edition_predicate(Events::Edition, edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(&root_str))
             .and_where(Expr::col(Events::CreatedAt).lte(until))
@@ -537,7 +592,7 @@ impl EventStore for SqliteEventStore {
             .distinct()
             .column(Events::Root)
             .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(edition))
+            .and_where(edition_predicate(Events::Edition, edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .to_string(SqliteQueryBuilder);
 
@@ -576,7 +631,7 @@ impl EventStore for SqliteEventStore {
             let edition_query = Query::select()
                 .expr(Expr::col(Events::Sequence).max())
                 .from(Events::Table)
-                .and_where(Expr::col(Events::Edition).eq(edition))
+                .and_where(edition_predicate(Events::Edition, edition))
                 .and_where(Expr::col(Events::Domain).eq(domain))
                 .and_where(Expr::col(Events::Root).eq(&root_str))
                 .to_string(SqliteQueryBuilder);
@@ -596,7 +651,10 @@ impl EventStore for SqliteEventStore {
             // No edition events - fall through to check main timeline
         }
 
-        // Query the target edition (or main timeline for fallback)
+        // Query the target edition (or main timeline for fallback). The
+        // main timeline is stored as SQL NULL (C-15) regardless of which
+        // sentinel form the caller passed; `edition_predicate` handles the
+        // mapping uniformly.
         let target_edition = if is_main_timeline(edition) {
             edition
         } else {
@@ -606,7 +664,7 @@ impl EventStore for SqliteEventStore {
         let query = Query::select()
             .expr(Expr::col(Events::Sequence).max())
             .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(target_edition))
+            .and_where(edition_predicate(Events::Edition, target_edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(&root_str))
             .to_string(SqliteQueryBuilder);
@@ -653,7 +711,12 @@ impl EventStore for SqliteEventStore {
 
         for row in rows {
             let domain: String = row.get("domain");
-            let edition: String = row.get("edition");
+            // C-15: the SQLite `edition` column is nullable since
+            // migration 0006. Decode as `Option<String>` and normalize NULL
+            // back to the empty-string sentinel; a bare `String` decode
+            // would panic with `UnexpectedNullError` on any main-timeline
+            // row written or migration-backfilled after 0006.
+            let edition: String = edition_from_db(row.get("edition"));
             let root_str: String = row.get("root");
             let event_data: Vec<u8> = row.get("event_data");
 
@@ -686,10 +749,13 @@ impl EventStore for SqliteEventStore {
         let query = Query::select()
             .column(Events::EventData)
             .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(edition))
+            .and_where(edition_predicate(Events::Edition, edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(&root_str))
-            .and_where(Expr::col(Events::SourceEdition).eq(&source_info.edition))
+            .and_where(edition_predicate(
+                Events::SourceEdition,
+                &source_info.edition,
+            ))
             .and_where(Expr::col(Events::SourceDomain).eq(&source_info.domain))
             .and_where(Expr::col(Events::SourceRoot).eq(&source_root_str))
             .and_where(Expr::col(Events::SourceSeq).eq(source_info.seq as i32))
@@ -727,7 +793,7 @@ impl EventStore for SqliteEventStore {
         let query = Query::select()
             .column(Events::EventData)
             .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(edition))
+            .and_where(edition_predicate(Events::Edition, edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(&root_str))
             .and_where(Expr::col(Events::ExternalId).eq(external_id))
@@ -748,9 +814,22 @@ impl EventStore for SqliteEventStore {
     }
 
     async fn delete_edition_events(&self, domain: &str, edition: &str) -> Result<u32> {
+        // C-15: main-timeline sentinels (`""` and `"angzarr"`) refer to the
+        // append-only canonical timeline. SQLite has no equivalent of the
+        // Postgres stored proc, so the guard lives in the Rust impl. Without
+        // it a caller passing `"angzarr"` (or `""`) would silently delete
+        // every main-timeline event for that domain.
+        if is_main_timeline(edition) {
+            return Err(StorageError::MainTimelineProtected(format!(
+                "delete_edition_events(edition={:?}) refused; the main \
+                 timeline is append-only",
+                edition
+            )));
+        }
+
         let query = Query::delete()
             .from_table(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(edition))
+            .and_where(edition_predicate(Events::Edition, edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .to_string(SqliteQueryBuilder);
 
@@ -759,38 +838,43 @@ impl EventStore for SqliteEventStore {
     }
 
     async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {
-        // Find cascade_ids with uncommitted events older than threshold.
-        // Exclude cascades that already have Confirmation/Revocation events
-        // (indicated by having ANY committed event with that cascade_id).
+        // Per-participant resolution (C-02): a cascade is stale iff it has
+        // at least one (cascade_id, domain, edition, root) participant that
+        // is past the threshold AND has no committed cascade row on that
+        // SAME (domain, edition, root) for the same cascade_id.
         //
-        // SQL logic:
-        // 1. Find distinct cascade_ids where committed=false AND created_at < threshold
-        // 2. Exclude cascade_ids that appear in committed=true rows (already resolved)
+        // Pre-fix semantics filtered out the entire cascade when ANY
+        // committed row existed for that cascade_id (globally) — once
+        // participant 1 of N was revoked, participants 2..N were stranded
+        // because the cascade was treated as "already resolved" even though
+        // their no_commit rows were still live.
         //
-        // Note: We use a simple approach - if a cascade has ANY committed event
-        // with the same cascade_id, it means a Confirmation/Revocation was written.
-
-        // Subquery: cascade_ids that have committed events (already resolved)
-        let committed_subquery = Query::select()
-            .distinct()
-            .column(Events::CascadeId)
-            .from(Events::Table)
-            .and_where(Expr::col(Events::Committed).eq(true))
-            .and_where(Expr::col(Events::CascadeId).is_not_null())
-            .to_owned();
-
-        // Main query: stale uncommitted cascades not in the committed set
-        let query = Query::select()
-            .distinct()
-            .column(Events::CascadeId)
-            .from(Events::Table)
-            .and_where(Expr::col(Events::Committed).eq(false))
-            .and_where(Expr::col(Events::CascadeId).is_not_null())
-            .and_where(Expr::col(Events::CreatedAt).lt(threshold))
-            .and_where(Expr::col(Events::CascadeId).not_in_subquery(committed_subquery))
-            .to_string(SqliteQueryBuilder);
-
-        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+        // SQL: NOT EXISTS (SELECT 1 FROM events c WHERE c.cascade_id = stale.cascade_id
+        //                  AND c.domain = stale.domain AND c.edition = stale.edition
+        //                  AND c.root = stale.root AND c.committed = true)
+        //
+        // sea-query lacks correlated-subquery sugar — fall back to raw SQL.
+        //
+        // C-15: `c.edition IS s.edition` (SQLite's NULL-aware equality) so
+        // main-timeline rows (where both sides are NULL) match correctly.
+        // A plain `=` would yield NULL there and exclude the row.
+        let raw = "SELECT DISTINCT s.cascade_id \
+             FROM events s \
+             WHERE s.committed = false \
+               AND s.cascade_id IS NOT NULL \
+               AND s.created_at < ? \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM events c \
+                 WHERE c.committed = true \
+                   AND c.cascade_id = s.cascade_id \
+                   AND c.domain = s.domain \
+                   AND c.edition IS s.edition \
+                   AND c.root = s.root \
+               )";
+        let rows = sqlx::query(raw)
+            .bind(threshold)
+            .fetch_all(&self.pool)
+            .await?;
 
         let mut cascade_ids = Vec::with_capacity(rows.len());
         for row in rows {
@@ -807,30 +891,43 @@ impl EventStore for SqliteEventStore {
     ) -> Result<Vec<CascadeParticipant>> {
         use std::collections::HashMap;
 
-        // Query all uncommitted events for this cascade, grouped by aggregate
-        let query = Query::select()
-            .columns([
-                Events::Domain,
-                Events::Edition,
-                Events::Root,
-                Events::Sequence,
-            ])
-            .from(Events::Table)
-            .and_where(Expr::col(Events::CascadeId).eq(cascade_id))
-            .and_where(Expr::col(Events::Committed).eq(false))
-            .order_by(Events::Domain, Order::Asc)
-            .order_by(Events::Root, Order::Asc)
-            .order_by(Events::Sequence, Order::Asc)
-            .to_string(SqliteQueryBuilder);
+        // Per-participant resolution (C-02): exclude (domain, edition, root)
+        // participants that already have a committed cascade row (a
+        // Revocation or Confirmation) for this cascade_id. Without this
+        // filter, the reaper would re-write Revocations on every cycle for
+        // already-resolved participants.
+        //
+        // C-15: `c.edition IS s.edition` for NULL-aware equality on the
+        // main timeline (SQLite stores `""` / `"angzarr"` as SQL NULL).
+        let raw = "SELECT s.domain, s.edition, s.root, s.sequence \
+             FROM events s \
+             WHERE s.cascade_id = ? \
+               AND s.committed = false \
+               AND NOT EXISTS ( \
+                 SELECT 1 FROM events c \
+                 WHERE c.committed = true \
+                   AND c.cascade_id = s.cascade_id \
+                   AND c.domain = s.domain \
+                   AND c.edition IS s.edition \
+                   AND c.root = s.root \
+               ) \
+             ORDER BY s.domain ASC, s.root ASC, s.sequence ASC";
 
-        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(raw)
+            .bind(cascade_id)
+            .fetch_all(&self.pool)
+            .await?;
 
         // Group by (domain, edition, root)
         let mut participants_map: HashMap<(String, String, Uuid), Vec<u32>> = HashMap::new();
 
         for row in rows {
             let domain: String = row.get("domain");
-            let edition: String = row.get("edition");
+            // C-15: SQLite stores main-timeline rows as SQL NULL since
+            // migration 0006; decode as Option<String> and surface back
+            // as the empty-string sentinel at the API boundary.
+            let edition_raw: Option<String> = row.get("edition");
+            let edition = edition_from_db(edition_raw);
             let root_str: String = row.get("root");
             let sequence: i32 = row.get("sequence");
 

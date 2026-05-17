@@ -102,6 +102,7 @@ fn test_recovery_interval_value_is_respected() {
 mod sqlite_tests {
     use super::*;
     use crate::bus::mock::MockEventBus;
+    use crate::proto_ext::pages::EventPageExt;
     use crate::test_utils::{make_cover_with_root, make_event_page};
     use sqlx::sqlite::SqlitePoolOptions;
     use sqlx::Row;
@@ -770,5 +771,191 @@ mod sqlite_tests {
         // Verify the remaining event is the one at max_retries
         let entry = get_outbox_entry(&pool, "at-max").await;
         assert!(entry.is_some(), "event at max_retries should still exist");
+    }
+
+    // ========================================================================
+    // C-13 Recovery Ordering Tests
+    // ========================================================================
+    //
+    // These tests pin the invariant that recovery NEVER republishes an older
+    // event for a root after a newer event for that root has been successfully
+    // published. CQRS-ES requires monotonic per-root delivery; if recovery
+    // re-emits seq=N for root X after seq=N+k has already gone out, downstream
+    // projectors and PMs observe state regression.
+    //
+    // Baseline (pre-fix) behavior: recovery decodes the orphaned book and
+    // unconditionally calls inner.publish() — so the consumer sees
+    // [seq=2, seq=1] when seq=1 had failed and seq=2 had succeeded.
+    //
+    // Fix (Option A from the plan): recovery checks per-(domain, root) the
+    // last successfully published sequence; if the orphaned event's sequence
+    // is <= that watermark, the row is dropped from the outbox WITHOUT
+    // republishing (the consumer has already seen newer state — re-emitting
+    // would be regressive).
+
+    fn make_test_event_book_seq(domain: &str, root: uuid::Uuid, seq: u32) -> EventBook {
+        EventBook {
+            cover: Some(make_cover_with_root(domain, root)),
+            pages: vec![make_event_page(seq)],
+            snapshot: None,
+            ..Default::default()
+        }
+    }
+
+    /// Recovery must not republish an older event for a root when a newer
+    /// event for the same root has already been successfully published.
+    ///
+    /// Scenario:
+    ///   1. seq=1 for root X failed to publish on the normal path; it sits
+    ///      in the outbox table with an aged created_at.
+    ///   2. seq=2 for root X is published normally — inner bus records it.
+    ///   3. Recovery fires. It must NOT emit seq=1 to the inner bus.
+    ///
+    /// The published log on the inner bus must show only seq=2 for root X
+    /// (or seq=1 followed by seq=2 if a future redesign blocks the seq=2
+    /// publish until seq=1 has been recovered; either is acceptable as long
+    /// as ordering holds). The test specifically forbids the
+    /// [seq=2, seq=1] sequence — that is the C-13 bug.
+    #[tokio::test]
+    async fn test_recovery_does_not_republish_superseded_event() {
+        let pool = create_test_pool().await;
+        let inner = Arc::new(MockEventBus::new());
+        let config = OutboxConfig {
+            max_retries: 10,
+            ..Default::default()
+        };
+
+        let outbox = Arc::new(SqliteOutboxEventBus::new(
+            inner.clone(),
+            pool.clone(),
+            config,
+        ));
+        outbox.init().await.unwrap();
+
+        let root = uuid::Uuid::new_v4();
+        let root_hex = hex::encode(root.as_bytes());
+
+        // (a) seq=1 for root X is stranded in the outbox (its publish
+        //     attempt previously failed; the row stayed behind). We insert
+        //     it directly with an aged timestamp to model "older than 30s".
+        let book_seq1 = make_test_event_book_seq("orders", root, 1);
+        let bytes_seq1 = book_seq1.encode_to_vec();
+        insert_orphaned_event(&pool, "seq1-stale", "orders", &bytes_seq1, 60, 0).await;
+        // Override the root column to match the real root (helper writes
+        // 'test-root'); recovery needs the real root to look up the
+        // per-root published watermark.
+        sqlx::query("UPDATE outbox SET root = ? WHERE id = ?")
+            .bind(&root_hex)
+            .bind("seq1-stale")
+            .execute(&pool)
+            .await
+            .expect("failed to set root for orphaned seq=1");
+
+        // (b) seq=2 for root X publishes successfully on the normal path.
+        let book_seq2 = Arc::new(make_test_event_book_seq("orders", root, 2));
+        outbox
+            .publish(book_seq2)
+            .await
+            .expect("seq=2 publish must succeed");
+
+        assert_eq!(
+            inner.published_count().await,
+            1,
+            "inner bus has only seq=2 so far"
+        );
+
+        // (c) Recovery fires. The bug republishes the stale seq=1 to the
+        //     inner bus AFTER seq=2 has already been emitted.
+        let _ = outbox
+            .recover_orphaned()
+            .await
+            .expect("recovery should succeed");
+
+        // (d) Observe what the consumer saw.
+        let observed = inner.take_published().await;
+        let observed_seqs: Vec<u32> = observed
+            .iter()
+            .flat_map(|b| b.pages.iter().map(|p| p.sequence_num()))
+            .collect();
+
+        // The C-13 invariant: ordering must be monotonic per-root.
+        // It is acceptable for recovery to drop seq=1 (Option A) or to
+        // hold seq=2 until seq=1 has recovered (Option B). It is NOT
+        // acceptable to emit seq=1 after seq=2.
+        let mut last: Option<u32> = None;
+        for (i, seq) in observed_seqs.iter().enumerate() {
+            if let Some(prev) = last {
+                assert!(
+                    *seq > prev,
+                    "C-13: per-root ordering violation on inner bus. Position {i} \
+                     emitted seq={seq} after seq={prev}. Full observed sequence: \
+                     {observed_seqs:?}. Recovery republished an older event for \
+                     root {root_hex} after a newer event was already published."
+                );
+            }
+            last = Some(*seq);
+        }
+
+        // And: seq=1 must be removed from the outbox so it never re-fires.
+        // Under Option A, recovery deletes superseded rows.
+        let remaining_seq1 = get_outbox_entry(&pool, "seq1-stale").await;
+        assert!(
+            remaining_seq1.is_none(),
+            "C-13: superseded seq=1 row must be removed from outbox after \
+             recovery sees seq=2 has been published (Option A). Found: \
+             {remaining_seq1:?}"
+        );
+    }
+
+    /// Recovery still republishes orphaned events when NO newer event for
+    /// the same root has been published. This is a regression guard against
+    /// an over-eager fix that drops every orphaned event.
+    #[tokio::test]
+    async fn test_recovery_still_republishes_non_superseded_event() {
+        let pool = create_test_pool().await;
+        let inner = Arc::new(MockEventBus::new());
+        let config = OutboxConfig {
+            max_retries: 10,
+            ..Default::default()
+        };
+
+        let outbox = Arc::new(SqliteOutboxEventBus::new(
+            inner.clone(),
+            pool.clone(),
+            config,
+        ));
+        outbox.init().await.unwrap();
+
+        let root = uuid::Uuid::new_v4();
+        let root_hex = hex::encode(root.as_bytes());
+
+        // seq=5 for root X is stranded. No newer event has been published
+        // for this root. Recovery must republish it.
+        let book = make_test_event_book_seq("orders", root, 5);
+        let bytes = book.encode_to_vec();
+        insert_orphaned_event(&pool, "lonely-seq5", "orders", &bytes, 60, 0).await;
+        sqlx::query("UPDATE outbox SET root = ? WHERE id = ?")
+            .bind(&root_hex)
+            .bind("lonely-seq5")
+            .execute(&pool)
+            .await
+            .expect("failed to set root for orphaned seq=5");
+
+        let recovered = outbox
+            .recover_orphaned()
+            .await
+            .expect("recovery should succeed");
+
+        assert_eq!(recovered, 1, "non-superseded event must be recovered");
+        assert_eq!(
+            inner.published_count().await,
+            1,
+            "non-superseded event must reach the inner bus"
+        );
+        assert_eq!(
+            count_outbox_entries(&pool).await,
+            0,
+            "non-superseded event must be removed from outbox after success"
+        );
     }
 }

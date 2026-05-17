@@ -120,6 +120,84 @@ _container-dind +ARGS: _build-images
             "$IMAGE" just {{ARGS}}
     fi
 
+# Run a mutation-testing target with the workspace mounted READ-ONLY.
+#
+# WHY:
+#   cargo-mutants --in-place writes mutated source into the working tree. If
+#   the workspace is bind-mounted RW (as `_container` does) and the container
+#   dies mid-run, the mutated files are left on the host. This helper closes
+#   that hole: source is mounted at /src:ro, an rsync copy lands in /work
+#   inside the container's WRITABLE OVERLAY LAYER, and `--rm` destroys the
+#   overlay (and the mutated copy) on every exit.
+#
+# WHAT TOUCHES THE HOST:
+#   - {{TOP}}/.mutants-cache/cargo-{home,target} — compiled artifacts and
+#     dep registry only. NEVER contains mutated source files. Gitignored.
+#     Delete the dir to purge the cache.
+#   - {{TOP}}/mutants.out/outcomes.json — copied out at the end of a
+#     successful run so `mutants-summary` / `mutants-survivors` work.
+#
+# WHAT NEVER TOUCHES THE HOST:
+#   - Mutated source trees (live in /work, container overlay, --rm wipes).
+#   - cargo-mutants's intermediate working dirs.
+[private]
+_container-ephemeral +ARGS: _build-images
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ "${DEVCONTAINER:-}" = "true" ]; then
+        # Already inside a devcontainer — that container IS the ephemeral
+        # boundary. Run directly; the outer just wrapper ensures --rm.
+        just --justfile "{{TOP}}/justfile.container" {{ARGS}}
+        exit 0
+    fi
+    IMAGE=$(just _image-tag angzarr-rust)
+    mkdir -p "{{TOP}}/mutants.out" \
+             "{{TOP}}/.mutants-cache/cargo-home" \
+             "{{TOP}}/.mutants-cache/cargo-target"
+    {{CONTAINER_RUN}} --network=host \
+        -v "{{TOP}}:/src:ro,Z" \
+        -v "{{TOP}}/mutants.out:/out:Z" \
+        -v "{{TOP}}/.mutants-cache/cargo-home:/cargo-home:Z" \
+        -v "{{TOP}}/.mutants-cache/cargo-target:/cargo-target:Z" \
+        -v "{{TOP}}/justfile.container:/etc/angzarr-justfile:ro" \
+        -e CARGO_HOME=/cargo-home \
+        -e CARGO_TARGET_DIR=/cargo-target \
+        -e MUTANTS_EPHEMERAL=1 \
+        -e MUTANTS_OUT_DIR=/out \
+        -w /work \
+        "$IMAGE" bash -eu -o pipefail -c '
+            # Self-heal: image should ship cargo-mutants, but install on
+            # demand (cached in /cargo-home) if the image is older.
+            if ! command -v cargo-mutants >/dev/null; then
+                echo "[ephemeral] cargo-mutants missing from image; installing to cached CARGO_HOME"
+                cargo install cargo-mutants --locked
+            fi
+            echo "[ephemeral] copying /src -> /work (container overlay)"
+            mkdir -p /work
+            # tar|tar: rsync is not in the base image. Excludes mirror what
+            # rsync would skip — build artifacts, prior mutation output,
+            # host-side cargo caches, and the new mutants cache itself.
+            tar -C /src \
+                --exclude=./target \
+                --exclude=./.cargo-container \
+                --exclude=./.mutants-cache \
+                --exclude=./mutants.out \
+                --exclude=./mutants.out.old \
+                -cf - . \
+                | tar -C /work -xf -
+            # Mount the container-side justfile into the copy so `just` finds
+            # it (the original /src is read-only, but /work is writable).
+            cp /etc/angzarr-justfile /work/justfile
+            cd /work
+            just {{ARGS}}
+            # Persist ONLY outcomes.json back to host. Mutated source trees
+            # and intermediate working dirs die with the container.
+            if [ -f /work/mutants.out/outcomes.json ]; then
+                cp /work/mutants.out/outcomes.json /out/outcomes.json
+                echo "[ephemeral] outcomes.json copied to host mutants.out/"
+            fi
+        '
+
 default:
     @just --list
 
@@ -295,6 +373,51 @@ precommit:
 # Regenerate mutation test exclusions from #[trivial_delegation] attributes
 gen-mutants-exclude:
     just _container gen-mutants-exclude
+
+# === Mutation Testing ===
+# =============================================================================
+# All cargo-mutants runs go through `_container-ephemeral` so the mutated
+# source lives in the container's writable overlay layer and is destroyed
+# with `--rm`. Running cargo-mutants on the host is FORBIDDEN — see
+# CLAUDE.md "Mutation Testing".
+#
+# The `mutants-summary` / `mutants-survivors` targets only READ outcomes.json
+# and so are routed through the regular `_container` (no source mutation).
+# =============================================================================
+
+# Run mutation tests on a specific file (ephemeral; no source touches host)
+mutants FILE:
+    just _container-ephemeral mutants {{FILE}}
+
+# Run mutation tests on handlers/core (aggregate, projector, saga, PM)
+mutants-core:
+    just _container-ephemeral mutants-core
+
+# Run mutation tests on bus module (event routing)
+mutants-bus:
+    just _container-ephemeral mutants-bus
+
+# Run mutation tests on orchestration (saga, aggregate, PM)
+mutants-orchestration:
+    just _container-ephemeral mutants-orchestration
+
+# Run mutation tests on changed code (CI uses git.diff file)
+mutants-ci:
+    just _container-ephemeral mutants-ci
+
+# Show mutation testing summary from last run's outcomes.json
+mutants-summary:
+    just _container mutants-summary
+
+# List surviving mutants from last run's outcomes.json
+mutants-survivors:
+    just _container mutants-survivors
+
+# Purge the local mutation build cache (.mutants-cache/) — compiled
+# artifacts and dep registry only; never holds mutated source.
+mutants-purge-cache:
+    rm -rf "{{TOP}}/.mutants-cache"
+    @echo "Removed {{TOP}}/.mutants-cache"
 
 # === Storage Contract Tests ===
 # =============================================================================

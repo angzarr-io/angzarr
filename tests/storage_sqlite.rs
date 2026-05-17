@@ -45,6 +45,60 @@ async fn test_sqlite_event_store() {
     println!("=== All SQLite EventStore tests PASSED ===");
 }
 
+/// C-18 round-trip contract tests, isolated from the main runner.
+///
+/// The main `test_sqlite_event_store` runner is currently blocked by a
+/// C-15 (edition NULL polarity) test in the middle of the suite. The
+/// new C-18 tests sit AFTER that gate, so wiring this as its own
+/// `#[tokio::test]` ensures the round-trip contracts get exercised
+/// while C-15 lands its SQLite fix in a sibling working tree.
+#[tokio::test]
+async fn test_sqlite_event_store_external_id_and_source_round_trip() {
+    use storage::event_store_tests::*;
+
+    println!("=== SQLite EventStore C-18 round-trip tests ===");
+
+    let pool = create_pool().await;
+    let store = SqliteEventStore::new(pool);
+
+    test_find_by_external_id_round_trip(&store).await;
+    println!("  test_find_by_external_id_round_trip: PASSED");
+
+    test_find_by_external_id_no_match(&store).await;
+    println!("  test_find_by_external_id_no_match: PASSED");
+
+    test_find_by_external_id_empty_returns_none(&store).await;
+    println!("  test_find_by_external_id_empty_returns_none: PASSED");
+
+    test_find_by_source_round_trip(&store).await;
+    println!("  test_find_by_source_round_trip: PASSED");
+
+    println!("=== SQLite EventStore C-18 round-trip tests PASSED ===");
+}
+
+/// Concurrent-write contract test (C-19).
+///
+/// SQLite serializes concurrent writers via `BEGIN IMMEDIATE` + the
+/// `PRIMARY KEY (domain, edition, root, sequence)` constraint, so N
+/// concurrent `add()` calls on the same root must yield exactly N
+/// distinct sequences with no overwrites or duplicates. Backends that
+/// use a read-then-write `get_next_sequence`/`put_item` pattern without
+/// a conditional write or transactional fence (DynamoDB, Bigtable,
+/// ImmuDB pre-C-19) fail this test.
+#[tokio::test]
+async fn test_sqlite_event_store_concurrent_writes() {
+    use std::sync::Arc;
+
+    println!("=== SQLite EventStore Concurrent-Write Tests ===");
+
+    let pool = create_pool().await;
+    let store = Arc::new(SqliteEventStore::new(pool));
+
+    run_event_store_concurrent_tests!(store);
+
+    println!("=== SQLite EventStore Concurrent-Write Tests PASSED ===");
+}
+
 // =============================================================================
 // SnapshotStore Tests
 // =============================================================================
@@ -116,6 +170,13 @@ async fn test_sqlite_snapshot_store() {
 
     test_edition_delete_independence(&store).await;
     println!("  test_edition_delete_independence: PASSED");
+
+    // main-timeline sentinel polarity tests (C-15)
+    test_main_timeline_sentinel_write_empty_read_both(&store).await;
+    println!("  test_main_timeline_sentinel_write_empty_read_both: PASSED");
+
+    test_main_timeline_sentinel_write_angzarr_read_both(&store).await;
+    println!("  test_main_timeline_sentinel_write_angzarr_read_both: PASSED");
 
     // large state tests
     test_large_state_100kb(&store).await;

@@ -108,6 +108,11 @@ pub mod schema {
             created_at     TIMESTAMP NOT NULL,
             event_data     BLOB NOT NULL,
             correlation_id VARCHAR(128),
+            external_id    VARCHAR(128),
+            source_edition VARCHAR(32),
+            source_domain  VARCHAR(64),
+            source_root    VARCHAR(36),
+            source_seq     INTEGER,
             PRIMARY KEY (domain, edition, root, sequence)
         )
     "#;

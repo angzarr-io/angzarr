@@ -200,6 +200,30 @@ infrastructure:
         repository: envoyproxy/envoy
         tag: v1.32-latest
         pullPolicy: IfNotPresent
+      # Proto FileDescriptorSet for envoy's grpc_json_transcoder filter.
+      # MANDATORY when `rest.enabled=true` — the chart fails template
+      # rendering otherwise (C-14 fail-closed posture). The descriptor
+      # gives envoy the per-RPC `(google.api.http)` annotations and acts
+      # as the canonical service surface; anything not in this
+      # descriptor (Health, ServerReflection, internal admin RPCs) is
+      # NOT reachable via the HTTP listener.
+      #
+      # Build the descriptor with:
+      #   buf build -o angzarr-status-descriptors.pb
+      # then ship it as a ConfigMap:
+      #   kubectl create configmap angzarr-status-descriptors \
+      #     --from-file=descriptors.pb=angzarr-status-descriptors.pb
+      # and set `configMapName: "angzarr-status-descriptors"`.
+      descriptor:
+        # Name of a ConfigMap that contains the FileDescriptorSet.
+        # Empty string disables `rest.enabled` (template fails) — by
+        # design, so a misconfigured chart never serves an open surface.
+        configMapName: ""
+        # Filename of the descriptor binary INSIDE the referenced
+        # ConfigMap. Must match the `--from-file=<key>=...` key used
+        # at ConfigMap creation time. Mounted at
+        # /etc/envoy/descriptors/<fileName> in the envoy container.
+        fileName: "descriptors.pb"
       # SPA static-asset init-container (Astro+Vue). Off until Phase 0
       # actually ships a frontend artifact; templated for future use.
       web:

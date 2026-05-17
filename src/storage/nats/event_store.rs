@@ -54,6 +54,15 @@ const HEADER_EDITION: &str = "Angzarr-Edition";
 /// Header name for root UUID (for cascade stream participant identification).
 const HEADER_ROOT: &str = "Angzarr-Root";
 
+/// Header name for fact-injection idempotency claim (C-18).
+const HEADER_EXTERNAL_ID: &str = "Angzarr-External-Id";
+
+/// Header names for saga-source provenance (C-18).
+const HEADER_SOURCE_EDITION: &str = "Angzarr-Source-Edition";
+const HEADER_SOURCE_DOMAIN: &str = "Angzarr-Source-Domain";
+const HEADER_SOURCE_ROOT: &str = "Angzarr-Source-Root";
+const HEADER_SOURCE_SEQ: &str = "Angzarr-Source-Seq";
+
 /// Cascade stream suffix.
 const CASCADE_STREAM_SUFFIX: &str = "CASCADE";
 
@@ -325,6 +334,104 @@ impl NatsEventStore {
         event.sequence_num()
     }
 
+    /// C-18 helper: scan the aggregate's subject history for a message
+    /// whose `Angzarr-External-Id` header matches `external_id`, returning
+    /// the message's payload (the persisted EventBook) and its pages on
+    /// match. Used by both `add()`'s idempotency precheck and
+    /// `find_by_external_id`.
+    ///
+    /// We use a per-call ephemeral consumer filtered to the aggregate's
+    /// exact subject — i.e. the scan is bounded by the aggregate's
+    /// `add()` history (typically tens of messages), not the whole
+    /// stream. The lookup is O(N) in that history because NATS
+    /// JetStream has no native secondary index; for high-volume saga
+    /// pipelines an operator may want to add a `{prefix}.claims` KV
+    /// bucket — same pattern documented for `get_by_correlation`.
+    async fn scan_aggregate_books_with_header<F>(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        consumer_prefix: &str,
+        mut matcher: F,
+    ) -> Result<Vec<EventBook>>
+    where
+        F: FnMut(&async_nats::HeaderMap) -> bool,
+    {
+        let stream_name = self.stream_name(domain);
+        let subject = self.subject(domain, root, edition);
+
+        let stream = match self.jetstream.get_stream(&stream_name).await {
+            Ok(s) => s,
+            Err(_) => return Ok(Vec::new()),
+        };
+
+        let consumer_name = format!("{}-{}", consumer_prefix, Uuid::new_v4());
+        let consumer = stream
+            .create_consumer(ConsumerConfig {
+                name: Some(consumer_name),
+                filter_subject: subject,
+                deliver_policy: jetstream::consumer::DeliverPolicy::All,
+                ack_policy: jetstream::consumer::AckPolicy::None,
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| StorageError::Nats(format!("Failed to create scan consumer: {}", e)))?;
+
+        let mut messages = consumer
+            .messages()
+            .await
+            .map_err(|e| StorageError::Nats(format!("Failed to get message stream: {}", e)))?;
+
+        let mut matches = Vec::new();
+        while let Ok(Some(msg)) = tokio::time::timeout(self.query_timeout, messages.next()).await {
+            let Ok(msg) = msg else { continue };
+            let headers_match = msg.headers.as_ref().map(&mut matcher).unwrap_or(false);
+            if !headers_match {
+                continue;
+            }
+            let Ok(book) = EventBook::decode(msg.payload.as_ref()) else {
+                continue;
+            };
+            matches.push(book);
+        }
+        Ok(matches)
+    }
+
+    /// C-18: check for an existing external_id claim on this aggregate.
+    /// Returns `Some((first_seq, last_seq))` of the prior batch when
+    /// found, `None` otherwise. Used by `add()` to short-circuit
+    /// duplicate publishes (the SQL backends do the same via the
+    /// `check_idempotency` helper).
+    async fn find_external_id_claim(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        external_id: &str,
+    ) -> Result<Option<(u32, u32)>> {
+        let books = self
+            .scan_aggregate_books_with_header(domain, edition, root, "extid-check", |headers| {
+                headers
+                    .get(HEADER_EXTERNAL_ID)
+                    .map(|v| v.as_str() == external_id)
+                    .unwrap_or(false)
+            })
+            .await?;
+        // Collect sequences across all matching books — under normal
+        // operation there is exactly one match (the idempotency check
+        // runs at add-time), but defensive code handles multi-match.
+        let mut seqs: Vec<u32> = books
+            .iter()
+            .flat_map(|b| b.pages.iter().map(Self::get_sequence))
+            .collect();
+        if seqs.is_empty() {
+            return Ok(None);
+        }
+        seqs.sort_unstable();
+        Ok(Some((*seqs.first().unwrap(), *seqs.last().unwrap())))
+    }
+
     /// Extract (root UUID, edition name) from a Cover, returning None if invalid.
     fn extract_root_edition(cover: &Cover) -> Option<(Uuid, String)> {
         let root = cover.root.as_ref()?;
@@ -486,8 +593,8 @@ impl EventStore for NatsEventStore {
         root: Uuid,
         events: Vec<EventPage>,
         correlation_id: &str,
-        _external_id: Option<&str>,
-        _source_info: Option<&SourceInfo>,
+        external_id: Option<&str>,
+        source_info: Option<&SourceInfo>,
     ) -> Result<AddOutcome> {
         if events.is_empty() {
             return Ok(AddOutcome::Added {
@@ -497,6 +604,26 @@ impl EventStore for NatsEventStore {
         }
 
         self.ensure_stream(domain).await?;
+
+        let external_id = external_id.unwrap_or("");
+
+        // C-18: external_id idempotency check. Pre-fix `add()` ignored
+        // external_id entirely; now we scan the aggregate's per-message
+        // history (already filtered by subject = single domain/root/edition)
+        // and check the `Angzarr-External-Id` header on each message
+        // before re-persisting. Returns `Duplicate` with the original
+        // sequence range if a prior call recorded this external_id.
+        if !external_id.is_empty() {
+            if let Some((first, last)) = self
+                .find_external_id_claim(domain, edition, root, external_id)
+                .await?
+            {
+                return Ok(AddOutcome::Duplicate {
+                    first_sequence: first,
+                    last_sequence: last,
+                });
+            }
+        }
 
         // Get current max sequence for validation
         let max_seq = self.get_max_sequence(domain, edition, root).await?;
@@ -538,6 +665,26 @@ impl EventStore for NatsEventStore {
         headers.insert(HEADER_SEQUENCE, first_seq.to_string().as_str());
         if !correlation_id.is_empty() {
             headers.insert(HEADER_CORRELATION, correlation_id);
+        }
+
+        // C-18: persist external_id + source_info as headers on the
+        // batch message so `find_by_external_id` and `find_by_source`
+        // can discover them by scanning the aggregate's subject history.
+        // SQL backends store per-event; NATS stores per-EventBook (one
+        // publish == one batch). For the trait contract, what matters is
+        // that a claim recorded at `add()` is discoverable on lookup —
+        // and the lookup returns the events that were persisted under
+        // that claim, which is the whole book's pages here.
+        if !external_id.is_empty() {
+            headers.insert(HEADER_EXTERNAL_ID, external_id);
+        }
+        if let Some(info) = source_info.filter(|s| !s.is_empty()) {
+            headers.insert(HEADER_SOURCE_EDITION, info.edition.as_str());
+            headers.insert(HEADER_SOURCE_DOMAIN, info.domain.as_str());
+            let source_root_str = info.root.as_hyphenated().to_string();
+            headers.insert(HEADER_SOURCE_ROOT, source_root_str.as_str());
+            let source_seq_str = info.seq.to_string();
+            headers.insert(HEADER_SOURCE_SEQ, source_seq_str.as_str());
         }
 
         // Deduplication ID: batch format for idempotency with EventBus
@@ -861,26 +1008,91 @@ impl EventStore for NatsEventStore {
 
     async fn find_by_source(
         &self,
-        _domain: &str,
-        _edition: &str,
-        _root: Uuid,
-        _source_info: &SourceInfo,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        source_info: &SourceInfo,
     ) -> Result<Option<Vec<EventPage>>> {
-        // NATS doesn't store source tracking - saga idempotency not supported
-        // Use SQLite or PostgreSQL for saga source tracking
-        Ok(None)
+        // C-18: Saga idempotency. Pre-fix this returned `Ok(None)`
+        // unconditionally, silently violating the trait contract.
+        // We scan the aggregate's subject history (already filtered to a
+        // single domain/root/edition) and match on the four source
+        // headers persisted by `add()`. NATS has no native secondary
+        // index; the scan is bounded by the aggregate's `add()` history.
+        if source_info.is_empty() {
+            return Ok(None);
+        }
+        let target_root_str = source_info.root.as_hyphenated().to_string();
+        let target_seq_str = source_info.seq.to_string();
+        let target_edition = source_info.edition.clone();
+        let target_domain = source_info.domain.clone();
+        let books = self
+            .scan_aggregate_books_with_header(
+                domain,
+                edition,
+                root,
+                "find-by-source",
+                move |headers| {
+                    let h_edition = headers.get(HEADER_SOURCE_EDITION).map(|v| v.as_str());
+                    let h_domain = headers.get(HEADER_SOURCE_DOMAIN).map(|v| v.as_str());
+                    let h_root = headers.get(HEADER_SOURCE_ROOT).map(|v| v.as_str());
+                    let h_seq = headers.get(HEADER_SOURCE_SEQ).map(|v| v.as_str());
+                    h_edition == Some(target_edition.as_str())
+                        && h_domain == Some(target_domain.as_str())
+                        && h_root == Some(target_root_str.as_str())
+                        && h_seq == Some(target_seq_str.as_str())
+                },
+            )
+            .await?;
+        let pages: Vec<EventPage> = books.into_iter().flat_map(|b| b.pages).collect();
+        if pages.is_empty() {
+            Ok(None)
+        } else {
+            let mut sorted = pages;
+            sorted.sort_by_key(Self::get_sequence);
+            Ok(Some(sorted))
+        }
     }
 
     async fn find_by_external_id(
         &self,
-        _domain: &str,
-        _edition: &str,
-        _root: Uuid,
-        _external_id: &str,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        external_id: &str,
     ) -> Result<Option<Vec<EventPage>>> {
-        // NATS doesn't store external_id tracking — fact pre-handler
-        // idempotency not supported. Use SQLite or PostgreSQL.
-        Ok(None)
+        // C-18: fact-injection idempotency. Pre-fix this returned
+        // `Ok(None)` unconditionally, silently violating the trait
+        // contract. We scan the aggregate's subject history (already
+        // filtered to a single domain/root/edition) and match on the
+        // `Angzarr-External-Id` header persisted by `add()`. Empty
+        // external_id returns None per contract.
+        if external_id.is_empty() {
+            return Ok(None);
+        }
+        let target = external_id.to_string();
+        let books = self
+            .scan_aggregate_books_with_header(
+                domain,
+                edition,
+                root,
+                "find-by-extid",
+                move |headers| {
+                    headers
+                        .get(HEADER_EXTERNAL_ID)
+                        .map(|v| v.as_str() == target.as_str())
+                        .unwrap_or(false)
+                },
+            )
+            .await?;
+        let pages: Vec<EventPage> = books.into_iter().flat_map(|b| b.pages).collect();
+        if pages.is_empty() {
+            Ok(None)
+        } else {
+            let mut sorted = pages;
+            sorted.sort_by_key(Self::get_sequence);
+            Ok(Some(sorted))
+        }
     }
 
     async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {

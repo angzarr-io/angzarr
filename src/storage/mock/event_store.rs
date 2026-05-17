@@ -358,57 +358,102 @@ impl EventStore for MockEventStore {
 
         let store = self.events.read().await;
 
-        // Collect all cascade_ids that have uncommitted events
-        let mut uncommitted_cascades: HashSet<String> = HashSet::new();
-        let mut resolved_cascades: HashSet<String> = HashSet::new();
-
-        for events in store.values() {
+        // Per-participant resolution (C-02): a cascade is stale if it has at
+        // least one unresolved participant past the threshold. A participant
+        // (cascade_id, domain, edition, root) is "resolved" when there is a
+        // committed cascade row (Confirmation/Revocation) on the SAME
+        // (domain, edition, root) carrying the SAME cascade_id.
+        //
+        // Pre-fix semantics excluded the cascade globally if ANY committed
+        // row existed anywhere for the cascade_id; that stranded participants
+        // 2..N after participant 1's Revocation succeeded.
+        let mut resolved_participants: HashSet<(String, String, String, Uuid)> = HashSet::new();
+        for ((domain, edition, root), events) in store.iter() {
             for stored in events {
-                if let Some(ref cascade_id) = stored.page.cascade_id {
+                if let Some(ref cid) = stored.page.cascade_id {
                     if !stored.page.no_commit {
-                        // This cascade has a committed event (Confirmation/Revocation marker)
-                        resolved_cascades.insert(cascade_id.clone());
-                    } else {
-                        // Check if created_at < threshold
-                        if let Some(ref ts) = stored.page.created_at {
-                            if let Some(dt) =
-                                chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
-                            {
-                                if dt < threshold_dt {
-                                    uncommitted_cascades.insert(cascade_id.clone());
-                                }
-                            }
-                        }
+                        resolved_participants.insert((
+                            cid.clone(),
+                            domain.clone(),
+                            edition.clone(),
+                            *root,
+                        ));
                     }
                 }
             }
         }
 
-        // Return cascade_ids that are uncommitted and not yet resolved
-        let stale: Vec<String> = uncommitted_cascades
-            .difference(&resolved_cascades)
-            .cloned()
-            .collect();
+        let mut stale_cascade_ids: HashSet<String> = HashSet::new();
+        for ((domain, edition, root), events) in store.iter() {
+            for stored in events {
+                if !stored.page.no_commit {
+                    continue;
+                }
+                let cid = match stored.page.cascade_id.as_ref() {
+                    Some(c) => c,
+                    None => continue,
+                };
+                if resolved_participants.contains(&(
+                    cid.clone(),
+                    domain.clone(),
+                    edition.clone(),
+                    *root,
+                )) {
+                    continue;
+                }
+                let ts = match stored.page.created_at.as_ref() {
+                    Some(t) => t,
+                    None => continue,
+                };
+                let dt = match chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32) {
+                    Some(dt) => dt,
+                    None => continue,
+                };
+                if dt < threshold_dt {
+                    stale_cascade_ids.insert(cid.clone());
+                }
+            }
+        }
 
-        Ok(stale)
+        Ok(stale_cascade_ids.into_iter().collect())
     }
 
     async fn query_cascade_participants(
         &self,
         cascade_id: &str,
     ) -> Result<Vec<CascadeParticipant>> {
+        use std::collections::HashSet;
+
         let store = self.events.read().await;
 
-        // Group by (domain, edition, root)
-        let mut participants_map: HashMap<(String, String, Uuid), Vec<u32>> = HashMap::new();
-
+        // Per-participant resolution (C-02): a participant is "resolved"
+        // when its (domain, edition, root) has a committed row for the same
+        // cascade_id (a Revocation or Confirmation marker). Resolved
+        // participants are filtered out so the reaper doesn't double-revoke.
+        let mut resolved: HashSet<(String, String, Uuid)> = HashSet::new();
         for ((domain, edition, root), events) in store.iter() {
             for stored in events {
                 if let Some(ref cid) = stored.page.cascade_id {
+                    if cid == cascade_id && !stored.page.no_commit {
+                        resolved.insert((domain.clone(), edition.clone(), *root));
+                    }
+                }
+            }
+        }
+
+        // Group uncommitted sequences by (domain, edition, root), skipping
+        // any participant that is already resolved.
+        let mut participants_map: HashMap<(String, String, Uuid), Vec<u32>> = HashMap::new();
+        for ((domain, edition, root), events) in store.iter() {
+            let key = (domain.clone(), edition.clone(), *root);
+            if resolved.contains(&key) {
+                continue;
+            }
+            for stored in events {
+                if let Some(ref cid) = stored.page.cascade_id {
                     if cid == cascade_id && stored.page.no_commit {
-                        let key = (domain.clone(), edition.clone(), *root);
                         participants_map
-                            .entry(key)
+                            .entry(key.clone())
                             .or_default()
                             .push(stored.page.sequence_num());
                     }

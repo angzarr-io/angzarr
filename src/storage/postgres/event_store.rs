@@ -13,26 +13,54 @@ use uuid::Uuid;
 use crate::proto::EventPage;
 use crate::storage::helpers::{assemble_event_books, is_main_timeline};
 use crate::storage::schema::Events;
-use crate::storage::{AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo};
+use crate::storage::{
+    AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo, StorageError,
+};
 
-/// Build a WHERE predicate on an edition column that translates the empty
-/// string (our "main timeline" sentinel at the Rust API) to SQL NULL.
+/// Build a WHERE predicate on an edition column that translates EITHER
+/// main-timeline sentinel (`""` or `"angzarr"`) to SQL `IS NULL`.
+///
+/// C-15: both sentinels must round-trip to the same SQL NULL row. Migration
+/// 0007 normalized pre-existing literal rows to NULL; new writes go through
+/// `edition_to_db`. Reads MUST use this predicate (not a bare `Edition.eq`)
+/// so a caller passing either form finds the row, and never accidentally
+/// matches a literal `"angzarr"` left in the table by a legacy writer.
 fn edition_predicate<T: Iden + 'static>(col: T, edition: &str) -> SimpleExpr {
-    if edition.is_empty() {
+    if is_main_timeline(edition) {
         Expr::col(col).is_null()
     } else {
         Expr::col(col).eq(edition)
     }
 }
 
-/// Convert the API-layer edition ("" = main) to the storage-layer value
-/// (`None` = SQL NULL).
+/// Convert the API-layer edition to the storage-layer value (`None` = SQL NULL).
+///
+/// C-15: BOTH `""` and `"angzarr"` are main-timeline sentinels per the
+/// trait/`is_main_timeline` contract. Both MUST normalize to `None` so that
+/// the SQL column holds a single canonical representation (NULL) for the
+/// main timeline. Pre-fix this helper only handled `""` → None, which let
+/// `"angzarr"` land as a literal table row that `edition_predicate` then
+/// failed to match (it looks for `IS NULL`). Result: a write under one
+/// sentinel was silently invisible to a read under the other.
 fn edition_to_db(edition: &str) -> Option<String> {
-    if edition.is_empty() {
+    if is_main_timeline(edition) {
         None
     } else {
         Some(edition.to_string())
     }
+}
+
+/// Convert a storage-layer edition column value back to the API-layer
+/// representation.
+///
+/// Migration 0007 made the `edition` column genuinely nullable and normalized
+/// pre-existing main-timeline sentinels (`''`, `'angzarr'`) to SQL `NULL`. The
+/// API surface uses the empty string as the canonical main-timeline sentinel,
+/// so a `NULL` read must round-trip to `""`. Use this helper at every read site
+/// — a bare `row.get::<String, _>("edition")` panics with `UnexpectedNullError`
+/// on any post-migration main-timeline row (bug C-16).
+fn edition_from_db(value: Option<String>) -> String {
+    value.unwrap_or_default()
 }
 
 /// PostgreSQL implementation of EventStore.
@@ -516,7 +544,11 @@ impl EventStore for PostgresEventStore {
 
         for row in rows {
             let domain: String = row.get("domain");
-            let edition: String = row.get("edition");
+            // C-16: `edition` is nullable (migration 0007). Decode as Option
+            // and normalize NULL back to the API-layer empty-string sentinel;
+            // a bare `String` decode would panic with `UnexpectedNullError`
+            // on any main-timeline row.
+            let edition: String = edition_from_db(row.get("edition"));
             let root_str: String = row.get("root");
             let event_data: Vec<u8> = row.get("event_data");
 
@@ -533,7 +565,22 @@ impl EventStore for PostgresEventStore {
     }
 
     async fn delete_edition_events(&self, domain: &str, edition: &str) -> Result<u32> {
-        // The stored procedure handles main timeline protection
+        // C-15: client-side guard mirrors the stored-proc guard so both
+        // forms of the main-timeline sentinel (`""` and `"angzarr"`) raise
+        // BEFORE we round-trip to Postgres. The proc was hardened in
+        // migration 0010 too (defense in depth), but failing fast here
+        // surfaces a clean Rust-level error (no language-of-database
+        // dialect mixed into the message).
+        if is_main_timeline(edition) {
+            return Err(StorageError::MainTimelineProtected(format!(
+                "delete_edition_events(edition={:?}) refused; the main \
+                 timeline is append-only",
+                edition
+            )));
+        }
+
+        // The stored procedure additionally rejects NULL/empty/"angzarr" at
+        // the database boundary, so even a direct SQL caller can't bypass.
         let row = sqlx::query("SELECT delete_edition_events($1, $2)")
             .bind(edition)
             .bind(domain)
@@ -626,31 +673,36 @@ impl EventStore for PostgresEventStore {
     }
 
     async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {
-        // Find cascade_ids with uncommitted events older than threshold.
-        // Exclude cascades that already have Confirmation/Revocation events
-        // (indicated by having ANY committed event with that cascade_id).
+        // Per-participant resolution (C-02): a cascade is stale iff it has
+        // at least one (cascade_id, domain, edition, root) participant that
+        // is past the threshold AND has no committed cascade row on that
+        // SAME (domain, edition, root) for the same cascade_id.
+        //
+        // Pre-fix semantics filtered out the entire cascade when ANY
+        // committed row existed for that cascade_id (globally) — once
+        // participant 1 of N was revoked, participants 2..N were stranded.
+        //
+        // Edition uses IS NOT DISTINCT FROM so SQL NULL (the postgres
+        // representation of the main-timeline sentinel "") joins correctly
+        // against itself.
+        let raw = "SELECT DISTINCT s.cascade_id \
+                   FROM events s \
+                   WHERE s.committed = false \
+                     AND s.cascade_id IS NOT NULL \
+                     AND s.created_at < $1 \
+                     AND NOT EXISTS ( \
+                       SELECT 1 FROM events c \
+                       WHERE c.committed = true \
+                         AND c.cascade_id = s.cascade_id \
+                         AND c.domain = s.domain \
+                         AND c.edition IS NOT DISTINCT FROM s.edition \
+                         AND c.root = s.root \
+                     )";
 
-        // Subquery: cascade_ids that have committed events (already resolved)
-        let committed_subquery = Query::select()
-            .distinct()
-            .column(Events::CascadeId)
-            .from(Events::Table)
-            .and_where(Expr::col(Events::Committed).eq(true))
-            .and_where(Expr::col(Events::CascadeId).is_not_null())
-            .to_owned();
-
-        // Main query: stale uncommitted cascades not in the committed set
-        let query = Query::select()
-            .distinct()
-            .column(Events::CascadeId)
-            .from(Events::Table)
-            .and_where(Expr::col(Events::Committed).eq(false))
-            .and_where(Expr::col(Events::CascadeId).is_not_null())
-            .and_where(Expr::col(Events::CreatedAt).lt(threshold))
-            .and_where(Expr::col(Events::CascadeId).not_in_subquery(committed_subquery))
-            .to_string(PostgresQueryBuilder);
-
-        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(raw)
+            .bind(threshold)
+            .fetch_all(&self.pool)
+            .await?;
 
         let mut cascade_ids = Vec::with_capacity(rows.len());
         for row in rows {
@@ -667,30 +719,38 @@ impl EventStore for PostgresEventStore {
     ) -> Result<Vec<CascadeParticipant>> {
         use std::collections::HashMap;
 
-        // Query all uncommitted events for this cascade, grouped by aggregate
-        let query = Query::select()
-            .columns([
-                Events::Domain,
-                Events::Edition,
-                Events::Root,
-                Events::Sequence,
-            ])
-            .from(Events::Table)
-            .and_where(Expr::col(Events::CascadeId).eq(cascade_id))
-            .and_where(Expr::col(Events::Committed).eq(false))
-            .order_by(Events::Domain, Order::Asc)
-            .order_by(Events::Root, Order::Asc)
-            .order_by(Events::Sequence, Order::Asc)
-            .to_string(PostgresQueryBuilder);
+        // Per-participant resolution (C-02): exclude (domain, edition, root)
+        // participants that already have a committed cascade row for this
+        // cascade_id. Without this filter, the reaper re-writes Revocations
+        // on every cycle for participants already resolved by a prior pass.
+        let raw = "SELECT s.domain, s.edition, s.root, s.sequence \
+                   FROM events s \
+                   WHERE s.cascade_id = $1 \
+                     AND s.committed = false \
+                     AND NOT EXISTS ( \
+                       SELECT 1 FROM events c \
+                       WHERE c.committed = true \
+                         AND c.cascade_id = s.cascade_id \
+                         AND c.domain = s.domain \
+                         AND c.edition IS NOT DISTINCT FROM s.edition \
+                         AND c.root = s.root \
+                     ) \
+                   ORDER BY s.domain ASC, s.root ASC, s.sequence ASC";
 
-        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+        let rows = sqlx::query(raw)
+            .bind(cascade_id)
+            .fetch_all(&self.pool)
+            .await?;
 
-        // Group by (domain, edition, root)
+        // Group by (domain, edition, root). Postgres stores `edition=""` as
+        // SQL NULL; surface that back as the empty-string main-timeline
+        // sentinel at the API boundary.
         let mut participants_map: HashMap<(String, String, Uuid), Vec<u32>> = HashMap::new();
 
         for row in rows {
             let domain: String = row.get("domain");
-            let edition: String = row.get("edition");
+            let edition_raw: Option<String> = row.get("edition");
+            let edition = edition_from_db(edition_raw);
             let root_str: String = row.get("root");
             let sequence: i32 = row.get("sequence");
 
