@@ -38,6 +38,17 @@ pub(crate) const CORRELATION_ID_ATTR: &str = "correlation_id";
 /// Message attribute name for aggregate root ID.
 pub(crate) const ROOT_ID_ATTR: &str = "root_id";
 
+/// Maximum message size in bytes for SNS/SQS transport.
+///
+/// AWS hard-limits both SNS and SQS message bodies to 256 KiB (262_144 bytes).
+/// Larger payloads must be offloaded via the claim-check pattern (see
+/// `crate::bus::offloading::OffloadingEventBus`) — the wrapper consults this
+/// value via the `EventBus::max_message_size` override when no explicit
+/// threshold is configured.
+///
+/// Reference: <https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/quotas-messages.html>
+pub(crate) const MAX_MESSAGE_SIZE: usize = 256 * 1024;
+
 // ============================================================================
 // Self-Registration
 // ============================================================================

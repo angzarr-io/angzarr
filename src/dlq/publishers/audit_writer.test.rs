@@ -66,6 +66,7 @@ async fn write_persists_record_with_expected_fields() {
         original_correlation_id: Some("old-corr-abc".to_string()),
         outcome: ReplayOutcome::Success,
         result_message: None,
+        idempotency_key: "replay-42-success-test".to_string(),
     };
     writer.record(rec).await.unwrap();
 
@@ -108,6 +109,7 @@ async fn write_persists_failure_with_message() {
             original_correlation_id: None,
             outcome: ReplayOutcome::Failure,
             result_message: Some("publisher said no".to_string()),
+            idempotency_key: "replay-99-failure-test".to_string(),
         })
         .await
         .unwrap();
@@ -143,6 +145,9 @@ async fn multiple_replays_of_same_dlq_id_all_persist() {
                 original_correlation_id: None,
                 outcome: ReplayOutcome::Success,
                 result_message: None,
+                // Different keys per attempt — `dlq_id` is allowed to
+                // repeat, only `idempotency_key` is unique.
+                idempotency_key: format!("replay-7-test-{}", i),
             })
             .await
             .unwrap();
@@ -163,6 +168,80 @@ async fn writer_source_id_is_sqlite_audit() {
 }
 
 #[tokio::test]
+async fn begin_pending_then_record_updates_same_row() {
+    // H-31 two-phase protocol: `begin_pending` inserts a Pending row;
+    // `record` UPDATEs it to the terminal outcome. The audit table
+    // must end up with exactly one row per idempotency_key, NOT one
+    // pending + one final.
+    let pool = fresh_pool().await;
+    run_sqlite_migrations(&pool).await.unwrap();
+    let writer = SqliteReplayAuditWriter::from_pool(pool.clone());
+
+    let key = "replay-2pc-test-1".to_string();
+    let mut rec = ReplayAuditRecord {
+        dlq_id: 100,
+        replayed_at: Utc::now(),
+        replay_mode: ReplayMode::FreshSequence,
+        new_correlation_id: "fresh-corr".to_string(),
+        original_correlation_id: Some("old-corr".to_string()),
+        outcome: ReplayOutcome::Pending,
+        result_message: None,
+        idempotency_key: key.clone(),
+    };
+    writer.begin_pending(&rec).await.unwrap();
+
+    // Phase 2: commit with terminal outcome.
+    rec.outcome = ReplayOutcome::Success;
+    rec.result_message = None;
+    writer.record(rec).await.unwrap();
+
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT outcome, idempotency_key FROM dlq_replay_audit WHERE idempotency_key = ?",
+    )
+    .bind(&key)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "two-phase write must produce exactly one row"
+    );
+    assert_eq!(
+        rows[0].0, "success",
+        "phase-2 commit must overwrite 'pending'"
+    );
+}
+
+#[tokio::test]
+async fn begin_pending_with_duplicate_key_returns_conflict() {
+    // Two concurrent replicas race on the same `idempotency_key`. The
+    // UNIQUE constraint surfaces a `DlqError::Conflict` on the loser
+    // so the handler can refuse to publish.
+    let pool = fresh_pool().await;
+    run_sqlite_migrations(&pool).await.unwrap();
+    let writer = SqliteReplayAuditWriter::from_pool(pool.clone());
+
+    let rec = ReplayAuditRecord {
+        dlq_id: 200,
+        replayed_at: Utc::now(),
+        replay_mode: ReplayMode::AsIs,
+        new_correlation_id: "first-corr".to_string(),
+        original_correlation_id: None,
+        outcome: ReplayOutcome::Pending,
+        result_message: None,
+        idempotency_key: "shared-idempotency-key".to_string(),
+    };
+    writer.begin_pending(&rec).await.unwrap();
+    let err = writer.begin_pending(&rec).await.unwrap_err();
+    assert!(
+        matches!(err, crate::dlq::DlqError::Conflict(_)),
+        "second begin_pending on same key must surface Conflict, got: {:?}",
+        err
+    );
+}
+
+#[tokio::test]
 async fn write_without_migration_returns_query_failed() {
     // Tolerance: if migration was skipped or failed, audit writes
     // surface QueryFailed (clear diagnostic) rather than crashing
@@ -179,6 +258,7 @@ async fn write_without_migration_returns_query_failed() {
             original_correlation_id: None,
             outcome: ReplayOutcome::Success,
             result_message: None,
+            idempotency_key: "replay-1-no-migration".to_string(),
         })
         .await
         .unwrap_err();

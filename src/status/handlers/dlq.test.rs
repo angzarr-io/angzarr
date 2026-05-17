@@ -390,10 +390,10 @@ async fn get_populates_payload_view_with_decoded_json() {
 // a distinguishable degraded response, never a transport-level error.
 
 /// In-memory replay publisher that records the most-recent command it
-/// was handed, so tests can assert the handler stamped metadata as
-/// expected.
+/// was handed PLUS the metadata bundle, so tests can assert the
+/// handler stamped the correct lineage on the way out.
 struct RecordingReplayPublisher {
-    last: std::sync::Mutex<Option<crate::proto::CommandBook>>,
+    last: std::sync::Mutex<Option<(crate::proto::CommandBook, crate::dlq::ReplayMetadata)>>,
 }
 
 impl RecordingReplayPublisher {
@@ -403,14 +403,21 @@ impl RecordingReplayPublisher {
         }
     }
     fn taken(&self) -> Option<crate::proto::CommandBook> {
-        self.last.lock().unwrap().clone()
+        self.last.lock().unwrap().clone().map(|(c, _)| c)
+    }
+    fn taken_metadata(&self) -> Option<crate::dlq::ReplayMetadata> {
+        self.last.lock().unwrap().clone().map(|(_, m)| m)
     }
 }
 
 #[async_trait::async_trait]
 impl crate::dlq::ReplayPublisher for RecordingReplayPublisher {
-    async fn replay(&self, command: crate::proto::CommandBook) -> Result<(), crate::dlq::DlqError> {
-        *self.last.lock().unwrap() = Some(command);
+    async fn replay(
+        &self,
+        command: crate::proto::CommandBook,
+        metadata: crate::dlq::ReplayMetadata,
+    ) -> Result<(), crate::dlq::DlqError> {
+        *self.last.lock().unwrap() = Some((command, metadata));
         Ok(())
     }
     fn source_id(&self) -> &'static str {
@@ -752,7 +759,11 @@ async fn replay_failure_writes_audit_row_with_failure_outcome() {
     struct AlwaysFailPublisher;
     #[async_trait::async_trait]
     impl crate::dlq::ReplayPublisher for AlwaysFailPublisher {
-        async fn replay(&self, _: crate::proto::CommandBook) -> Result<(), crate::dlq::DlqError> {
+        async fn replay(
+            &self,
+            _: crate::proto::CommandBook,
+            _: crate::dlq::ReplayMetadata,
+        ) -> Result<(), crate::dlq::DlqError> {
             Err(crate::dlq::DlqError::Connection("nope".to_string()))
         }
         fn source_id(&self) -> &'static str {
@@ -801,11 +812,18 @@ async fn replay_does_not_write_audit_when_row_missing() {
 }
 
 #[tokio::test]
-async fn audit_write_failure_does_not_break_replay_response() {
-    // The plan's resilience contract: degraded observability is
-    // preferable to swallowing a successful replay. If the audit
-    // backend is down, the replay still completes and the operator
-    // sees the success envelope.
+async fn audit_write_failure_after_successful_publish_surfaces_degraded() {
+    // H-30: previously the handler swallowed audit-write failures with
+    // a `warn!` log and returned Ok. The UI is documented to consult
+    // the audit table to warn operators on re-replay; silent audit
+    // loss enables double-replay.
+    //
+    // New contract: when the publish succeeded but the durable audit
+    // write failed, the operator MUST see a degraded ProblemDetails
+    // carrying enough detail to know "replay happened but audit
+    // failed — manual reconciliation required." Losing the audit row
+    // silently is worse than telling the operator about a partial
+    // success.
     use crate::proto::status::replay_dead_letter_response::State;
     let _ = crate::proto_reflect::ensure_initialized();
 
@@ -834,8 +852,28 @@ async fn audit_write_failure_does_not_break_replay_response() {
         .await
         .unwrap()
         .into_inner();
-    // Replay still succeeded — audit failure is the lesser harm.
-    assert!(matches!(resp.state.unwrap(), State::Ok(_)));
+    match resp.state.unwrap() {
+        State::Degraded(p) => {
+            // Sentinel surface so the SPA can render the "publish OK,
+            // audit lost — reconcile manually" message distinctly from
+            // a vanilla 500.
+            assert!(
+                p.r#type.contains("audit-write-failed"),
+                "type uri must signal audit-write failure, got: {}",
+                p.r#type
+            );
+            // Operator MUST see the new correlation_id even when audit
+            // failed, otherwise they can't manually reconcile.
+            assert!(
+                p.detail.contains("audit") || p.detail.contains("Audit"),
+                "detail must mention audit failure: {}",
+                p.detail
+            );
+        }
+        State::Ok(_) => {
+            panic!("audit-write failure after publish must NOT surface as Ok")
+        }
+    }
 }
 
 #[tokio::test]
@@ -1119,5 +1157,281 @@ async fn payload_view_empty_when_payload_bytes_are_garbage() {
     assert!(
         !entries[0].payload.is_empty(),
         "raw payload bytes still available"
+    );
+}
+
+// ============================================================================
+// H-29 — Replay metadata propagation to the published command (lineage)
+// ============================================================================
+//
+// WHY: `replayed_from_dlq_id` and `original_correlation_id` are documented as
+// stamped on the command for downstream lineage. Previously they leaked
+// only via `tracing::debug!`, which is lost on log rotation and not
+// queryable. The new contract: the handler MUST pass these to the
+// `ReplayPublisher::replay` call alongside the rewritten command, so the
+// publisher implementation can stamp them on the wire (proto-level
+// `Cover.metadata` lands when the angzarr-project submodule adds the
+// field; in the meantime the trait surface carries the data so transport
+// impls don't have to re-derive it from logs).
+
+#[tokio::test]
+async fn replay_passes_lineage_metadata_to_publisher() {
+    // The publisher receives `ReplayMetadata` carrying the original
+    // correlation_id AND the source DLQ row id. A regression that drops
+    // either field strands the replayed command without a back-pointer
+    // to its origin.
+    let _ = crate::proto_reflect::ensure_initialized();
+    let pubr = Arc::new(RecordingReplayPublisher::new());
+    let h = DlqAdminHandler::new_with_replay(
+        Arc::new(CommandReplayReader),
+        pubr.clone() as Arc<dyn crate::dlq::ReplayPublisher>,
+    );
+    let _ = h
+        .replay_dead_letter(tonic::Request::new(ReplayDeadLetterRequest {
+            id: 42,
+            replay_mode: crate::proto::status::ReplayMode::AsIs as i32,
+        }))
+        .await
+        .unwrap();
+
+    let metadata = pubr
+        .taken_metadata()
+        .expect("publisher must have received metadata alongside the command");
+    assert_eq!(
+        metadata.replayed_from_dlq_id, 42,
+        "replayed_from_dlq_id must point at the source row"
+    );
+    assert_eq!(
+        metadata.original_correlation_id, "original-trace",
+        "original_correlation_id must carry the row's pre-replay value"
+    );
+}
+
+#[tokio::test]
+async fn replay_metadata_carries_empty_original_when_row_has_none() {
+    // Some legacy rows have NULL correlation_id; the publisher must
+    // still receive a well-formed (empty) original_correlation_id
+    // rather than a missing field on the wire.
+    let _ = crate::proto_reflect::ensure_initialized();
+
+    struct NullCorrelationReader;
+    #[async_trait::async_trait]
+    impl DeadLetterReader for NullCorrelationReader {
+        async fn list(&self, _: ListFilter) -> Result<DeadLetterPage, DlqError> {
+            Ok(DeadLetterPage {
+                entries: vec![],
+                next_page_token: None,
+            })
+        }
+        async fn get(&self, id: i64) -> Result<Option<StoredDeadLetter>, DlqError> {
+            if id != 7 {
+                return Ok(None);
+            }
+            let mut row = cmd_dl_row(7, "");
+            row.correlation_id = None;
+            Ok(Some(row))
+        }
+        async fn delete(&self, _: i64) -> Result<bool, DlqError> {
+            Ok(false)
+        }
+    }
+
+    let pubr = Arc::new(RecordingReplayPublisher::new());
+    let h = DlqAdminHandler::new_with_replay(
+        Arc::new(NullCorrelationReader),
+        pubr.clone() as Arc<dyn crate::dlq::ReplayPublisher>,
+    );
+    let _ = h
+        .replay_dead_letter(tonic::Request::new(ReplayDeadLetterRequest {
+            id: 7,
+            replay_mode: 0,
+        }))
+        .await
+        .unwrap();
+    let metadata = pubr.taken_metadata().expect("metadata captured");
+    assert_eq!(metadata.replayed_from_dlq_id, 7);
+    assert_eq!(metadata.original_correlation_id, "");
+}
+
+// ============================================================================
+// H-31 — Two-phase replay-audit ordering + idempotency-key dedup
+// ============================================================================
+//
+// WHY: previously the handler published BEFORE writing the audit row. Two
+// replicas + an operator double-click could both publish duplicate
+// replays of the same DLQ row. The new contract: a pending audit row is
+// inserted FIRST (keyed on a request-scoped idempotency key) and the
+// publish only happens if that insert wins. A second concurrent request
+// carrying the same idempotency key sees the conflict and refuses to
+// publish.
+
+/// In-memory audit writer that simulates a UNIQUE-constraint on
+/// `idempotency_key`. The trait's new `begin_pending` method returns
+/// `DlqError::Conflict` on the second call with a known key.
+struct DedupingAuditWriter {
+    pending_keys: std::sync::Mutex<Vec<String>>,
+    final_rows: std::sync::Mutex<Vec<crate::dlq::ReplayAuditRecord>>,
+}
+
+impl DedupingAuditWriter {
+    fn new() -> Self {
+        Self {
+            pending_keys: std::sync::Mutex::new(vec![]),
+            final_rows: std::sync::Mutex::new(vec![]),
+        }
+    }
+    fn final_rows(&self) -> Vec<crate::dlq::ReplayAuditRecord> {
+        self.final_rows.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::dlq::ReplayAuditWriter for DedupingAuditWriter {
+    async fn begin_pending(
+        &self,
+        record: &crate::dlq::ReplayAuditRecord,
+    ) -> Result<(), crate::dlq::DlqError> {
+        let mut keys = self.pending_keys.lock().unwrap();
+        if keys.contains(&record.idempotency_key) {
+            return Err(crate::dlq::DlqError::Conflict(format!(
+                "duplicate idempotency_key: {}",
+                record.idempotency_key
+            )));
+        }
+        keys.push(record.idempotency_key.clone());
+        Ok(())
+    }
+    async fn record(
+        &self,
+        record: crate::dlq::ReplayAuditRecord,
+    ) -> Result<(), crate::dlq::DlqError> {
+        self.final_rows.lock().unwrap().push(record);
+        Ok(())
+    }
+    fn source_id(&self) -> &'static str {
+        "deduping"
+    }
+}
+
+#[tokio::test]
+async fn concurrent_replays_with_same_idempotency_key_publish_only_once() {
+    // Two replicas (or one operator double-clicking) attempt to replay
+    // the same DLQ entry. Both requests carry the same client-supplied
+    // idempotency key (`x-idempotency-key` metadata). The first request
+    // INSERTs the pending audit row and proceeds to publish; the second
+    // hits a `Conflict` on the pending-row insert and returns degraded
+    // WITHOUT publishing.
+    use crate::proto::status::replay_dead_letter_response::State;
+    let _ = crate::proto_reflect::ensure_initialized();
+
+    let pubr = Arc::new(RecordingReplayPublisher::new());
+    let audit = Arc::new(DedupingAuditWriter::new());
+    let h = Arc::new(DlqAdminHandler::new_with_audit(
+        Arc::new(CommandReplayReader),
+        pubr.clone() as Arc<dyn crate::dlq::ReplayPublisher>,
+        audit.clone() as Arc<dyn crate::dlq::ReplayAuditWriter>,
+    ));
+
+    fn req_with_key(id: i64, key: &str) -> tonic::Request<ReplayDeadLetterRequest> {
+        let mut r = tonic::Request::new(ReplayDeadLetterRequest { id, replay_mode: 0 });
+        r.metadata_mut()
+            .insert("x-idempotency-key", key.parse().unwrap());
+        r
+    }
+
+    // Two replay attempts with the same idempotency key. The pending
+    // row protocol must let exactly one through.
+    let r1 = h.replay_dead_letter(req_with_key(42, "op-click-abc")).await;
+    let r2 = h.replay_dead_letter(req_with_key(42, "op-click-abc")).await;
+    let r1 = r1.unwrap().into_inner();
+    let r2 = r2.unwrap().into_inner();
+
+    // Exactly one of the two responses is Ok; the other is degraded
+    // with the conflict signature.
+    let oks = [r1.state.clone(), r2.state.clone()]
+        .into_iter()
+        .filter(|s| matches!(s, Some(State::Ok(_))))
+        .count();
+    let degradeds: Vec<_> = [r1.state.clone(), r2.state.clone()]
+        .into_iter()
+        .filter_map(|s| match s {
+            Some(State::Degraded(p)) => Some(p),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(oks, 1, "exactly one replay must succeed");
+    assert_eq!(degradeds.len(), 1, "exactly one must degrade on conflict");
+    let p = &degradeds[0];
+    assert!(
+        p.r#type.contains("conflict") || p.r#type.contains("in-progress"),
+        "degraded type uri must signal conflict / in-progress: {}",
+        p.r#type
+    );
+    // Critically: only ONE publish call reached the publisher.
+    assert!(
+        pubr.taken().is_some(),
+        "the winning replica must publish exactly once"
+    );
+    // And exactly one final audit row (not two) was written.
+    assert_eq!(
+        audit.final_rows().len(),
+        1,
+        "only the winning replica writes the final audit row"
+    );
+}
+
+#[tokio::test]
+async fn replay_inserts_pending_audit_row_before_publishing() {
+    // Ordering invariant: the pending-row INSERT must precede the
+    // publish call. Verified by an audit writer that fails
+    // `begin_pending` — if the handler observes the failure, the
+    // publisher must NOT receive the command.
+    use crate::proto::status::replay_dead_letter_response::State;
+    let _ = crate::proto_reflect::ensure_initialized();
+
+    struct AlwaysConflictAudit;
+    #[async_trait::async_trait]
+    impl crate::dlq::ReplayAuditWriter for AlwaysConflictAudit {
+        async fn begin_pending(
+            &self,
+            _: &crate::dlq::ReplayAuditRecord,
+        ) -> Result<(), crate::dlq::DlqError> {
+            Err(crate::dlq::DlqError::Conflict(
+                "another replay already in flight".to_string(),
+            ))
+        }
+        async fn record(
+            &self,
+            _: crate::dlq::ReplayAuditRecord,
+        ) -> Result<(), crate::dlq::DlqError> {
+            panic!("record must NOT be called when begin_pending failed");
+        }
+    }
+
+    let pubr = Arc::new(RecordingReplayPublisher::new());
+    let h = DlqAdminHandler::new_with_audit(
+        Arc::new(CommandReplayReader),
+        pubr.clone() as Arc<dyn crate::dlq::ReplayPublisher>,
+        Arc::new(AlwaysConflictAudit),
+    );
+    let resp = h
+        .replay_dead_letter(tonic::Request::new(ReplayDeadLetterRequest {
+            id: 42,
+            replay_mode: 0,
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    match resp.state.unwrap() {
+        State::Degraded(p) => assert!(
+            p.r#type.contains("conflict") || p.r#type.contains("in-progress"),
+            "conflict on pending-row insert must surface as conflict degraded: {}",
+            p.r#type
+        ),
+        State::Ok(_) => panic!("conflict must NOT surface as Ok"),
+    }
+    assert!(
+        pubr.taken().is_none(),
+        "publisher must NOT be called when the pending-row INSERT lost the race"
     );
 }

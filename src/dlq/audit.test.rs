@@ -19,6 +19,7 @@ fn sample_record() -> ReplayAuditRecord {
         original_correlation_id: Some("old-corr".to_string()),
         outcome: ReplayOutcome::Success,
         result_message: None,
+        idempotency_key: "replay-42-test".to_string(),
     }
 }
 

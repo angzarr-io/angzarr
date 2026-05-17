@@ -178,10 +178,19 @@ pub trait EventStore: Send + Sync {
         root: Uuid,
         explicit_divergence: Option<u32>,
     ) -> Result<Vec<EventPage>> {
-        // Default implementation: ignore explicit divergence, call regular get()
-        // Implementations that support divergence should override this.
-        let _ = explicit_divergence;
-        self.get(domain, edition, root).await
+        // H-20: the pre-fix default silently delegated to `get()` and
+        // ignored `explicit_divergence`, so every backend that didn't
+        // override this method returned the wrong events for new-branch
+        // reads at a non-implicit divergence. Make the missing
+        // implementation loud — fail closed so callers can route around
+        // it instead of consuming silently-wrong history.
+        let _ = (domain, edition, root, explicit_divergence);
+        Err(super::error::StorageError::NotImplemented(format!(
+            "get_with_divergence is not implemented for this backend; \
+             override it on the EventStore impl to support explicit-divergence \
+             reads (called with edition={:?}, explicit_divergence={:?})",
+            edition, explicit_divergence
+        )))
     }
 
     /// Retrieve events from sequence N onwards.

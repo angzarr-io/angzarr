@@ -269,4 +269,11 @@ impl EventBus for PubSubEventBus {
         let bus = PubSubEventBus::new(config).await?;
         Ok(Arc::new(bus))
     }
+
+    fn max_message_size(&self) -> Option<usize> {
+        // Pub/Sub caps published message data at 10 MiB. Surface this so
+        // `OffloadingEventBus` engages claim-check offload automatically.
+        // See `super::MAX_MESSAGE_SIZE` for the citation.
+        Some(super::MAX_MESSAGE_SIZE)
+    }
 }

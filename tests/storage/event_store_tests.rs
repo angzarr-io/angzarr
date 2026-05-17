@@ -2,6 +2,12 @@
 //!
 //! These tests verify the contract of the EventStore trait.
 //! Each storage implementation should run these tests.
+//!
+//! `#![allow(dead_code)]` because each backend's integration-test binary
+//! only invokes the subset of contract tests its implementation actually
+//! supports (e.g. the mock backend skips cascade-query tests).
+
+#![allow(dead_code)]
 
 use prost_types::Any;
 use uuid::Uuid;
@@ -174,6 +180,103 @@ pub async fn test_add_duplicate_sequence<S: EventStore>(store: &S) {
         )
         .await;
     assert!(result.is_err(), "duplicate sequence should fail");
+}
+
+/// H-24: contract that the SQL backends already enforce via PRIMARY KEY +
+/// sequence-conflict guards. The mock historically accepted any sequence,
+/// so a unit test built on mock could silently demonstrate "passing"
+/// behavior that the production stores would reject. After H-24's fix,
+/// mock must reject the same shapes SQL rejects.
+///
+/// Three rejection shapes, each on a fresh root:
+///   1. Duplicate (re-adding an existing sequence)
+///   2. Rewind (sequence below `next_sequence`)
+///   3. In-batch duplicate (same sequence appearing twice in one `add()`
+///      call) — SQL backends fail this on the second INSERT.
+///
+/// Gap inserts (e.g. seq=5 with no prior events) are NOT asserted here:
+/// the framework supports a few callers that legitimately seed an
+/// aggregate at a non-zero sequence (snapshot rehydrate paths), and the
+/// SQL backends do not reject those at the storage layer. The bug being
+/// closed is duplicate/overlap, which IS uniformly rejected by SQL.
+pub async fn test_add_rejects_duplicate_sequences<S: EventStore>(store: &S) {
+    // (1) Duplicate: re-adding the same sequence after a successful add.
+    {
+        let domain = "test_h24_duplicate";
+        let root = Uuid::new_v4();
+        store
+            .add(domain, "test", root, make_events(0, 3), "", None, None)
+            .await
+            .expect("first add should succeed");
+
+        let result = store
+            .add(
+                domain,
+                "test",
+                root,
+                vec![make_event(2, "DuplicateOfSeq2")],
+                "",
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "H-24: re-adding an existing sequence MUST fail; got {:?}",
+            result
+        );
+    }
+
+    // (2) Rewind: a single-event add at a sequence strictly below
+    // next_sequence (the canonical "another writer beat me" shape).
+    {
+        let domain = "test_h24_rewind";
+        let root = Uuid::new_v4();
+        store
+            .add(domain, "test", root, make_events(0, 5), "", None, None)
+            .await
+            .expect("first add should succeed");
+
+        let result = store
+            .add(
+                domain,
+                "test",
+                root,
+                vec![make_event(1, "Rewind")],
+                "",
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "H-24: rewinding to a lower sequence MUST fail; got {:?}",
+            result
+        );
+    }
+
+    // (3) In-batch duplicate: the same sequence twice in one add() call.
+    // SQL backends fail on the second INSERT inside the transaction.
+    {
+        let domain = "test_h24_in_batch_duplicate";
+        let root = Uuid::new_v4();
+        let result = store
+            .add(
+                domain,
+                "test",
+                root,
+                vec![make_event(0, "First"), make_event(0, "Duplicate")],
+                "",
+                None,
+                None,
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "H-24: in-batch duplicate sequence MUST fail; got {:?}",
+            result
+        );
+    }
 }
 
 // =============================================================================
@@ -2394,6 +2497,9 @@ macro_rules! run_event_store_tests {
 
         test_add_duplicate_sequence($store).await;
         println!("  test_add_duplicate_sequence: PASSED");
+
+        test_add_rejects_duplicate_sequences($store).await;
+        println!("  test_add_rejects_duplicate_sequences: PASSED");
 
         // get tests
         test_get_all_events($store).await;

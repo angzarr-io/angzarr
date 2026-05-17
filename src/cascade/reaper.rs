@@ -159,12 +159,26 @@ impl<S: EventStore + 'static> CascadeReaper<S> {
             value: revocation.encode_to_vec(),
         };
 
+        // H-24: the framework does NOT auto-assign sequence numbers
+        // (the dead `auto_sequence` parameter on `resolve_sequence` was
+        // removed in H-21). Compute the next sequence explicitly so
+        // the Revocation lands at the head of the stream, not on top
+        // of the very uncommitted page it's revoking. SQL backends
+        // (PostgreSQL / SQLite) enforce this via `PRIMARY KEY (domain,
+        // edition, root, sequence)`; the mock now enforces it too.
+        let next_sequence = self
+            .store
+            .get_next_sequence(&participant.domain, &participant.edition, participant.root)
+            .await?;
+
         // Create EventPage (no_commit defaults to false = committed)
         let now = Utc::now();
         let page = EventPage {
             header: Some(PageHeader {
                 sync_mode: None,
-                sequence_type: None, // Framework will assign sequence
+                sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(
+                    next_sequence,
+                )),
             }),
             created_at: Some(prost_types::Timestamp {
                 seconds: now.timestamp(),

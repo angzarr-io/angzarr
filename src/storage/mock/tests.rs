@@ -388,12 +388,20 @@ async fn test_add_idempotency_returns_duplicate() {
 }
 
 /// Empty external_id does not trigger idempotency check.
+///
+/// Two distinct adds at distinct sequences with empty external_id both
+/// succeed; the empty-external_id path is non-idempotent. H-24 (mock
+/// rejects duplicate sequences) means the two adds MUST use different
+/// sequences — pre-H-24 this test used sequence 0 twice and silently
+/// "passed" because mock didn't enforce SQL's PRIMARY KEY contract;
+/// the duplicate-sequence shape is now covered by H-24's dedicated
+/// tests.
 #[tokio::test]
 async fn test_add_empty_external_id_no_idempotency() {
     let store = MockEventStore::new();
     let root = Uuid::new_v4();
 
-    let event = EventPage {
+    let event_0 = EventPage {
         header: Some(PageHeader {
             sync_mode: None,
             sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
@@ -405,14 +413,25 @@ async fn test_add_empty_external_id_no_idempotency() {
         created_at: None,
         ..Default::default()
     };
+    let event_1 = EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(1)),
+        }),
+        payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
+            type_url: "test.Event".to_string(),
+            value: vec![],
+        })),
+        created_at: None,
+        ..Default::default()
+    };
 
-    // Add twice with empty external_id - both should succeed as Added
     let result1 = store
-        .add("orders", "test", root, vec![event.clone()], "", None, None)
+        .add("orders", "test", root, vec![event_0], "", None, None)
         .await
         .unwrap();
     let result2 = store
-        .add("orders", "test", root, vec![event], "", None, None)
+        .add("orders", "test", root, vec![event_1], "", None, None)
         .await
         .unwrap();
 
@@ -960,4 +979,127 @@ async fn test_query_stale_cascades_timestamp_boundary() {
         .unwrap();
     assert_eq!(stale.len(), 1);
     assert_eq!(stale[0], "cascade-boundary");
+}
+
+// ============================================================================
+// H-24: mock event_store must reject duplicate/overlap sequences
+// ============================================================================
+//
+// Pre-fix bug: `MockEventStore::add` did NO sequence-conflict check, so a
+// unit test that asserted "this duplicate is rejected" against mock could
+// silently pass while production (Postgres / SQLite, both backed by a
+// `PRIMARY KEY (domain, edition, root, sequence)`) would reject the same
+// shape. That gap put mock-based unit tests in a credibility hole.
+//
+// Post-fix contract: mock must reject the same three shapes SQL rejects.
+// The shared contract test in `tests/storage/event_store_tests.rs::
+// test_add_rejects_duplicate_sequences` covers the contract; these
+// `#[tokio::test]`s pin it under the `cargo test --lib` runner so the
+// fix is visible in the unit suite without needing a separate test
+// binary.
+
+fn h24_event(seq: u32) -> EventPage {
+    EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(seq)),
+        }),
+        payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
+            type_url: "test.H24Event".to_string(),
+            value: vec![seq as u8],
+        })),
+        created_at: None,
+        ..Default::default()
+    }
+}
+
+/// Re-adding an existing sequence after a successful add must fail.
+#[tokio::test]
+async fn test_mock_rejects_duplicate_sequence_after_add() {
+    let store = MockEventStore::new();
+    let root = Uuid::new_v4();
+
+    store
+        .add(
+            "orders",
+            "test",
+            root,
+            vec![h24_event(0), h24_event(1), h24_event(2)],
+            "",
+            None,
+            None,
+        )
+        .await
+        .expect("first add should succeed");
+
+    let result = store
+        .add("orders", "test", root, vec![h24_event(2)], "", None, None)
+        .await;
+
+    assert!(
+        result.is_err(),
+        "H-24: re-adding an existing sequence MUST fail; got {:?}",
+        result
+    );
+}
+
+/// Rewind: a single-event add at a sequence below `next_sequence` must fail.
+#[tokio::test]
+async fn test_mock_rejects_rewind_sequence() {
+    let store = MockEventStore::new();
+    let root = Uuid::new_v4();
+
+    store
+        .add(
+            "orders",
+            "test",
+            root,
+            vec![
+                h24_event(0),
+                h24_event(1),
+                h24_event(2),
+                h24_event(3),
+                h24_event(4),
+            ],
+            "",
+            None,
+            None,
+        )
+        .await
+        .expect("first add should succeed");
+
+    let result = store
+        .add("orders", "test", root, vec![h24_event(1)], "", None, None)
+        .await;
+
+    assert!(
+        result.is_err(),
+        "H-24: rewinding to a lower sequence MUST fail; got {:?}",
+        result
+    );
+}
+
+/// In-batch duplicate: the same sequence twice in one `add()` call must fail.
+#[tokio::test]
+async fn test_mock_rejects_in_batch_duplicate_sequence() {
+    let store = MockEventStore::new();
+    let root = Uuid::new_v4();
+
+    let result = store
+        .add(
+            "orders",
+            "test",
+            root,
+            vec![h24_event(0), h24_event(0)],
+            "",
+            None,
+            None,
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "H-24: in-batch duplicate sequence MUST fail; got {:?}",
+        result
+    );
 }

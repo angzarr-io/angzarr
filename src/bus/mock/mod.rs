@@ -13,11 +13,22 @@ use crate::proto::EventBook;
 pub struct MockEventBus {
     published: RwLock<Vec<EventBook>>,
     fail_on_publish: RwLock<bool>,
+    max_message_size: Option<usize>,
 }
 
 impl MockEventBus {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Construct a MockEventBus that advertises a max message size via
+    /// `EventBus::max_message_size`. Used by tests that exercise wrappers
+    /// (e.g. OffloadingEventBus) which consult the inner bus's limit.
+    pub fn with_max_message_size(size: usize) -> Self {
+        Self {
+            max_message_size: Some(size),
+            ..Self::default()
+        }
     }
 
     pub async fn set_fail_on_publish(&self, fail: bool) {
@@ -53,6 +64,10 @@ impl EventBus for MockEventBus {
         _domain_filter: Option<&str>,
     ) -> Result<Arc<dyn EventBus>> {
         Err(BusError::SubscribeNotSupported)
+    }
+
+    fn max_message_size(&self) -> Option<usize> {
+        self.max_message_size
     }
 }
 

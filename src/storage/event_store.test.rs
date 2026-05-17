@@ -2,7 +2,10 @@
 //!
 //! These are pure data structures with simple methods - no async, no I/O.
 
-use super::{AddOutcome, SourceInfo};
+use super::{AddOutcome, CascadeParticipant, EventStore, SourceInfo};
+use crate::proto::{EventBook, EventPage};
+use crate::storage::{Result, StorageError};
+use async_trait::async_trait;
 use uuid::Uuid;
 
 // ============================================================================
@@ -149,4 +152,155 @@ fn add_outcome_equality() {
 
     assert_eq!(a, b);
     assert_ne!(a, c);
+}
+
+// ============================================================================
+// H-20: default `get_with_divergence` MUST NOT silently call `get()`
+// ============================================================================
+//
+// Pre-fix bug: the default trait impl ignored `explicit_divergence` and
+// delegated to `get(domain, edition, root)`. Any backend that did NOT
+// override (Mock/Dynamo/Bigtable/NATS/ImmuDB) silently returned the wrong
+// events for new-branch reads at a non-implicit divergence point.
+// Post-fix contract: the default returns `Err(NotImplemented)` so missing
+// per-backend implementations are loud, not silent.
+
+/// Minimal EventStore stub that exercises ONLY the default trait impls.
+///
+/// Every required trait method `unimplemented!()`s — we only call
+/// `get_with_divergence` on it, which is the one method with a default body.
+struct DefaultImplStub;
+
+#[async_trait]
+impl EventStore for DefaultImplStub {
+    async fn add(
+        &self,
+        _domain: &str,
+        _edition: &str,
+        _root: Uuid,
+        _events: Vec<EventPage>,
+        _correlation_id: &str,
+        _external_id: Option<&str>,
+        _source_info: Option<&SourceInfo>,
+    ) -> Result<AddOutcome> {
+        unimplemented!("not exercised in this test")
+    }
+    async fn get(&self, _domain: &str, _edition: &str, _root: Uuid) -> Result<Vec<EventPage>> {
+        // Sentinel: if the default `get_with_divergence` falls through to
+        // `get()` (pre-fix behavior), it would return an empty Vec here and
+        // the test would see `Ok(vec![])`. The post-fix default returns
+        // `Err(NotImplemented)` WITHOUT ever calling `get()`.
+        Ok(vec![])
+    }
+    async fn get_from(
+        &self,
+        _domain: &str,
+        _edition: &str,
+        _root: Uuid,
+        _from: u32,
+    ) -> Result<Vec<EventPage>> {
+        unimplemented!()
+    }
+    async fn get_from_to(
+        &self,
+        _domain: &str,
+        _edition: &str,
+        _root: Uuid,
+        _from: u32,
+        _to: u32,
+    ) -> Result<Vec<EventPage>> {
+        unimplemented!()
+    }
+    async fn list_roots(&self, _domain: &str, _edition: &str) -> Result<Vec<Uuid>> {
+        unimplemented!()
+    }
+    async fn list_domains(&self) -> Result<Vec<String>> {
+        unimplemented!()
+    }
+    async fn get_next_sequence(&self, _domain: &str, _edition: &str, _root: Uuid) -> Result<u32> {
+        unimplemented!()
+    }
+    async fn get_until_timestamp(
+        &self,
+        _domain: &str,
+        _edition: &str,
+        _root: Uuid,
+        _until: &str,
+    ) -> Result<Vec<EventPage>> {
+        unimplemented!()
+    }
+    async fn get_by_correlation(&self, _correlation_id: &str) -> Result<Vec<EventBook>> {
+        unimplemented!()
+    }
+    async fn find_by_source(
+        &self,
+        _domain: &str,
+        _edition: &str,
+        _root: Uuid,
+        _source_info: &SourceInfo,
+    ) -> Result<Option<Vec<EventPage>>> {
+        unimplemented!()
+    }
+    async fn find_by_external_id(
+        &self,
+        _domain: &str,
+        _edition: &str,
+        _root: Uuid,
+        _external_id: &str,
+    ) -> Result<Option<Vec<EventPage>>> {
+        unimplemented!()
+    }
+    async fn delete_edition_events(&self, _domain: &str, _edition: &str) -> Result<u32> {
+        unimplemented!()
+    }
+    async fn query_stale_cascades(&self, _threshold: &str) -> Result<Vec<String>> {
+        unimplemented!()
+    }
+    async fn query_cascade_participants(
+        &self,
+        _cascade_id: &str,
+    ) -> Result<Vec<CascadeParticipant>> {
+        unimplemented!()
+    }
+}
+
+/// H-20: a backend that does NOT override `get_with_divergence` must
+/// return `NotImplemented` for any caller that supplies an explicit
+/// divergence point — NOT a silent empty result via `get()`.
+#[tokio::test]
+async fn default_get_with_divergence_returns_not_implemented_for_explicit_branch() {
+    let store = DefaultImplStub;
+    let root = Uuid::new_v4();
+
+    let result = store
+        .get_with_divergence("orders", "new-explicit-branch", root, Some(3))
+        .await;
+
+    match result {
+        Err(StorageError::NotImplemented(_)) => {}
+        Err(other) => panic!("expected NotImplemented, got different error: {:?}", other),
+        Ok(events) => panic!(
+            "expected NotImplemented, got Ok({} events) — default impl is silently \
+             falling back to get() and producing wrong events for a new branch",
+            events.len()
+        ),
+    }
+}
+
+/// H-20: same contract for `explicit_divergence = None` — the trait
+/// default should not silently substitute `get()` even when the caller
+/// asks for implicit-divergence semantics. Backends that genuinely
+/// support divergence must implement it explicitly.
+#[tokio::test]
+async fn default_get_with_divergence_returns_not_implemented_for_implicit_branch() {
+    let store = DefaultImplStub;
+    let root = Uuid::new_v4();
+
+    let result = store.get_with_divergence("orders", "v2", root, None).await;
+
+    assert!(
+        matches!(result, Err(StorageError::NotImplemented(_))),
+        "default impl must not silently delegate to get(); got {:?}",
+        result
+    );
 }

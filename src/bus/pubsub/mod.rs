@@ -38,6 +38,16 @@ const CORRELATION_ID_ATTR: &str = "correlation_id";
 /// Attribute name for aggregate root ID.
 const ROOT_ID_ATTR: &str = "root_id";
 
+/// Maximum message size in bytes for Google Cloud Pub/Sub.
+///
+/// Pub/Sub allows a published message data field of up to 10 MiB
+/// (10 * 1024 * 1024 bytes). Anything larger must be offloaded via
+/// the claim-check pattern; surfacing this constant lets
+/// `OffloadingEventBus` engage automatically.
+///
+/// Reference: <https://cloud.google.com/pubsub/quotas#resource_limits>
+pub(crate) const MAX_MESSAGE_SIZE: usize = 10 * 1024 * 1024;
+
 // ============================================================================
 // Self-Registration
 // ============================================================================

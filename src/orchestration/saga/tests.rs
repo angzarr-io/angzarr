@@ -388,3 +388,234 @@ async fn test_execute_retries_delivery_with_state_from_conflict() {
     // Command delivery retried after conflict, saga not re-executed.
     // The RetryableWithStateExecutor fails once then succeeds.
 }
+
+// ============================================================================
+// H-12: AngzarrDeferred-stamp rewrite must preserve per-command sync_mode
+// ============================================================================
+//
+// Saga handlers may tag an emitted command's `PageHeader.sync_mode` to override
+// the inherited flow mode (e.g. `Decision` when the accept/reject must surface
+// synchronously). The AngzarrDeferred-stamp rewrite in `orchestrate_saga` at
+// `saga/mod.rs:446` (existing-deferred branch) and `saga/mod.rs:460` (default
+// branch) reconstructs `PageHeader { sync_mode: None, sequence_type: ... }`
+// — clobbering the handler's override. PM's equivalent path was fixed at
+// `process_manager/mod.rs:487` (`preserved_sync_mode`); saga was missed.
+
+use crate::proto::{
+    command_page::Payload as CmdPayload, page_header::SequenceType, AngzarrDeferredSequence,
+    CommandPage, MergeStrategy, PageHeader,
+};
+use tokio::sync::Mutex as AsyncMutex;
+
+/// Executor that captures each CommandBook it sees so the test can inspect the
+/// rewritten page header that `orchestrate_saga` produced.
+struct CapturingExecutor {
+    seen: AsyncMutex<Vec<CommandBook>>,
+}
+
+impl CapturingExecutor {
+    fn new() -> Self {
+        Self {
+            seen: AsyncMutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl CommandExecutor for CapturingExecutor {
+    async fn execute(&self, command: CommandBook, _sync_mode: SyncMode) -> CommandOutcome {
+        self.seen.lock().await.push(command);
+        CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+/// Saga context that emits a single command whose page header carries an
+/// explicit `sync_mode` override plus an `angzarr_deferred` marker with
+/// `source = None` — drives the line 446 fill-in branch of the rewrite.
+struct SagaWithExistingDeferredAndSyncMode {
+    override_mode: SyncMode,
+}
+
+#[async_trait]
+impl SagaRetryContext for SagaWithExistingDeferredAndSyncMode {
+    async fn handle(
+        &self,
+        _destination_sequences: HashMap<String, u32>,
+    ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let header = PageHeader {
+            sync_mode: Some(self.override_mode as i32),
+            sequence_type: Some(SequenceType::AngzarrDeferred(AngzarrDeferredSequence {
+                source: None,
+                source_seq: 7,
+            })),
+        };
+        let page = CommandPage {
+            header: Some(header),
+            merge_strategy: MergeStrategy::MergeCommutative as i32,
+            payload: Some(CmdPayload::Command(prost_types::Any {
+                type_url: "test.SagaCommand".to_string(),
+                value: vec![],
+            })),
+        };
+        let cover = Cover {
+            domain: "inventory".to_string(),
+            correlation_id: "corr-1".to_string(),
+            ..Default::default()
+        };
+        Ok(SagaResponse {
+            commands: vec![CommandBook {
+                cover: Some(cover),
+                pages: vec![page],
+            }],
+            events: vec![],
+        })
+    }
+    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
+    fn source_cover(&self) -> Option<&Cover> {
+        None
+    }
+    fn source_max_sequence(&self) -> u32 {
+        0
+    }
+}
+
+/// Saga context that emits a single command whose page header carries an
+/// explicit `sync_mode` override but NO `sequence_type` — drives the line 460
+/// default branch of the rewrite (saga handler didn't set angzarr_deferred).
+struct SagaWithNoDeferredAndSyncMode {
+    override_mode: SyncMode,
+}
+
+#[async_trait]
+impl SagaRetryContext for SagaWithNoDeferredAndSyncMode {
+    async fn handle(
+        &self,
+        _destination_sequences: HashMap<String, u32>,
+    ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let header = PageHeader {
+            sync_mode: Some(self.override_mode as i32),
+            sequence_type: None,
+        };
+        let page = CommandPage {
+            header: Some(header),
+            merge_strategy: MergeStrategy::MergeCommutative as i32,
+            payload: Some(CmdPayload::Command(prost_types::Any {
+                type_url: "test.SagaCommand".to_string(),
+                value: vec![],
+            })),
+        };
+        let cover = Cover {
+            domain: "inventory".to_string(),
+            correlation_id: "corr-1".to_string(),
+            ..Default::default()
+        };
+        Ok(SagaResponse {
+            commands: vec![CommandBook {
+                cover: Some(cover),
+                pages: vec![page],
+            }],
+            events: vec![],
+        })
+    }
+    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
+    fn source_cover(&self) -> Option<&Cover> {
+        None
+    }
+    fn source_max_sequence(&self) -> u32 {
+        0
+    }
+}
+
+/// H-12: when a saga sets `angzarr_deferred` with `source = None` AND tags an
+/// explicit per-command `sync_mode`, the rewrite that fills in the source must
+/// preserve the explicit `sync_mode` (mirror of PM `preserved_sync_mode`).
+///
+/// Baseline reproduces the bug: rewrite emits `PageHeader { sync_mode: None,
+/// ... }`, dropping the saga's override.
+#[tokio::test]
+async fn test_saga_rewrite_preserves_sync_mode_on_existing_deferred() {
+    let ctx = SagaWithExistingDeferredAndSyncMode {
+        override_mode: SyncMode::Decision,
+    };
+    let executor = CapturingExecutor::new();
+
+    let result = orchestrate_saga(
+        &ctx,
+        &executor,
+        None, // command_bus
+        None, // fetcher
+        None, // fact_executor
+        "saga-h12-existing-deferred",
+        "corr-1",
+        None,
+        SyncMode::Simple, // inherited mode
+        fast_backoff(),
+    )
+    .await;
+    assert!(result.is_ok(), "orchestrate_saga should succeed");
+
+    let captured = executor.seen.lock().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "expected one CommandBook through executor"
+    );
+    let header = captured[0]
+        .pages
+        .first()
+        .and_then(|p| p.header.as_ref())
+        .expect("rewritten page should have a header");
+    assert_eq!(
+        header.sync_mode,
+        Some(SyncMode::Decision as i32),
+        "rewrite must preserve the saga handler's per-command sync_mode override \
+         (existing-deferred branch at saga/mod.rs:446)"
+    );
+}
+
+/// H-12: when a saga emits a command with NO `sequence_type` but an explicit
+/// per-command `sync_mode`, the default-deferred rewrite branch must preserve
+/// the explicit `sync_mode` (mirror of PM `preserved_sync_mode`).
+///
+/// Baseline reproduces the bug: rewrite emits `PageHeader { sync_mode: None,
+/// ... }`, dropping the saga's override.
+#[tokio::test]
+async fn test_saga_rewrite_preserves_sync_mode_on_default_branch() {
+    let ctx = SagaWithNoDeferredAndSyncMode {
+        override_mode: SyncMode::Decision,
+    };
+    let executor = CapturingExecutor::new();
+
+    let result = orchestrate_saga(
+        &ctx,
+        &executor,
+        None, // command_bus
+        None, // fetcher
+        None, // fact_executor
+        "saga-h12-default-branch",
+        "corr-1",
+        None,
+        SyncMode::Simple,
+        fast_backoff(),
+    )
+    .await;
+    assert!(result.is_ok(), "orchestrate_saga should succeed");
+
+    let captured = executor.seen.lock().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "expected one CommandBook through executor"
+    );
+    let header = captured[0]
+        .pages
+        .first()
+        .and_then(|p| p.header.as_ref())
+        .expect("rewritten page should have a header");
+    assert_eq!(
+        header.sync_mode,
+        Some(SyncMode::Decision as i32),
+        "rewrite must preserve the saga handler's per-command sync_mode override \
+         (default-deferred branch at saga/mod.rs:460)"
+    );
+}

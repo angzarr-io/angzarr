@@ -21,6 +21,16 @@ use super::traits::EventBus;
 pub use bus::KafkaEventBus;
 pub use config::KafkaEventBusConfig;
 
+/// Maximum message size in bytes for the Kafka transport.
+///
+/// Kafka's broker default `message.max.bytes` is 1 MiB (1_048_576 bytes).
+/// Operators sometimes raise this, but the safe default the framework
+/// advertises to `OffloadingEventBus` matches the out-of-the-box broker
+/// limit; oversized payloads beyond this are offloaded via claim-check.
+///
+/// Reference: <https://kafka.apache.org/documentation/#brokerconfigs_message.max.bytes>
+pub(crate) const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
+
 // ============================================================================
 // Self-Registration
 // ============================================================================

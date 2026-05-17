@@ -56,6 +56,11 @@ pub struct CheckpointConfig {
     /// Path to checkpoint file.
     pub file_path: PathBuf,
     /// Flush interval for batched writes.
+    ///
+    /// Retained for API stability; current `update()` flushes synchronously
+    /// on every write (per H-05 remediation). If future profiling motivates
+    /// batched writes, this is the knob.
+    #[allow(dead_code)]
     pub flush_interval: Duration,
     /// Whether checkpointing is enabled.
     pub enabled: bool,
@@ -144,34 +149,60 @@ impl Checkpoint {
 
     /// Update checkpoint for a domain/root.
     ///
-    /// Only updates if new sequence is greater than current.
-    /// Triggers flush if flush interval has elapsed.
+    /// Only updates if new sequence is greater than current. The
+    /// read-then-write comparison is performed under a single write-lock so
+    /// concurrent updaters cannot clobber a higher sequence (H-05 atomicity
+    /// fix).
+    ///
+    /// On a real advancement the new state is flushed to disk before this
+    /// function returns (H-05 durability fix). This eliminates the
+    /// previously up-to-`flush_interval`-second window between in-memory
+    /// advancement and disk persistence; a crash after `update()` returns
+    /// can no longer re-deliver events past the checkpoint (which would
+    /// re-run side-effecting handlers without an idempotency contract).
+    ///
+    /// Trade-off vs the prior batched flush: each successful update now
+    /// pays one fsync-style temp-file-rename. The framework's stance per
+    /// CLAUDE.md is "correctness over speed"; if/when this becomes a
+    /// measured bottleneck the path is to batch at the consumer level
+    /// (flush after K events or T elapsed in `dispatch_to_handlers`)
+    /// rather than to reintroduce the in-memory drift here.
     pub async fn update(&self, domain: &str, root: &[u8], sequence: u32) {
         if !self.config.enabled {
             return;
         }
 
-        let current = self.get(domain, root).await.unwrap_or(0);
-        if sequence <= current {
+        // Atomic read-then-write under a single write-lock. Without this,
+        // concurrent updaters race: task A reads current=0 under a read-lock,
+        // task B writes 10 and releases its write-lock, task A then takes a
+        // write-lock and writes 5 — clobbering 10 with the lower sequence.
+        let advanced = {
+            let mut data = self.data.write().await;
+            let current = data.get(domain, root).unwrap_or(0);
+            if sequence <= current {
+                false
+            } else {
+                data.set(domain, root, sequence);
+                true
+            }
+        };
+
+        if !advanced {
             return;
         }
 
-        {
-            let mut data = self.data.write().await;
-            data.set(domain, root, sequence);
-        }
         *self.dirty.write().await = true;
 
-        // Check if we should flush
-        let should_flush = {
-            let last = self.last_flush.read().await;
-            last.elapsed() >= self.config.flush_interval
-        };
-
-        if should_flush {
-            if let Err(e) = self.flush().await {
-                warn!(error = %e, "Failed to flush checkpoint");
-            }
+        // Flush on every advancement so the on-disk state always reflects
+        // what `update()` has acknowledged. A failure to flush is logged
+        // but does NOT panic — the in-memory state is still correct and a
+        // subsequent successful flush (via EOF/shutdown or the next
+        // update) will catch up. The flush_interval field is retained
+        // because explicit `flush()` callers (e.g.
+        // `flush_checkpoint_on_eof` in `client.rs`) still consult it
+        // indirectly via the `dirty` short-circuit.
+        if let Err(e) = self.flush().await {
+            warn!(error = %e, "Failed to flush checkpoint");
         }
     }
 

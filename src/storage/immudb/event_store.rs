@@ -377,7 +377,6 @@ impl EventStore for ImmudbEventStore {
             .map(|s| s + 1)
             .unwrap_or(0);
 
-        let mut auto_sequence = base_sequence;
         let mut first_sequence = None;
         let mut last_sequence = 0u32;
 
@@ -403,11 +402,7 @@ impl EventStore for ImmudbEventStore {
         // Insert events one by one (immudb may not support multi-row INSERT well)
         for event in events {
             let event_data = event.encode_to_vec();
-            let sequence = crate::storage::helpers::resolve_sequence(
-                &event,
-                base_sequence,
-                &mut auto_sequence,
-            )?;
+            let sequence = crate::storage::helpers::resolve_sequence(&event, base_sequence)?;
             let created_at = crate::storage::helpers::parse_timestamp(&event)?;
 
             if first_sequence.is_none() {

@@ -79,7 +79,10 @@ async fn noop_replay_publisher_returns_not_configured() {
     // different bucket and surface incorrectly.
     let p = NoopReplayPublisher;
     let err = p
-        .replay(crate::proto::CommandBook::default())
+        .replay(
+            crate::proto::CommandBook::default(),
+            ReplayMetadata::default(),
+        )
         .await
         .unwrap_err();
     assert!(matches!(err, DlqError::NotConfigured));
@@ -94,7 +97,11 @@ fn trait_default_is_configured_returns_true() {
     struct DefaultsPublisher;
     #[async_trait::async_trait]
     impl ReplayPublisher for DefaultsPublisher {
-        async fn replay(&self, _: crate::proto::CommandBook) -> Result<(), DlqError> {
+        async fn replay(
+            &self,
+            _: crate::proto::CommandBook,
+            _: ReplayMetadata,
+        ) -> Result<(), DlqError> {
             Ok(())
         }
     }

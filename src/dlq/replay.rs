@@ -27,6 +27,30 @@ use async_trait::async_trait;
 use super::error::DlqError;
 use crate::proto::CommandBook;
 
+/// Audit-trail metadata propagated alongside a replayed `CommandBook`.
+///
+/// `replayed_from_dlq_id` and `original_correlation_id` give downstream
+/// observers (logs, traces, DLQ tap consumer, audit queries) a
+/// back-pointer from the freshly-published command to the row it was
+/// recovered from.
+///
+/// **Why a separate parameter, not a field on `CommandBook`:** the
+/// proto-level `Cover.metadata` field that would carry this on the wire
+/// lives in the `angzarr-project` submodule. Until that lands, the
+/// handler hands the metadata to the publisher trait directly; the
+/// publisher implementation decides how to stamp it (e.g. AMQP headers,
+/// gRPC request metadata) so the data isn't lost between handler and
+/// transport. This trait surface is the explicit contract — a
+/// `tracing::debug!`-only path is no longer sufficient (H-29).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReplayMetadata {
+    /// `dlq_entries.id` of the row this replay came from.
+    pub replayed_from_dlq_id: i64,
+    /// The pre-replay `correlation_id`. Empty string when the source
+    /// row's `correlation_id` was NULL.
+    pub original_correlation_id: String,
+}
+
 /// The two replay shapes the operator chooses between. Mirrors the
 /// `ReplayMode` proto enum (`crate::proto::status::ReplayMode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,10 +100,12 @@ impl ReplayMode {
 #[async_trait]
 pub trait ReplayPublisher: Send + Sync {
     /// Publish the (already-rewritten) command on the appropriate
-    /// bus. The command's metadata is expected to already carry
-    /// `replayed_from_dlq_id` and `original_correlation_id` —
-    /// the handler stamps those before calling.
-    async fn replay(&self, command: CommandBook) -> Result<(), DlqError>;
+    /// bus. `metadata` carries lineage pointers (source DLQ row id +
+    /// original correlation_id) that the publisher implementation is
+    /// responsible for surfacing on the wire — out-of-band transport
+    /// metadata until the proto-level `Cover.metadata` field lands in
+    /// the `angzarr-project` submodule. See [`ReplayMetadata`].
+    async fn replay(&self, command: CommandBook, metadata: ReplayMetadata) -> Result<(), DlqError>;
 
     /// Whether this publisher can actually route. Mirrors the
     /// pattern on the reader/publisher traits — the noop returns
@@ -104,7 +130,11 @@ pub struct NoopReplayPublisher;
 
 #[async_trait]
 impl ReplayPublisher for NoopReplayPublisher {
-    async fn replay(&self, _command: CommandBook) -> Result<(), DlqError> {
+    async fn replay(
+        &self,
+        _command: CommandBook,
+        _metadata: ReplayMetadata,
+    ) -> Result<(), DlqError> {
         Err(DlqError::NotConfigured)
     }
 

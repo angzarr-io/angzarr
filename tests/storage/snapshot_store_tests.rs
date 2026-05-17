@@ -2,6 +2,11 @@
 //!
 //! These tests verify the contract of the SnapshotStore trait.
 //! Each storage implementation should run these tests.
+//!
+//! `#![allow(dead_code)]` because each backend's integration-test binary
+//! only invokes the subset of contract tests its implementation supports.
+
+#![allow(dead_code)]
 
 use prost_types::Any;
 use uuid::Uuid;

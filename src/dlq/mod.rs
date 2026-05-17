@@ -94,7 +94,7 @@ pub use reader::{
     DeadLetterPage, DeadLetterReader, ListFilter, NoopDeadLetterReader, StoredDeadLetter,
     DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
 };
-pub use replay::{NoopReplayPublisher, ReplayMode, ReplayPublisher};
+pub use replay::{NoopReplayPublisher, ReplayMetadata, ReplayMode, ReplayPublisher};
 
 // Re-export publishers
 pub use publishers::ChannelDeadLetterPublisher;

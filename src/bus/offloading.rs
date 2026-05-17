@@ -22,7 +22,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use futures::future::BoxFuture;
 use prost::Message;
-use tracing::{debug, warn};
+use tracing::{debug, error};
 
 use super::{BusError, EventBus, EventHandler, PublishResult, Result};
 use crate::payload_store::{PayloadStore, PayloadStoreError};
@@ -109,31 +109,49 @@ impl<S: PayloadStore + 'static> OffloadingEventBus<S> {
                 if let Some(Payload::Event(ref event)) = page.payload {
                     let payload_bytes = event.encode_to_vec();
 
-                    match self.store.put(&payload_bytes).await {
-                        Ok(reference) => {
-                            debug!(
-                                original_size = payload_bytes.len(),
-                                uri = %reference.uri,
-                                "Offloaded large event payload"
-                            );
+                    // H-02: `store.put` failure must surface as `Err`. The
+                    // previous behaviour (warn! + silently inline the
+                    // oversized payload) either produced an opaque
+                    // inner-bus rejection later on the call path or — if
+                    // the inner bus accepted it — silently violated the
+                    // size-bounded contract the offloading wrapper
+                    // promises. The bus refuses to lie; the caller is in
+                    // the right position to decide retry / DLQ / circuit
+                    // break. Matches the explicit-Err idiom landed for
+                    // C-12 in `sns_sqs/bus.rs`.
+                    let reference = self.store.put(&payload_bytes).await.map_err(|e| {
+                        error!(
+                            error = %e,
+                            page_size = page_size,
+                            threshold = threshold,
+                            "Payload store rejected put; refusing silent inline fallback"
+                        );
+                        BusError::Publish(format!(
+                            "Payload offload failed: {} (inline fallback refused — \
+                             the offloading wrapper will not silently exceed the \
+                             inner bus's size limit)",
+                            e
+                        ))
+                    })?;
 
-                            new_pages.push(EventPage {
-                                header: page.header.clone(),
-                                created_at: page.created_at,
-                                payload: Some(Payload::External(reference)),
-                                no_commit: page.no_commit,
-                                cascade_id: page.cascade_id.clone(),
-                            });
-                            continue;
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Failed to offload payload, sending inline");
-                        }
-                    }
+                    debug!(
+                        original_size = payload_bytes.len(),
+                        uri = %reference.uri,
+                        "Offloaded large event payload"
+                    );
+
+                    new_pages.push(EventPage {
+                        header: page.header.clone(),
+                        created_at: page.created_at,
+                        payload: Some(Payload::External(reference)),
+                        no_commit: page.no_commit,
+                        cascade_id: page.cascade_id.clone(),
+                    });
+                    continue;
                 }
             }
 
-            // Keep original page (small or offload failed)
+            // Keep original page (small or non-event payload)
             new_pages.push(page.clone());
         }
 
@@ -214,53 +232,57 @@ async fn resolve_payloads_with_store<S: PayloadStore>(
     use crate::proto::event_page::Payload;
 
     let mut new_pages = Vec::with_capacity(book.pages.len());
-    let mut had_errors = false;
 
     for page in &book.pages {
         if let Some(Payload::External(ref reference)) = page.payload {
-            // Fetch the payload
-            match store.get(reference).await {
-                Ok(payload_bytes) => {
-                    // Decode back to Any
-                    match prost_types::Any::decode(payload_bytes.as_slice()) {
-                        Ok(event) => {
-                            new_pages.push(EventPage {
-                                header: page.header.clone(),
-                                created_at: page.created_at,
-                                payload: Some(Payload::Event(event)),
-                                no_commit: page.no_commit,
-                                cascade_id: page.cascade_id.clone(),
-                            });
-                            continue;
-                        }
-                        Err(e) => {
-                            warn!(
-                                uri = %reference.uri,
-                                error = %e,
-                                "Failed to decode retrieved payload"
-                            );
-                            had_errors = true;
-                        }
-                    }
-                }
-                Err(e) => {
-                    warn!(
-                        uri = %reference.uri,
-                        error = %e,
-                        "Failed to retrieve external payload"
-                    );
-                    had_errors = true;
-                }
-            }
+            // H-03: `store.get` failure (or decode failure) must surface as
+            // `Err`. The previous behaviour (warn! + pass the External page
+            // through to the handler) silently delivered payloads the
+            // business handler could not decode — events appeared to be
+            // handled successfully while their contents were never
+            // observed. Surfacing the error lets the bus transport (AMQP,
+            // JetStream, etc.) nack / redeliver, and lets the handler
+            // dispatch path see the failure. Matches the explicit-Err
+            // idiom landed for C-12 in `sns_sqs/bus.rs`.
+            let payload_bytes = store.get(reference).await.map_err(|e| {
+                error!(
+                    uri = %reference.uri,
+                    error = %e,
+                    "Failed to retrieve external payload; refusing to deliver \
+                     unresolved External page to handler"
+                );
+                BusError::Publish(format!(
+                    "Failed to retrieve external payload {}: {} \
+                     (unresolved External page would be undecodable by handlers)",
+                    reference.uri, e
+                ))
+            })?;
+
+            let event = prost_types::Any::decode(payload_bytes.as_slice()).map_err(|e| {
+                error!(
+                    uri = %reference.uri,
+                    error = %e,
+                    "Failed to decode retrieved payload; refusing to deliver \
+                     unresolved External page to handler"
+                );
+                BusError::Publish(format!(
+                    "Failed to decode retrieved payload {}: {}",
+                    reference.uri, e
+                ))
+            })?;
+
+            new_pages.push(EventPage {
+                header: page.header.clone(),
+                created_at: page.created_at,
+                payload: Some(Payload::Event(event)),
+                no_commit: page.no_commit,
+                cascade_id: page.cascade_id.clone(),
+            });
+            continue;
         }
 
-        // Keep original page (no reference or resolution failed)
+        // Keep original page (no External reference)
         new_pages.push(page.clone());
-    }
-
-    if had_errors {
-        // Log but don't fail - partial resolution is better than nothing
-        warn!("Some external payloads could not be resolved");
     }
 
     Ok(EventBook {

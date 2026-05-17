@@ -35,8 +35,7 @@ fn make_event_with_sequence(seq: u32) -> EventPage {
 #[test]
 fn test_resolve_sequence_explicit_valid() {
     let event = make_event_with_sequence(5);
-    let mut auto = 3;
-    let result = resolve_sequence(&event, 3, &mut auto).unwrap();
+    let result = resolve_sequence(&event, 3).unwrap();
     assert_eq!(result, 5);
 }
 
@@ -47,8 +46,7 @@ fn test_resolve_sequence_explicit_valid() {
 #[test]
 fn test_resolve_sequence_explicit_conflict() {
     let event = make_event_with_sequence(2);
-    let mut auto = 5;
-    let result = resolve_sequence(&event, 5, &mut auto);
+    let result = resolve_sequence(&event, 5);
     assert!(matches!(
         result,
         Err(StorageError::SequenceConflict {
@@ -65,9 +63,24 @@ fn test_resolve_sequence_explicit_conflict() {
 #[test]
 fn test_resolve_sequence_zero() {
     let event = make_event_with_sequence(0);
-    let mut auto = 0;
-    let result = resolve_sequence(&event, 0, &mut auto).unwrap();
+    let result = resolve_sequence(&event, 0).unwrap();
     assert_eq!(result, 0);
+}
+
+/// H-21 regression: the prior signature took a `&mut u32 auto_sequence`
+/// that the body never read or wrote — auto-assign was advertised but
+/// dead. The new 2-arg signature documents the actual contract (caller
+/// always provides explicit sequence). This test pins the contract by
+/// exercising the new signature; if anyone reintroduces a third
+/// parameter without documenting auto-assign semantics, the call site
+/// here will break and force the discussion.
+#[test]
+fn test_resolve_sequence_signature_is_two_arg() {
+    let event = make_event_with_sequence(7);
+    // Compile-time pinning: any signature change forces this test to
+    // be revisited.
+    let result = resolve_sequence(&event, 7);
+    assert_eq!(result.unwrap(), 7);
 }
 
 // ============================================================================

@@ -4,7 +4,9 @@
 //!
 //! ## Architecture
 //!
-//! - **Publishing**: Events published to `{prefix}.events.{domain}.{root}.{edition}`
+//! - **Publishing**: Events published to `{prefix}.events.{domain}.{root}` (edition is
+//!   in the EventBook payload, not the subject — see H-09 in
+//!   `plans/deep-review-remediation.md` for the rationale)
 //! - **Subscribing**: Durable pull consumers filter by domain
 //! - **Consumer Groups**: Multiple subscribers with same name share workload
 //!

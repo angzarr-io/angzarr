@@ -28,6 +28,16 @@ use super::traits::{EventBus, EventHandler, PublishResult};
 use crate::proto::EventBook;
 use crate::proto_ext::CoverExt;
 
+/// Maximum message size in bytes for AMQP (RabbitMQ).
+///
+/// RabbitMQ has no formal hard cap, but the broker default (since 3.7) is
+/// 128 MiB (`max_message_size`). Anything beyond this risks broker
+/// rejection and degraded throughput; surfacing this constant lets
+/// `OffloadingEventBus` engage claim-check offload before that wall.
+///
+/// Reference: <https://www.rabbitmq.com/configure.html#config-items>
+pub(crate) const MAX_MESSAGE_SIZE: usize = 128 * 1024 * 1024;
+
 // ============================================================================
 // Self-Registration
 // ============================================================================
@@ -694,6 +704,13 @@ impl EventBus for AmqpEventBus {
         };
         let bus = AmqpEventBus::new(config).await?;
         Ok(Arc::new(bus))
+    }
+
+    fn max_message_size(&self) -> Option<usize> {
+        // RabbitMQ broker default `max_message_size` is 128 MiB. Surface
+        // this so `OffloadingEventBus` engages claim-check offload before
+        // hitting the broker's wall. See `super::MAX_MESSAGE_SIZE`.
+        Some(MAX_MESSAGE_SIZE)
     }
 }
 

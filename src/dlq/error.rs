@@ -10,6 +10,7 @@ pub mod errmsg {
     pub const UNKNOWN_TYPE: &str = "Unknown DLQ backend type: ";
     pub const QUERY_FAILED: &str = "DLQ query failed: ";
     pub const INVALID_ARGUMENT: &str = "Invalid DLQ query argument: ";
+    pub const CONFLICT: &str = "Conflict: ";
 }
 
 /// Errors that can occur during DLQ operations.
@@ -38,6 +39,14 @@ pub enum DlqError {
 
     #[error("{}{}", errmsg::INVALID_ARGUMENT, .0)]
     InvalidArgument(String),
+
+    /// A two-phase-replay conflict: a pending audit row already exists
+    /// for the same `idempotency_key`. Surfaced when a second replica
+    /// or a double-clicking operator attempts to replay the same DLQ
+    /// entry while the first attempt is still in flight (or already
+    /// committed under the same key).
+    #[error("{}{}", errmsg::CONFLICT, .0)]
+    Conflict(String),
 }
 
 /// Result type for DLQ operations.

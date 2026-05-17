@@ -60,23 +60,82 @@ impl SqliteReplayAuditWriter {
 
 #[async_trait]
 impl ReplayAuditWriter for SqliteReplayAuditWriter {
-    async fn record(&self, record: ReplayAuditRecord) -> Result<(), DlqError> {
-        sqlx::query(
+    async fn begin_pending(&self, record: &ReplayAuditRecord) -> Result<(), DlqError> {
+        // Two-phase protocol (H-31): INSERT a Pending row BEFORE the
+        // publisher is called. The UNIQUE index on `idempotency_key`
+        // fences out a concurrent replica that picked up the same
+        // operator click — the loser sees a UNIQUE-violation here and
+        // surfaces it as `DlqError::Conflict`.
+        let res = sqlx::query(
             "INSERT INTO dlq_replay_audit \
              (dlq_id, replayed_at, replay_mode, new_correlation_id, \
-              original_correlation_id, outcome, result_message) \
-             VALUES (?, ?, ?, ?, ?, ?, ?)",
+              original_correlation_id, outcome, result_message, idempotency_key) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(record.dlq_id)
         .bind(record.replayed_at.to_rfc3339())
         .bind(replay_mode_str(record.replay_mode))
         .bind(&record.new_correlation_id)
         .bind(&record.original_correlation_id)
+        .bind(crate::dlq::audit::ReplayOutcome::Pending.as_str())
+        .bind(&record.result_message)
+        .bind(&record.idempotency_key)
+        .execute(&self.pool)
+        .await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                Err(DlqError::Conflict(format!(
+                    "replay already in flight for idempotency_key={}",
+                    record.idempotency_key
+                )))
+            }
+            Err(e) => Err(DlqError::QueryFailed(format!(
+                "SQLite audit begin_pending: {}",
+                e
+            ))),
+        }
+    }
+
+    async fn record(&self, record: ReplayAuditRecord) -> Result<(), DlqError> {
+        // Phase 2: UPDATE the Pending row to its terminal outcome.
+        // If no Pending row exists for the key (i.e., a writer that
+        // skipped `begin_pending`), fall back to an INSERT so legacy
+        // call sites keep working.
+        let updated = sqlx::query(
+            "UPDATE dlq_replay_audit \
+             SET outcome = ?, result_message = ?, replayed_at = ?, \
+                 new_correlation_id = ? \
+             WHERE idempotency_key = ?",
+        )
         .bind(record.outcome.as_str())
         .bind(&record.result_message)
+        .bind(record.replayed_at.to_rfc3339())
+        .bind(&record.new_correlation_id)
+        .bind(&record.idempotency_key)
         .execute(&self.pool)
         .await
-        .map_err(|e| DlqError::QueryFailed(format!("SQLite audit insert: {}", e)))?;
+        .map_err(|e| DlqError::QueryFailed(format!("SQLite audit update: {}", e)))?;
+
+        if updated.rows_affected() == 0 {
+            sqlx::query(
+                "INSERT INTO dlq_replay_audit \
+                 (dlq_id, replayed_at, replay_mode, new_correlation_id, \
+                  original_correlation_id, outcome, result_message, idempotency_key) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(record.dlq_id)
+            .bind(record.replayed_at.to_rfc3339())
+            .bind(replay_mode_str(record.replay_mode))
+            .bind(&record.new_correlation_id)
+            .bind(&record.original_correlation_id)
+            .bind(record.outcome.as_str())
+            .bind(&record.result_message)
+            .bind(&record.idempotency_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DlqError::QueryFailed(format!("SQLite audit insert: {}", e)))?;
+        }
         Ok(())
     }
 
@@ -123,23 +182,74 @@ impl PostgresReplayAuditWriter {
 #[cfg(feature = "postgres")]
 #[async_trait]
 impl ReplayAuditWriter for PostgresReplayAuditWriter {
-    async fn record(&self, record: ReplayAuditRecord) -> Result<(), DlqError> {
-        sqlx::query(
+    async fn begin_pending(&self, record: &ReplayAuditRecord) -> Result<(), DlqError> {
+        // Two-phase protocol (H-31). See SQLite variant for rationale.
+        let res = sqlx::query(
             "INSERT INTO dlq_replay_audit \
              (dlq_id, replayed_at, replay_mode, new_correlation_id, \
-              original_correlation_id, outcome, result_message) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+              original_correlation_id, outcome, result_message, idempotency_key) \
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(record.dlq_id)
         .bind(record.replayed_at.to_rfc3339())
         .bind(replay_mode_str(record.replay_mode))
         .bind(&record.new_correlation_id)
         .bind(&record.original_correlation_id)
+        .bind(crate::dlq::audit::ReplayOutcome::Pending.as_str())
+        .bind(&record.result_message)
+        .bind(&record.idempotency_key)
+        .execute(&self.pool)
+        .await;
+        match res {
+            Ok(_) => Ok(()),
+            Err(sqlx::Error::Database(db)) if db.is_unique_violation() => {
+                Err(DlqError::Conflict(format!(
+                    "replay already in flight for idempotency_key={}",
+                    record.idempotency_key
+                )))
+            }
+            Err(e) => Err(DlqError::QueryFailed(format!(
+                "Postgres audit begin_pending: {}",
+                e
+            ))),
+        }
+    }
+
+    async fn record(&self, record: ReplayAuditRecord) -> Result<(), DlqError> {
+        let updated = sqlx::query(
+            "UPDATE dlq_replay_audit \
+             SET outcome = $1, result_message = $2, replayed_at = $3, \
+                 new_correlation_id = $4 \
+             WHERE idempotency_key = $5",
+        )
         .bind(record.outcome.as_str())
         .bind(&record.result_message)
+        .bind(record.replayed_at.to_rfc3339())
+        .bind(&record.new_correlation_id)
+        .bind(&record.idempotency_key)
         .execute(&self.pool)
         .await
-        .map_err(|e| DlqError::QueryFailed(format!("Postgres audit insert: {}", e)))?;
+        .map_err(|e| DlqError::QueryFailed(format!("Postgres audit update: {}", e)))?;
+
+        if updated.rows_affected() == 0 {
+            sqlx::query(
+                "INSERT INTO dlq_replay_audit \
+                 (dlq_id, replayed_at, replay_mode, new_correlation_id, \
+                  original_correlation_id, outcome, result_message, idempotency_key) \
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            )
+            .bind(record.dlq_id)
+            .bind(record.replayed_at.to_rfc3339())
+            .bind(replay_mode_str(record.replay_mode))
+            .bind(&record.new_correlation_id)
+            .bind(&record.original_correlation_id)
+            .bind(record.outcome.as_str())
+            .bind(&record.result_message)
+            .bind(&record.idempotency_key)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DlqError::QueryFailed(format!("Postgres audit insert: {}", e)))?;
+        }
         Ok(())
     }
 

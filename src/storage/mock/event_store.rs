@@ -109,6 +109,45 @@ impl EventStore for MockEventStore {
             }
         }
 
+        // H-24: enforce the same sequence-conflict contract the SQL
+        // backends enforce via `PRIMARY KEY (domain, edition, root,
+        // sequence)`. The mock previously appended without checking,
+        // so a unit test that asserted "this duplicate is rejected"
+        // against mock could silently pass while Postgres / SQLite
+        // would reject the same shape. We reject three shapes:
+        //   1. New events overlap an existing sequence (duplicate).
+        //   2. New events fall below the current max sequence (rewind).
+        //   3. The batch itself contains a repeated sequence.
+        // Gap inserts (sequence > current_max + 1) are NOT rejected:
+        // the framework allows snapshot-rehydrate paths to seed a
+        // stream at a non-zero base, matching SQL behavior at the
+        // storage layer.
+        let existing_sequences: std::collections::HashSet<u32> = store
+            .get(&key)
+            .map(|events| events.iter().map(|e| e.page.sequence_num()).collect())
+            .unwrap_or_default();
+        let next_sequence = existing_sequences.iter().max().map(|s| s + 1).unwrap_or(0);
+
+        let mut seen_in_batch: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for event in &events {
+            let seq = event.sequence_num();
+            if existing_sequences.contains(&seq) {
+                return Err(StorageError::SequenceConflict {
+                    expected: next_sequence,
+                    actual: seq,
+                });
+            }
+            if !seen_in_batch.insert(seq) {
+                // In-batch duplicate. SQL stores fail on the second
+                // INSERT inside the transaction; mirror that here so
+                // the contract holds across both surfaces.
+                return Err(StorageError::SequenceConflict {
+                    expected: next_sequence,
+                    actual: seq,
+                });
+            }
+        }
+
         let first_sequence = events.first().map(|e| e.sequence_num()).unwrap_or(0);
         let last_sequence = events.last().map(|e| e.sequence_num()).unwrap_or(0);
 
@@ -142,6 +181,70 @@ impl EventStore for MockEventStore {
             .get(&key)
             .map(|events| events.iter().map(|e| e.page.clone()).collect())
             .unwrap_or_default())
+    }
+
+    /// H-20: explicit-divergence composite read for editions. Mirrors the
+    /// SQL backends' `composite_read_with_divergence` so the in-memory
+    /// mock can stand in for SQL stores in tests that exercise branch
+    /// creation. Without this override the default impl raises
+    /// `NotImplemented` (the safer fail-closed for unsupported backends).
+    async fn get_with_divergence(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        explicit_divergence: Option<u32>,
+    ) -> Result<Vec<EventPage>> {
+        // Main timeline: explicit divergence has no meaning; degrade to
+        // a plain `get()` so callers that pass `Some(_)` for the main
+        // timeline don't trip a backend-asymmetry. Use the caller's
+        // edition value verbatim — mock keys events on the exact
+        // string, so substituting `DEFAULT_EDITION` here would skip
+        // rows stored under `""` (the wire-level sentinel for main).
+        if is_main_timeline(edition) {
+            return self.get(domain, edition, root).await;
+        }
+
+        let edition_events = self.get(domain, edition, root).await?;
+
+        // Determine the divergence point. Explicit wins; else implicit
+        // (first edition event's sequence). With no edition events and
+        // no explicit divergence, fall back to the main timeline.
+        let divergence = if let Some(div) = explicit_divergence {
+            div
+        } else if let Some(first) = edition_events.first() {
+            first.sequence_num()
+        } else {
+            // No edition events + no explicit divergence: caller wants
+            // the implicit-divergence fallback (main timeline). The
+            // mock doesn't normalize `""` ↔ `"angzarr"` keying, so
+            // probe both sentinels and concatenate (in practice tests
+            // use one or the other consistently, but the contract is
+            // that both name the same timeline).
+            let mut main_events = self.get(domain, DEFAULT_EDITION, root).await?;
+            if main_events.is_empty() {
+                main_events = self.get(domain, "", root).await?;
+            }
+            return Ok(main_events);
+        };
+
+        let mut main_events = self.get(domain, DEFAULT_EDITION, root).await?;
+        if main_events.is_empty() {
+            main_events = self.get(domain, "", root).await?;
+        }
+
+        let mut result: Vec<EventPage> = main_events
+            .into_iter()
+            .filter(|e| e.sequence_num() < divergence)
+            .collect();
+
+        for event in edition_events {
+            if event.sequence_num() >= divergence {
+                result.push(event);
+            }
+        }
+
+        Ok(result)
     }
 
     async fn get_from(

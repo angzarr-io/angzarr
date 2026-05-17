@@ -20,6 +20,38 @@ use crate::bus::error::{BusError, Result};
 use crate::bus::traits::{EventBus, EventHandler, PublishResult};
 use crate::proto::{Cover, EventBook};
 
+/// Build the NATS subject for a per-aggregate event publish.
+///
+/// # Contract
+///
+/// Subject layout is `{prefix}.events.{domain}.{root}`. **The edition
+/// is deliberately NOT in the subject** so two events with the same
+/// `(domain, root)` but different editions land on the SAME subject —
+/// JetStream guarantees per-subject ordering, so this preserves cross-
+/// edition ordering for the same aggregate root (H-09).
+///
+/// Edition is carried in the `EventBook` payload (`Cover.edition`); the
+/// consumer-side handler can still observe it. The consumer's
+/// subject_filter (`{prefix}.events.{domain}.>`) catches every event
+/// for the domain regardless of edition.
+///
+/// # Purity
+///
+/// Pure function (no NATS client, no I/O, no time) so the H-09
+/// regression suite in `bus.test.rs` can exercise it without a
+/// JetStream instance.
+///
+/// # Parameters
+///
+/// * `prefix`   — subject prefix (e.g. `"angzarr"`)
+/// * `domain`   — aggregate domain (e.g. `"orders"`)
+/// * `root`     — aggregate root UUID
+/// * `_edition` — accepted for API symmetry with the rest of the bus
+///   layer; intentionally ignored per the contract above.
+pub(crate) fn build_subject(prefix: &str, domain: &str, root: Uuid, _edition: &str) -> String {
+    format!("{}.events.{}.{}", prefix, domain, root.as_hyphenated())
+}
+
 /// EventBus backed by NATS JetStream.
 pub struct NatsEventBus {
     client: async_nats::Client,
@@ -75,13 +107,7 @@ impl NatsEventBus {
 
     /// Get the subject for an aggregate.
     fn subject(&self, domain: &str, root: Uuid, edition: &str) -> String {
-        format!(
-            "{}.events.{}.{}.{}",
-            self.config.prefix,
-            domain,
-            root.as_hyphenated(),
-            edition
-        )
+        build_subject(&self.config.prefix, domain, root, edition)
     }
 
     /// Ensure the stream exists for a domain.
@@ -254,3 +280,7 @@ impl EventBus for NatsEventBus {
         Ok(Arc::new(bus))
     }
 }
+
+#[cfg(test)]
+#[path = "bus.test.rs"]
+mod tests;

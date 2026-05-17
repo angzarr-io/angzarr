@@ -410,6 +410,13 @@ impl EventBus for SnsSqsEventBus {
         let bus = SnsSqsEventBus::new(config).await?;
         Ok(Arc::new(bus))
     }
+
+    fn max_message_size(&self) -> Option<usize> {
+        // AWS SNS / SQS hard-cap message bodies at 256 KiB. Surface this so
+        // OffloadingEventBus engages claim-check offload without explicit
+        // operator config. See `super::MAX_MESSAGE_SIZE` for the citation.
+        Some(super::MAX_MESSAGE_SIZE)
+    }
 }
 
 #[cfg(test)]

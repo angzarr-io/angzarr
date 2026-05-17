@@ -19,6 +19,64 @@ use crate::proto_ext::CoverExt;
 #[cfg(feature = "otel")]
 use super::otel::{kafka_extract_trace_context, kafka_inject_trace_context};
 
+/// Validate and extract the Kafka partition key for an `EventBook`
+/// publish.
+///
+/// # Contract
+///
+/// **Root-less EventBooks are rejected with `BusError::Publish`.** The
+/// publisher previously skipped `record.key(...)` when
+/// `book.root_id_hex()` returned `None`, and Kafka's default
+/// partitioner round-robined those messages across partitions —
+/// silently bypassing the per-aggregate-root ordering guarantee the
+/// rest of the bus layer documents (H-10).
+///
+/// The only non-empty fallback we could compute is a per-event UUID
+/// key, which would put every root-less event in its own partition-
+/// hash class — i.e., still no useful ordering. Falling back that way
+/// would silently weaken the documented per-root ordering contract.
+/// Surfacing the misuse here as `BusError::Publish` produces a clear,
+/// root-cause-naming error at the boundary instead of an opaque
+/// "out-of-order delivery" symptom several layers down.
+///
+/// This mirrors the C-12 decision for SNS/SQS FIFO (root-less →
+/// `BusError::Publish` because empty `MessageGroupId` is rejected by
+/// AWS regardless). Kafka does not reject empty keys on the wire, but
+/// the framework-level invariant is the same: every published event
+/// is associated with an aggregate root.
+///
+/// # Purity
+///
+/// Pure function (no Kafka producer, no I/O) so the H-10 regression
+/// suite in `bus.test.rs` can exercise it without a broker.
+pub(crate) fn validate_publish_key(book: &EventBook) -> Result<String> {
+    let key = book.root_id_hex().ok_or_else(|| {
+        BusError::Publish(
+            "EventBook missing root: Kafka publish requires a non-empty partition key \
+             for per-aggregate-root ordering. Falling back to round-robin would silently \
+             disable ordering. Provide a root on the EventBook cover, or route root-less \
+             events through a non-ordered transport."
+                .to_string(),
+        )
+    })?;
+
+    // Defense-in-depth: `root_id_hex` returns `Some` whenever a root
+    // ProtoUuid is present, even if its `value` bytes are empty. An
+    // empty key would partition-hash to a single partition and
+    // silently collapse all such events into one ordering group;
+    // reject it here with the same explicit error so the framework's
+    // failure mode is identical across both shapes of "no root".
+    if key.is_empty() {
+        return Err(BusError::Publish(
+            "EventBook root_id is empty: Kafka partition key must be non-empty to preserve \
+             per-aggregate-root ordering"
+                .to_string(),
+        ));
+    }
+
+    Ok(key)
+}
+
 /// Kafka event bus implementation.
 ///
 /// Events are published to topics named `{topic_prefix}.events.{domain}`.
@@ -192,14 +250,14 @@ impl EventBus for KafkaEventBus {
             .ok_or_else(|| BusError::Publish("EventBook missing cover/domain".to_string()))?;
 
         let topic = self.config.topic_for_domain(domain);
-        let key = book.root_id_hex();
+        // `validate_publish_key` rejects root-less and empty-root books
+        // with `BusError::Publish` per H-10; we never reach the key
+        // assignment below with an empty key.
+        let key = validate_publish_key(&book)?;
         let payload = book.encode_to_vec();
 
-        let mut record = FutureRecord::to(&topic).payload(&payload);
-
-        if let Some(ref k) = key {
-            record = record.key(k);
-        }
+        #[cfg_attr(not(feature = "otel"), allow(unused_mut))]
+        let mut record = FutureRecord::to(&topic).payload(&payload).key(&key);
 
         #[cfg(feature = "otel")]
         let trace_headers = kafka_inject_trace_context();
@@ -258,4 +316,15 @@ impl EventBus for KafkaEventBus {
         let bus = KafkaEventBus::new(config).await?;
         Ok(Arc::new(bus))
     }
+
+    fn max_message_size(&self) -> Option<usize> {
+        // Kafka broker default `message.max.bytes` is 1 MiB. Surface this
+        // so `OffloadingEventBus` engages claim-check offload automatically.
+        // See `super::MAX_MESSAGE_SIZE` for the citation.
+        Some(super::MAX_MESSAGE_SIZE)
+    }
 }
+
+#[cfg(test)]
+#[path = "bus.test.rs"]
+mod tests;

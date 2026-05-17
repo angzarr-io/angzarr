@@ -438,12 +438,17 @@ pub async fn orchestrate_saga(
 
     for cmd in &mut commands {
         for page in &mut cmd.pages {
+            // Preserve any per-command sync_mode the saga handler set on the
+            // header before we rewrite the sequence_type for angzarr_deferred
+            // stamping — the override would otherwise be lost. Mirrors the
+            // PM canonical pattern at process_manager/mod.rs:487.
+            let preserved_sync_mode = page.header.as_ref().and_then(|h| h.sync_mode);
             match page.header.as_ref().and_then(|h| h.sequence_type.as_ref()) {
                 Some(SequenceType::AngzarrDeferred(existing)) => {
                     // Saga set angzarr_deferred - fill in source if missing, preserve source_seq
                     if existing.source.is_none() {
                         page.header = Some(PageHeader {
-                            sync_mode: None,
+                            sync_mode: preserved_sync_mode,
                             sequence_type: Some(SequenceType::AngzarrDeferred(
                                 AngzarrDeferredSequence {
                                     source: source_cover.clone(),
@@ -457,7 +462,7 @@ pub async fn orchestrate_saga(
                 _ => {
                     // Saga didn't set angzarr_deferred - use defaults
                     page.header = Some(PageHeader {
-                        sync_mode: None,
+                        sync_mode: preserved_sync_mode,
                         sequence_type: Some(SequenceType::AngzarrDeferred(
                             AngzarrDeferredSequence {
                                 source: source_cover.clone(),
