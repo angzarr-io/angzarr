@@ -9,9 +9,30 @@
 # NOTE: Post-commit deploy removed - examples extracted to angzarr-examples-* repos
 # To auto-deploy, add post-commit hooks in those repos instead.
 
+# Plant the in-submodule pre-commit guard in .git/modules/<name>/hooks/.
+# The hook source is tracked in angzarr-project/scripts/ — this step copies
+# it into the per-submodule hooks dir so an editor inside the submodule
+# can't sneak a commit past us.
+post-checkout:
+  commands:
+    install-submodule-hooks:
+      run: just install-submodule-hooks
+
+# Same trigger for `git merge` (e.g. pulling tip changes that bumped the
+# angzarr-project submodule). post-checkout alone does not fire on merge.
+post-merge:
+  commands:
+    install-submodule-hooks:
+      run: just install-submodule-hooks
+
 pre-commit:
   parallel: false
   commands:
+    # Block the parent commit if any submodule has uncommitted edits or
+    # untracked files. Pointer-only bumps still pass.
+    check-submodules-clean:
+      run: just check-submodules-clean
+
     # Rust - fmt + clippy + test in a SINGLE container invocation.
     # Running them as three separate `just _container ...` calls under
     # rootless docker triggers a `.cargo-lock` permission race because
