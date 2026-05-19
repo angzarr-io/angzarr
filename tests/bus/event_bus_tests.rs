@@ -474,7 +474,215 @@ pub async fn test_payload_bytes_exact<B: EventBus>(
 // Concurrency tests
 // =============================================================================
 
+/// Build an `EventBook` with a SPECIFIC root and an in-payload `(root, seq)`
+/// marker so a downstream consumer can reconstruct the publish order.
+///
+/// `make_event_book()` allocates a fresh random root on every call, which
+/// is what most of the EventBus contract tests want — but the per-root
+/// ordering check in `test_per_root_ordering_under_concurrent_publish`
+/// needs N publishers to keep emitting under the same root for the
+/// duration of the test, with the publish-order sequence embedded so the
+/// receiver can detect reordering.
+///
+/// The payload `value` is laid out as `[root_bytes (16) || seq (u32 BE)]`.
+/// We do NOT encode the sequence into `PageHeader.sequence_type` because
+/// some buses (notably SNS/SQS FIFO) include the page's `max_seq` in their
+/// MessageDeduplicationId — reusing the same seq across publishers would
+/// produce identical dedup_ids and collide inside AWS's 5-minute dedup
+/// window. Carrying the order marker in the payload sidesteps that.
+fn make_event_book_with_root_and_seq(domain: &str, root: uuid::Uuid, seq: u32) -> EventBook {
+    let mut payload_bytes = Vec::with_capacity(20);
+    payload_bytes.extend_from_slice(root.as_bytes());
+    payload_bytes.extend_from_slice(&seq.to_be_bytes());
+
+    EventBook {
+        cover: Some(Cover {
+            domain: domain.to_string(),
+            root: Some(Uuid {
+                value: root.as_bytes().to_vec(),
+            }),
+            correlation_id: format!("test-{}-{}", root, seq),
+            edition: None,
+        }),
+        pages: vec![EventPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                // Unique per (root, seq) so the bus's own dedup logic (if
+                // any) does not drop the second event from a producer that
+                // restarted its counter.
+                sequence_type: Some(SequenceType::Sequence(seq)),
+            }),
+            created_at: None,
+            payload: Some(event_page::Payload::Event(Any {
+                type_url: "type.googleapis.com/test.OrderedEvent".to_string(),
+                value: payload_bytes,
+            })),
+            ..Default::default()
+        }],
+        snapshot: None,
+        ..Default::default()
+    }
+}
+
+/// Test that the framework's "events for the same aggregate root arrive in
+/// publish order" guarantee holds under concurrent publishing from
+/// multiple producers writing to multiple roots.
+///
+/// Background (H-11 in `plans/deep-review-remediation.md`): the original
+/// concurrent-publish test (`test_concurrent_publish_no_loss`) only
+/// counted received messages — it never verified the framework's
+/// strongest delivery claim. Pub/Sub (with `enable_message_ordering=false`)
+/// and Kafka (with no message key) both silently violate per-root
+/// ordering under load while passing a pure-count contract test. C-11
+/// turned on Pub/Sub ordering and H-10 made Kafka reject root-less
+/// EventBooks, so this contract test should now pass on every backend
+/// that documents per-root ordering as a guarantee.
+///
+/// The test:
+/// 1. Picks `num_roots` distinct aggregate roots.
+/// 2. Spawns `num_roots` concurrent producers — one per root — each
+///    publishing `events_per_root` events with payload `(root, seq)` in
+///    monotonic order 0..events_per_root.
+/// 3. The consumer groups received events by root and asserts each
+///    group's sequences appear in publish order (no reordering inside a
+///    root). Across roots, no ordering is asserted — that is not a
+///    framework contract.
+pub async fn test_per_root_ordering_under_concurrent_publish(
+    publisher: Arc<dyn EventBus>,
+    domain: &str,
+    subscriber_name: &str,
+    num_roots: usize,
+    events_per_root: u32,
+) {
+    let subscriber = publisher
+        .create_subscriber(subscriber_name, Some(domain))
+        .await
+        .expect("Failed to create subscriber");
+
+    let total_events = num_roots * events_per_root as usize;
+    let (tx, mut rx) = mpsc::channel(total_events * 2);
+
+    subscriber
+        .subscribe(Box::new(CapturingHandler::new(tx)))
+        .await
+        .expect("Failed to subscribe");
+
+    subscriber.start_consuming().await.expect("Failed to start");
+
+    // Give the consumer time to wire up before we start firing.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Allocate roots up-front so producers don't race the test on UUID
+    // generation.
+    let roots: Vec<uuid::Uuid> = (0..num_roots).map(|_| uuid::Uuid::new_v4()).collect();
+
+    // One producer task per root; events 0..events_per_root in order.
+    // Sharing an `Arc<dyn EventBus>` across producers exercises the
+    // documented concurrent-publish contract without requiring `B: Clone`
+    // (which most production bus types do not implement).
+    let mut handles = Vec::with_capacity(num_roots);
+    for root in roots.iter().copied() {
+        let pub_arc = publisher.clone();
+        let domain_owned = domain.to_string();
+        handles.push(tokio::spawn(async move {
+            for seq in 0..events_per_root {
+                let book = make_event_book_with_root_and_seq(&domain_owned, root, seq);
+                pub_arc
+                    .publish(Arc::new(book))
+                    .await
+                    .unwrap_or_else(|e| panic!("publish root={} seq={} failed: {}", root, seq, e));
+            }
+        }));
+    }
+    for h in handles {
+        h.await.expect("producer task panicked");
+    }
+
+    // Receive everything we expect with a generous timeout — the per-root
+    // ordering claim is about ordering, not latency; we still need a
+    // bound so a regression that silently drops a frame doesn't hang.
+    let mut received_per_root: std::collections::HashMap<uuid::Uuid, Vec<u32>> =
+        std::collections::HashMap::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    let mut received_total = 0usize;
+    while received_total < total_events {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Some(book)) => {
+                // Extract (root, seq) from the payload bytes laid down by
+                // `make_event_book_with_root_and_seq`. Skip events whose
+                // payload doesn't match our marker shape — some backends
+                // may interleave messages from prior tests on the same
+                // domain queue.
+                let Some(payload) = book.pages.first().and_then(|p| match &p.payload {
+                    Some(event_page::Payload::Event(any)) => Some(&any.value),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                if payload.len() != 20 {
+                    continue;
+                }
+                let mut root_bytes = [0u8; 16];
+                root_bytes.copy_from_slice(&payload[..16]);
+                let root = uuid::Uuid::from_bytes(root_bytes);
+                if !roots.contains(&root) {
+                    // Not one of our roots — ignore.
+                    continue;
+                }
+                let mut seq_bytes = [0u8; 4];
+                seq_bytes.copy_from_slice(&payload[16..20]);
+                let seq = u32::from_be_bytes(seq_bytes);
+                received_per_root.entry(root).or_default().push(seq);
+                received_total += 1;
+            }
+            _ => break,
+        }
+    }
+
+    // First: no losses on any root. This guards against the case where
+    // per-root ordering is "verified" only on roots that happened to
+    // round-trip everything.
+    for root in &roots {
+        let got = received_per_root.get(root).cloned().unwrap_or_default();
+        assert_eq!(
+            got.len(),
+            events_per_root as usize,
+            "root {} received {} events, expected {}",
+            root,
+            got.len(),
+            events_per_root,
+        );
+    }
+
+    // Second: per-root, the received sequences must equal the publish
+    // sequence. Equal — not just monotone — because we know exactly what
+    // each producer emitted. Any reordering inside a root surfaces here.
+    let expected: Vec<u32> = (0..events_per_root).collect();
+    for root in &roots {
+        let got = received_per_root.get(root).expect("checked above");
+        assert_eq!(
+            got, &expected,
+            "root {} events arrived in order {:?}, expected {:?} \
+             (per-root ordering is a documented framework contract; \
+              this is the H-11 regression)",
+            root, got, expected,
+        );
+    }
+}
+
 /// Test parallel publishing doesn't lose messages.
+///
+/// Superseded by `test_per_root_ordering_under_concurrent_publish`, which
+/// asserts both message-count preservation AND per-root ordering (H-11).
+/// Kept around for buses that don't preserve per-root ordering but still
+/// promise no-loss; no current backend test invokes it. The `Clone` bound
+/// is what blocks generic re-use against `Arc<dyn EventBus>`, so the H-11
+/// rewrite took a different shape.
+#[allow(dead_code)]
 pub async fn test_concurrent_publish_no_loss<B: EventBus + Clone + 'static>(
     publisher: &B,
     domain: &str,
@@ -619,5 +827,37 @@ macro_rules! run_event_bus_tests {
         )
         .await;
         println!("  test_payload_bytes_exact: PASSED");
+    };
+}
+
+/// Run the per-root ordering contract test against a bus implementation
+/// that documents per-aggregate-root ordering as a guarantee (SNS/SQS
+/// FIFO, NATS JetStream, Kafka with keying, Pub/Sub with
+/// `enable_message_ordering=true`).
+///
+/// Separated from `run_event_bus_tests!` because some bus implementations
+/// (e.g., the in-process channel bus) do not claim per-root ordering
+/// across concurrent publishers and would fail a contract test that
+/// applies to ordered transports only.
+#[macro_export]
+macro_rules! run_per_root_ordering_test {
+    ($publisher_arc:expr, $prefix:expr) => {
+        use $crate::bus::event_bus_tests::test_per_root_ordering_under_concurrent_publish;
+
+        // 4 roots × 10 events = 40 events total. Enough roots that
+        // accidental ordering on a single partition is improbable;
+        // enough events per root that a single reordering will surface.
+        // We expect an `Arc<dyn EventBus>` (or other clonable Arc-like)
+        // so concurrent producers can share the publisher without
+        // requiring `B: Clone`.
+        test_per_root_ordering_under_concurrent_publish(
+            $publisher_arc,
+            &format!("{}-ordered", $prefix),
+            &format!("{}-sub-ordered", $prefix),
+            4,
+            10,
+        )
+        .await;
+        println!("  test_per_root_ordering_under_concurrent_publish: PASSED");
     };
 }

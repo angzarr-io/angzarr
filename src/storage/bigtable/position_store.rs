@@ -74,9 +74,20 @@ impl BigtablePositionStore {
     }
 
     /// Build the row key for a position.
+    ///
+    /// H-26: percent-encode `handler`, `domain`, and `edition` so any
+    /// `#` in any of them is unambiguous. `root_hex` is bare hex (no
+    /// reserved characters) and needs no escaping.
     pub fn row_key(handler: &str, domain: &str, edition: &str, root: &[u8]) -> Vec<u8> {
         let root_hex = hex::encode(root);
-        format!("{}#{}#{}#{}", handler, domain, edition, root_hex).into_bytes()
+        format!(
+            "{}#{}#{}#{}",
+            crate::storage::helpers::pct_encode_component(handler),
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition),
+            root_hex
+        )
+        .into_bytes()
     }
 }
 

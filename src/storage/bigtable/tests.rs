@@ -81,6 +81,71 @@ mod row_key_tests {
         .is_none());
     }
 
+    /// H-26: row keys must round-trip components that contain the `#`
+    /// separator. Pre-fix `row_key` interpolated raw `#` and `parse_row_key`
+    /// used `splitn(4, '#')` so any `#` inside `domain`, `edition`, or
+    /// `root` mis-parsed (the trailing component absorbed the rest of the
+    /// string).
+    ///
+    /// We deliberately exercise three shapes:
+    ///
+    /// - domain with `#`
+    /// - edition with `#`
+    /// - both
+    ///
+    /// All three must round-trip; the sequence still parses as `u32`.
+    #[test]
+    fn test_event_row_key_round_trip_with_hash_in_components() {
+        let root = Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
+
+        for (domain, edition) in [
+            ("orders#alpha", "main"),
+            ("orders", "v2#preview"),
+            ("orders#alpha", "v2#preview"),
+            ("orders#", "#main"),
+        ] {
+            let key = BigtableEventStore::row_key(domain, edition, root, 42);
+            let parsed = BigtableEventStore::parse_row_key(&key).unwrap_or_else(|| {
+                panic!(
+                    "round-trip failed for domain={:?} edition={:?}: parse_row_key returned None",
+                    domain, edition
+                )
+            });
+            assert_eq!(parsed.0, domain, "domain must round-trip");
+            assert_eq!(parsed.1, edition, "edition must round-trip");
+            assert_eq!(parsed.2, root, "root must round-trip");
+            assert_eq!(parsed.3, 42, "sequence must round-trip");
+        }
+    }
+
+    /// H-26 companion: cascade-index row key shape must also round-trip
+    /// hash characters in any component.
+    #[test]
+    fn test_cascade_index_row_key_round_trip_with_hash_in_components() {
+        let root = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
+
+        for (cascade_id, domain, edition) in [
+            ("cascade#alpha", "orders", "main"),
+            ("cascade", "orders#beta", "main"),
+            ("cascade", "orders", "v2#gamma"),
+            ("cas#cade", "or#ders", "v2#preview"),
+        ] {
+            let key =
+                BigtableEventStore::cascade_index_row_key(cascade_id, domain, edition, root, 7);
+            let parsed = BigtableEventStore::parse_cascade_index_key(&key).unwrap_or_else(|| {
+                panic!(
+                    "round-trip failed for cascade={:?} domain={:?} edition={:?}",
+                    cascade_id, domain, edition
+                )
+            });
+            assert_eq!(parsed.0, cascade_id);
+            assert_eq!(parsed.1, domain);
+            assert_eq!(parsed.2, edition);
+            assert_eq!(parsed.3, root);
+            assert_eq!(parsed.4, 7);
+        }
+    }
+
     #[test]
     fn test_snapshot_row_key_format() {
         let root = Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
@@ -118,30 +183,29 @@ mod row_key_tests {
 
 mod sequence_tests {
     use super::*;
-    use crate::proto::EventPage;
+    use crate::proto::{page_header::SequenceType, EventPage, PageHeader};
 
-    #[test]
-    fn test_get_sequence() {
-        let event = EventPage {
-            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(42)),
+    fn event_with_seq(seq: u32) -> EventPage {
+        EventPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(SequenceType::Sequence(seq)),
+            }),
             payload: None,
             created_at: None,
             no_commit: false,
             cascade_id: None,
-        };
-        assert_eq!(BigtableEventStore::get_sequence(&event), 42);
+        }
+    }
+
+    #[test]
+    fn test_get_sequence() {
+        assert_eq!(BigtableEventStore::get_sequence(&event_with_seq(42)), 42);
     }
 
     #[test]
     fn test_get_sequence_zero() {
-        let event = EventPage {
-            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
-            payload: None,
-            created_at: None,
-            no_commit: false,
-            cascade_id: None,
-        };
-        assert_eq!(BigtableEventStore::get_sequence(&event), 0);
+        assert_eq!(BigtableEventStore::get_sequence(&event_with_seq(0)), 0);
     }
 }
 
@@ -201,9 +265,12 @@ mod mutation_tests {
 
     #[test]
     fn test_build_event_mutations() {
-        use crate::proto::event_page;
+        use crate::proto::{event_page, page_header::SequenceType, PageHeader};
         let event = EventPage {
-            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(SequenceType::Sequence(0)),
+            }),
             payload: Some(event_page::Payload::Event(prost_types::Any {
                 type_url: "test.Event".to_string(),
                 value: vec![1, 2, 3],

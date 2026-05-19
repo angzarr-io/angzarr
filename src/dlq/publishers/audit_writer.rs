@@ -33,6 +33,72 @@ fn replay_mode_str(m: ReplayMode) -> &'static str {
 }
 
 // ============================================================================
+// H-32: bootstrap guard — SQLite audit is single-writer
+// ============================================================================
+//
+// SQLite is fundamentally single-writer. Two status pods writing to the same
+// SQLite audit file produce SQLITE_BUSY at best (concurrent INSERTs serialize
+// behind the per-file lock) and corruption at worst. Per-pod files partition
+// the audit history, which is the C-31 case H-29/H-30/H-31 surfaced. The
+// deployment default is `replicas: 2`, so the SQLite path can only be used
+// safely when explicitly downscaled to one pod — typically dev.
+//
+// The helm chart injects the configured replica count into the pod via
+// `POD_REPLICAS={{ .Values.infrastructure.status.replicas }}`. The status
+// binary reads it at startup and calls `guard_sqlite_audit_against_replicas`
+// before constructing a `SqliteReplayAuditWriter`. The guard aborts startup
+// with a clear, operator-actionable error when the configuration would race.
+//
+// Env-var-name parameter (`read_pod_replicas_from_env_var`) is plumbed for
+// testability: production callers pass `"POD_REPLICAS"`; tests use a unique
+// key to avoid process-global races.
+
+/// Default env var injected by the helm chart's status-deployment template.
+pub const POD_REPLICAS_ENV_VAR: &str = "POD_REPLICAS";
+
+/// Read replica count from `POD_REPLICAS_ENV_VAR` (or the supplied alias),
+/// defaulting to 1 when the variable is absent or unparseable.
+///
+/// Fail-safe to the single-writer assumption: an unset / garbage value
+/// produces `1`, so the guard accepts (correct for in-process / dev).
+/// Production deployments rely on the helm chart explicitly setting the
+/// variable.
+pub fn read_pod_replicas_from_env_var(env_var: &str) -> u32 {
+    std::env::var(env_var)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1)
+}
+
+/// Read replica count from the canonical `POD_REPLICAS` env var.
+pub fn read_pod_replicas() -> u32 {
+    read_pod_replicas_from_env_var(POD_REPLICAS_ENV_VAR)
+}
+
+/// Refuse to start a SQLite audit writer when the pod is configured for
+/// multiple replicas. The deployment must either downscale to 1 or switch
+/// to the Postgres backend (which is multi-writer safe via row-level locks
+/// + the H-31 UNIQUE-on-idempotency_key fence).
+///
+/// Returns `Ok(())` for `replica_count <= 1` (the supported single-writer
+/// configuration). Returns `DlqError::Connection` with an operator-actionable
+/// message for `replica_count > 1`.
+pub fn guard_sqlite_audit_against_replicas(replica_count: u32) -> Result<(), DlqError> {
+    if replica_count <= 1 {
+        return Ok(());
+    }
+    Err(DlqError::Connection(format!(
+        "SQLite replay-audit writer is single-writer and cannot run with \
+         POD_REPLICAS={replica_count} (>1). Two pods writing the same SQLite \
+         file produce SQLITE_BUSY/corruption, and per-pod files partition the \
+         audit history (the H-29/H-31 idempotency contract assumes a shared \
+         backend). Switch to the Postgres audit backend for multi-replica \
+         deployments, or scale infrastructure.status.replicas down to 1 \
+         (dev only). See plans/deep-review-remediation.md H-32."
+    )))
+}
+
+// ============================================================================
 // SQLite writer + migrations (always compiled)
 // ============================================================================
 
@@ -45,7 +111,11 @@ impl SqliteReplayAuditWriter {
     /// Open a pool against the SQLite URI. Caller should run
     /// [`run_sqlite_migrations`] before recording, but `record`
     /// surfaces a clear error if the table is missing.
+    ///
+    /// H-32: refuses to construct when `POD_REPLICAS>1` — see
+    /// [`guard_sqlite_audit_against_replicas`].
     pub async fn new(uri: &str) -> Result<Self, DlqError> {
+        guard_sqlite_audit_against_replicas(read_pod_replicas())?;
         let pool = sqlx::SqlitePool::connect(uri)
             .await
             .map_err(|e| DlqError::Connection(format!("Failed to connect to SQLite: {}", e)))?;
@@ -53,6 +123,8 @@ impl SqliteReplayAuditWriter {
         Ok(Self { pool })
     }
 
+    /// Construct from an existing pool. Test entry point that bypasses the
+    /// H-32 replica guard (production callers go through `new`).
     pub fn from_pool(pool: sqlx::SqlitePool) -> Self {
         Self { pool }
     }

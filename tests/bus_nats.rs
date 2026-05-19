@@ -81,11 +81,21 @@ async fn test_nats_event_bus() {
     let (_container, client) = start_nats().await;
     let prefix = test_prefix();
 
-    let bus = NatsEventBus::new(client, Some(&prefix))
+    let bus = NatsEventBus::new(client.clone(), Some(&prefix))
         .await
         .expect("Failed to create NATS EventBus");
 
     run_event_bus_tests!(&bus, &prefix);
+
+    // H-11: per-root ordering contract test. Re-create the bus inside an
+    // Arc so the helper can clone it across concurrent producer tasks
+    // (`NatsEventBus` does not implement `Clone`).
+    let bus_arc: Arc<dyn EventBus> = Arc::new(
+        NatsEventBus::new(client.clone(), Some(&prefix))
+            .await
+            .expect("Failed to create NATS EventBus for ordering test"),
+    );
+    run_per_root_ordering_test!(bus_arc, &prefix);
 
     println!("=== All NATS EventBus tests PASSED ===");
 }

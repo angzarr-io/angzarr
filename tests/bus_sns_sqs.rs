@@ -105,6 +105,20 @@ async fn test_sns_sqs_event_bus() {
 
     run_event_bus_tests!(&bus, &prefix);
 
+    // H-11: per-root ordering contract test. Re-create the bus inside an
+    // Arc so the helper can clone it across concurrent producer tasks
+    // (`SnsSqsEventBus` does not implement `Clone`).
+    let bus_arc: std::sync::Arc<dyn angzarr::bus::EventBus> = std::sync::Arc::new(
+        SnsSqsEventBus::new(
+            SnsSqsConfig::publisher()
+                .with_endpoint(&endpoint_url)
+                .with_region("us-east-1"),
+        )
+        .await
+        .expect("Failed to create SNS/SQS publisher for ordering test"),
+    );
+    run_per_root_ordering_test!(bus_arc, &prefix);
+
     println!("=== All SNS/SQS EventBus tests PASSED ===");
 }
 

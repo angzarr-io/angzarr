@@ -129,5 +129,15 @@ async fn test_pubsub_event_bus() {
 
     run_event_bus_tests!(&bus, &prefix);
 
+    // H-11: per-root ordering contract test. Re-create the bus inside an
+    // Arc so the helper can clone it across concurrent producer tasks
+    // (`PubSubEventBus` does not implement `Clone`).
+    let bus_arc: std::sync::Arc<dyn angzarr::bus::EventBus> = std::sync::Arc::new(
+        PubSubEventBus::new(PubSubConfig::publisher("test-project"))
+            .await
+            .expect("Failed to create Pub/Sub publisher for ordering test"),
+    );
+    run_per_root_ordering_test!(bus_arc, &prefix);
+
     println!("=== All Pub/Sub EventBus tests PASSED ===");
 }

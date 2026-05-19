@@ -78,16 +78,34 @@ impl BigtableSnapshotStore {
     }
 
     /// Build the row key for a snapshot.
+    ///
+    /// H-26: percent-encode `domain` and `edition` so any `#` in either
+    /// component is unambiguous on parse.
     pub fn row_key(domain: &str, edition: &str, root: Uuid, sequence: u32) -> Vec<u8> {
-        format!("{}#{}#{}#{:010}", domain, edition, root, sequence).into_bytes()
+        format!(
+            "{}#{}#{}#{:010}",
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition),
+            root,
+            sequence
+        )
+        .into_bytes()
     }
 
     /// Build the row key prefix for scanning all snapshots of a root.
     pub fn row_key_prefix(domain: &str, edition: &str, root: Uuid) -> Vec<u8> {
-        format!("{}#{}#{}#", domain, edition, root).into_bytes()
+        format!(
+            "{}#{}#{}#",
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition),
+            root
+        )
+        .into_bytes()
     }
 
     /// Parse row key into (domain, edition, root, sequence).
+    ///
+    /// H-26: percent-decode components back to their original form.
     pub fn parse_row_key(key: &[u8]) -> Option<(String, String, Uuid, u32)> {
         let key_str = String::from_utf8(key.to_vec()).ok()?;
         let parts: Vec<&str> = key_str.splitn(4, '#').collect();
@@ -96,8 +114,8 @@ impl BigtableSnapshotStore {
             return None;
         }
 
-        let domain = parts[0].to_string();
-        let edition = parts[1].to_string();
+        let domain = crate::storage::helpers::pct_decode_component(parts[0])?;
+        let edition = crate::storage::helpers::pct_decode_component(parts[1])?;
         let root = Uuid::parse_str(parts[2]).ok()?;
         let sequence = parts[3].parse::<u32>().ok()?;
 

@@ -2,13 +2,36 @@
 //!
 //! Provides convenient accessors for sequence, type URL, and payload decoding.
 
-use super::constants::TYPE_URL_PREFIX;
 use crate::proto::page_header::SequenceType;
 use crate::proto::{
     AngzarrDeferredSequence, CommandPage, EventPage, ExternalDeferredSequence, MergeStrategy,
     PageHeader,
 };
 use prost::Name;
+
+/// Extract the message-name suffix from a protobuf `Any.type_url`.
+///
+/// Three shapes appear in the wild:
+///   - `type.googleapis.com/{full_name}` — the well-known default
+///     emitted by `Any.Pack()` in every language SDK.
+///   - `/{full_name}` — prost's `prost::Name::type_url()` default; bare
+///     leading slash, no domain (proto3's canonical form).
+///   - `type.angzarr.io/{full_name}` — angzarr's framework prefix used
+///     for Confirmation / Revocation / Compensate / NoOp / Notification.
+///
+/// Stripping everything up to and including the LAST `/` collapses all
+/// three to `{full_name}`. Strings without a `/` fall back to the whole
+/// value (permissive — same posture as prost's `Any.type_url`-relaxed
+/// decode).
+///
+/// H-41: pre-fix `decode_typed` accepted only shape 1, so an Any built
+/// via `M::type_url()` (shape 2) silently failed `decode_typed::<M>()`.
+fn type_url_suffix(type_url: &str) -> &str {
+    match type_url.rsplit_once('/') {
+        Some((_, suffix)) => suffix,
+        None => type_url,
+    }
+}
 
 /// Extension trait for PageHeader.
 pub trait PageHeaderExt {
@@ -121,8 +144,10 @@ impl EventPageExt for EventPage {
             Some(crate::proto::event_page::Payload::Event(e)) => e,
             _ => return None,
         };
-        let expected = format!("{}{}", TYPE_URL_PREFIX, M::full_name());
-        if event.type_url != expected {
+        // H-41: compare the message-name SUFFIX, not the full URL. Accepts
+        // `type.googleapis.com/{name}`, `/{name}` (prost default), and
+        // `type.angzarr.io/{name}`.
+        if type_url_suffix(&event.type_url) != M::full_name() {
             return None;
         }
         M::decode(event.value.as_slice()).ok()
@@ -199,8 +224,10 @@ impl CommandPageExt for CommandPage {
             Some(crate::proto::command_page::Payload::Command(c)) => c,
             _ => return None,
         };
-        let expected = format!("{}{}", TYPE_URL_PREFIX, M::full_name());
-        if command.type_url != expected {
+        // H-41: compare the message-name SUFFIX, not the full URL. Accepts
+        // `type.googleapis.com/{name}`, `/{name}` (prost default), and
+        // `type.angzarr.io/{name}`.
+        if type_url_suffix(&command.type_url) != M::full_name() {
             return None;
         }
         M::decode(command.value.as_slice()).ok()
@@ -236,3 +263,7 @@ impl AngzarrDeferredSequenceExt for AngzarrDeferredSequence {
         )
     }
 }
+
+#[cfg(test)]
+#[path = "pages.test.rs"]
+mod tests;

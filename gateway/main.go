@@ -20,6 +20,11 @@ import (
 
 	"github.com/angzarr-io/angzarr/gateway/discovery"
 	gw "github.com/angzarr-io/angzarr/gateway/gen/angzarr_client/proto/angzarr"
+	// H-42: angzarr-status DLQ admin protos live under core/main/proto and
+	// generate into gen/angzarr/status (their own go_package). The REST
+	// surface (`/api/dlq`, `/api/dlq/{id}`, etc.) is dead unless we
+	// register this handler.
+	status "github.com/angzarr-io/angzarr/gateway/gen/angzarr/status"
 )
 
 //go:embed api/*
@@ -73,6 +78,13 @@ func main() {
 	}
 	if err := gw.RegisterProcessManagerCoordinatorServiceHandler(ctx, gwMux, conn); err != nil {
 		log.Fatalf("Failed to register ProcessManagerCoordinatorService handler: %v", err)
+	}
+	// H-42: DLQ admin REST routes (GET /api/dlq, GET /api/dlq/{id},
+	// DELETE /api/dlq/{id}, POST /api/dlq/{id}/replay). Connected to the
+	// same gRPC backend; the angzarr-status pod serves DlqAdminService on
+	// that endpoint via the in-process command-handler binary.
+	if err := status.RegisterDlqAdminServiceHandler(ctx, gwMux, conn); err != nil {
+		log.Fatalf("Failed to register DlqAdminService handler: %v", err)
 	}
 
 	// Load base OpenAPI spec

@@ -120,9 +120,14 @@ pub trait SagaRetryContext: Send + Sync {
     ///
     /// `destination_sequences` maps domain names to their `next_sequence` values.
     /// Sagas use these via `stamp_command()` helper to stamp commands correctly.
+    ///
+    /// `sync_mode` is the flow mode inherited from `orchestrate_saga`'s caller.
+    /// Distributed (gRPC) impls stamp it onto the outgoing SagaHandleRequest
+    /// (H-17); in-process impls may ignore it.
     async fn handle(
         &self,
         destination_sequences: HashMap<String, u32>,
+        sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Handle a permanently rejected command (compensation, logging, etc.)
@@ -411,8 +416,10 @@ pub async fn orchestrate_saga(
 
     // Phase 2: Execute saga translation
     // Saga receives source events and destination sequences for command stamping.
+    // Pass the inherited sync_mode so distributed (gRPC) contexts can stamp it
+    // onto the outgoing SagaHandleRequest instead of hardcoding Simple (H-17).
     let saga_response = ctx
-        .handle(destination_sequences)
+        .handle(destination_sequences, sync_mode)
         .await
         .map_err(|e| BusError::Publish(e.to_string()))?;
 

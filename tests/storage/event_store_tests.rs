@@ -497,6 +497,33 @@ pub async fn test_get_from_to_empty<S: EventStore>(store: &S) {
     assert!(events.is_empty(), "out of range should be empty");
 }
 
+/// H-25: `get_from_to(from, to=0)` describes the empty half-open range
+/// `[from, 0)` and must return zero events without panicking.
+///
+/// Pre-fix, `dynamo` computed `to - 1` as a bare `u32` subtraction which
+/// underflowed and panicked for `to == 0`. Other backends had latent bugs
+/// of the same shape — this test pins the contract across all of them.
+pub async fn test_get_from_to_zero_to<S: EventStore>(store: &S) {
+    let domain = "test_range_zero_to";
+    let root = Uuid::new_v4();
+
+    store
+        .add(domain, "test", root, make_events(0, 3), "", None, None)
+        .await
+        .expect("add should succeed");
+
+    // `[0, 0)` is the empty range — must not panic and must return zero events.
+    let events = store
+        .get_from_to(domain, "test", root, 0, 0)
+        .await
+        .expect("get_from_to(0, 0) must not panic");
+    assert!(
+        events.is_empty(),
+        "[0, 0) is the empty half-open range, expected 0 events, got {}",
+        events.len()
+    );
+}
+
 // =============================================================================
 // EventStore::list_roots tests
 // =============================================================================
@@ -2536,6 +2563,9 @@ macro_rules! run_event_store_tests {
 
         test_get_from_to_empty($store).await;
         println!("  test_get_from_to_empty: PASSED");
+
+        test_get_from_to_zero_to($store).await;
+        println!("  test_get_from_to_zero_to: PASSED");
 
         // list_roots tests
         test_list_roots_single($store).await;

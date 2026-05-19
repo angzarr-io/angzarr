@@ -201,12 +201,18 @@ impl SagaCoordinatorService for SagaCoord {
         // Gap-fill EventBook if incomplete
         let source = super::fill_gaps_if_needed(self.gap_filler.as_ref(), source).await?;
 
+        // Carry the caller's inherited sync_mode through to the saga handler
+        // so the gRPC saga context stamps it on the wire (H-17). Speculative
+        // execution still respects the requested mode even though it produces
+        // no side effects — handlers can inspect the inherited mode.
+        let sync_mode = SyncMode::try_from(req.sync_mode).unwrap_or(SyncMode::Async);
+
         // Create context and call handle() directly (no command delivery)
         // For speculative execution, pass empty sequences since we're not actually delivering commands
         let ctx = self.factory.create(Arc::new(source));
 
         let response = ctx
-            .handle(std::collections::HashMap::new())
+            .handle(std::collections::HashMap::new(), sync_mode)
             .await
             .map_err(|e| {
                 error!(error = %e, "Saga handler failed");

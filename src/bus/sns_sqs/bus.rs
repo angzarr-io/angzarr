@@ -6,9 +6,9 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
+use aws_sdk_sns::primitives::Blob;
 use aws_sdk_sns::Client as SnsClient;
 use aws_sdk_sqs::Client as SqsClient;
-use base64::prelude::*;
 use prost::Message;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
@@ -20,7 +20,9 @@ use crate::proto_ext::{CoverExt, EventPageExt};
 
 use super::config::SnsSqsConfig;
 use super::consumer::consume_sqs_queue;
-use super::{CORRELATION_ID_ATTR, DOMAIN_ATTR, ROOT_ID_ATTR};
+use super::{
+    CORRELATION_ID_ATTR, DOMAIN_ATTR, MESSAGE_BODY_PLACEHOLDER, PAYLOAD_ATTR, ROOT_ID_ATTR,
+};
 
 /// AWS SNS/SQS event bus implementation.
 ///
@@ -280,9 +282,14 @@ impl EventBus for SnsSqsEventBus {
 
         let topic_arn = self.get_or_create_topic(domain).await?;
 
-        // Serialize the event book
+        // Serialize the event book. The protobuf bytes go into a BINARY
+        // SNS MessageAttribute (`PAYLOAD_ATTR`) — not the SNS body — so
+        // we don't burn 33% of the 256 KiB SNS/SQS budget on base64
+        // overhead the way the previous body-encoded layout did (H-08).
+        // With `RawMessageDelivery=true` on the SQS subscription the
+        // binary attribute is forwarded to SQS verbatim, so the consumer
+        // can read the bytes back with zero decoding.
         let data = book.encode_to_vec();
-        let message = BASE64_STANDARD.encode(&data);
 
         // Build message attributes
         use aws_sdk_sns::types::MessageAttributeValue;
@@ -312,17 +319,29 @@ impl EventBus for SnsSqsEventBus {
                 .build()
                 .map_err(|e| BusError::Publish(format!("Failed to build attribute: {}", e)))?,
         );
+        attrs.insert(
+            PAYLOAD_ATTR.to_string(),
+            MessageAttributeValue::builder()
+                .data_type("Binary")
+                .binary_value(Blob::new(data))
+                .build()
+                .map_err(|e| {
+                    BusError::Publish(format!("Failed to build payload attribute: {}", e))
+                })?,
+        );
 
         #[cfg(feature = "otel")]
         super::otel::sns_inject_trace_context(&mut attrs);
 
         // Publish to SNS. FIFO ordering by aggregate root; dedup_id includes
         // a per-bus publish counter (see `build_fifo_attributes`) so
-        // legitimate retries survive AWS's 5-minute dedup window.
+        // legitimate retries survive AWS's 5-minute dedup window. The
+        // body is a short human-readable placeholder — SNS rejects an
+        // empty `Message`, but the real payload travels in `PAYLOAD_ATTR`.
         self.sns
             .publish()
             .topic_arn(&topic_arn)
-            .message(&message)
+            .message(MESSAGE_BODY_PLACEHOLDER)
             .set_message_attributes(Some(attrs))
             .message_group_id(&root_id)
             .message_deduplication_id(&dedup_id)

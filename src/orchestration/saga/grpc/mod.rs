@@ -62,20 +62,34 @@ impl GrpcSagaContext {
     }
 }
 
+/// Build the outgoing `SagaHandleRequest` for a remote saga invocation.
+///
+/// Pure helper so the H-17 contract (inherited sync_mode reaches the wire)
+/// is unit-testable without spinning up tonic. Stamps the request with the
+/// inherited `sync_mode` (NOT the legacy hardcoded `Simple`).
+pub(super) fn build_saga_handle_request(
+    source: &EventBook,
+    destination_sequences: HashMap<String, u32>,
+    sync_mode: SyncMode,
+) -> SagaHandleRequest {
+    SagaHandleRequest {
+        source: Some(source.clone()),
+        sync_mode: sync_mode.into(),
+        cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
+        destination_sequences,
+    }
+}
+
 #[async_trait]
 impl SagaRetryContext for GrpcSagaContext {
     async fn handle(
         &self,
         destination_sequences: HashMap<String, u32>,
+        sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         let correlation_id = self.source.correlation_id();
         let mut client = self.saga_client.lock().await;
-        let request = SagaHandleRequest {
-            source: Some(self.source.clone()),
-            sync_mode: SyncMode::Simple.into(),
-            cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-            destination_sequences,
-        };
+        let request = build_saga_handle_request(&self.source, destination_sequences, sync_mode);
         let mut response = client
             .handle(correlated_request(request, correlation_id))
             .await

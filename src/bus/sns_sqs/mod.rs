@@ -38,6 +38,30 @@ pub(crate) const CORRELATION_ID_ATTR: &str = "correlation_id";
 /// Message attribute name for aggregate root ID.
 pub(crate) const ROOT_ID_ATTR: &str = "root_id";
 
+/// Message attribute name carrying the raw protobuf-encoded EventBook bytes.
+///
+/// SNS `Publish.Message` is typed `String` (UTF-8) in the AWS SDK, so the
+/// arbitrary bytes of a protobuf serialization cannot be placed there
+/// directly. The historical workaround was to base64-encode the protobuf and
+/// stuff the result in the body — which inflated the payload by ~33% under
+/// the 256 KiB SNS/SQS hard cap (see H-08 in
+/// `plans/deep-review-remediation.md`).
+///
+/// Binary message attributes preserve raw bytes intact under
+/// `RawMessageDelivery=true`, so the publisher now writes the protobuf to
+/// this attribute with `data_type = "Binary"` and the consumer reads it
+/// back without any decoding overhead, recovering the full 256 KiB budget
+/// for the user payload.
+pub(crate) const PAYLOAD_ATTR: &str = "payload";
+
+/// Placeholder body for the SNS `Publish.Message` field.
+///
+/// SNS rejects an empty `Message`; we ship the real protobuf payload in the
+/// `PAYLOAD_ATTR` binary attribute (see above) and reserve the body for a
+/// short human-readable marker that operators can inspect in the AWS
+/// console without having to base64-decode anything.
+pub(crate) const MESSAGE_BODY_PLACEHOLDER: &str = "angzarr-eventbook";
+
 /// Maximum message size in bytes for SNS/SQS transport.
 ///
 /// AWS hard-limits both SNS and SQS message bodies to 256 KiB (262_144 bytes).

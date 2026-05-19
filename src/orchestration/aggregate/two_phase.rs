@@ -103,6 +103,40 @@ pub fn transform_for_two_phase(events: &EventBook, ctx: &TwoPhaseContext) -> Two
     }
 }
 
+/// Check whether an `Any.type_url` carries a given framework message kind
+/// (`"angzarr.Confirmation"`, `"angzarr.Revocation"`, etc.), regardless of
+/// the URL's prefix.
+///
+/// # Why "regardless of prefix"
+///
+/// angzarr stamps its own 2PC framework events with the canonical
+/// `type.angzarr.io/...` prefix (see `type_url::CONFIRMATION` /
+/// `type_url::REVOCATION` / `type_url::COMPENSATE` constants). External
+/// producers — Python, Go, C++ examples — emit Anys with
+/// `type.googleapis.com/...`, which is what every language's `Any.Pack()`
+/// writes by default and what the proto well-known type spec uses in
+/// examples.
+///
+/// Pre-fix, this function did an exact `==` against the angzarr-domain
+/// constant only, so cross-language Confirmations and Revocations were
+/// invisible to the visibility transform — uncommitted events stamped by a
+/// Go saga and committed via a Python coordinator stayed NoOp'd in standard
+/// reads. Stripping everything up to the last `/` covers both shapes
+/// (and prost's `Name::type_url()` default `"/angzarr.Confirmation"` form
+/// for free, mirroring the H-41 fix).
+///
+/// The canonical stamped form remains `type.angzarr.io/...` — this helper
+/// only broadens what's RECOGNIZED, not what we PRODUCE.
+fn is_framework_event_kind(any: &prost_types::Any, full_name: &str) -> bool {
+    let suffix = match any.type_url.rsplit_once('/') {
+        Some((_, s)) => s,
+        // No `/` at all — treat the whole string as the message-name
+        // suffix. Permissive but symmetric with `decode_typed`.
+        None => any.type_url.as_str(),
+    };
+    suffix == full_name
+}
+
 /// Collect confirmed and revoked sequences from framework events.
 fn collect_framework_decisions(events: &EventBook) -> (HashSet<u32>, HashSet<u32>) {
     let mut confirmed = HashSet::new();
@@ -110,11 +144,11 @@ fn collect_framework_decisions(events: &EventBook) -> (HashSet<u32>, HashSet<u32
 
     for page in &events.pages {
         if let Some(event_page::Payload::Event(any)) = &page.payload {
-            if any.type_url == type_url::CONFIRMATION {
+            if is_framework_event_kind(any, "angzarr.Confirmation") {
                 if let Ok(conf) = Confirmation::decode(any.value.as_slice()) {
                     confirmed.extend(conf.sequences.iter().copied());
                 }
-            } else if any.type_url == type_url::REVOCATION {
+            } else if is_framework_event_kind(any, "angzarr.Revocation") {
                 if let Ok(rev) = Revocation::decode(any.value.as_slice()) {
                     revoked.extend(rev.sequences.iter().copied());
                 }
@@ -188,12 +222,16 @@ fn transform_event_page(
 }
 
 /// Check if an event page contains a framework event.
+///
+/// See `is_framework_event_kind` for the cross-prefix rationale (H-40):
+/// accepts both `type.angzarr.io/...` (canonical stamped form) and
+/// `type.googleapis.com/...` (cross-language producers) plus the prost
+/// `Name::type_url()` default `/...` shape (H-41 symmetric).
 fn is_framework_event(page: &EventPage) -> bool {
     if let Some(event_page::Payload::Event(any)) = &page.payload {
-        matches!(
-            any.type_url.as_str(),
-            type_url::CONFIRMATION | type_url::REVOCATION | type_url::COMPENSATE
-        )
+        is_framework_event_kind(any, "angzarr.Confirmation")
+            || is_framework_event_kind(any, "angzarr.Revocation")
+            || is_framework_event_kind(any, "angzarr.Compensate")
     } else {
         false
     }

@@ -43,8 +43,16 @@ impl DynamoSnapshotStore {
     }
 
     /// Build the partition key.
+    ///
+    /// H-26: percent-encode `domain` and `edition` so `#`-containing
+    /// values survive the round-trip; UUIDs are safe as-is.
     fn pk(domain: &str, edition: &str, root: Uuid) -> String {
-        format!("{}#{}#{}", domain, edition, root)
+        format!(
+            "{}#{}#{}",
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition),
+            root
+        )
     }
 }
 

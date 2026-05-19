@@ -32,3 +32,13 @@ plugins:
       - merge_file_name=angzarr
 inputs:
   - directory: ../angzarr-project/proto
+  # H-42: also ingest core/main/proto so status-domain protos (e.g.
+  # dlq_admin.proto, which carries (google.api.http) annotations on
+  # DlqAdminService for REST transcoding) reach the gateway gen step.
+  # Without this input, ListDeadLetters / GetDeadLetter / DeleteDeadLetter /
+  # ReplayDeadLetter have no REST surface via this gateway and the
+  # angzarr-status SPA cannot reach the DLQ admin tile.
+  #
+  # Path is relative to this buf.gen.yaml file (gateway/), so the status
+  # proto tree sits one directory up at `../proto`.
+  - directory: ../proto

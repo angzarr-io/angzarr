@@ -67,7 +67,16 @@ const HEADER_SOURCE_SEQ: &str = "Angzarr-Source-Seq";
 const CASCADE_STREAM_SUFFIX: &str = "CASCADE";
 
 /// Default query timeout in milliseconds.
-const DEFAULT_QUERY_TIMEOUT_MS: u64 = 100;
+///
+/// H-19: previously 100 ms — far too short for any non-trivial aggregate
+/// on networked NATS. A timeout fires inside `query_events`'s drain loop
+/// and pre-fix that was silently treated as "consumer exhausted", so any
+/// events that hadn't arrived yet were dropped. We bump to 30 s (matches
+/// the rest of the codebase's "human-scale" RPC timeouts) and pair the
+/// bump with an exhaustion-detection check (see `query_events`) so the
+/// caller surfaces an explicit `StorageError::Nats("query timeout: ...")`
+/// instead of returning a silently-truncated `Vec<EventPage>`.
+const DEFAULT_QUERY_TIMEOUT_MS: u64 = 30_000;
 
 /// EventStore backed by NATS JetStream streams.
 ///
@@ -270,6 +279,26 @@ impl NatsEventStore {
 
     /// Query events from a specific subject starting at a given sequence.
     /// Reads EventBook messages and extracts pages (same format as EventBus).
+    ///
+    /// # H-19: explicit timeout failure mode
+    ///
+    /// JetStream pull consumers have no "end of stream" signal — once the
+    /// stored messages drain, `messages.next()` blocks waiting for new
+    /// publishes. The drain loop therefore terminates on the timeout. To
+    /// avoid silently dropping events that just hadn't arrived yet, we:
+    ///
+    ///   1. Probe `get_max_sequence` first to learn the per-aggregate
+    ///      high-water mark we're expected to see.
+    ///   2. Drain the consumer with `tokio::time::timeout(self.query_timeout, …)`.
+    ///   3. If the loop exits before we've read a page with `seq ==
+    ///      expected_max`, surface an explicit
+    ///      `StorageError::Nats("query timeout: …")` so the caller can
+    ///      retry or fail loudly. Pre-fix this branch returned the
+    ///      truncated `Vec` silently — that was the H-19 bug.
+    ///
+    /// The probe is best-effort: if `get_max_sequence` returns `None`
+    /// (stream doesn't exist or no messages yet) we trust the drain and
+    /// return whatever we read, including the empty case.
     async fn query_events(
         &self,
         domain: &str,
@@ -284,6 +313,11 @@ impl NatsEventStore {
             Ok(s) => s,
             Err(_) => return Ok(Vec::new()),
         };
+
+        // H-19: probe the expected last sequence so we can detect an
+        // incomplete drain. `None` means "no messages stored yet" — the
+        // drain has nothing to read and the empty-Vec return is correct.
+        let expected_max = self.get_max_sequence(domain, edition, root).await?;
 
         // Create ephemeral consumer for this query
         let consumer_name = format!("query-{}", Uuid::new_v4());
@@ -304,22 +338,67 @@ impl NatsEventStore {
             .map_err(|e| StorageError::Nats(format!("Failed to get message stream: {}", e)))?;
 
         let mut events = Vec::new();
+        let mut highest_seen: Option<u32> = None;
+        let mut timed_out = false;
 
         // Fetch all messages (EventBooks) and extract pages
-        while let Ok(Some(msg)) = tokio::time::timeout(self.query_timeout, messages.next()).await {
-            let msg =
-                msg.map_err(|e| StorageError::Nats(format!("Failed to receive message: {}", e)))?;
+        loop {
+            match tokio::time::timeout(self.query_timeout, messages.next()).await {
+                Ok(Some(msg)) => {
+                    let msg = msg.map_err(|e| {
+                        StorageError::Nats(format!("Failed to receive message: {}", e))
+                    })?;
 
-            // Decode as EventBook (unified format with EventBus)
-            let book =
-                EventBook::decode(msg.payload.as_ref()).map_err(StorageError::ProtobufDecode)?;
+                    // Decode as EventBook (unified format with EventBus)
+                    let book = EventBook::decode(msg.payload.as_ref())
+                        .map_err(StorageError::ProtobufDecode)?;
 
-            // Extract pages and filter by sequence
-            for page in book.pages {
-                let seq = Self::get_sequence(&page);
-                if seq >= from {
-                    events.push(page);
+                    // Extract pages and filter by sequence
+                    for page in book.pages {
+                        let seq = Self::get_sequence(&page);
+                        highest_seen = Some(highest_seen.map_or(seq, |h| h.max(seq)));
+                        if seq >= from {
+                            events.push(page);
+                        }
+                    }
                 }
+                // `Ok(None)` — the message stream ended cleanly.
+                Ok(None) => break,
+                // `Err(_)` — the per-call timeout fired.
+                Err(_) => {
+                    timed_out = true;
+                    break;
+                }
+            }
+        }
+
+        // H-19: detect incomplete reads. If we timed out AND we haven't
+        // seen the highest sequence the stream says exists, surface an
+        // explicit error rather than returning truncated data.
+        if timed_out {
+            let incomplete = match (expected_max, highest_seen) {
+                // We expected `m` but the last page we observed has a
+                // smaller sequence — the timeout fired mid-drain.
+                (Some(m), Some(h)) if h < m => true,
+                // We expected events but read none — definitely
+                // incomplete.
+                (Some(_), None) => true,
+                // No expected high-water mark, or we've reached/exceeded
+                // it — the drain is complete enough.
+                _ => false,
+            };
+            if incomplete {
+                return Err(StorageError::Nats(format!(
+                    "query timeout: drained {}/{} expected events for {}@{} (root {}) before \
+                     {} ms timeout fired — increase NatsEventStore::with_query_timeout or \
+                     reduce aggregate size",
+                    highest_seen.map(|h| h + 1).unwrap_or(0),
+                    expected_max.map(|m| m + 1).unwrap_or(0),
+                    domain,
+                    edition,
+                    root,
+                    self.query_timeout.as_millis()
+                )));
             }
         }
 

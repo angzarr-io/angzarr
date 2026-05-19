@@ -71,6 +71,7 @@ impl crate::orchestration::saga::SagaRetryContext for MockSagaContext {
     async fn handle(
         &self,
         _destination_sequences: std::collections::HashMap<String, u32>,
+        _sync_mode: crate::proto::SyncMode,
     ) -> Result<crate::proto::SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(crate::proto::SagaResponse {
             commands: self.commands.clone(),

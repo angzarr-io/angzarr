@@ -38,9 +38,19 @@ impl DynamoPositionStore {
     }
 
     /// Build the partition key.
+    ///
+    /// H-26: percent-encode `handler`, `domain`, and `edition` so any
+    /// `#` in any of them survives a round-trip. `root_hex` is bare hex
+    /// (no separator characters) so it's safe as-is.
     fn pk(handler: &str, domain: &str, edition: &str, root: &[u8]) -> String {
         let root_hex = hex::encode(root);
-        format!("{}#{}#{}#{}", handler, domain, edition, root_hex)
+        format!(
+            "{}#{}#{}#{}",
+            crate::storage::helpers::pct_encode_component(handler),
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition),
+            root_hex
+        )
     }
 }
 

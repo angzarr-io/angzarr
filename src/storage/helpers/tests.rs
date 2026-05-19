@@ -298,3 +298,65 @@ fn test_timestamp_to_rfc3339_invalid() {
     let result = timestamp_to_rfc3339(&ts);
     assert!(matches!(result, Err(StorageError::InvalidTimestamp { .. })));
 }
+
+// ============================================================================
+// H-26: Percent-encoding tests
+// ============================================================================
+
+#[test]
+fn pct_encode_passes_through_plain_strings() {
+    assert_eq!(pct_encode_component("orders"), "orders");
+    assert_eq!(pct_encode_component("main"), "main");
+    assert_eq!(
+        pct_encode_component("12345678-1234-1234-1234-123456789abc"),
+        "12345678-1234-1234-1234-123456789abc"
+    );
+}
+
+#[test]
+fn pct_encode_escapes_hash_and_percent() {
+    assert_eq!(pct_encode_component("orders#alpha"), "orders%23alpha");
+    assert_eq!(pct_encode_component("a%b"), "a%25b");
+    assert_eq!(pct_encode_component("#"), "%23");
+    assert_eq!(pct_encode_component("%"), "%25");
+    // Percent must be encoded BEFORE hash so a literal `%23` round-trips
+    // to itself rather than being decoded as `#`.
+    assert_eq!(pct_encode_component("%23"), "%2523");
+}
+
+#[test]
+fn pct_decode_inverts_encode() {
+    for s in [
+        "",
+        "plain",
+        "orders#alpha",
+        "a%b",
+        "%23",
+        "##",
+        "a#b#c",
+        "%",
+        "%23%25%23",
+    ] {
+        let encoded = pct_encode_component(s);
+        let decoded = pct_decode_component(&encoded).expect("decode after encode must succeed");
+        assert_eq!(decoded, s, "round-trip failed for {:?}", s);
+    }
+}
+
+#[test]
+fn pct_decode_rejects_malformed_escapes() {
+    // `%` not followed by two characters.
+    assert!(pct_decode_component("%").is_none());
+    assert!(pct_decode_component("%2").is_none());
+    // Unknown escape: not `%23` or `%25`.
+    assert!(pct_decode_component("%41").is_none()); // `A` — valid hex but not in alphabet
+    assert!(pct_decode_component("%gg").is_none());
+}
+
+#[test]
+fn pct_encode_preserves_uuid_hyphens() {
+    // UUIDs are a common component — confirm hyphens pass through.
+    let uuid_str = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+    assert_eq!(pct_encode_component(uuid_str), uuid_str);
+    assert_eq!(pct_decode_component(uuid_str).unwrap(), uuid_str);
+}

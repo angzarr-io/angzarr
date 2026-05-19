@@ -143,16 +143,39 @@ impl BigtableEventStore {
     }
 
     /// Build the row key for an event.
+    ///
+    /// H-26: `domain` and `edition` are percent-encoded so any `#` in
+    /// either component is escaped and the row-key parser can recover
+    /// the original strings. The `root` UUID and zero-padded sequence
+    /// contain only hex/digits/hyphens and need no escaping.
     pub fn row_key(domain: &str, edition: &str, root: Uuid, sequence: u32) -> Vec<u8> {
-        format!("{}#{}#{}#{:010}", domain, edition, root, sequence).into_bytes()
+        format!(
+            "{}#{}#{}#{:010}",
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition),
+            root,
+            sequence
+        )
+        .into_bytes()
     }
 
     /// Build the row key prefix for scanning all events of a root.
     pub fn row_key_prefix(domain: &str, edition: &str, root: Uuid) -> Vec<u8> {
-        format!("{}#{}#{}#", domain, edition, root).into_bytes()
+        format!(
+            "{}#{}#{}#",
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition),
+            root
+        )
+        .into_bytes()
     }
 
     /// Parse row key into (domain, edition, root, sequence).
+    ///
+    /// H-26: components are percent-decoded back to their original form;
+    /// any malformed escape sequence (introduced by external writes
+    /// that didn't go through `row_key`) returns `None` so callers
+    /// surface a parse error rather than silently dropping data.
     pub fn parse_row_key(key: &[u8]) -> Option<(String, String, Uuid, u32)> {
         let key_str = String::from_utf8(key.to_vec()).ok()?;
         let parts: Vec<&str> = key_str.splitn(4, '#').collect();
@@ -161,8 +184,8 @@ impl BigtableEventStore {
             return None;
         }
 
-        let domain = parts[0].to_string();
-        let edition = parts[1].to_string();
+        let domain = crate::storage::helpers::pct_decode_component(parts[0])?;
+        let edition = crate::storage::helpers::pct_decode_component(parts[1])?;
         let root = Uuid::parse_str(parts[2]).ok()?;
         let sequence = parts[3].parse::<u32>().ok()?;
 
@@ -300,6 +323,10 @@ impl BigtableEventStore {
     }
 
     /// Build row key for cascade index table.
+    ///
+    /// H-26: percent-encode `cascade_id`, `domain`, and `edition` so any
+    /// `#` in any of them survives a round-trip through the row-key
+    /// parser. UUIDs and the zero-padded sequence are safe as-is.
     pub fn cascade_index_row_key(
         cascade_id: &str,
         domain: &str,
@@ -309,12 +336,18 @@ impl BigtableEventStore {
     ) -> Vec<u8> {
         format!(
             "{}#{}#{}#{}#{:010}",
-            cascade_id, domain, edition, root, sequence
+            crate::storage::helpers::pct_encode_component(cascade_id),
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition),
+            root,
+            sequence
         )
         .into_bytes()
     }
 
     /// Parse cascade index row key into (cascade_id, domain, edition, root, sequence).
+    ///
+    /// H-26: components are percent-decoded back to their original form.
     pub fn parse_cascade_index_key(key: &[u8]) -> Option<(String, String, String, Uuid, u32)> {
         let key_str = String::from_utf8(key.to_vec()).ok()?;
         let parts: Vec<&str> = key_str.splitn(5, '#').collect();
@@ -323,9 +356,9 @@ impl BigtableEventStore {
             return None;
         }
 
-        let cascade_id = parts[0].to_string();
-        let domain = parts[1].to_string();
-        let edition = parts[2].to_string();
+        let cascade_id = crate::storage::helpers::pct_decode_component(parts[0])?;
+        let domain = crate::storage::helpers::pct_decode_component(parts[1])?;
+        let edition = crate::storage::helpers::pct_decode_component(parts[2])?;
         let root = Uuid::parse_str(parts[3]).ok()?;
         let sequence = parts[4].parse::<u32>().ok()?;
 
@@ -854,6 +887,16 @@ impl EventStore for BigtableEventStore {
         from: u32,
         to: u32,
     ) -> Result<Vec<EventPage>> {
+        // H-25: half-open range `[from, to)`. `to == 0` (and `to <= from`)
+        // are empty by definition. Without the short-circuit, the
+        // saturating_sub would build an `EndKeyClosed` row key for
+        // `to_inclusive == 0` paired with a `StartKeyClosed` at `from`,
+        // which Bigtable interprets as a single-row read at `from=0`
+        // (returning the seq=0 row that shouldn't be in the half-open
+        // result) or an inverted range (silent empty).
+        if to <= from {
+            return Ok(Vec::new());
+        }
         let start_key = Self::row_key(domain, edition, root, from);
         let end_key = Self::row_key(domain, edition, root, to.saturating_sub(1));
 
@@ -901,7 +944,13 @@ impl EventStore for BigtableEventStore {
     }
 
     async fn list_roots(&self, domain: &str, edition: &str) -> Result<Vec<Uuid>> {
-        let prefix = format!("{}#{}#", domain, edition).into_bytes();
+        // H-26: percent-encode prefix components to match `row_key`.
+        let prefix = format!(
+            "{}#{}#",
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition)
+        )
+        .into_bytes();
 
         let mut client = self.client.lock().await;
         let table_name = client.get_full_table_name(&self.table_name);
@@ -1100,7 +1149,13 @@ impl EventStore for BigtableEventStore {
     }
 
     async fn delete_edition_events(&self, domain: &str, edition: &str) -> Result<u32> {
-        let prefix = format!("{}#{}#", domain, edition).into_bytes();
+        // H-26: percent-encode prefix components to match `row_key`.
+        let prefix = format!(
+            "{}#{}#",
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition)
+        )
+        .into_bytes();
 
         let mut client = self.client.lock().await;
         let table_name = client.get_full_table_name(&self.table_name);
@@ -1343,7 +1398,12 @@ impl EventStore for BigtableEventStore {
         let table_name = client.get_full_table_name(&self.cascade_index_table);
 
         // Prefix scan for rows starting with {cascade_id}#
-        let prefix = format!("{}#", cascade_id).into_bytes();
+        // H-26: percent-encode `cascade_id` to match `cascade_index_row_key`.
+        let prefix = format!(
+            "{}#",
+            crate::storage::helpers::pct_encode_component(cascade_id)
+        )
+        .into_bytes();
         let mut end_prefix = prefix.clone();
         if let Some(last) = end_prefix.last_mut() {
             *last = last.saturating_add(1);

@@ -1,11 +1,12 @@
 //! SQS consumer helpers for message processing.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use aws_sdk_sqs::types::MessageAttributeValue;
 use aws_sdk_sqs::Client as SqsClient;
 use backon::{BackoffBuilder, ExponentialBuilder};
-use base64::prelude::*;
 use prost::Message;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, Instrument};
@@ -13,7 +14,45 @@ use tracing::{debug, error, info, Instrument};
 use crate::bus::traits::{domain_matches_any, EventHandler};
 use crate::proto::EventBook;
 
-use super::DOMAIN_ATTR;
+use super::{DOMAIN_ATTR, PAYLOAD_ATTR};
+
+/// Extract the protobuf-encoded EventBook bytes from the binary
+/// `PAYLOAD_ATTR` message attribute.
+///
+/// # Contract
+///
+/// The publisher (`bus::publish`) writes the protobuf bytes to a binary
+/// SNS MessageAttribute keyed by `PAYLOAD_ATTR`. With
+/// `RawMessageDelivery=true` on the SQS subscription, the binary
+/// attribute is forwarded to SQS verbatim, so the consumer can read the
+/// bytes without any decoding overhead — recovering the ~33% of the
+/// 256 KiB budget the previous base64-in-body layout consumed (H-08).
+///
+/// Returns `None` when:
+///   * the attribute is missing entirely (malformed message — caller
+///     should treat as a decode error and drop it),
+///   * the attribute is present but typed as `String`/`Number` instead
+///     of `Binary` (protocol mismatch — likely an old publisher that
+///     still base64-encodes into the body; caller should drop).
+///
+/// Returns `Some(bytes)` (possibly empty) when a binary attribute is
+/// present. An empty Vec is preserved deliberately: the wire-level
+/// presence/absence of the binary attribute is meaningful, even if the
+/// byte count is zero.
+///
+/// # Purity
+///
+/// This helper is a pure function (no AWS SDK calls, no I/O, no time) so
+/// it can be unit-tested directly without Floci/LocalStack. See
+/// `consumer.test.rs` for the H-08 regression suite.
+pub(crate) fn extract_payload_bytes(
+    attrs: &HashMap<String, MessageAttributeValue>,
+) -> Option<Vec<u8>> {
+    attrs
+        .get(PAYLOAD_ATTR)
+        .and_then(|v| v.binary_value())
+        .map(|blob| blob.as_ref().to_vec())
+}
 
 /// Result of processing an SQS message.
 #[derive(Debug)]
@@ -22,7 +61,8 @@ pub(crate) enum SqsProcessResult {
     Success,
     /// Message didn't match domain filter - delete it.
     Filtered,
-    /// Message couldn't be decoded (base64 or protobuf) - delete it.
+    /// Message couldn't be decoded (missing/non-binary payload attribute
+    /// or invalid protobuf) - delete it.
     DecodeError,
     /// Handler failed - let visibility timeout retry.
     HandlerFailed,
@@ -48,7 +88,7 @@ pub(crate) async fn delete_sqs_message(sqs: &SqsClient, queue_url: &str, receipt
 /// Process a single SQS message.
 ///
 /// Handles the complete decode → filter → dispatch cycle:
-/// 1. Decode base64 body
+/// 1. Extract protobuf bytes from the binary `PAYLOAD_ATTR` attribute
 /// 2. Check domain filter
 /// 3. Decode EventBook protobuf
 /// 4. Dispatch to handlers
@@ -58,25 +98,42 @@ pub(crate) async fn process_sqs_message(
     handlers: &Arc<RwLock<Vec<Box<dyn EventHandler>>>>,
     filter_domains: &[String],
 ) -> SqsProcessResult {
-    // Get message body
-    let body = match message.body() {
-        Some(b) => b,
-        None => return SqsProcessResult::DecodeError,
+    // Extract protobuf bytes from the binary payload attribute.
+    //
+    // The publisher writes the protobuf-encoded EventBook to the
+    // `PAYLOAD_ATTR` binary MessageAttribute (see H-08); under
+    // `RawMessageDelivery=true` the binary value is forwarded verbatim
+    // to SQS, so we read the bytes directly without any decoding
+    // overhead. A missing or non-binary attribute is a protocol error
+    // (the message is malformed or came from a pre-H-08 publisher that
+    // still base64-encodes into the body) — drop the message so it
+    // doesn't poison the queue.
+    let attrs = match message.message_attributes() {
+        Some(a) => a,
+        None => {
+            error!(
+                "SQS message has no attributes; cannot extract binary payload \
+                 (expected attribute '{}'). Dropping.",
+                PAYLOAD_ATTR
+            );
+            return SqsProcessResult::DecodeError;
+        }
     };
-
-    // Decode base64
-    let data = match BASE64_STANDARD.decode(body) {
-        Ok(d) => d,
-        Err(e) => {
-            error!(error = %e, "Failed to decode base64 message");
+    let data = match extract_payload_bytes(attrs) {
+        Some(d) => d,
+        None => {
+            error!(
+                "SQS message missing binary '{}' attribute; cannot decode EventBook. \
+                 Likely a pre-H-08 publisher or a malformed message. Dropping.",
+                PAYLOAD_ATTR
+            );
             return SqsProcessResult::DecodeError;
         }
     };
 
     // Get domain from message attributes
-    let msg_domain = message
-        .message_attributes()
-        .and_then(|attrs| attrs.get(DOMAIN_ATTR))
+    let msg_domain = attrs
+        .get(DOMAIN_ATTR)
         .and_then(|v| v.string_value())
         .unwrap_or("unknown");
 
@@ -177,3 +234,7 @@ pub(crate) async fn consume_sqs_queue(
         }
     }
 }
+
+#[cfg(test)]
+#[path = "consumer.test.rs"]
+mod tests;

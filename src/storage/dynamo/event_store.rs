@@ -61,19 +61,46 @@ impl DynamoEventStore {
     }
 
     /// Build the partition key for events.
-    fn pk(domain: &str, edition: &str, root: Uuid) -> String {
-        format!("{}#{}#{}", domain, edition, root)
+    ///
+    /// H-26: `domain` and `edition` are percent-encoded so any `#` in
+    /// either component survives the round-trip through `parse_pk`.
+    pub(crate) fn pk(domain: &str, edition: &str, root: Uuid) -> String {
+        format!(
+            "{}#{}#{}",
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition),
+            root
+        )
     }
 
     /// Parse partition key into (domain, edition, root).
-    fn parse_pk(pk: &str) -> Option<(String, String, Uuid)> {
+    ///
+    /// H-26: percent-decode components so `#`-containing names recover.
+    pub(crate) fn parse_pk(pk: &str) -> Option<(String, String, Uuid)> {
         let parts: Vec<&str> = pk.splitn(3, '#').collect();
         if parts.len() == 3 {
+            let domain = crate::storage::helpers::pct_decode_component(parts[0])?;
+            let edition = crate::storage::helpers::pct_decode_component(parts[1])?;
             let root = Uuid::parse_str(parts[2]).ok()?;
-            Some((parts[0].to_string(), parts[1].to_string(), root))
+            Some((domain, edition, root))
         } else {
             None
         }
+    }
+
+    /// H-25 helper: compute the inclusive upper sequence for
+    /// `get_from_to(from, to)` over the half-open range `[from, to)`.
+    ///
+    /// DynamoDB's `BETWEEN :from AND :to` is inclusive on both ends, so
+    /// we need `to - 1` as the inclusive cap. For `to == 0` the range is
+    /// empty by definition; using `saturating_sub` avoids the underflow
+    /// panic that bit pre-fix code, and the inclusive cap of `0` paired
+    /// with `from >= 0` (and the caller's empty-range expectation) yields
+    /// either an empty match or a single seq=0 row depending on `from`.
+    /// Callers should still short-circuit `to == 0`; this helper is the
+    /// last line of defence.
+    pub(crate) fn to_inclusive(to: u32) -> u32 {
+        to.saturating_sub(1)
     }
 
     /// Get sequence from EventPage.
@@ -325,8 +352,15 @@ impl EventStore for DynamoEventStore {
                     "correlation_id".to_string(),
                     AttributeValue::S(correlation_id.to_string()),
                 );
-                // GSI sort key for correlation queries
-                let gsi_sk = format!("{}#{}#{}#{}", domain, edition, root, seq);
+                // GSI sort key for correlation queries (H-26: percent-encode
+                // the component fields so `#` in any of them is unambiguous).
+                let gsi_sk = format!(
+                    "{}#{}#{}#{}",
+                    crate::storage::helpers::pct_encode_component(domain),
+                    crate::storage::helpers::pct_encode_component(edition),
+                    root,
+                    seq
+                );
                 item.insert("gsi_sk".to_string(), AttributeValue::S(gsi_sk));
             }
 
@@ -486,7 +520,17 @@ impl EventStore for DynamoEventStore {
         from: u32,
         to: u32,
     ) -> Result<Vec<EventPage>> {
+        // H-25: half-open range `[from, to)`. `to == 0` (and `to <= from`)
+        // are empty by definition — short-circuit so we never (a) panic
+        // on `(to - 1)` underflow nor (b) issue a query that DynamoDB
+        // would reject as `from > to`. `Self::to_inclusive` is a
+        // defensive saturating helper; the early return keeps callers
+        // from observing any DynamoDB-side asymmetry.
+        if to <= from {
+            return Ok(Vec::new());
+        }
         let pk = Self::pk(domain, edition, root);
+        let to_inclusive = Self::to_inclusive(to);
 
         let result = self
             .client
@@ -495,7 +539,7 @@ impl EventStore for DynamoEventStore {
             .key_condition_expression("pk = :pk AND seq BETWEEN :from AND :to")
             .expression_attribute_values(":pk", AttributeValue::S(pk))
             .expression_attribute_values(":from", AttributeValue::N(from.to_string()))
-            .expression_attribute_values(":to", AttributeValue::N((to - 1).to_string()))
+            .expression_attribute_values(":to", AttributeValue::N(to_inclusive.to_string()))
             .send()
             .await
             .map_err(|e| StorageError::NotImplemented(format!("DynamoDB query failed: {}", e)))?;
@@ -516,7 +560,13 @@ impl EventStore for DynamoEventStore {
 
     async fn list_roots(&self, domain: &str, edition: &str) -> Result<Vec<Uuid>> {
         // Scan with filter - not efficient but DynamoDB doesn't support DISTINCT
-        let prefix = format!("{}#{}#", domain, edition);
+        // H-26: percent-encode the prefix components to match `pk()` so a
+        // `#`-containing domain doesn't silently scan the wrong namespace.
+        let prefix = format!(
+            "{}#{}#",
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition)
+        );
 
         let result = self
             .client
@@ -726,7 +776,12 @@ impl EventStore for DynamoEventStore {
     }
 
     async fn delete_edition_events(&self, domain: &str, edition: &str) -> Result<u32> {
-        let prefix = format!("{}#{}#", domain, edition);
+        // H-26: percent-encode prefix components to match `pk()`.
+        let prefix = format!(
+            "{}#{}#",
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(edition)
+        );
         let mut deleted_count = 0u32;
 
         // Scan for matching items

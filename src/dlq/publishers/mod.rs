@@ -48,9 +48,12 @@ pub use database::SqliteDlqPublisher;
 pub use database_reader::PostgresDlqReader;
 pub use database_reader::SqliteDlqReader;
 
+pub use audit_writer::{
+    guard_sqlite_audit_against_replicas, read_pod_replicas, read_pod_replicas_from_env_var,
+    run_sqlite_migrations, SqliteReplayAuditWriter, POD_REPLICAS_ENV_VAR,
+};
 #[cfg(feature = "postgres")]
 pub use audit_writer::{run_postgres_migrations, PostgresReplayAuditWriter};
-pub use audit_writer::{run_sqlite_migrations, SqliteReplayAuditWriter};
 
 #[cfg(feature = "amqp")]
 pub use amqp::AmqpDeadLetterPublisher;

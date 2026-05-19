@@ -75,6 +75,15 @@ spec:
             # Override default port (50051) to 1390 per the plan.
             - name: ANGZARR__TRANSPORT__TCP__PORT
               value: {{ .Values.infrastructure.status.grpcPort | quote }}
+            # H-32: surface the deployment replica count to the binary so the
+            # SQLite audit writer can refuse to start when configured for
+            # multi-replica HA. SQLite is single-writer; two pods writing the
+            # same audit file produce SQLITE_BUSY/corruption. Operators must
+            # switch to the Postgres backend for replicas>1. See
+            # plans/deep-review-remediation.md H-32 and
+            # dlq/publishers/audit_writer.rs::guard_sqlite_audit_against_replicas.
+            - name: POD_REPLICAS
+              value: {{ .Values.infrastructure.status.replicas | quote }}
             {{- if .Values.infrastructure.status.descriptors.configMapName }}
             # Tell the binary where to find pre-staged proto descriptors.
             # Empty / absent = framework + reflection-pulled descriptors

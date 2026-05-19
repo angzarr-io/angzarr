@@ -361,6 +361,74 @@ pub async fn test_retention_persist<S: SnapshotStore>(store: &S) {
     assert_eq!(persist.unwrap().sequence, 5);
 }
 
+/// H-23: `get_at_seq(N)` must return the historical snapshot with the
+/// highest sequence `<= N`, even when a newer snapshot has been stored.
+///
+/// This is the "snapshot at sequence N for conflict detection" use case
+/// from the SnapshotStore trait docstring. A single-snapshot store
+/// silently violates this: after storing seq=10, querying `get_at_seq(5)`
+/// returns None because the only snapshot's sequence is 10 (> 5), losing
+/// the historical state that earlier put() recorded at seq=5.
+///
+/// Distinct from `test_retention_persist`: this test uses DEFAULT
+/// retention to demonstrate the bug applies to ordinary writes, not just
+/// the PERSIST opt-in path.
+pub async fn test_get_at_seq_returns_historical_snapshot<S: SnapshotStore>(store: &S) {
+    let domain = "test_snap_historical";
+    let root = Uuid::new_v4();
+
+    // Store snapshot at seq 5 (default retention).
+    store
+        .put(domain, "test", root, make_snapshot(5))
+        .await
+        .expect("put @ 5 should succeed");
+
+    // Store newer snapshot at seq 10 (default retention).
+    store
+        .put(domain, "test", root, make_snapshot(10))
+        .await
+        .expect("put @ 10 should succeed");
+
+    // get_at_seq(5) must return the historical snapshot, NOT None.
+    let historical = store
+        .get_at_seq(domain, "test", root, 5)
+        .await
+        .expect("get_at_seq should succeed");
+    assert!(
+        historical.is_some(),
+        "snapshot at seq 5 must remain queryable for conflict detection \
+         even after newer snapshots are stored"
+    );
+    assert_eq!(
+        historical.unwrap().sequence,
+        5,
+        "get_at_seq(5) must return the snapshot at seq=5, not a newer one"
+    );
+
+    // get_at_seq(7) returns the seq=5 snapshot (highest <= 7).
+    let bounded = store
+        .get_at_seq(domain, "test", root, 7)
+        .await
+        .expect("get_at_seq(7) should succeed");
+    assert!(bounded.is_some(), "should find seq=5 (highest <= 7)");
+    assert_eq!(bounded.unwrap().sequence, 5);
+
+    // get_at_seq(10) returns the seq=10 snapshot.
+    let exact = store
+        .get_at_seq(domain, "test", root, 10)
+        .await
+        .expect("get_at_seq(10) should succeed");
+    assert!(exact.is_some(), "should find seq=10");
+    assert_eq!(exact.unwrap().sequence, 10);
+
+    // get_at_seq(4) returns None (no snapshot <= 4 exists).
+    let too_early = store
+        .get_at_seq(domain, "test", root, 4)
+        .await
+        .expect("get_at_seq(4) should succeed");
+    assert!(too_early.is_none(), "no snapshot exists at or before seq 4");
+}
+
 pub async fn test_retention_default<S: SnapshotStore>(store: &S) {
     let domain = "test_snap_default";
     let root = Uuid::new_v4();
@@ -590,6 +658,9 @@ macro_rules! run_snapshot_store_tests {
 
         test_retention_persist($store).await;
         println!("  test_retention_persist: PASSED");
+
+        test_get_at_seq_returns_historical_snapshot($store).await;
+        println!("  test_get_at_seq_returns_historical_snapshot: PASSED");
 
         test_retention_default($store).await;
         println!("  test_retention_default: PASSED");

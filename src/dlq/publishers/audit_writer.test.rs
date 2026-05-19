@@ -241,6 +241,110 @@ async fn begin_pending_with_duplicate_key_returns_conflict() {
     );
 }
 
+// ============================================================================
+// H-32: SQLite audit pool incompatible with replicas>1
+// ============================================================================
+//
+// SQLite is fundamentally single-writer. Two status pods writing to the
+// same SQLite file produce SQLITE_BUSY at best / corruption at worst, and
+// per-pod files partition the audit history (the C-31 case). The deployment
+// default is `replicas: 2`. The guard refuses to start the binary with
+// SQLite audit AND replicas>1, instructing the operator to switch to
+// Postgres for HA.
+
+/// replicas=1 + SQLite audit is the supported single-writer config. Must
+/// pass the guard.
+#[test]
+fn h32_guard_accepts_sqlite_with_single_replica() {
+    let result = guard_sqlite_audit_against_replicas(1);
+    assert!(
+        result.is_ok(),
+        "SQLite audit with replicas=1 is the supported single-writer config; \
+         guard must accept it. Got: {:?}",
+        result
+    );
+}
+
+/// replicas=2 + SQLite audit must be refused at bootstrap. Mirrors the
+/// deployment default that the C-31 / H-32 audit surfaced.
+#[test]
+fn h32_guard_rejects_sqlite_with_two_replicas() {
+    let result = guard_sqlite_audit_against_replicas(2);
+    assert!(
+        result.is_err(),
+        "SQLite audit with replicas>1 must be refused — two writers to the \
+         same SQLite file produce SQLITE_BUSY/corruption, per-pod files \
+         partition the audit history. Operators must switch to Postgres. \
+         Got Ok."
+    );
+    let err = result.unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.to_lowercase().contains("sqlite"),
+        "guard error message must name 'sqlite' so the operator can \
+         diagnose the misconfiguration. Got: {msg}"
+    );
+    assert!(
+        msg.to_lowercase().contains("postgres"),
+        "guard error message must instruct switching to Postgres for HA. \
+         Got: {msg}"
+    );
+}
+
+/// Boundary: replicas=0 (helm-set "off") still passes — there's no second
+/// writer to race with.
+#[test]
+fn h32_guard_accepts_sqlite_with_zero_replicas() {
+    assert!(guard_sqlite_audit_against_replicas(0).is_ok());
+}
+
+/// Large replica counts are rejected the same way as 2.
+#[test]
+fn h32_guard_rejects_sqlite_with_many_replicas() {
+    let result = guard_sqlite_audit_against_replicas(5);
+    assert!(
+        result.is_err(),
+        "replicas=5 + SQLite must be refused (same rationale as replicas=2)"
+    );
+}
+
+/// `read_pod_replicas_from_env` reads POD_REPLICAS env var, defaulting to 1
+/// when absent or unparseable. The helm chart injects POD_REPLICAS from
+/// `.Values.infrastructure.status.replicas`.
+#[test]
+fn h32_read_pod_replicas_defaults_to_one_when_unset() {
+    // SAFETY: env is process-global; we set a unique key and clean up.
+    // Using POD_REPLICAS directly would race with parallel tests; the
+    // pure-function form reads a passed-in env-var name.
+    std::env::remove_var("POD_REPLICAS_H32_UNSET");
+    let n = read_pod_replicas_from_env_var("POD_REPLICAS_H32_UNSET");
+    assert_eq!(
+        n, 1,
+        "H-32 guard must default to 1 when POD_REPLICAS is absent so \
+         in-process and dev deployments don't trip the guard. Got {n}"
+    );
+}
+
+#[test]
+fn h32_read_pod_replicas_parses_integer() {
+    std::env::set_var("POD_REPLICAS_H32_TWO", "2");
+    let n = read_pod_replicas_from_env_var("POD_REPLICAS_H32_TWO");
+    std::env::remove_var("POD_REPLICAS_H32_TWO");
+    assert_eq!(n, 2, "POD_REPLICAS=2 must parse as 2");
+}
+
+#[test]
+fn h32_read_pod_replicas_treats_garbage_as_one() {
+    std::env::set_var("POD_REPLICAS_H32_BAD", "not-a-number");
+    let n = read_pod_replicas_from_env_var("POD_REPLICAS_H32_BAD");
+    std::env::remove_var("POD_REPLICAS_H32_BAD");
+    assert_eq!(
+        n, 1,
+        "Unparseable POD_REPLICAS must fall back to 1 — fail-safe to the \
+         single-writer assumption. Got {n}"
+    );
+}
+
 #[tokio::test]
 async fn write_without_migration_returns_query_failed() {
     // Tolerance: if migration was skipped or failed, audit writes

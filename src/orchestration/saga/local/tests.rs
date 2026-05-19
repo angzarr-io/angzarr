@@ -91,7 +91,10 @@ async fn c0138_source_edition_stamps_outgoing_commands() {
     let source = source_event_book(cover_with_edition("order", Some("speculative")));
     let ctx = LocalSagaContext::new(handler, source);
 
-    let response = ctx.handle(HashMap::new()).await.expect("handle ok");
+    let response = ctx
+        .handle(HashMap::new(), crate::proto::SyncMode::Async)
+        .await
+        .expect("handle ok");
 
     let cmd_cover = response.commands[0].cover.as_ref().expect("cmd cover");
     let edition = cmd_cover.edition.as_ref().expect("edition stamped");
@@ -114,7 +117,10 @@ async fn c0139_source_edition_stamps_outgoing_events() {
     let source = source_event_book(cover_with_edition("order", Some("speculative")));
     let ctx = LocalSagaContext::new(handler, source);
 
-    let response = ctx.handle(HashMap::new()).await.expect("handle ok");
+    let response = ctx
+        .handle(HashMap::new(), crate::proto::SyncMode::Async)
+        .await
+        .expect("handle ok");
 
     let event_cover = response.events[0].cover.as_ref().expect("event cover");
     let edition = event_cover.edition.as_ref().expect("edition stamped");
@@ -143,7 +149,10 @@ async fn c0140_handler_set_edition_overwritten_with_source() {
     let source = source_event_book(cover_with_edition("order", Some("alpha")));
     let ctx = LocalSagaContext::new(handler, source);
 
-    let response = ctx.handle(HashMap::new()).await.expect("handle ok");
+    let response = ctx
+        .handle(HashMap::new(), crate::proto::SyncMode::Async)
+        .await
+        .expect("handle ok");
 
     let cmd_edition = response.commands[0]
         .cover
@@ -181,7 +190,10 @@ async fn c0141_no_source_edition_clears_handler_set_edition() {
     let source = source_event_book(cover_with_edition("order", None));
     let ctx = LocalSagaContext::new(handler, source);
 
-    let response = ctx.handle(HashMap::new()).await.expect("handle ok");
+    let response = ctx
+        .handle(HashMap::new(), crate::proto::SyncMode::Async)
+        .await
+        .expect("handle ok");
 
     assert!(
         response.commands[0]
@@ -223,7 +235,10 @@ async fn c0142_source_edition_divergences_propagate_verbatim() {
     let source = source_event_book(source_cover);
     let ctx = LocalSagaContext::new(handler, source);
 
-    let response = ctx.handle(HashMap::new()).await.expect("handle ok");
+    let response = ctx
+        .handle(HashMap::new(), crate::proto::SyncMode::Async)
+        .await
+        .expect("handle ok");
 
     let edition = response.commands[0]
         .cover

@@ -35,6 +35,7 @@ impl SagaRetryContext for AlwaysSucceeds {
     async fn handle(
         &self,
         _destination_sequences: HashMap<String, u32>,
+        _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse::default())
     }
@@ -58,6 +59,7 @@ impl SagaRetryContext for RetryingSagaContext {
     async fn handle(
         &self,
         _destination_sequences: HashMap<String, u32>,
+        _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse {
             commands: vec![CommandBook::default()],
@@ -86,6 +88,7 @@ impl SagaRetryContext for AlwaysRejects {
     async fn handle(
         &self,
         _destination_sequences: HashMap<String, u32>,
+        _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse::default())
     }
@@ -352,6 +355,7 @@ impl SagaRetryContext for RetryableCommandContext {
     async fn handle(
         &self,
         _destination_sequences: HashMap<String, u32>,
+        _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse {
             commands: vec![CommandBook::default()],
@@ -441,6 +445,7 @@ impl SagaRetryContext for SagaWithExistingDeferredAndSyncMode {
     async fn handle(
         &self,
         _destination_sequences: HashMap<String, u32>,
+        _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         let header = PageHeader {
             sync_mode: Some(self.override_mode as i32),
@@ -491,6 +496,7 @@ impl SagaRetryContext for SagaWithNoDeferredAndSyncMode {
     async fn handle(
         &self,
         _destination_sequences: HashMap<String, u32>,
+        _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         let header = PageHeader {
             sync_mode: Some(self.override_mode as i32),
@@ -640,6 +646,7 @@ impl SagaRetryContext for SagaWithFact {
     async fn handle(
         &self,
         _destination_sequences: HashMap<String, u32>,
+        _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         let fact = EventBook {
             cover: Some(Cover {
@@ -700,4 +707,65 @@ async fn test_orchestrate_saga_refuses_facts_without_fact_executor() {
              the missing wiring. Got: {msg}"
         );
     }
+}
+
+// ============================================================================
+// H-17: SagaRetryContext::handle must receive the inherited sync_mode
+// ============================================================================
+
+struct RecordingSyncModeContext {
+    recorded: AsyncMutex<Option<SyncMode>>,
+}
+
+impl RecordingSyncModeContext {
+    fn new() -> Self {
+        Self {
+            recorded: AsyncMutex::new(None),
+        }
+    }
+}
+
+#[async_trait]
+impl SagaRetryContext for RecordingSyncModeContext {
+    async fn handle(
+        &self,
+        _destination_sequences: HashMap<String, u32>,
+        sync_mode: SyncMode,
+    ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
+        *self.recorded.lock().await = Some(sync_mode);
+        Ok(SagaResponse::default())
+    }
+    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
+    fn source_cover(&self) -> Option<&Cover> {
+        None
+    }
+    fn source_max_sequence(&self) -> u32 {
+        0
+    }
+}
+
+#[tokio::test]
+async fn test_orchestrate_saga_threads_sync_mode_to_context_handle() {
+    let ctx = RecordingSyncModeContext::new();
+    let executor = SuccessExecutor;
+    let result = orchestrate_saga(
+        &ctx,
+        &executor,
+        None,
+        None,
+        None,
+        "saga-h17",
+        "corr-1",
+        None,
+        SyncMode::Decision,
+        fast_backoff(),
+    )
+    .await;
+    assert!(result.is_ok());
+    let recorded = ctx.recorded.lock().await;
+    assert_eq!(
+        *recorded,
+        Some(SyncMode::Decision),
+        "H-17: orchestrate_saga must thread its sync_mode argument into SagaRetryContext::handle"
+    );
 }

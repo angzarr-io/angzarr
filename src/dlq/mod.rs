@@ -117,7 +117,10 @@ pub use publishers::{run_postgres_migrations, PostgresReplayAuditWriter};
 // SQLite is always compiled
 pub use publishers::SqliteDlqPublisher;
 pub use publishers::SqliteDlqReader;
-pub use publishers::{run_sqlite_migrations, SqliteReplayAuditWriter};
+pub use publishers::{
+    guard_sqlite_audit_against_replicas, read_pod_replicas, read_pod_replicas_from_env_var,
+    run_sqlite_migrations, SqliteReplayAuditWriter, POD_REPLICAS_ENV_VAR,
+};
 
 #[cfg(feature = "amqp")]
 pub use publishers::AmqpDeadLetterPublisher;

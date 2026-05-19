@@ -84,6 +84,10 @@ impl SagaRetryContext for LocalSagaContext {
     async fn handle(
         &self,
         destination_sequences: HashMap<String, u32>,
+        // H-17: sync_mode is threaded through the trait so gRPC impls can
+        // stamp it on the wire. In-process handler invocation predates this
+        // plumbing; per-page overrides live on PageHeader.sync_mode.
+        _sync_mode: crate::proto::SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         let mut response = self
             .saga_handler
