@@ -18,6 +18,10 @@
 
 set shell := ["bash", "-c"]
 
+# Reusable submodule-protection recipes (install-submodule-hooks,
+# check-submodules-clean). Source of truth: angzarr-project/submodule.just.
+import? 'angzarr-project/submodule.just'
+
 TOP := `git rev-parse --show-toplevel`
 REGISTRY := "ghcr.io/angzarr-io"
 # Container runtime: docker (rootless or rootful). Empty when running inside
@@ -44,6 +48,17 @@ mod tofu "deploy/tofu/justfile"
 
 # Build images with skaffold (content-addressable tags)
 # Outputs built image tags to build/images/build.json
+#
+# Docker Hub rate-limit strategy:
+#   1. Ensure `debian:trixie-slim` is locally cached (one-time pull;
+#      subsequent invocations skip the pull and pay no registry cost).
+#      skaffold's ONBUILD-parsing/manifest-fetch goes through the local
+#      Docker daemon cache instead of querying Docker Hub.
+#   2. If both `angzarr-base:latest` and `angzarr-rust:latest` already
+#      exist locally, skip skaffold entirely and synthesize a build.json
+#      pointing at the cached tags. skaffold can't avoid a registry call
+#      during cache-check even with `tryImportMissing`, so this short-
+#      circuit lets every run after the first one be 100% local.
 [private]
 _build-images:
     #!/usr/bin/env bash
@@ -51,6 +66,43 @@ _build-images:
     # Skip when already in a devcontainer - no image building needed
     if [ "${DEVCONTAINER:-}" = "true" ]; then
         exit 0
+    fi
+    # Fast path: if the commit-tagged images for HEAD (or any recent
+    # commit-tagged image, whichever is newer locally) exist, write a
+    # synthetic build.json and skip skaffold entirely. We avoid `:latest`
+    # because that tag may pre-date a base-image bump (e.g. bookworm→trixie)
+    # and trigger glibc mismatches inside the ephemeral mutants container.
+    EXPECTED_TAG=$(git describe --tags --abbrev=8 --always 2>/dev/null || echo "")
+    BASE_TAG=""
+    RUST_TAG=""
+    if [ -n "$EXPECTED_TAG" ] \
+       && docker image inspect "ghcr.io/angzarr-io/angzarr-base:$EXPECTED_TAG" >/dev/null 2>&1 \
+       && docker image inspect "ghcr.io/angzarr-io/angzarr-rust:$EXPECTED_TAG" >/dev/null 2>&1; then
+        BASE_TAG="ghcr.io/angzarr-io/angzarr-base:$EXPECTED_TAG"
+        RUST_TAG="ghcr.io/angzarr-io/angzarr-rust:$EXPECTED_TAG"
+    else
+        # Fall back to the most-recently-created commit-tagged image of
+        # each kind. If both exist we still skip skaffold; otherwise we
+        # take the slow path below.
+        BASE_TAG=$(docker images --format "{{ "{{.Repository}}:{{.Tag}}" }} {{ "{{.CreatedAt}}" }}" ghcr.io/angzarr-io/angzarr-base 2>/dev/null \
+            | grep -E ":v[0-9]" | sort -k2 -r | head -1 | awk '{print $1}')
+        RUST_TAG=$(docker images --format "{{ "{{.Repository}}:{{.Tag}}" }} {{ "{{.CreatedAt}}" }}" ghcr.io/angzarr-io/angzarr-rust 2>/dev/null \
+            | grep -E ":v[0-9]" | sort -k2 -r | head -1 | awk '{print $1}')
+    fi
+    if [ -n "$BASE_TAG" ] && [ -n "$RUST_TAG" ]; then
+        printf '{"builds":[{"imageName":"ghcr.io/angzarr-io/angzarr-base","tag":"%s"},{"imageName":"ghcr.io/angzarr-io/angzarr-rust","tag":"%s"}]}\n' \
+            "$BASE_TAG" "$RUST_TAG" \
+            > "{{TOP}}/build/images/build.json"
+        echo "Built images (cached, no registry hit):"
+        jq -r '.builds[].tag' "{{TOP}}/build/images/build.json"
+        exit 0
+    fi
+    # Slow path: pre-pull the upstream base ONCE so skaffold's manifest
+    # resolution finds it locally and doesn't trigger Docker Hub rate
+    # limits when parsing ONBUILD instructions.
+    if ! docker image inspect docker.io/library/debian:trixie-slim >/dev/null 2>&1; then
+        echo "Pre-pulling docker.io/library/debian:trixie-slim (one-time; subsequent runs are cached)..."
+        docker pull docker.io/library/debian:trixie-slim
     fi
     cd "{{TOP}}/build/images"
     skaffold build --file-output=build.json

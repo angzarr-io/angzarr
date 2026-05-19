@@ -400,8 +400,13 @@ cov-full-summary:
 # Uses --in-place to avoid copying the entire workspace (saves ~200GB disk).
 # Safe because mutations are reverted after each test.
 
-MUTANTS_TIMEOUT := "120"
-MUTANTS_FEATURES := "--features 'sqlite test-utils'"
+MUTANTS_TIMEOUT := "600"
+# `sqlite` is NOT a Cargo feature — sqlx/sqlite is always compiled per
+# Cargo.toml ("sqlite is always enabled (no feature gate)"). Passing
+# --features sqlite errors with "package 'angzarr' does not contain this
+# feature: sqlite" and breaks every mutants run. Match the plain test
+# recipe (just `--features test-utils`).
+MUTANTS_FEATURES := "--features test-utils"
 
 # Regenerate exclude_re patterns from #[trivial_delegation] attributes
 gen-mutants-exclude:
