@@ -1219,3 +1219,387 @@ mod concurrent_publisher_framing_tests {
         }
     }
 }
+
+// ============================================================================
+// BrokenPipe Subscriber-Pruning Tests (H-04)
+// ============================================================================
+//
+// Per the H-04 finding: a `BrokenPipe` (EPIPE) on `write_all` to one
+// subscriber's FIFO means the subscriber's reader closed its end. The
+// pre-fix publish path silently swallowed this as "not an error" and
+// returned `Ok` overall, leaving the dead subscriber in the routing
+// table — every subsequent publish would re-attempt the open+write to
+// a pipe whose reader is gone, wasting syscalls and (more importantly)
+// silently violating the "all subscribers see all events" contract for
+// THAT publish (the dead subscriber missed the event but the bus
+// claims everything was fine).
+//
+// The H-04 decision is OPTION (c): the IPC broker supports explicit
+// register/unregister (`broker.rs`), so a BrokenPipe on write is the
+// kernel-level equivalent of an unannounced unregister. The publisher
+// should:
+//   1. Drop the broken subscriber from its in-memory routing list
+//      (so subsequent publishes don't re-target the dead pipe).
+//   2. Return `Ok` because every surviving subscriber DID receive
+//      its copy — the dead subscriber has effectively left the bus.
+//
+// `ENXIO` on open keeps its existing "subscriber hasn't started yet"
+// semantics: the subscriber is NOT pruned because this is a bring-up
+// race, not a death. Only a successful open followed by a `BrokenPipe`
+// on write triggers pruning.
+mod broken_pipe_pruning_tests {
+    use super::*;
+    use std::io::Read as IoRead;
+    use std::sync::Arc as StdArc;
+    use std::thread;
+    use std::time::Duration;
+    use tempfile::tempdir;
+
+    /// Build a small EventBook with a stable correlation marker.
+    fn make_book_with_marker(marker: &str) -> EventBook {
+        use crate::proto::Cover;
+        EventBook {
+            cover: Some(Cover {
+                domain: "h04-test".to_string(),
+                root: None,
+                correlation_id: marker.to_string(),
+                edition: None,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Pure-helper test: `decide_write_error` returns `Prune` for
+    /// `BrokenPipe` (EPIPE), and `Err` for every other I/O error.
+    ///
+    /// This is the H-04 decision boundary in isolation: classifying a
+    /// `write_all` failure as either "subscriber left" (prune + Ok)
+    /// or "transport-level error" (propagate as `BusError::Publish`).
+    /// The end-to-end test below exercises the actual EPIPE path
+    /// against a real FIFO; this test pins the decision logic without
+    /// the FIFO race.
+    #[test]
+    fn decide_write_error_classifies_broken_pipe_as_prune() {
+        // BrokenPipe → Prune (subscriber's reader closed; treat as left)
+        let broken = std::io::Error::from(std::io::ErrorKind::BrokenPipe);
+        match decide_write_error(&broken) {
+            WriteErrorOutcome::Prune => {}
+            other => panic!("BrokenPipe must classify as Prune, got {:?}", other),
+        }
+
+        // Everything else → Err (still a real transport failure)
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::Other,
+            std::io::ErrorKind::WouldBlock,
+            std::io::ErrorKind::Interrupted,
+        ] {
+            let err = std::io::Error::from(kind);
+            match decide_write_error(&err) {
+                WriteErrorOutcome::Err => {}
+                other => panic!(
+                    "{:?} must classify as Err (not Prune), got {:?}",
+                    kind, other
+                ),
+            }
+        }
+    }
+
+    /// H-04 REGRESSION (pruning bookkeeping): a BrokenPipe on
+    /// `write_all` to one subscriber must remove that subscriber from
+    /// the bus's live routing list so subsequent publishes don't
+    /// retarget the dead pipe.
+    ///
+    /// Constructing a deterministic kernel-level EPIPE inside a unit
+    /// test is race-prone (the reader's close has to land between the
+    /// publisher's open and write, an interleave the kernel does not
+    /// expose a synchronization primitive for). We instead exercise
+    /// the bookkeeping seam directly: `prune_subscribers(&[name])` is
+    /// the same retain-by-name path the publish loop invokes when its
+    /// per-subscriber `decide_write_error` classifies the failure as
+    /// `Prune`. The classification side is pinned by the pure-helper
+    /// test above; this test pins the *effect*: after pruning, the
+    /// subscriber is gone from `live_subscribers()` and the OTHER
+    /// subscriber survives.
+    ///
+    /// On baseline (pre-fix) this test does not compile — neither
+    /// `prune_subscribers` nor `live_subscribers` exists — which is
+    /// the strongest form of test-red: the fix's contract cannot be
+    /// expressed against the buggy code. Post-fix the assertions
+    /// hold.
+    #[test]
+    fn prune_subscribers_removes_only_named_entry() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        let subs = vec![
+            SubscriberInfo {
+                name: "dead".to_string(),
+                domains: vec![],
+                pipe_path: dir.path().join("dead.pipe"),
+            },
+            SubscriberInfo {
+                name: "alive".to_string(),
+                domains: vec![],
+                pipe_path: dir.path().join("alive.pipe"),
+            },
+        ];
+        let config = IpcConfig::publisher_with_subscribers(dir.path(), subs);
+        let bus = IpcEventBus::new(config);
+
+        // Pre-condition: both subscribers in the live list.
+        let before: Vec<String> = rt
+            .block_on(bus.live_subscribers())
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(before.contains(&"dead".to_string()));
+        assert!(before.contains(&"alive".to_string()));
+
+        // Prune the dead subscriber (the same seam the publish loop
+        // hits when it observes a BrokenPipe write failure).
+        rt.block_on(bus.prune_subscribers(&["dead".to_string()]));
+
+        // Post-condition: dead is gone, alive remains.
+        let after: Vec<String> = rt
+            .block_on(bus.live_subscribers())
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert!(
+            !after.contains(&"dead".to_string()),
+            "H-04: subscriber 'dead' must be pruned; live={:?}",
+            after
+        );
+        assert!(
+            after.contains(&"alive".to_string()),
+            "H-04: subscriber 'alive' must NOT be pruned when only 'dead' was named; live={:?}",
+            after
+        );
+
+        // Idempotency: pruning a name that's already gone is a no-op.
+        rt.block_on(bus.prune_subscribers(&["dead".to_string()]));
+        let after2: Vec<String> = rt
+            .block_on(bus.live_subscribers())
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+        assert_eq!(after, after2, "prune_subscribers must be idempotent");
+    }
+
+    /// H-04 REGRESSION (end-to-end): when one subscriber's reader
+    /// closes the pipe (kernel-level EPIPE on `write_all`), publish
+    /// must (a) return Ok because every surviving subscriber received
+    /// its copy, (b) actually deliver the frame to the surviving
+    /// subscriber, and (c) prune the dead subscriber from the routing
+    /// list so subsequent publishes don't repeat the syscall to a
+    /// dead pipe.
+    ///
+    /// To force EPIPE deterministically we shrink the dead pipe's
+    /// kernel buffer to ~1 page (F_SETPIPE_SZ), publish a body MUCH
+    /// larger than that page, and have the reader thread close ITS
+    /// FD after a brief delay. The publisher's open succeeds (reader
+    /// briefly attached), the write fills the small buffer and
+    /// BLOCKS waiting for reader drain, the reader then drops →
+    /// kernel returns EPIPE on the blocked write. This is the same
+    /// pattern Linux's tests use for FIFO EPIPE races.
+    ///
+    /// On baseline this test fails: the BrokenPipe is silently
+    /// swallowed and the subscriber stays in `config.subscribers`
+    /// forever (forcing every future publish to repeat the ENXIO /
+    /// EPIPE syscall).
+    #[test]
+    fn broken_pipe_prunes_dead_subscriber_and_delivers_to_survivors() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(4)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        let pipe_a = dir.path().join("subscriber-h04-dead.pipe");
+        let pipe_b = dir.path().join("subscriber-h04-alive.pipe");
+
+        // Create both FIFOs.
+        {
+            use nix::sys::stat::Mode;
+            use nix::unistd::mkfifo;
+            mkfifo(&pipe_a, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo a");
+            mkfifo(&pipe_b, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo b");
+        }
+
+        // Order subscribers so the DEAD pipe is first — that way the
+        // publisher hits the EPIPE branch before delivering to the
+        // alive subscriber, exercising the "continue with rest of
+        // fan-out" path.
+        let subs = vec![
+            SubscriberInfo {
+                name: "dead".to_string(),
+                domains: vec![],
+                pipe_path: pipe_a.clone(),
+            },
+            SubscriberInfo {
+                name: "alive".to_string(),
+                domains: vec![],
+                pipe_path: pipe_b.clone(),
+            },
+        ];
+        let config = IpcConfig::publisher_with_subscribers(dir.path(), subs);
+        let bus = StdArc::new(IpcEventBus::new(config));
+
+        // Sub-B reader: drain everything until EOF. Pipe buffer left at
+        // default — the alive subscriber must NOT trip the back-pressure
+        // path.
+        let pipe_b_for_reader = pipe_b.clone();
+        let reader_b = thread::spawn(move || -> std::io::Result<Vec<Vec<u8>>> {
+            let mut reader = File::open(&pipe_b_for_reader)?;
+            let mut frames = Vec::new();
+            loop {
+                let mut len_buf = [0u8; 4];
+                match reader.read_exact(&mut len_buf) {
+                    Ok(_) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                    Err(e) => return Err(e),
+                }
+                let len = u32::from_be_bytes(len_buf) as usize;
+                let mut body = vec![0u8; len];
+                reader.read_exact(&mut body)?;
+                frames.push(body);
+            }
+            Ok(frames)
+        });
+
+        // Sub-A reader: open, shrink the pipe buffer to one page so the
+        // publisher's body will block, then sleep briefly so the
+        // publisher has time to open AND start writing, then DROP.
+        // The blocked write returns EPIPE — the H-04 path under test.
+        let pipe_a_for_reader = pipe_a.clone();
+        let reader_a = thread::spawn(move || {
+            let reader = File::open(&pipe_a_for_reader).expect("open pipe-a");
+            unsafe {
+                use std::os::unix::io::AsRawFd;
+                const F_SETPIPE_SZ: i32 = 1031;
+                // One page (4 KiB) is the smallest pipe size Linux
+                // accepts for non-root processes. The publisher's body
+                // below is ~256 KiB → guaranteed to fill the buffer and
+                // block.
+                let _ = libc::fcntl(reader.as_raw_fd(), F_SETPIPE_SZ, 4096);
+            }
+            // Brief pause: gives the publisher time to take its
+            // per-pipe lock, open the FIFO, clear O_NONBLOCK, and
+            // start the write_all that fills the 4 KiB buffer. After
+            // that, dropping the FD causes the kernel to send EPIPE
+            // to the blocked writer.
+            thread::sleep(Duration::from_millis(150));
+            drop(reader);
+        });
+
+        // Give both reader threads time to reach their open() syscall.
+        thread::sleep(Duration::from_millis(50));
+
+        let publish_outcome = rt.block_on(async {
+            // Body ~256 KiB >> 4 KiB pipe buffer on the dead subscriber:
+            // the publisher's write_all to pipe-A will block until the
+            // reader-A drop fires EPIPE. The same body goes to pipe-B
+            // (alive) with the default pipe buffer; reader-B drains it
+            // promptly so that write doesn't block.
+            let large_marker = "X".repeat(256 * 1024);
+            let book = Arc::new(make_book_with_marker(&large_marker));
+            bus.publish(book).await
+        });
+
+        // Reader-A is already finished (it dropped its FD before
+        // returning from the thread closure).
+        reader_a.join().expect("reader-a panicked");
+
+        // Publish must have succeeded — surviving subscriber got the
+        // message; dead subscriber's BrokenPipe was absorbed as a
+        // prune.
+        publish_outcome.expect(
+            "publish must return Ok when only-dead-subscriber-failed (surviving subs received) (H-04)",
+        );
+
+        // Live routing list must reflect the prune.
+        let live = rt.block_on(bus.live_subscribers());
+        let names: Vec<String> = live.iter().map(|s| s.name.clone()).collect();
+        assert!(
+            !names.contains(&"dead".to_string()),
+            "H-04: subscriber 'dead' must be pruned after BrokenPipe; live={:?}",
+            names
+        );
+        assert!(
+            names.contains(&"alive".to_string()),
+            "H-04: subscriber 'alive' must remain after a different subscriber's BrokenPipe; live={:?}",
+            names
+        );
+
+        // Drop the bus so the writer FDs close and reader-B sees EOF.
+        drop(bus);
+
+        let frames_b = reader_b
+            .join()
+            .expect("reader-b panicked")
+            .expect("reader-b read error");
+        assert!(
+            !frames_b.is_empty(),
+            "H-04: surviving subscriber must have received at least one frame, got 0"
+        );
+    }
+
+    /// ENXIO on open (no reader attached at all — subscriber hasn't
+    /// started yet) must NOT prune the subscriber. That's a bring-up
+    /// race, not a death. Only BrokenPipe on `write` after a
+    /// successful open triggers pruning.
+    ///
+    /// This regression guard locks the asymmetry: ENXIO is silently
+    /// tolerated (subscriber stays in the routing list, eligible for
+    /// the NEXT publish once the subscriber starts), while
+    /// BrokenPipe-on-write is final.
+    #[test]
+    fn enxio_on_open_does_not_prune_subscriber() {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let dir = tempdir().unwrap();
+        let pipe_path = dir.path().join("subscriber-h04-not-started.pipe");
+
+        // Create the FIFO but do NOT open a reader. The publisher's
+        // O_NONBLOCK open will return ENXIO (errno=6, ERANGE on linux
+        // is 34, ENXIO is 6) — current code skips silently in that
+        // case. The subscriber must remain in the routing list.
+        {
+            use nix::sys::stat::Mode;
+            use nix::unistd::mkfifo;
+            mkfifo(&pipe_path, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo");
+        }
+
+        let subs = vec![SubscriberInfo {
+            name: "not-started".to_string(),
+            domains: vec![],
+            pipe_path: pipe_path.clone(),
+        }];
+        let config = IpcConfig::publisher_with_subscribers(dir.path(), subs);
+        let bus = IpcEventBus::new(config);
+
+        // First publish: ENXIO — subscriber not started yet.
+        let outcome = rt.block_on(bus.publish(Arc::new(make_book_with_marker("first"))));
+        outcome.expect("ENXIO on open must NOT propagate as Err (subscriber not started)");
+
+        // Subscriber must still be in the routing list — eligible to
+        // receive the next publish once it actually starts.
+        let live = rt.block_on(bus.live_subscribers());
+        let names: Vec<String> = live.iter().map(|s| s.name.clone()).collect();
+        assert!(
+            names.contains(&"not-started".to_string()),
+            "H-04: ENXIO on open is a bring-up race, NOT a death — \
+             subscriber must remain in the routing list; live={:?}",
+            names
+        );
+    }
+}

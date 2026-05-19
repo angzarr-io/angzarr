@@ -184,6 +184,60 @@ fn test_extract_event_book_from_status_empty_details() {
     assert!(extracted.is_none());
 }
 
+// ============================================================================
+// H-38: Module name reflects actual scope
+// ============================================================================
+//
+// The original `sequence_validator` name implies EventBook gap/duplicate
+// scanning, but the implementation only compares two `u32` values. To prevent
+// future callers from mistaking the contract, the module was renamed to
+// `single_sequence_check` (with a doc-comment pointing gap/dup consumers at
+// `services::gap_fill`). These tests pin the rename — they reach the API
+// through the canonical `single_sequence_check` path.
+
+/// New canonical module path resolves `validate_sequence`.
+///
+/// Compile-time check: if the module is still named `sequence_validator` (or
+/// the public API isn't re-exposed under the new name) this test fails to
+/// compile, which is the rename's failing-red signal.
+#[test]
+fn test_single_sequence_check_module_path_resolves() {
+    // Reach through the canonical module name. If the path doesn't exist
+    // the file won't compile.
+    let result = crate::utils::single_sequence_check::validate_sequence(7, 7);
+    assert_eq!(
+        result,
+        crate::utils::single_sequence_check::SequenceValidationResult::Valid
+    );
+}
+
+/// `sequence_mismatch_error_with_state` reachable via new module path.
+///
+/// All four public functions consumed by orchestration call sites must
+/// resolve through the new path; this covers the one with the richest
+/// signature so the symbol-table miss is unambiguous.
+#[test]
+fn test_single_sequence_check_module_path_resolves_with_state() {
+    use crate::proto::{Cover, Uuid as ProtoUuid};
+
+    let event_book = EventBook {
+        cover: Some(Cover {
+            domain: "orders".to_string(),
+            root: Some(ProtoUuid {
+                value: vec![1, 2, 3, 4],
+            }),
+            correlation_id: "corr".to_string(),
+            edition: None,
+        }),
+        pages: vec![],
+        snapshot: None,
+        ..Default::default()
+    };
+    let status =
+        crate::utils::single_sequence_check::sequence_mismatch_error_with_state(0, 3, &event_book);
+    assert_eq!(status.code(), tonic::Code::FailedPrecondition);
+}
+
 /// Invalid details bytes returns None (not panic).
 ///
 /// Malformed details should be handled gracefully, not crash.

@@ -412,6 +412,18 @@ fn load_subscribers_from_env() -> Vec<SubscriberInfo> {
 /// IPC event bus - same interface as AMQP/Kafka.
 pub struct IpcEventBus {
     config: IpcConfig,
+    /// Live subscriber routing list.
+    ///
+    /// Seeded from `config.subscribers` at construction time. The publish
+    /// path snapshots this list before fanning out, and a `BrokenPipe` on
+    /// `write_all` to any subscriber prunes that subscriber from this list
+    /// so subsequent publishes don't re-target a dead pipe. See H-04 in
+    /// plans/deep-review-remediation.md.
+    ///
+    /// `config.subscribers` is kept as the immutable bootstrap snapshot
+    /// (for inspection by tests and the publisher constructor); this field
+    /// is the mutable runtime view.
+    subscribers: Arc<RwLock<Vec<SubscriberInfo>>>,
     /// Handlers for subscriber mode.
     handlers: Arc<RwLock<Vec<Box<dyn EventHandler>>>>,
     /// Consumer task handle.
@@ -450,14 +462,44 @@ impl IpcEventBus {
             (Some(name), true) => CheckpointConfig::for_subscriber(&config.base_path, name),
             _ => CheckpointConfig::disabled(),
         };
+        let subscribers = Arc::new(RwLock::new(config.subscribers.clone()));
         Self {
             checkpoint: Arc::new(Checkpoint::new(checkpoint_config)),
             config,
+            subscribers,
             handlers: Arc::new(RwLock::new(Vec::new())),
             consumer_task: Arc::new(RwLock::new(None)),
             shutdown: Arc::new(AtomicBool::new(false)),
             pipe_locks: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Return a snapshot of the live subscriber routing list.
+    ///
+    /// Used by tests to verify the publisher's view of who is currently
+    /// routable. Subscribers are pruned from this list when a publish
+    /// fails with `BrokenPipe` (the kernel-level equivalent of an
+    /// unannounced unregister). See H-04.
+    pub async fn live_subscribers(&self) -> Vec<SubscriberInfo> {
+        self.subscribers.read().await.clone()
+    }
+
+    /// Drop subscribers whose names appear in `names` from the routing
+    /// list.
+    ///
+    /// Idempotent: names not present are silently ignored. This is the
+    /// same retain-by-name operation the publish path performs when a
+    /// per-subscriber `write_all` returns `BrokenPipe`; exposing it
+    /// here (a) lets tests pin the pruning bookkeeping without racing
+    /// on a real kernel EPIPE and (b) gives an operator-visible seam
+    /// if the broker ever wants to push an explicit unregister into
+    /// the publisher.
+    pub(crate) async fn prune_subscribers(&self, names: &[String]) {
+        if names.is_empty() {
+            return;
+        }
+        let mut live = self.subscribers.write().await;
+        live.retain(|s| !names.iter().any(|n| n == &s.name));
     }
 
     /// Get (or lazily create) the per-pipe write mutex for `pipe_path`.
@@ -559,10 +601,18 @@ impl EventBus for IpcEventBus {
     /// Publish events directly to subscriber pipes.
     #[tracing::instrument(name = "bus.publish", skip_all, fields(domain = %book.domain()))]
     async fn publish(&self, book: Arc<EventBook>) -> Result<PublishResult> {
-        if self.config.subscribers.is_empty() {
-            debug!("No subscribers configured, event not published");
-            return Ok(PublishResult::default());
-        }
+        // Snapshot the live routing list. We iterate over the snapshot so
+        // a concurrent prune doesn't perturb iteration; any subscriber
+        // pruned during this publish is collected separately and applied
+        // to the shared list at the end.
+        let snapshot: Vec<SubscriberInfo> = {
+            let guard = self.subscribers.read().await;
+            if guard.is_empty() {
+                debug!("No subscribers configured, event not published");
+                return Ok(PublishResult::default());
+            }
+            guard.clone()
+        };
 
         let routing_key = book.routing_key();
 
@@ -582,7 +632,12 @@ impl EventBus for IpcEventBus {
         framed.extend_from_slice(&(serialized.len() as u32).to_be_bytes());
         framed.extend_from_slice(&serialized);
 
-        for subscriber in &self.config.subscribers {
+        // Names of subscribers to prune from the routing list after this
+        // publish. Collected during the fan-out loop and applied in a
+        // single write-lock acquisition at the end (H-04).
+        let mut to_prune: Vec<String> = Vec::new();
+
+        for subscriber in &snapshot {
             // Check domain filter using routing key
             if !matches_domain_filter(&routing_key, &subscriber.domains) {
                 continue;
@@ -619,6 +674,9 @@ impl EventBus for IpcEventBus {
                     // full pipe (back-pressure) instead of leaving a
                     // half-written frame.
                     if let Err(e) = clear_nonblock(&file) {
+                        // Drop the per-pipe lock guard before the early
+                        // return so we don't hold it across the await for
+                        // the (now-unreachable) prune apply path.
                         return Err(BusError::Publish(format!(
                             "Failed to clear O_NONBLOCK for subscriber '{}': {}",
                             subscriber.name, e
@@ -626,17 +684,29 @@ impl EventBus for IpcEventBus {
                     }
 
                     if let Err(e) = file.write_all(&framed) {
-                        if e.kind() == std::io::ErrorKind::BrokenPipe {
-                            // Broken pipe means reader disconnected - not an error
-                            debug!(
-                                subscriber = %subscriber.name,
-                                "Subscriber pipe closed (broken pipe)"
-                            );
-                        } else {
-                            return Err(BusError::Publish(format!(
-                                "Failed to write to IPC pipe for subscriber '{}': {}",
-                                subscriber.name, e
-                            )));
+                        match decide_write_error(&e) {
+                            WriteErrorOutcome::Prune => {
+                                // H-04: BrokenPipe means the subscriber's
+                                // reader closed its end of the FIFO. Treat
+                                // as an unannounced unregister: drop the
+                                // subscriber from the routing list and
+                                // continue with the rest of the fan-out.
+                                // Surviving subscribers still get their
+                                // copies; the publish call returns Ok
+                                // because every subscriber that is still
+                                // alive received the event.
+                                debug!(
+                                    subscriber = %subscriber.name,
+                                    "Subscriber pipe closed (broken pipe); pruning from routing list"
+                                );
+                                to_prune.push(subscriber.name.clone());
+                            }
+                            WriteErrorOutcome::Err => {
+                                return Err(BusError::Publish(format!(
+                                    "Failed to write to IPC pipe for subscriber '{}': {}",
+                                    subscriber.name, e
+                                )));
+                            }
                         }
                     } else {
                         debug!(
@@ -647,7 +717,11 @@ impl EventBus for IpcEventBus {
                     }
                 }
                 Err(e) => {
-                    // ENXIO = no reader yet, that's okay (subscriber hasn't started)
+                    // ENXIO = no reader yet, that's okay (subscriber hasn't started).
+                    // This is explicitly NOT a prune trigger — bring-up
+                    // races are a normal part of orchestration and the
+                    // subscriber stays in the routing list, eligible for
+                    // the next publish once it actually starts.
                     if e.raw_os_error() != Some(libc::ENXIO) {
                         return Err(BusError::Publish(format!(
                             "Failed to open IPC pipe for subscriber '{}': {}",
@@ -658,6 +732,11 @@ impl EventBus for IpcEventBus {
             }
             // _write_guard drops here, releasing the per-pipe mutex.
         }
+
+        // Apply any pending prunes in a single write-lock acquisition.
+        // Idempotent: a concurrent caller that already pruned the same
+        // name is safe.
+        self.prune_subscribers(&to_prune).await;
 
         Ok(PublishResult::default())
     }
@@ -738,6 +817,41 @@ fn clear_nonblock(file: &File) -> std::io::Result<()> {
 /// - domains contains the routing_key
 fn matches_domain_filter(routing_key: &str, domains: &[String]) -> bool {
     domains.is_empty() || domains.iter().any(|d| d == "#" || d == routing_key)
+}
+
+/// Outcome of classifying a per-subscriber `write_all` failure.
+///
+/// See H-04: `BrokenPipe` means the subscriber's reader closed its
+/// end of the FIFO — the broker supports register/unregister, so this
+/// is semantically an unannounced unregister and the publisher should
+/// drop the subscriber from its routing list. Any other I/O error is
+/// a transport-level failure that must propagate up to the caller as
+/// `BusError::Publish`.
+#[derive(Debug, PartialEq, Eq)]
+enum WriteErrorOutcome {
+    /// Drop the subscriber from the routing list and continue.
+    Prune,
+    /// Propagate the error to the caller.
+    Err,
+}
+
+/// Classify an `io::Error` from `write_all` to a subscriber FIFO.
+///
+/// `BrokenPipe` (EPIPE) → `Prune` — the subscriber's reader closed,
+/// treat as an unannounced unregister; all *surviving* subscribers
+/// still receive this publish, so the call returns `Ok` from the
+/// caller's perspective.
+///
+/// Everything else → `Err` — a real transport failure (permission
+/// denied, disk full on the FIFO's filesystem, interrupted by a
+/// signal we can't recover from cleanly, etc.). These propagate to
+/// the caller so they can retry, dead-letter, or abort.
+fn decide_write_error(err: &std::io::Error) -> WriteErrorOutcome {
+    if err.kind() == std::io::ErrorKind::BrokenPipe {
+        WriteErrorOutcome::Prune
+    } else {
+        WriteErrorOutcome::Err
+    }
 }
 
 #[cfg(test)]

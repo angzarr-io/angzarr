@@ -245,6 +245,8 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
 [build-dependencies]
 tonic-prost-build = "0.14"
 prost-build = "0.14"
+prost = "0.14"
+prost-types = "0.14"
 
 [[bin]]
 name = "angzarr-aggregate"

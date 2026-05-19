@@ -213,3 +213,97 @@ async fn test_multiple_subscribers_same_correlation() {
     assert!(received1.is_some());
     assert!(received2.is_some());
 }
+
+/// H-39: A subscriber whose bounded channel is full (consumer is too slow)
+/// must be removed from the registry rather than silently dropping the
+/// event. Stream consumers are expected to keep up; if they fall behind,
+/// the framework terminates the stream and forces a reconnect.
+///
+/// Regression: previously `try_send` returning `TrySendError::Full` was
+/// logged but the subscriber was retained because `is_closed()` is false
+/// for a full-but-open channel — every subsequent event was also dropped.
+#[tokio::test]
+async fn test_full_subscriber_removed_on_burst() {
+    let service = StreamService::new();
+    let handler = StreamEventHandler::new(&service);
+
+    // Manually register a subscriber with a tiny channel (cap=1) so we
+    // can saturate it deterministically. The production code uses cap=32
+    // but the invariant we're verifying is "Full → remove", which is
+    // capacity-independent.
+    let (tx, rx) = mpsc::channel::<Result<EventBook, Status>>(1);
+    {
+        let mut subs = service.subscriptions.write().await;
+        subs.entry("burst-test".to_string())
+            .or_default()
+            .push(Subscriber { sender: tx });
+    }
+
+    // Fill the channel without draining `rx`.
+    let book = Arc::new(make_test_event_book("burst-test"));
+    handler.handle(Arc::clone(&book)).await.unwrap();
+
+    // Sanity: the subscription is still present after the first
+    // (successful) send — it's only the *full* burst that should kick
+    // the subscriber out.
+    {
+        let subs = service.subscriptions.read().await;
+        assert!(
+            subs.contains_key("burst-test"),
+            "subscription should remain after first send (channel had room)"
+        );
+    }
+
+    // Second send: channel is full, consumer hasn't drained. The
+    // subscriber must be removed so future events don't keep dropping.
+    handler.handle(Arc::clone(&book)).await.unwrap();
+
+    let subs = service.subscriptions.read().await;
+    assert!(
+        !subs.contains_key("burst-test"),
+        "Subscriber whose channel is full must be removed (H-39); \
+             retaining it silently drops every future event"
+    );
+
+    // Keep rx alive so the channel doesn't drop to `closed` for the
+    // wrong reason (we want the test to verify Full→remove, not
+    // Closed→remove).
+    drop(rx);
+}
+
+/// H-39 / StreamService::handle (twin path on line 51): the per-event
+/// dispatch invoked by the gRPC projector sidecar must also remove a
+/// full subscriber. The two send paths share an invariant; pin it on
+/// both so they don't drift.
+#[tokio::test]
+async fn test_full_subscriber_removed_on_burst_service_handle() {
+    let service = StreamService::new();
+
+    let (tx, rx) = mpsc::channel::<Result<EventBook, Status>>(1);
+    {
+        let mut subs = service.subscriptions.write().await;
+        subs.entry("burst-svc".to_string())
+            .or_default()
+            .push(Subscriber { sender: tx });
+    }
+
+    let book = make_test_event_book("burst-svc");
+
+    // First send succeeds, fills the channel.
+    service.handle(&book).await;
+    {
+        let subs = service.subscriptions.read().await;
+        assert!(subs.contains_key("burst-svc"));
+    }
+
+    // Second send hits Full and must remove the subscriber.
+    service.handle(&book).await;
+
+    let subs = service.subscriptions.read().await;
+    assert!(
+        !subs.contains_key("burst-svc"),
+        "StreamService::handle must remove full subscribers (H-39)"
+    );
+
+    drop(rx);
+}

@@ -1,9 +1,18 @@
-//! Sequence validation logic for AggregateService.
+//! Single-value sequence comparison helpers for `AggregateService`.
 //!
 //! DOC: This file is referenced in docs/docs/operations/error-recovery.mdx
 //!      Update documentation when making changes to sequence validation.
 //!
-//! Handles sequence validation and sequence computation helpers.
+//! **Scope.** This module compares a single expected `u32` against a single
+//! actual `u32` and produces the standard `FailedPrecondition` status when
+//! they disagree. The name was previously `sequence_validator`, which
+//! implied a richer EventBook-level scan (gaps, duplicates) that this code
+//! does NOT perform — see H-38 in the deep-review remediation plan.
+//!
+//! If you need EventBook page-sequence gap or duplicate detection, use
+//! [`crate::services::gap_fill`] instead — that module already scans for
+//! gaps between adjacent pages and is the canonical entry point for
+//! reconciliation flows.
 
 use prost::Message;
 use tonic::Status;
@@ -123,5 +132,5 @@ pub fn handle_storage_error(
 }
 
 #[cfg(test)]
-#[path = "sequence_validator.test.rs"]
+#[path = "single_sequence_check.test.rs"]
 mod tests;

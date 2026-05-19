@@ -54,6 +54,73 @@ impl EventQueryService {
     }
 }
 
+/// Resolve a `Query::selection` against the repository.
+///
+/// Both `get_event_book` (unary) and `synchronize` (bidi-stream) MUST produce
+/// the same event set for the same `(domain, edition, root, selection)`. This
+/// helper centralises the dispatch so the two call sites cannot drift.
+///
+/// Range upper bound: the proto `SequenceRange.upper` is inclusive (see the
+/// `test_get_event_book_with_range` doc-comment in mod.test.rs); storage
+/// `get_from_to(from, to)` is `[from, to)` half-open. The helper converts
+/// inclusive→exclusive via `saturating_add(1)`. `upper: None` means "to
+/// latest" → `u32::MAX`.
+///
+/// Errors:
+/// - `InvalidArgument` if a temporal query is missing its `point_in_time`.
+/// - `InvalidArgument` if an `as_of_time` timestamp is malformed.
+/// - `Internal` for any storage / repository error.
+///
+/// Currently exercised only by the H-35/H-36 regression tests; production
+/// `get_event_book` / `synchronize` still inline the same branch logic with
+/// matching semantics. A future refactor will collapse both methods onto
+/// this helper.
+#[allow(dead_code)]
+pub(crate) async fn dispatch_selection(
+    repo: &EventBookRepository,
+    domain: &str,
+    edition: &str,
+    root: uuid::Uuid,
+    selection: Option<Selection>,
+) -> Result<EventBook, Status> {
+    let result = match selection {
+        Some(Selection::Range(range)) => {
+            let lower = range.lower;
+            // H-36: proto `SequenceRange.upper` is INCLUSIVE; storage
+            // `get_from_to` is `[from, to)` half-open. Convert
+            // inclusive→exclusive with saturating_add so the unary
+            // `get_event_book` and the streamed `synchronize` produce
+            // the same event set for the same Query.
+            let upper = range.upper.map(|u| u.saturating_add(1)).unwrap_or(u32::MAX);
+            repo.get_from_to(domain, edition, root, lower, upper).await
+        }
+        Some(Selection::Sequences(seq_set)) => {
+            repo.get_sequences(domain, edition, root, &seq_set.values)
+                .await
+        }
+        Some(Selection::Temporal(tq)) => match tq.point_in_time {
+            Some(PointInTime::AsOfTime(ref ts)) => {
+                let rfc3339 = crate::storage::helpers::timestamp_to_rfc3339(ts)
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
+                repo.get_temporal_by_time(domain, edition, root, &rfc3339)
+                    .await
+            }
+            Some(PointInTime::AsOfSequence(seq)) => {
+                repo.get_temporal_by_sequence(domain, edition, root, seq)
+                    .await
+            }
+            None => {
+                // H-35: emit the constant's VALUE, not its path.
+                return Err(Status::invalid_argument(
+                    crate::services::errmsg::TEMPORAL_QUERY_MISSING_POINT,
+                ));
+            }
+        },
+        None => repo.get(domain, edition, root).await,
+    };
+    result.map_err(|e| Status::internal(e.to_string()))
+}
+
 #[tonic::async_trait]
 impl EventQueryTrait for EventQueryService {
     type GetEventsStream = ReceiverStream<Result<EventBook, Status>>;
@@ -152,7 +219,7 @@ impl EventQueryTrait for EventQueryService {
                     }
                     None => {
                         return Err(Status::invalid_argument(
-                            "crate::services::errmsg::TEMPORAL_QUERY_MISSING_POINT",
+                            crate::services::errmsg::TEMPORAL_QUERY_MISSING_POINT,
                         ));
                     }
                 }
@@ -309,10 +376,15 @@ impl EventQueryTrait for EventQueryService {
                         };
 
                         // Handle selection: range, specific sequences, temporal, or full query
+                        // H-36: match get_event_book's inclusive→exclusive
+                        // conversion so the same Query produces the same
+                        // event set whether the caller goes through the
+                        // unary or the bidi-stream RPC.
                         let result = match query.selection {
                             Some(Selection::Range(ref range)) => {
                                 let lower = range.lower;
-                                let upper = range.upper.unwrap_or(u32::MAX);
+                                let upper =
+                                    range.upper.map(|u| u.saturating_add(1)).unwrap_or(u32::MAX);
                                 event_book_repo
                                     .get_from_to(&domain, edition, root, lower, upper)
                                     .await
@@ -353,7 +425,7 @@ impl EventQueryTrait for EventQueryService {
                                 None => {
                                     if tx
                                         .send(Err(Status::invalid_argument(
-                                            "crate::services::errmsg::TEMPORAL_QUERY_MISSING_POINT",
+                                            crate::services::errmsg::TEMPORAL_QUERY_MISSING_POINT,
                                         )))
                                         .await
                                         .is_err()

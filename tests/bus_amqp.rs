@@ -239,3 +239,121 @@ async fn test_handler_err_triggers_amqp_redelivery() {
         observed
     );
 }
+
+/// Regression test for finding H-06: malformed messages must land in the
+/// dead-letter queue, not be silently dropped.
+///
+/// Baseline (pre-H-06): `setup_consumer` declared the primary queue
+/// WITHOUT `x-dead-letter-exchange`, so when `process_delivery` rejected
+/// a decode-failed message via `delivery.reject(BasicRejectOptions {
+/// requeue: false, .. })`, RabbitMQ had no DLX to route it to and
+/// dropped the message on the floor. Operators got zero observability
+/// into malformed-payload incidents.
+///
+/// After the fix: the primary queue carries `x-dead-letter-exchange =
+/// "{queue}.dlx"`, the framework also declares the fanout DLX and a
+/// bound DLQ (`{queue}.dlq`), and rejected messages land in the DLQ for
+/// recovery.
+///
+/// Strategy: stand up a subscriber, publish a raw non-protobuf payload
+/// to the bound routing key (so decode fails), then `basic_get` from the
+/// expected DLQ name and assert the malformed payload arrived.
+#[tokio::test]
+async fn test_decode_failure_routes_to_dead_letter_queue() {
+    use lapin::options::{BasicGetOptions, BasicPublishOptions};
+    use lapin::{BasicProperties, Connection, ConnectionProperties};
+
+    println!("=== AMQP H-06 DLX-on-decode-failure test ===");
+    let (_container, url) = start_rabbitmq().await;
+    let prefix = test_prefix();
+    let domain = format!("{}-h06-domain", prefix);
+    let queue = format!("{}-h06-queue", prefix);
+    let expected_dlq = format!("{}.dlq", queue);
+
+    let publisher = AmqpEventBus::new(AmqpConfig::publisher(&url))
+        .await
+        .expect("Failed to create AMQP publisher");
+
+    let subscriber = publisher
+        .create_subscriber(&queue, Some(&domain))
+        .await
+        .expect("Failed to create AMQP subscriber");
+
+    // No handler subscribed — we only need the framework to attach as a
+    // consumer so the queue is declared with DLX wiring and the broker
+    // delivers our malformed message to the framework consumer (which
+    // will reject → DLX → DLQ).
+    subscriber
+        .start_consuming()
+        .await
+        .expect("Failed to start consuming");
+
+    // Let the consumer attach so the queue (with DLX args) is declared
+    // before we publish.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // Open a side-channel via raw lapin to publish a non-protobuf payload
+    // (decode will fail in `process_delivery`).
+    let conn = Connection::connect(&url, ConnectionProperties::default())
+        .await
+        .expect("raw lapin connect");
+    let channel = conn.create_channel().await.expect("raw channel");
+
+    let malformed_payload = b"not a valid protobuf EventBook";
+    let routing_key = format!("{}.deadbeef", domain);
+    channel
+        .basic_publish(
+            "angzarr.events",
+            &routing_key,
+            BasicPublishOptions::default(),
+            malformed_payload,
+            BasicProperties::default().with_delivery_mode(2),
+        )
+        .await
+        .expect("basic_publish malformed payload")
+        .await
+        .expect("publish confirm");
+
+    // Poll the DLQ for up to a few seconds: the framework consumer must
+    // receive the malformed delivery, decode-fail, reject(requeue=false),
+    // and RabbitMQ must route it to {queue}.dlx → {queue}.dlq.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut got: Option<Vec<u8>> = None;
+    while std::time::Instant::now() < deadline {
+        match channel
+            .basic_get(&expected_dlq, BasicGetOptions { no_ack: true })
+            .await
+        {
+            Ok(Some(delivery)) => {
+                got = Some(delivery.data.clone());
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => panic!("basic_get on DLQ {} failed: {}", expected_dlq, e),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let payload = got.unwrap_or_else(|| {
+        panic!(
+            "expected malformed payload to land in DLQ {} after \
+             decode-failure rejection, but the queue was empty after \
+             polling. Baseline (pre-H-06) declares the primary queue \
+             without `x-dead-letter-exchange` so RabbitMQ silently drops \
+             the rejected delivery — this is the H-06 silent-data-loss \
+             bug.",
+            expected_dlq
+        )
+    });
+
+    assert_eq!(
+        payload, malformed_payload,
+        "DLQ payload bytes must match what was published unchanged"
+    );
+
+    println!(
+        "=== H-06 DLX-on-decode-failure: PASSED (DLQ {} received {} bytes) ===",
+        expected_dlq,
+        payload.len()
+    );
+}

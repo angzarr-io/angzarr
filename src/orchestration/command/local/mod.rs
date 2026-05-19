@@ -8,7 +8,7 @@ use async_trait::async_trait;
 
 use crate::proto::{CommandBook, CommandResponse, SyncMode};
 use crate::utils::retry::is_retryable_status;
-use crate::utils::sequence_validator::extract_event_book_from_status;
+use crate::utils::single_sequence_check::extract_event_book_from_status;
 
 use super::CommandExecutor;
 use super::CommandOutcome;

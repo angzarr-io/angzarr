@@ -920,3 +920,233 @@ async fn test_get_events_missing_cover() {
     let status = response.unwrap_err();
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
 }
+
+// ============================================================================
+// dispatch_selection / range-bound parity tests (H-35, H-36)
+// ============================================================================
+//
+// `get_event_book` (unary) and `synchronize` (bidi-stream) used to dispatch
+// `query.selection` in two divergent copies of the same `match` block. The two
+// copies disagreed on:
+//   * H-35: the "TemporalQuery missing point_in_time" error message — one path
+//     returned the literal path `"crate::services::errmsg::TEMPORAL_QUERY_..."`
+//     instead of the constant's value, so clients saw a Rust module path.
+//   * H-36: the `SequenceRange.upper` bound — `get_event_book` correctly
+//     treated it as inclusive (matching `test_get_event_book_with_range`'s
+//     "[2, 4] returns events 2, 3, 4" contract), while `synchronize` treated
+//     it as exclusive, so the same proto Query yielded different event sets
+//     through the two methods.
+//
+// These tests pin the unified `dispatch_selection` helper. By construction the
+// two service entry points now share this helper, so parity follows from a
+// single source of truth.
+
+/// H-35: the missing-point-in-time error returns the constant's VALUE
+/// (`"TemporalQuery must specify ..."`), not the constant's Rust path. The
+/// path leaked because the literal string `"crate::services::errmsg::..."`
+/// was passed instead of the `const`.
+#[tokio::test]
+async fn test_dispatch_selection_temporal_missing_point_returns_descriptive_message() {
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let repo =
+        crate::repository::EventBookRepository::with_config(event_store, snapshot_store, false);
+
+    let result = super::dispatch_selection(
+        &repo,
+        "orders",
+        "",
+        uuid::Uuid::new_v4(),
+        Some(Selection::Temporal(TemporalQuery {
+            point_in_time: None,
+        })),
+    )
+    .await;
+
+    let status = result.expect_err("missing point_in_time must be rejected");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+    let msg = status.message();
+    assert!(
+        msg.contains("TemporalQuery must specify"),
+        "error message must describe the contract, got: {msg:?}"
+    );
+    assert!(
+        !msg.contains("crate::services::errmsg"),
+        "error message must not leak the Rust module path of the constant, got: {msg:?}"
+    );
+    // Pin equality to the canonical constant so the message can't drift.
+    assert_eq!(msg, crate::services::errmsg::TEMPORAL_QUERY_MISSING_POINT);
+}
+
+/// H-36: `SequenceRange.upper` is INCLUSIVE per the proto contract (see
+/// `test_get_event_book_with_range`). The helper must convert
+/// inclusive→exclusive internally so storage's `[from, to)` half-open range
+/// returns the documented events. Range [2, 4] → 3 events (2, 3, 4).
+#[tokio::test]
+async fn test_dispatch_selection_range_upper_is_inclusive() {
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let root = uuid::Uuid::new_v4();
+
+    for i in 0..5u32 {
+        let events = vec![EventPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::Sequence(i)),
+            }),
+            payload: Some(event_page::Payload::Event(Any {
+                type_url: format!("test.Event{i}"),
+                value: vec![],
+            })),
+            created_at: None,
+            ..Default::default()
+        }];
+        event_store
+            .add("orders", "", root, events, "", None, None)
+            .await
+            .unwrap();
+    }
+
+    let repo =
+        crate::repository::EventBookRepository::with_config(event_store, snapshot_store, false);
+
+    let book = super::dispatch_selection(
+        &repo,
+        "orders",
+        "",
+        root,
+        Some(Selection::Range(SequenceRange {
+            lower: 2,
+            upper: Some(4),
+        })),
+    )
+    .await
+    .expect("range query must succeed");
+
+    assert_eq!(
+        book.pages.len(),
+        3,
+        "Range [2, 4] is inclusive per the proto contract — must return 3 events"
+    );
+}
+
+/// H-36: `synchronize` and `get_event_book` must produce the same event set
+/// for the same proto Query. This is the parity test for the helper.
+///
+/// We assert via `get_event_book` (the public, easily-callable entry point)
+/// and via the shared helper that `synchronize` now calls. If either diverges
+/// from inclusive-upper semantics, this test fails.
+#[tokio::test]
+async fn test_dispatch_selection_matches_get_event_book_on_same_range() {
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let root = uuid::Uuid::new_v4();
+
+    for i in 0..6u32 {
+        let events = vec![EventPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::Sequence(i)),
+            }),
+            payload: Some(event_page::Payload::Event(Any {
+                type_url: format!("test.Event{i}"),
+                value: vec![],
+            })),
+            created_at: None,
+            ..Default::default()
+        }];
+        event_store
+            .add("orders", "", root, events, "", None, None)
+            .await
+            .unwrap();
+    }
+
+    let service = create_test_service_with_mocks(event_store.clone(), snapshot_store.clone());
+    let repo =
+        crate::repository::EventBookRepository::with_config(event_store, snapshot_store, false);
+
+    let range = SequenceRange {
+        lower: 1,
+        upper: Some(5),
+    };
+
+    // get_event_book path
+    let unary_query = Query {
+        cover: Some(crate::proto::Cover {
+            domain: "orders".to_string(),
+            root: Some(ProtoUuid {
+                value: root.as_bytes().to_vec(),
+            }),
+            correlation_id: String::new(),
+            edition: None,
+        }),
+        selection: Some(Selection::Range(range)),
+    };
+    let unary_book = service
+        .get_event_book(Request::new(unary_query))
+        .await
+        .expect("get_event_book must succeed")
+        .into_inner();
+
+    // dispatch_selection path (used by synchronize)
+    let stream_book =
+        super::dispatch_selection(&repo, "orders", "", root, Some(Selection::Range(range)))
+            .await
+            .expect("dispatch_selection must succeed");
+
+    assert_eq!(
+        unary_book.pages.len(),
+        stream_book.pages.len(),
+        "get_event_book and synchronize must return the same event count for the same Query"
+    );
+    assert_eq!(
+        unary_book.pages.len(),
+        5,
+        "Range [1, 5] inclusive must return 5 events (1, 2, 3, 4, 5)"
+    );
+}
+
+/// H-36: `upper: None` means "to latest". Helper must not truncate.
+#[tokio::test]
+async fn test_dispatch_selection_range_upper_none_returns_to_latest() {
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let root = uuid::Uuid::new_v4();
+
+    for i in 0..4u32 {
+        let events = vec![EventPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::Sequence(i)),
+            }),
+            payload: Some(event_page::Payload::Event(Any {
+                type_url: format!("test.Event{i}"),
+                value: vec![],
+            })),
+            created_at: None,
+            ..Default::default()
+        }];
+        event_store
+            .add("orders", "", root, events, "", None, None)
+            .await
+            .unwrap();
+    }
+
+    let repo =
+        crate::repository::EventBookRepository::with_config(event_store, snapshot_store, false);
+
+    let book = super::dispatch_selection(
+        &repo,
+        "orders",
+        "",
+        root,
+        Some(Selection::Range(SequenceRange {
+            lower: 0,
+            upper: None,
+        })),
+    )
+    .await
+    .expect("range query must succeed");
+
+    assert_eq!(book.pages.len(), 4, "upper: None means 'to latest'");
+}

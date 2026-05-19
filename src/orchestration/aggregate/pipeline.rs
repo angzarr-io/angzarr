@@ -322,8 +322,22 @@ async fn execute_mode(
         );
     }
 
-    // Sequence validation based on merge strategy (skip for deferred)
-    let sequence_mismatch = !is_deferred && expected != actual;
+    // Sequence validation based on merge strategy.
+    //
+    // For non-deferred commands `expected` is the explicit sequence the
+    // client claimed; for deferred (saga-produced) commands
+    // `extract_command_sequence` returns 0, so `expected != actual` fires
+    // exactly when the destination has prior history. That's the trigger
+    // we want for COMMUTATIVE/MANUAL on deferred commands (H-18): the
+    // upfront sequence check is genuinely meaningless for sagas (they
+    // never claimed a destination sequence), but the *field-overlap*
+    // check still applies — a saga that produced a command against
+    // stale destination field state must still be caught. Pre-fix the
+    // gate was `!is_deferred && expected != actual` which skipped
+    // COMMUTATIVE/MANUAL entirely for deferred commands; the cascade
+    // gate (C-03) only catches uncommitted-cascade overlaps, leaving
+    // committed-intervening overlap unchecked.
+    let sequence_mismatch = expected != actual;
 
     // Track if we need post-execution commutative check
     let needs_commutative_check =
@@ -334,10 +348,19 @@ async fn execute_mode(
             MergeStrategy::MergeStrict => {
                 // STRICT: Return FAILED_PRECONDITION (retryable) for update-and-retry flow.
                 // The retry loop will reload fresh state and retry the command.
-                return Err(Status::failed_precondition(format!(
-                    "{}{expected}, aggregate at {actual}",
-                    crate::orchestration::errmsg::SEQUENCE_MISMATCH
-                )));
+                //
+                // Deferred commands never claim a destination sequence, so
+                // STRICT optimistic-concurrency is meaningless for them —
+                // they always run with `expected = 0`. Skip the STRICT
+                // arm for deferred so saga redeliveries don't enter an
+                // unconditional retry loop. Field-overlap semantics
+                // (COMMUTATIVE/MANUAL) are still enforced below; H-18.
+                if !is_deferred {
+                    return Err(Status::failed_precondition(format!(
+                        "{}{expected}, aggregate at {actual}",
+                        crate::orchestration::errmsg::SEQUENCE_MISMATCH
+                    )));
+                }
             }
             MergeStrategy::MergeCommutative => {
                 // COMMUTATIVE: Proceed to execution, check field overlap afterward.
@@ -466,8 +489,19 @@ async fn execute_mode(
         )
         .await?;
 
-    let mut persisted = match outcome {
-        PersistOutcome::Persisted(events) | PersistOutcome::NoOp(events) => events,
+    // H-16: distinguish Persisted (new events / snapshot change) from
+    // NoOp (no diff). The PersistOutcome::NoOp EventBook has `pages:
+    // vec![]` — passing it to `post_persist` would publish a 0-page
+    // book to the bus, wasting traffic and tripping subscribers that
+    // pattern-match `pages.first()`. Idempotent-republish (the saga
+    // redelivery path at line 230) is a SEPARATE code path that
+    // legitimately republishes the cached book; its EventBook carries
+    // pages and is dispatched independently above. The skip applies
+    // only to the post-handler NoOp from a command that produced no
+    // diff against prior state.
+    let (mut persisted, is_noop) = match outcome {
+        PersistOutcome::Persisted(events) => (events, false),
+        PersistOutcome::NoOp(events) => (events, true),
         PersistOutcome::Duplicate { .. } => {
             // Should not happen for commands (no external_id passed)
             return Err(Status::internal("Unexpected duplicate in command pipeline"));
@@ -477,8 +511,19 @@ async fn execute_mode(
     // Set next_sequence on persisted EventBook for callers
     calculate_set_next_seq(&mut persisted);
 
-    // Post-persist: publish + sync projectors
-    let projections = ctx.post_persist(&persisted).await?;
+    // Post-persist: publish + sync projectors. Skip on NoOp to avoid
+    // publishing an empty EventBook to the bus (H-16). Callers still
+    // receive the (empty) book in CommandResponse so "command ran, just
+    // nothing changed" is observable.
+    let projections = if is_noop {
+        tracing::debug!(
+            domain = %domain,
+            "Skipping post_persist for PersistOutcome::NoOp (H-16: empty EventBook must not reach the bus)"
+        );
+        vec![]
+    } else {
+        ctx.post_persist(&persisted).await?
+    };
 
     Ok(CommandResponse {
         events: Some(persisted),

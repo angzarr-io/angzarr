@@ -142,7 +142,7 @@ pub fn is_retryable_status(status: &Status) -> bool {
     // FailedPrecondition. Only sequence-related rejections are actually
     // retryable — refetching state and retrying a guard rejection just
     // hits the same guard. Match the message prefix the framework emits
-    // (`Sequence mismatch:` from sequence_validator,
+    // (`Sequence mismatch:` from single_sequence_check,
     // `Sequence conflict:` from storage::error::SEQUENCE_CONFLICT).
     let msg = status.message();
     msg.starts_with("Sequence mismatch:") || msg.starts_with("Sequence conflict:")

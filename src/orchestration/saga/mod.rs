@@ -509,6 +509,34 @@ pub async fn orchestrate_saga(
     // Facts must have `external_id` set in their Cover for idempotent handling.
     // Fact injection failure fails the entire saga operation — facts are not
     // best-effort, they're part of the transaction.
+    //
+    // H-15: silent-drop refused. If the saga emits any facts but no
+    // `FactExecutor` is wired, return an explicit error instead of
+    // silently discarding them. Mirrors the PM-side fix in
+    // `process_manager/mod.rs` — prevents the bc1d3db4 regression class
+    // where a caller forgets to wire an executor and every fact is lost.
+    if !events.is_empty() && fact_executor.is_none() {
+        let domains: Vec<&str> = events
+            .iter()
+            .map(|f| {
+                f.cover
+                    .as_ref()
+                    .map(|c| c.domain.as_str())
+                    .unwrap_or("unknown")
+            })
+            .collect();
+        return Err(BusError::SagaFailed {
+            name: saga_name.to_string(),
+            message: format!(
+                "Saga produced {} fact(s) (target domains: {:?}) but no \
+                 FactExecutor is wired — facts cannot be silently dropped \
+                 (H-15). Wire a FactExecutor or guarantee handle() returns \
+                 no events.",
+                events.len(),
+                domains,
+            ),
+        });
+    }
     if let Some(fact_exec) = fact_executor {
         for fact in events {
             let domain = fact

@@ -49,6 +49,14 @@ pub struct AggregateCommandHandler {
     context_factory: Arc<dyn AggregateContextFactory>,
     backoff: ExponentialBuilder,
     sync_projectors: Vec<SyncProjectorEntry>,
+    /// When true (default), async command failures propagate to the bus
+    /// dispatch layer (the message nacks → redeliver / DLQ). When false,
+    /// errors are logged but the handler returns `Ok(())`, matching the
+    /// legacy silent-ack behavior. Mirrors `ProcessManagerEventHandler`.
+    ///
+    /// Default: true (loud-fail). Use `with_error_propagation(false)` to
+    /// opt back into silent acknowledgement.
+    propagate_errors: bool,
 }
 
 impl AggregateCommandHandler {
@@ -58,6 +66,7 @@ impl AggregateCommandHandler {
             context_factory,
             backoff: saga_backoff(),
             sync_projectors: Vec::new(),
+            propagate_errors: true,
         }
     }
 
@@ -70,6 +79,19 @@ impl AggregateCommandHandler {
     /// Add sync projectors to be called after command execution.
     pub fn with_sync_projectors(mut self, projectors: Vec<SyncProjectorEntry>) -> Self {
         self.sync_projectors = projectors;
+        self
+    }
+
+    /// Configure error-propagation behavior for the async `EventHandler` path.
+    ///
+    /// When enabled (the default), `execute_command_with_retry` failures
+    /// surface as `Err(BusError)` from `EventHandler::handle`, causing the
+    /// bus dispatcher to nack the message. When disabled, errors are
+    /// `error!`-logged and the handler returns `Ok(())` — the legacy
+    /// behavior; only safe when the caller has already arranged for DLQ
+    /// routing elsewhere or genuinely wants at-most-once semantics.
+    pub fn with_error_propagation(mut self, propagate: bool) -> Self {
+        self.propagate_errors = propagate;
         self
     }
 
@@ -144,6 +166,7 @@ impl EventHandler for AggregateCommandHandler {
 
         let factory = self.context_factory.clone();
         let backoff = self.backoff;
+        let propagate_errors = self.propagate_errors;
 
         Box::pin(
             async move {
@@ -168,6 +191,12 @@ impl EventHandler for AggregateCommandHandler {
                         error = %e,
                         "Async command execution failed"
                     );
+                    if propagate_errors {
+                        // Surface the failure to the bus dispatcher so the
+                        // message nacks → redelivers / lands in the DLQ.
+                        // Mirrors ProcessManagerEventHandler / SagaEventHandler.
+                        return Err(BusError::from(e));
+                    }
                 }
 
                 // Response events are published by the pipeline's post_persist

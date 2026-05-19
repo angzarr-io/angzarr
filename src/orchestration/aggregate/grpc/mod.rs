@@ -24,7 +24,7 @@ use crate::proto_ext::{correlated_request, CoverExt, EventPageExt};
 use crate::repository::EventBookRepository;
 use crate::services::upcaster::Upcaster;
 use crate::storage::{EventStore, SnapshotStore, StorageError};
-use crate::utils::sequence_validator::sequence_mismatch_error_with_state;
+use crate::utils::single_sequence_check::sequence_mismatch_error_with_state;
 
 use crate::storage::AddOutcome;
 

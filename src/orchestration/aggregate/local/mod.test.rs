@@ -1220,3 +1220,620 @@ async fn test_post_persist_async_still_publishes() {
         "Async mode publishes but does not wait for projectors; bus must still receive the EventBook"
     );
 }
+
+// ========================================================================
+// H-16: PersistOutcome::NoOp must not publish an empty EventBook to the bus
+//
+// `execute_mode` extracts the EventBook from PersistOutcome::Persisted /
+// NoOp via the same `outcome { ... => events }` match, then unconditionally
+// calls `ctx.post_persist(&persisted)`. On NoOp the EventBook has
+// `pages: vec![]`; publishing a 0-page book wastes bus traffic and is a
+// foot-gun for subscribers/sagas/PMs that assume non-empty pages (e.g.,
+// `pages.first()` stamping patterns).
+//
+// The fix short-circuits post_persist on NoOp — no bus publish, no sync
+// projector dispatch, and the caller gets an empty `projections` vector.
+// The Persisted path is unchanged; idempotent-republish (deferred-cache
+// hit on line 230 of pipeline.rs) is a *separate* outcome that must still
+// publish so the bus recovers from a prior failure.
+// ========================================================================
+
+/// H-16 reproducer: a command that the business handler turns into a no-op
+/// (returns an empty EventBook so persist finds no diff) must not republish
+/// a 0-page book. Pre-fix: post_persist runs unconditionally on NoOp;
+/// MockEventBus captures a published EventBook with `pages.is_empty()`.
+/// Post-fix: nothing reaches the bus.
+#[tokio::test]
+async fn test_noop_persist_does_not_publish_empty_event_book() {
+    let storage = create_test_storage();
+    let event_bus = Arc::new(MockEventBus::new());
+    // Use Simple (default-publish) so the failure mode is "post_persist
+    // fired and produced a publish". Isolated would mask the bug — its
+    // C-05 short-circuit already returns early before we'd see whether
+    // the NoOp short-circuit is in place.
+    let ctx = LocalAggregateContext::without_discovery(storage, event_bus.clone())
+        .with_sync_mode(SyncMode::Simple);
+
+    let target_root = Uuid::new_v4();
+
+    // A vanilla (non-deferred) command. MockClientLogic.invoke returns
+    // `EventBook::default()` (no pages, no snapshot). Pipeline's persist
+    // step computes new_pages = []` and `snapshot_changed = false`, so
+    // returns PersistOutcome::NoOp. The bug: pipeline still calls
+    // post_persist on the empty book.
+    let command = CommandBook {
+        cover: Some(Cover {
+            domain: "hand".to_string(),
+            root: Some(ProtoUuid {
+                value: target_root.as_bytes().to_vec(),
+            }),
+            correlation_id: "corr-noop".to_string(),
+            edition: None,
+        }),
+        pages: vec![CommandPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::Sequence(0)),
+            }),
+            payload: Some(command_page::Payload::Command(prost_types::Any {
+                type_url: "test.NoopCmd".to_string(),
+                value: vec![],
+            })),
+            merge_strategy: MergeStrategy::MergeAggregateHandles as i32,
+        }],
+    };
+
+    let business = MockClientLogic::new(0);
+    let response = execute_command_pipeline(&ctx, &business, command, PipelineMode::Execute)
+        .await
+        .expect("no-op command must succeed");
+
+    // The CommandResponse should still carry the (empty) events back to
+    // the caller — that's the contract for "command ran, just nothing
+    // changed". Only the bus publish is suppressed.
+    let returned = response.events.as_ref().expect("response carries events");
+    assert!(
+        returned.pages.is_empty(),
+        "no-op command must return a 0-page EventBook; got {} pages",
+        returned.pages.len()
+    );
+
+    // Pre-fix: pipeline calls post_persist on the empty NoOp book, so the
+    // bus sees one 0-page EventBook. Post-fix: the bus stays empty.
+    let published = event_bus.take_published().await;
+    assert!(
+        published.is_empty(),
+        "H-16: NoOp must not publish to the bus; got {} published EventBook(s) (pre-fix: pipeline.rs:481 calls post_persist on the empty NoOp book, wasting bus traffic and tripping subscribers that assume non-empty pages)",
+        published.len()
+    );
+}
+
+/// Regression guard for the *normal* persist path: when the handler
+/// produces a new event, the bus must still receive the EventBook. Pins
+/// the H-16 fix as "skip publish only on NoOp", not "skip publish always".
+///
+/// Uses BalanceClientLogic (defined above for C-03) which appends one
+/// event per command, so PersistOutcome::Persisted is the outcome.
+#[tokio::test]
+async fn test_persisted_outcome_still_publishes_to_bus() {
+    let storage = create_test_storage();
+    let event_bus = Arc::new(MockEventBus::new());
+    let ctx = LocalAggregateContext::without_discovery(storage, event_bus.clone())
+        .with_sync_mode(SyncMode::Simple);
+
+    let target_root = Uuid::new_v4();
+
+    // Empty aggregate; BalanceClientLogic appends a single delta event.
+    let command = balance_command_book("wallet", target_root, 0, 7);
+    let business = BalanceClientLogic;
+
+    execute_command_pipeline(&ctx, &business, command, PipelineMode::Execute)
+        .await
+        .expect("Persisted-outcome command must succeed");
+
+    let published = event_bus.take_published().await;
+    assert_eq!(
+        published.len(),
+        1,
+        "Persisted outcome must publish exactly one EventBook to the bus"
+    );
+    assert_eq!(
+        published[0].pages.len(),
+        1,
+        "published EventBook must carry the one new event"
+    );
+}
+
+/// Regression guard for the idempotent-republish path (C-04): a deferred
+/// command redelivery that hits `check_deferred_idempotency` must still
+/// publish the cached EventBook so the bus recovers from a prior failure.
+/// The H-16 short-circuit lives on the *PersistOutcome::NoOp* branch of
+/// `execute_mode` — NOT on the idempotency-hit fast path, which uses a
+/// separate `post_persist` call (pipeline.rs:230). Pinning this contract
+/// prevents an over-broad H-16 fix from silently breaking C-04.
+#[tokio::test]
+async fn test_idempotent_republish_still_publishes_event_book() {
+    let storage = create_test_storage();
+    let event_store = storage.event_store.clone();
+    let event_bus = Arc::new(MockEventBus::new());
+    let ctx = LocalAggregateContext::without_discovery(storage, event_bus.clone());
+
+    let target_root = Uuid::new_v4();
+    let source_root = Uuid::new_v4();
+    let correlation_id = "corr-H-16-republish";
+    let source_info = crate::storage::SourceInfo::new("", "table", source_root, 5);
+
+    // Seed: prior dispatch persisted an event tagged with source provenance.
+    let prior_event = EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(page_header::SequenceType::Sequence(0)),
+        }),
+        ..Default::default()
+    };
+    event_store
+        .add(
+            "hand",
+            "",
+            target_root,
+            vec![prior_event],
+            correlation_id,
+            None,
+            Some(&source_info),
+        )
+        .await
+        .expect("seed prior dispatch");
+
+    // Redelivery — same source provenance triggers the idempotency hit.
+    let command =
+        deferred_command_book("hand", target_root, correlation_id, "table", source_root, 5);
+
+    let business = MockClientLogic::new(0);
+    execute_command_pipeline(&ctx, &business, command, PipelineMode::Execute)
+        .await
+        .expect("redelivery should succeed via idempotency hit");
+
+    let published = event_bus.take_published().await;
+    assert_eq!(
+        published.len(),
+        1,
+        "idempotent republish must still publish exactly one EventBook to the bus to recover from a prior bus failure (regression guard for C-04)"
+    );
+    assert_eq!(
+        published[0].pages.len(),
+        1,
+        "republished book must carry the cached event"
+    );
+}
+
+// ========================================================================
+// H-18: deferred commands must run COMMUTATIVE/MANUAL branches
+//
+// `pipeline.rs:327` gates the sequence-mismatch check on `!is_deferred`,
+// which skips the entire merge-strategy match block for saga-produced
+// commands. The original intent — "deferred commands have already been
+// validated upstream so skip" — applies only to the *sequence* check;
+// the *field-overlap* check has independent semantics that DO apply.
+//
+// A saga that produced a command against stale destination state has no
+// commutative-overlap guard today: if intervening committed events
+// touched the same fields as the saga's command, the COMMUTATIVE branch
+// would catch it post-execution — but the deferred bypass skips the
+// `needs_commutative_check` trigger. Similarly, MERGE_MANUAL deferred
+// commands miss DLQ routing.
+//
+// The fix: drop `!is_deferred` from `sequence_mismatch`. For deferred
+// commands, `expected = 0` (from `extract_command_sequence` which
+// returns 0 for any deferred sequence type), so `expected != actual`
+// fires whenever the destination has prior history — which is the
+// trigger we want: "saga didn't observe the destination, run the
+// strategy's check".
+// ========================================================================
+
+/// H-18 reproducer (COMMUTATIVE overlap): a deferred command with
+/// `MergeCommutative` whose handler touches the *same* field as a prior
+/// committed event must be rejected post-execution. Pre-fix the
+/// commutative check is skipped because `is_deferred` short-circuits
+/// `sequence_mismatch`, so the command persists despite the conflict.
+#[tokio::test]
+async fn test_deferred_commutative_rejects_overlapping_fields() {
+    let storage = create_test_storage();
+    let event_store = storage.event_store.clone();
+    let target_root = Uuid::new_v4();
+
+    // Seed: prior committed event touched `balance` (BalanceClientLogic's
+    // replay emits a `test.StatefulState` JSON with a single "balance"
+    // field). The saga didn't know about this event.
+    let prior_event = EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(page_header::SequenceType::Sequence(0)),
+        }),
+        payload: Some(event_page::Payload::Event(prost_types::Any {
+            type_url: "test.BalanceDelta".to_string(),
+            value: vec![10],
+        })),
+        created_at: None,
+        no_commit: false,
+        cascade_id: None,
+    };
+    event_store
+        .add(
+            "wallet",
+            "",
+            target_root,
+            vec![prior_event],
+            "corr-prior",
+            None,
+            None,
+        )
+        .await
+        .expect("seed prior event");
+
+    let ctx = LocalAggregateContext::without_discovery(storage, Arc::new(MockEventBus::new()));
+
+    // Deferred command with COMMUTATIVE strategy; handler will produce a
+    // BalanceDelta event (touches balance), overlapping with the prior.
+    let source_root = Uuid::new_v4();
+    let command = CommandBook {
+        cover: Some(Cover {
+            domain: "wallet".to_string(),
+            root: Some(ProtoUuid {
+                value: target_root.as_bytes().to_vec(),
+            }),
+            correlation_id: "corr-saga".to_string(),
+            edition: None,
+        }),
+        pages: vec![CommandPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::AngzarrDeferred(deferred(
+                    "table",
+                    source_root,
+                    5,
+                ))),
+            }),
+            payload: Some(command_page::Payload::Command(prost_types::Any {
+                type_url: "test.BalanceCmd".to_string(),
+                value: vec![5],
+            })),
+            merge_strategy: MergeStrategy::MergeCommutative as i32,
+        }],
+    };
+
+    let business = BalanceClientLogic;
+    let result = execute_command_pipeline(&ctx, &business, command, PipelineMode::Execute).await;
+
+    let err = result.expect_err(
+        "H-18: deferred COMMUTATIVE command with overlapping field must be rejected. \
+         Bug present: pipeline returned Ok because `!is_deferred` short-circuits the \
+         sequence_mismatch trigger, so the post-execution commutative check never runs.",
+    );
+    assert_eq!(
+        err.code(),
+        tonic::Code::FailedPrecondition,
+        "commutative overlap should surface as FailedPrecondition (retryable); got {:?}: {}",
+        err.code(),
+        err.message()
+    );
+}
+
+/// H-18 regression guard (COMMUTATIVE disjoint): a deferred command with
+/// `MergeCommutative` whose handler touches a *different* field than the
+/// prior committed event must succeed. Pins the fix as "extend the check
+/// to deferred commands", not "reject all deferred commands with history".
+#[tokio::test]
+async fn test_deferred_commutative_allows_disjoint_fields() {
+    /// Variant of BalanceClientLogic whose replay emits a JSON with two
+    /// named fields (field_a, field_b) so the test-state diff path
+    /// distinguishes them. Mirrors DisjointBalanceClientLogic above.
+    struct DisjointDeferredClientLogic;
+
+    #[async_trait]
+    impl ClientLogic for DisjointDeferredClientLogic {
+        async fn invoke(&self, cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
+            let prior = cmd.events.as_ref().expect("prior events present");
+            let next_seq = prior
+                .pages
+                .iter()
+                .map(|p| {
+                    use crate::proto_ext::EventPageExt;
+                    p.sequence_num()
+                })
+                .max()
+                .map(|m| m + 1)
+                .unwrap_or(0);
+
+            let delta = cmd
+                .command
+                .as_ref()
+                .and_then(|c| c.pages.first())
+                .and_then(|p| p.payload.as_ref())
+                .and_then(|payload| match payload {
+                    command_page::Payload::Command(any) => {
+                        Some(any.value.first().copied().unwrap_or(0))
+                    }
+                    _ => None,
+                })
+                .unwrap_or(0);
+
+            let event = EventPage {
+                header: Some(PageHeader {
+                    sync_mode: None,
+                    sequence_type: Some(page_header::SequenceType::Sequence(next_seq)),
+                }),
+                payload: Some(event_page::Payload::Event(prost_types::Any {
+                    type_url: "test.FieldBDelta".to_string(),
+                    value: vec![delta],
+                })),
+                created_at: None,
+                ..Default::default()
+            };
+
+            Ok(BusinessResponse {
+                result: Some(BrResult::Events(EventBook {
+                    cover: prior.cover.clone(),
+                    pages: vec![event],
+                    snapshot: None,
+                    ..Default::default()
+                })),
+            })
+        }
+
+        async fn invoke_fact(
+            &self,
+            ctx: crate::orchestration::aggregate::FactContext,
+        ) -> Result<EventBook, Status> {
+            Ok(ctx.facts)
+        }
+
+        async fn replay(&self, events: &EventBook) -> Result<prost_types::Any, Status> {
+            let mut field_a: u32 = 0;
+            let mut field_b: u32 = 0;
+            for p in &events.pages {
+                if let Some(event_page::Payload::Event(any)) = p.payload.as_ref() {
+                    match any.type_url.as_str() {
+                        "test.FieldADelta" => {
+                            field_a += any.value.first().copied().unwrap_or(0) as u32;
+                        }
+                        "test.FieldBDelta" => {
+                            field_b += any.value.first().copied().unwrap_or(0) as u32;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let json = format!("{{\"field_a\":{},\"field_b\":{}}}", field_a, field_b);
+            Ok(prost_types::Any {
+                type_url: "test.StatefulState".to_string(),
+                value: json.into_bytes(),
+            })
+        }
+    }
+
+    let storage = create_test_storage();
+    let event_store = storage.event_store.clone();
+    let target_root = Uuid::new_v4();
+
+    // Seed: prior committed event touched field_a.
+    let prior_event = EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(page_header::SequenceType::Sequence(0)),
+        }),
+        payload: Some(event_page::Payload::Event(prost_types::Any {
+            type_url: "test.FieldADelta".to_string(),
+            value: vec![10],
+        })),
+        created_at: None,
+        no_commit: false,
+        cascade_id: None,
+    };
+    event_store
+        .add(
+            "wallet",
+            "",
+            target_root,
+            vec![prior_event],
+            "corr-prior",
+            None,
+            None,
+        )
+        .await
+        .expect("seed prior event");
+
+    let ctx = LocalAggregateContext::without_discovery(storage, Arc::new(MockEventBus::new()));
+
+    let source_root = Uuid::new_v4();
+    let command = CommandBook {
+        cover: Some(Cover {
+            domain: "wallet".to_string(),
+            root: Some(ProtoUuid {
+                value: target_root.as_bytes().to_vec(),
+            }),
+            correlation_id: "corr-saga".to_string(),
+            edition: None,
+        }),
+        pages: vec![CommandPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::AngzarrDeferred(deferred(
+                    "table",
+                    source_root,
+                    5,
+                ))),
+            }),
+            payload: Some(command_page::Payload::Command(prost_types::Any {
+                type_url: "test.FieldBCmd".to_string(),
+                value: vec![5],
+            })),
+            merge_strategy: MergeStrategy::MergeCommutative as i32,
+        }],
+    };
+
+    let business = DisjointDeferredClientLogic;
+    let result = execute_command_pipeline(&ctx, &business, command, PipelineMode::Execute).await;
+
+    assert!(
+        result.is_ok(),
+        "deferred COMMUTATIVE command touching a disjoint field must succeed; got {:?}",
+        result.err()
+    );
+}
+
+/// H-18 reproducer (MANUAL): a deferred command with `MergeManual` on a
+/// destination with prior history must DLQ-route. Pre-fix the MANUAL
+/// branch is skipped because `!is_deferred` short-circuits
+/// `sequence_mismatch`, so the command runs as if there were no history.
+#[tokio::test]
+async fn test_deferred_manual_routes_to_dlq_on_prior_history() {
+    use crate::dlq::ChannelDeadLetterPublisher;
+
+    let storage = create_test_storage();
+    let event_store = storage.event_store.clone();
+    let target_root = Uuid::new_v4();
+
+    // Seed: prior committed event so `actual > 0` for the deferred
+    // command's `expected = 0`, triggering MANUAL's DLQ branch.
+    let prior_event = EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(page_header::SequenceType::Sequence(0)),
+        }),
+        ..Default::default()
+    };
+    event_store
+        .add(
+            "wallet",
+            "",
+            target_root,
+            vec![prior_event],
+            "corr-prior",
+            None,
+            None,
+        )
+        .await
+        .expect("seed prior event");
+
+    let (publisher, receiver) = ChannelDeadLetterPublisher::new();
+    let mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::dlq::AngzarrDeadLetter> =
+        receiver;
+    let ctx = LocalAggregateContext::without_discovery(storage, Arc::new(MockEventBus::new()))
+        .with_dlq_publisher(Arc::new(publisher));
+
+    let source_root = Uuid::new_v4();
+    let command = CommandBook {
+        cover: Some(Cover {
+            domain: "wallet".to_string(),
+            root: Some(ProtoUuid {
+                value: target_root.as_bytes().to_vec(),
+            }),
+            correlation_id: "corr-saga".to_string(),
+            edition: None,
+        }),
+        pages: vec![CommandPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::AngzarrDeferred(deferred(
+                    "table",
+                    source_root,
+                    5,
+                ))),
+            }),
+            payload: Some(command_page::Payload::Command(prost_types::Any {
+                type_url: "test.ManualCmd".to_string(),
+                value: vec![],
+            })),
+            merge_strategy: MergeStrategy::MergeManual as i32,
+        }],
+    };
+
+    let business = MockClientLogic::new(0);
+    let result = execute_command_pipeline(&ctx, &business, command, PipelineMode::Execute).await;
+
+    let err = result.expect_err(
+        "H-18: deferred MANUAL command on destination-with-history must Err. \
+         Bug present: pipeline returned Ok because `!is_deferred` short-circuits \
+         sequence_mismatch, so MANUAL's DLQ branch never runs.",
+    );
+    assert_eq!(
+        err.code(),
+        tonic::Code::Aborted,
+        "MANUAL sequence-mismatch surfaces as Aborted (non-retryable, human review); got {:?}: {}",
+        err.code(),
+        err.message()
+    );
+
+    // The DLQ publisher must have received the command.
+    let dead_letter = receiver.try_recv().expect(
+        "H-18: deferred MANUAL command must publish to DLQ. \
+         Bug present: empty channel means the DLQ branch never fired.",
+    );
+    assert_eq!(
+        dead_letter
+            .cover
+            .as_ref()
+            .map(|cover| cover.domain.as_str()),
+        Some("wallet"),
+        "DLQ payload must carry the rejected command's cover"
+    );
+}
+
+/// H-18 regression guard (deferred MANUAL on empty destination): a deferred
+/// command with `MergeManual` on a brand-new aggregate (no prior events)
+/// must NOT DLQ — `expected = 0` and `actual = 0` so there's no mismatch.
+/// Pins the fix as "trigger on actual sequence mismatch", not "always DLQ
+/// deferred commands".
+#[tokio::test]
+async fn test_deferred_manual_passes_on_empty_destination() {
+    use crate::dlq::ChannelDeadLetterPublisher;
+
+    let storage = create_test_storage();
+    let (publisher, receiver) = ChannelDeadLetterPublisher::new();
+    let mut receiver: tokio::sync::mpsc::UnboundedReceiver<crate::dlq::AngzarrDeadLetter> =
+        receiver;
+    let ctx = LocalAggregateContext::without_discovery(storage, Arc::new(MockEventBus::new()))
+        .with_dlq_publisher(Arc::new(publisher));
+
+    let target_root = Uuid::new_v4();
+    let source_root = Uuid::new_v4();
+    let command = CommandBook {
+        cover: Some(Cover {
+            domain: "wallet".to_string(),
+            root: Some(ProtoUuid {
+                value: target_root.as_bytes().to_vec(),
+            }),
+            correlation_id: "corr-saga".to_string(),
+            edition: None,
+        }),
+        pages: vec![CommandPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::AngzarrDeferred(deferred(
+                    "table",
+                    source_root,
+                    5,
+                ))),
+            }),
+            payload: Some(command_page::Payload::Command(prost_types::Any {
+                type_url: "test.ManualCmd".to_string(),
+                value: vec![],
+            })),
+            merge_strategy: MergeStrategy::MergeManual as i32,
+        }],
+    };
+
+    let business = MockClientLogic::new(0);
+    let result = execute_command_pipeline(&ctx, &business, command, PipelineMode::Execute).await;
+
+    assert!(
+        result.is_ok(),
+        "deferred MANUAL on empty destination must succeed (no sequence mismatch); got {:?}",
+        result.err()
+    );
+
+    assert!(
+        receiver.try_recv().is_err(),
+        "no DLQ entry expected when the deferred command races no intervening events"
+    );
+}

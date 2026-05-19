@@ -20,7 +20,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use prost::Message;
+use sha2::{Digest, Sha256};
 use tracing::{debug, error, info, warn};
+// `Uuid` is unused in production code after H-37 — the compensation root is
+// derived deterministically via SHA-256 — but the test module (loaded via
+// `#[path = "mod.test.rs"]`) still imports `Uuid::new_v4()` for fixture
+// construction. The `#[cfg(test)]` attribute keeps the production binary
+// free of the dependency edge.
+#[cfg(test)]
 use uuid::Uuid;
 
 use crate::bus::EventBus;
@@ -32,6 +39,35 @@ use crate::proto::{
 };
 use crate::proto_ext::type_url;
 use crate::proto_ext::CoverExt;
+
+/// Minimal clock abstraction for the compensation builder.
+///
+/// Production callers use [`SystemClock`] which reads `SystemTime::now()` on
+/// every call. Tests (and any replay/idempotency harness that needs a
+/// byte-identical EventBook) inject a fixed clock so the page's
+/// `created_at` is deterministic.
+///
+/// The clock only affects `EventBook.pages[*].created_at`. The aggregate
+/// root is derived purely from the `CompensationContext` + reason, so even
+/// with a real wall-clock the root remains stable across redeliveries.
+pub trait Clock: Send + Sync {
+    /// Returns the current instant. Implementations must be cheap and
+    /// non-blocking — this is called on the synchronous build path.
+    fn now(&self) -> std::time::SystemTime;
+}
+
+/// Wall-clock implementation of [`Clock`].
+///
+/// Used by all production call sites. Tests can substitute a fixed-instant
+/// clock to assert byte-equality of the compensation EventBook.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SystemClock;
+
+impl Clock for SystemClock {
+    fn now(&self) -> std::time::SystemTime {
+        std::time::SystemTime::now()
+    }
+}
 
 /// Result type for compensation operations.
 pub type Result<T> = std::result::Result<T, CompensationError>;
@@ -432,9 +468,14 @@ pub fn build_notification_command_book(context: &CompensationContext) -> Result<
 ///
 /// This is emitted when client logic cannot handle the revocation
 /// or explicitly requests system revocation.
+///
+/// The `occurred_at` timestamp is sourced from the injected [`Clock`]. In
+/// production, `&SystemClock` reproduces the historical `SystemTime::now()`
+/// behavior; tests and replay paths can pin a fixed clock for determinism.
 pub fn build_compensation_failed_event(
     context: &CompensationContext,
     compensation_failure_reason: &str,
+    clock: &dyn Clock,
 ) -> SagaCompensationFailed {
     SagaCompensationFailed {
         triggering_aggregate: context.source.source.clone(),
@@ -442,27 +483,101 @@ pub fn build_compensation_failed_event(
         rejection_reason: context.rejection_reason.clone(),
         compensation_failure_reason: compensation_failure_reason.to_string(),
         rejected_command: Some(context.rejected_command.clone()),
-        occurred_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+        occurred_at: Some(prost_types::Timestamp::from(clock.now())),
     }
+}
+
+/// Derive the compensation EventBook's aggregate root deterministically.
+///
+/// H-37 fix. Previously a fresh `Uuid::new_v4()` was minted on every call,
+/// so every redelivery of the same failed saga command (e.g., AMQP/NATS
+/// redelivery, crash + replay) wrote a new fallback-domain aggregate,
+/// breaking idempotency and the "snapshot derivable from events alone"
+/// invariant.
+///
+/// The root is now SHA-256 over a canonical concatenation of:
+///   - source aggregate's domain (UTF-8 bytes)
+///   - source aggregate's root UUID bytes (empty if absent)
+///   - source_seq (little-endian u64)
+///   - rejected command's encoded proto bytes (already canonical)
+///   - compensation failure reason (UTF-8 bytes)
+///
+/// We slice the digest to the first 16 bytes to fit a UUID. Different
+/// logical compensation events still discriminate (SHA-256 collisions on
+/// 128-bit truncation are vanishingly improbable), and identical inputs
+/// always produce the same root — which is exactly the idempotency
+/// invariant the bug violated.
+fn derive_compensation_root_bytes(
+    context: &CompensationContext,
+    compensation_failure_reason: &str,
+) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    if let Some(src) = context.source.source.as_ref() {
+        hasher.update(src.domain.as_bytes());
+        // Field separator so domain "ab" + empty root can't collide with
+        // domain "a" + root "b".
+        hasher.update(b"\x00");
+        if let Some(root) = src.root.as_ref() {
+            hasher.update(&root.value);
+        }
+        hasher.update(b"\x00");
+    } else {
+        // No source provenance — still emit a stable separator so the
+        // remaining fields drive the digest.
+        hasher.update(b"\x00\x00");
+    }
+    hasher.update(context.source.source_seq.to_le_bytes());
+    hasher.update(b"\x00");
+    hasher.update(context.rejected_command.encode_to_vec());
+    hasher.update(b"\x00");
+    hasher.update(compensation_failure_reason.as_bytes());
+
+    let digest = hasher.finalize();
+    digest[..16].to_vec()
 }
 
 /// Build an EventBook containing the SagaCompensationFailed event.
 ///
-/// Uses the fallback domain from config as the target domain.
+/// Uses the fallback domain from config as the target domain. The
+/// `EventBook.cover.root` is derived deterministically from the
+/// (context, reason) pair (see [`derive_compensation_root_bytes`]) so that
+/// re-deliveries of the same failed saga command land on the same
+/// fallback-domain aggregate. The page timestamp is taken from
+/// `SystemClock`; callers needing deterministic timestamps should use
+/// [`build_compensation_failed_event_book_with_clock`].
 pub fn build_compensation_failed_event_book(
     context: &CompensationContext,
     compensation_failure_reason: &str,
     config: &SagaCompensationConfig,
 ) -> EventBook {
-    let event = build_compensation_failed_event(context, compensation_failure_reason);
-    let fallback_root = Uuid::new_v4();
+    build_compensation_failed_event_book_with_clock(
+        context,
+        compensation_failure_reason,
+        config,
+        &SystemClock,
+    )
+}
+
+/// Clock-injected variant of [`build_compensation_failed_event_book`].
+///
+/// Behavior is identical except the `created_at` and `occurred_at`
+/// timestamps come from `clock.now()` rather than `SystemTime::now()`.
+/// Used in tests to assert byte-equality of the produced EventBook; the
+/// public clock-less function delegates here with `&SystemClock`.
+pub fn build_compensation_failed_event_book_with_clock(
+    context: &CompensationContext,
+    compensation_failure_reason: &str,
+    config: &SagaCompensationConfig,
+    clock: &dyn Clock,
+) -> EventBook {
+    let event = build_compensation_failed_event(context, compensation_failure_reason, clock);
+    let root_bytes = derive_compensation_root_bytes(context, compensation_failure_reason);
+    let created_at = prost_types::Timestamp::from(clock.now());
 
     EventBook {
         cover: Some(Cover {
             domain: config.fallback_domain.clone(),
-            root: Some(ProtoUuid {
-                value: fallback_root.as_bytes().to_vec(),
-            }),
+            root: Some(ProtoUuid { value: root_bytes }),
             correlation_id: context.correlation_id.clone(),
             edition: None,
         }),
@@ -471,7 +586,7 @@ pub fn build_compensation_failed_event_book(
                 sync_mode: None,
                 sequence_type: Some(SequenceType::Sequence(0)),
             }),
-            created_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+            created_at: Some(created_at),
             payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
                 type_url: type_url::SAGA_COMPENSATION_FAILED.to_string(),
                 value: event.encode_to_vec(),

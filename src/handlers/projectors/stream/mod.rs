@@ -34,6 +34,24 @@ fn extract_correlation_id(book: &EventBook) -> Option<&str> {
 }
 
 /// Send event to all subscribers, returning (sent_count, indices_to_remove).
+///
+/// # Slow-consumer policy (H-39)
+///
+/// `try_send` on a bounded channel can fail for two reasons: `Closed`
+/// (subscriber gone) or `Full` (subscriber present but not draining
+/// fast enough). Both are terminal here — the subscriber is removed
+/// and the caller is expected to reconnect via `subscribe()`. We do
+/// NOT retry, sleep, or escalate to `send` with a timeout: this
+/// function runs while holding the `subscriptions` `RwLock` write
+/// guard, and awaiting on a slow consumer would block delivery for
+/// every other correlation_id on the service.
+///
+/// Stream consumers are externally observable (gRPC streams), so a
+/// reconnect after a drop is the cleanest backpressure signal: the
+/// next `subscribe()` call gets a fresh, empty channel and the
+/// consumer starts over from "now". This matches how k8s pod
+/// restarts already force consumers to reconnect, so consumers
+/// already need that recovery path.
 fn send_to_subscribers(
     subscribers: &[Subscriber],
     book: &EventBook,
@@ -51,14 +69,14 @@ fn send_to_subscribers(
         match sub.sender.try_send(Ok(book.clone())) {
             Ok(()) => sent_count += 1,
             Err(e) => {
+                // Both `Full` and `Closed` are terminal — remove the
+                // subscriber rather than dropping the event silently.
                 warn!(
                     correlation_id = %correlation_id,
                     error = %e,
-                    "Failed to send event to subscriber"
+                    "Subscriber send failed; removing subscriber (H-39 slow-consumer policy)"
                 );
-                if sub.sender.is_closed() {
-                    to_remove.push(idx);
-                }
+                to_remove.push(idx);
             }
         }
     }
@@ -267,14 +285,15 @@ impl EventHandler for StreamEventHandler {
                     }
 
                     if let Err(e) = sub.sender.try_send(Ok((*book).clone())) {
+                        // H-39 slow-consumer policy: any `try_send` failure
+                        // (Full or Closed) removes the subscriber. See
+                        // `send_to_subscribers` above for the rationale.
                         warn!(
                             correlation_id = %correlation_id,
                             error = %e,
-                            "Failed to send event to subscriber"
+                            "Subscriber send failed; removing subscriber (H-39 slow-consumer policy)"
                         );
-                        if sub.sender.is_closed() {
-                            to_remove.push(idx);
-                        }
+                        to_remove.push(idx);
                     } else {
                         sent_count += 1;
                     }

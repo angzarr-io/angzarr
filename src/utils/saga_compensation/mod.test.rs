@@ -200,7 +200,7 @@ fn test_build_notification_command_book_missing_source() {
 #[test]
 fn test_build_compensation_failed_event() {
     let context = make_context();
-    let event = build_compensation_failed_event(&context, "Business declined");
+    let event = build_compensation_failed_event(&context, "Business declined", &SystemClock);
 
     assert_eq!(event.triggering_event_sequence, 5);
     assert_eq!(
@@ -480,6 +480,166 @@ async fn test_handle_business_response_with_notify_flag() {
         outcome,
         CompensationOutcome::EmitSystemRevocation(_)
     ));
+}
+
+// ============================================================================
+// H-37: Deterministic compensation EventBook root + timestamp
+// ============================================================================
+//
+// Re-deliveries of the same rejected command (e.g., AMQP/NATS redelivery,
+// crash + replay of the saga's HandleCompensation step) must produce a
+// SagaCompensationFailed EventBook with an IDENTICAL root_id and identical
+// timestamp. Otherwise, every redelivery writes a fresh fallback-domain
+// aggregate, defeating idempotency and violating the "snapshots derivable
+// from events alone" invariant.
+//
+// Determinism inputs (chosen so the same logical compensation event always
+// hashes to the same root):
+//   - source.domain
+//   - source.root.value (bytes)
+//   - source.source_seq
+//   - rejected_command.encode_to_vec() (canonical proto bytes)
+//   - compensation_failure_reason
+//
+// Timestamp is taken from an injected `Clock` so production callers see
+// wall-clock time while tests can pin it to a fixed value.
+
+/// Compensation EventBook root is deterministic across calls.
+///
+/// Two calls to `build_compensation_failed_event_book` with the same context,
+/// reason, and config MUST produce EventBooks with the same `cover.root`
+/// bytes. Without this, every redelivery of the same failed saga command
+/// writes a brand-new fallback-domain aggregate, breaking idempotency.
+#[test]
+fn test_build_compensation_failed_event_book_root_is_deterministic() {
+    let context = make_context();
+    let config = SagaCompensationConfig::default();
+
+    let first = build_compensation_failed_event_book(&context, "failure", &config);
+    let second = build_compensation_failed_event_book(&context, "failure", &config);
+
+    let first_root = first.cover.unwrap().root.unwrap().value;
+    let second_root = second.cover.unwrap().root.unwrap().value;
+
+    assert_eq!(
+        first_root, second_root,
+        "Compensation EventBook root MUST be deterministic across calls \
+         with identical (context, reason, config); two calls produced \
+         different roots, meaning redeliveries would write distinct \
+         fallback aggregates and break idempotency."
+    );
+    // UUID-sized root (16 bytes) — sanity check the derivation didn't
+    // accidentally truncate to zero or emit a SHA-256 (32 bytes).
+    assert_eq!(first_root.len(), 16);
+}
+
+/// Different compensation inputs produce different roots.
+///
+/// The deterministic root must still discriminate between genuinely distinct
+/// compensation events: different source aggregates, different source_seq
+/// values, and different compensation failure reasons must all hash to
+/// different roots. Otherwise the determinism becomes a collision: two
+/// unrelated failures would collapse to the same fallback aggregate.
+#[test]
+fn test_build_compensation_failed_event_book_root_discriminates_inputs() {
+    let base = make_context();
+    let config = SagaCompensationConfig::default();
+
+    let base_root = build_compensation_failed_event_book(&base, "failure", &config)
+        .cover
+        .unwrap()
+        .root
+        .unwrap()
+        .value;
+
+    // Different source_seq → different root.
+    let mut other_seq = base.clone();
+    other_seq.source.source_seq = base.source.source_seq + 1;
+    let other_seq_root = build_compensation_failed_event_book(&other_seq, "failure", &config)
+        .cover
+        .unwrap()
+        .root
+        .unwrap()
+        .value;
+    assert_ne!(
+        base_root, other_seq_root,
+        "Distinct source_seq values must produce distinct compensation roots"
+    );
+
+    // Different compensation reason → different root.
+    let other_reason = build_compensation_failed_event_book(&base, "other failure", &config)
+        .cover
+        .unwrap()
+        .root
+        .unwrap()
+        .value;
+    assert_ne!(
+        base_root, other_reason,
+        "Distinct compensation reasons must produce distinct compensation roots"
+    );
+
+    // Different source domain → different root.
+    let mut other_domain = base.clone();
+    other_domain.source.source.as_mut().unwrap().domain = "different".to_string();
+    let other_domain_root = build_compensation_failed_event_book(&other_domain, "failure", &config)
+        .cover
+        .unwrap()
+        .root
+        .unwrap()
+        .value;
+    assert_ne!(
+        base_root, other_domain_root,
+        "Distinct source domains must produce distinct compensation roots"
+    );
+}
+
+/// Compensation EventBook timestamp comes from the injected clock.
+///
+/// Production code uses `SystemClock` (wall-clock). Tests / replays can pin
+/// a deterministic `Clock` so the EventBook is byte-identical on re-runs.
+/// We assert via the lower-level `build_compensation_failed_event_book_with_clock`
+/// entry point that the page's `created_at` reflects the injected clock's
+/// `now()`, NOT `SystemTime::now()`.
+#[test]
+fn test_build_compensation_failed_event_book_timestamp_from_clock() {
+    use std::time::{Duration, UNIX_EPOCH};
+
+    let context = make_context();
+    let config = SagaCompensationConfig::default();
+
+    // Fixed clock pinned to a known instant well in the past.
+    let pinned = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let clock = FixedClock::new(pinned);
+
+    let event_book =
+        build_compensation_failed_event_book_with_clock(&context, "failure", &config, &clock);
+
+    let page = event_book.pages.first().expect("one page");
+    let ts = page.created_at.as_ref().expect("created_at populated");
+
+    // Expected: seconds = 1_700_000_000, nanos = 0 (we pinned to a whole second).
+    assert_eq!(ts.seconds, 1_700_000_000);
+    assert_eq!(ts.nanos, 0);
+}
+
+/// Helper: a `Clock` that always returns the same instant.
+///
+/// Used only in tests to pin the compensation EventBook timestamp so we can
+/// assert determinism. Production paths use `SystemClock`.
+struct FixedClock {
+    now: std::time::SystemTime,
+}
+
+impl FixedClock {
+    fn new(now: std::time::SystemTime) -> Self {
+        Self { now }
+    }
+}
+
+impl Clock for FixedClock {
+    fn now(&self) -> std::time::SystemTime {
+        self.now
+    }
 }
 
 /// DLQ flag triggers quarantine alongside decline.

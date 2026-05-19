@@ -35,8 +35,10 @@
 //! and would silently degrade CASCADE mode if registered without the data.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
+use backon::{BackoffBuilder, ExponentialBackoff, ExponentialBuilder};
 use futures::TryStreamExt;
 use k8s_openapi::api::core::v1::Service;
 use kube::{
@@ -46,7 +48,7 @@ use kube::{
 };
 use tokio::sync::RwLock;
 use tonic::transport::Channel;
-use tracing::{debug, error, info};
+use tracing::{debug, info, warn};
 
 use crate::config::{NAMESPACE_ENV_VAR, POD_NAMESPACE_ENV_VAR};
 use crate::proto::command_handler_coordinator_service_client::CommandHandlerCoordinatorServiceClient;
@@ -78,6 +80,89 @@ const COMPONENT_PROCESS_MANAGER: &str = "process-manager";
 /// Default gRPC port.
 const DEFAULT_GRPC_PORT: u16 = 50051;
 
+/// Minimum delay between watcher reconnect attempts.
+const RECONNECT_MIN_DELAY: Duration = Duration::from_millis(100);
+
+/// Maximum delay between watcher reconnect attempts.
+const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(30);
+
+/// Reconnect-backoff growth factor (exponential, no jitter so the loop is
+/// deterministic for testing — jitter would only matter at fleet scale to
+/// avoid thundering herd, and a single status console doesn't herd).
+const RECONNECT_FACTOR: f32 = 2.0;
+
+/// Per-watcher liveness window. If any watcher has been silent for longer
+/// than this since its last observed event (or birth), `is_watcher_healthy`
+/// reports false — the helm liveness probe can read this to restart the
+/// pod rather than letting a silently-disconnected watcher keep serving a
+/// stale cache.
+pub const WATCHER_HEALTH_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// Tracks watcher liveness. The reconnect loop calls [`record_event`] on
+/// every observed `Event` (including `Init`/`InitDone` markers — those
+/// prove the apiserver is responding). [`is_healthy`] reads the last
+/// observed timestamp and compares against the caller-supplied `now`.
+///
+/// Behind a `std::sync::Mutex` (not tokio's) because the critical section
+/// is a single `Instant` swap — no `.await` inside the lock, and async
+/// contention is irrelevant at the per-event update rate.
+#[derive(Debug)]
+pub(crate) struct WatcherHealth {
+    last_event_at: Mutex<Instant>,
+}
+
+impl WatcherHealth {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            last_event_at: Mutex::new(now),
+        }
+    }
+
+    pub(crate) fn record_event(&self, now: Instant) {
+        let mut guard = self
+            .last_event_at
+            .lock()
+            .expect("WatcherHealth mutex poisoned");
+        *guard = now;
+    }
+
+    pub(crate) fn is_healthy(&self, threshold: Duration, now: Instant) -> bool {
+        let last = *self
+            .last_event_at
+            .lock()
+            .expect("WatcherHealth mutex poisoned");
+        now.saturating_duration_since(last) <= threshold
+    }
+}
+
+/// Compute the next reconnect delay and (optionally) reset the backoff
+/// iterator.
+///
+/// Mirrors AMQP's `consume_with_reconnect` pattern, BUT fixes the H-07
+/// anti-pattern: backoff resets ONLY after the stream actually delivered
+/// at least one event in the previous cycle (`observed_any_event_in_cycle
+/// = true`). A "subscribed → errored before first event" cycle (apiserver
+/// rejects the watch immediately) must NOT reset the backoff, otherwise
+/// the loop hammers the apiserver at the min delay forever.
+fn next_reconnect_delay(
+    observed_any_event_in_cycle: bool,
+    backoff_iter: &mut ExponentialBackoff,
+    builder: &ExponentialBuilder,
+) -> Duration {
+    if observed_any_event_in_cycle {
+        *backoff_iter = builder.build();
+    }
+    backoff_iter.next().unwrap_or(RECONNECT_MAX_DELAY)
+}
+
+/// The standard reconnect-backoff builder for K8s watchers.
+fn reconnect_builder() -> ExponentialBuilder {
+    ExponentialBuilder::default()
+        .with_min_delay(RECONNECT_MIN_DELAY)
+        .with_max_delay(RECONNECT_MAX_DELAY)
+        .with_factor(RECONNECT_FACTOR)
+}
+
 /// K8s label-based service discovery.
 ///
 /// Mesh handles L7 load balancing—we just connect to Service names.
@@ -95,6 +180,12 @@ pub struct K8sServiceDiscovery {
     pms: Arc<RwLock<HashMap<String, PmService>>>,
     /// Inner static discovery for storage and client caching.
     inner: StaticServiceDiscovery,
+    /// Per-component watcher health. Populated by `start_watching` —
+    /// `is_watcher_healthy()` reads them at the trait boundary.
+    aggregate_health: Arc<WatcherHealth>,
+    projector_health: Arc<WatcherHealth>,
+    saga_health: Arc<WatcherHealth>,
+    pm_health: Arc<WatcherHealth>,
 }
 
 impl K8sServiceDiscovery {
@@ -105,6 +196,7 @@ impl K8sServiceDiscovery {
 
         info!(namespace = %namespace, "Service discovery initialized");
 
+        let now = Instant::now();
         Ok(Self {
             client: Some(client),
             namespace: namespace.clone(),
@@ -113,7 +205,29 @@ impl K8sServiceDiscovery {
             sagas: Arc::new(RwLock::new(HashMap::new())),
             pms: Arc::new(RwLock::new(HashMap::new())),
             inner: StaticServiceDiscovery::new(),
+            aggregate_health: Arc::new(WatcherHealth::new(now)),
+            projector_health: Arc::new(WatcherHealth::new(now)),
+            saga_health: Arc::new(WatcherHealth::new(now)),
+            pm_health: Arc::new(WatcherHealth::new(now)),
         })
+    }
+
+    /// Returns `true` only when every started watcher has observed an
+    /// event within `WATCHER_HEALTH_THRESHOLD` (the `Init`/`InitDone`
+    /// markers count). Returns `true` in static mode (no K8s client —
+    /// nothing to watch). Surfaces the H-27 liveness signal for an
+    /// external health check; if this returns `false` the cache may be
+    /// drifting silently and the pod should be restarted.
+    pub fn is_watcher_healthy(&self) -> bool {
+        if self.client.is_none() {
+            return true;
+        }
+        let now = Instant::now();
+        let threshold = WATCHER_HEALTH_THRESHOLD;
+        self.aggregate_health.is_healthy(threshold, now)
+            && self.projector_health.is_healthy(threshold, now)
+            && self.saga_health.is_healthy(threshold, now)
+            && self.pm_health.is_healthy(threshold, now)
     }
 
     /// Create from environment variables.
@@ -131,6 +245,7 @@ impl K8sServiceDiscovery {
         &self,
         component: &'static str,
         cache: Arc<RwLock<HashMap<String, DiscoveredService>>>,
+        health: Arc<WatcherHealth>,
     ) {
         let client = match &self.client {
             Some(c) => c.clone(),
@@ -139,26 +254,61 @@ impl K8sServiceDiscovery {
         let namespace = self.namespace.clone();
 
         tokio::spawn(async move {
-            let services: Api<Service> = Api::namespaced(client, &namespace);
+            let builder = reconnect_builder();
+            let mut backoff_iter = builder.build();
 
-            let watcher = watcher::watcher(
-                services,
-                watcher::Config::default().labels(&format!("{}={}", COMPONENT_LABEL, component)),
-            );
+            loop {
+                let services: Api<Service> = Api::namespaced(client.clone(), &namespace);
+                let stream = watcher::watcher(
+                    services,
+                    watcher::Config::default()
+                        .labels(&format!("{}={}", COMPONENT_LABEL, component)),
+                );
 
-            info!(component = component, "Starting service watcher");
+                info!(component = component, "Starting service watcher");
 
-            if let Err(e) = watcher
-                .try_for_each(|event| {
+                // `observed_event` toggles to true the first time the
+                // stream yields anything — used to decide whether the
+                // next reconnect-cycle should reset its backoff.
+                let observed_event = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let outcome = {
+                    let observed_event = observed_event.clone();
                     let cache = cache.clone();
-                    async move {
-                        Self::handle_event(component, &cache, event).await;
-                        Ok(())
-                    }
-                })
-                .await
-            {
-                error!(component = component, error = %e, "Service watcher error");
+                    let health = health.clone();
+                    let namespace = namespace.clone();
+                    stream
+                        .try_for_each(|event| {
+                            let cache = cache.clone();
+                            let health = health.clone();
+                            let observed_event = observed_event.clone();
+                            let namespace = namespace.clone();
+                            async move {
+                                observed_event.store(true, std::sync::atomic::Ordering::Release);
+                                health.record_event(Instant::now());
+                                Self::handle_event(component, &cache, &namespace, event).await;
+                                Ok(())
+                            }
+                        })
+                        .await
+                };
+
+                let observed = observed_event.load(std::sync::atomic::Ordering::Acquire);
+                match outcome {
+                    Ok(()) => info!(
+                        component = component,
+                        observed_events = observed,
+                        "Watcher stream ended; reconnecting"
+                    ),
+                    Err(e) => warn!(
+                        component = component,
+                        error = %e,
+                        observed_events = observed,
+                        "Service watcher error; will reconnect after backoff"
+                    ),
+                }
+
+                let delay = next_reconnect_delay(observed, &mut backoff_iter, &builder);
+                tokio::time::sleep(delay).await;
             }
         });
     }
@@ -167,7 +317,11 @@ impl K8sServiceDiscovery {
     /// [`start_watching_component`] but extracts the source-domain label
     /// into a [`SagaService`] so [`get_saga_endpoints_for_domain`] can
     /// filter by source domain without re-reading metadata on every call.
-    fn start_watching_sagas(&self, cache: Arc<RwLock<HashMap<String, SagaService>>>) {
+    fn start_watching_sagas(
+        &self,
+        cache: Arc<RwLock<HashMap<String, SagaService>>>,
+        health: Arc<WatcherHealth>,
+    ) {
         let client = match &self.client {
             Some(c) => c.clone(),
             None => return,
@@ -175,32 +329,68 @@ impl K8sServiceDiscovery {
         let namespace = self.namespace.clone();
 
         tokio::spawn(async move {
-            let services: Api<Service> = Api::namespaced(client, &namespace);
-            let watcher = watcher::watcher(
-                services,
-                watcher::Config::default()
-                    .labels(&format!("{}={}", COMPONENT_LABEL, COMPONENT_SAGA)),
-            );
+            let builder = reconnect_builder();
+            let mut backoff_iter = builder.build();
 
-            info!(component = COMPONENT_SAGA, "Starting saga watcher");
+            loop {
+                let services: Api<Service> = Api::namespaced(client.clone(), &namespace);
+                let stream = watcher::watcher(
+                    services,
+                    watcher::Config::default()
+                        .labels(&format!("{}={}", COMPONENT_LABEL, COMPONENT_SAGA)),
+                );
 
-            if let Err(e) = watcher
-                .try_for_each(|event| {
+                info!(component = COMPONENT_SAGA, "Starting saga watcher");
+
+                let observed_event = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let outcome = {
+                    let observed_event = observed_event.clone();
                     let cache = cache.clone();
-                    async move {
-                        Self::handle_saga_event(&cache, event).await;
-                        Ok(())
-                    }
-                })
-                .await
-            {
-                error!(component = COMPONENT_SAGA, error = %e, "Saga watcher error");
+                    let health = health.clone();
+                    let namespace = namespace.clone();
+                    stream
+                        .try_for_each(|event| {
+                            let cache = cache.clone();
+                            let health = health.clone();
+                            let observed_event = observed_event.clone();
+                            let namespace = namespace.clone();
+                            async move {
+                                observed_event.store(true, std::sync::atomic::Ordering::Release);
+                                health.record_event(Instant::now());
+                                Self::handle_saga_event(&cache, &namespace, event).await;
+                                Ok(())
+                            }
+                        })
+                        .await
+                };
+
+                let observed = observed_event.load(std::sync::atomic::Ordering::Acquire);
+                match outcome {
+                    Ok(()) => info!(
+                        component = COMPONENT_SAGA,
+                        observed_events = observed,
+                        "Saga watcher stream ended; reconnecting"
+                    ),
+                    Err(e) => warn!(
+                        component = COMPONENT_SAGA,
+                        error = %e,
+                        observed_events = observed,
+                        "Saga watcher error; will reconnect after backoff"
+                    ),
+                }
+
+                let delay = next_reconnect_delay(observed, &mut backoff_iter, &builder);
+                tokio::time::sleep(delay).await;
             }
         });
     }
 
     /// Start a watcher for process-manager services.
-    fn start_watching_pms(&self, cache: Arc<RwLock<HashMap<String, PmService>>>) {
+    fn start_watching_pms(
+        &self,
+        cache: Arc<RwLock<HashMap<String, PmService>>>,
+        health: Arc<WatcherHealth>,
+    ) {
         let client = match &self.client {
             Some(c) => c.clone(),
             None => return,
@@ -208,46 +398,75 @@ impl K8sServiceDiscovery {
         let namespace = self.namespace.clone();
 
         tokio::spawn(async move {
-            let services: Api<Service> = Api::namespaced(client, &namespace);
-            let watcher = watcher::watcher(
-                services,
-                watcher::Config::default().labels(&format!(
-                    "{}={}",
-                    COMPONENT_LABEL, COMPONENT_PROCESS_MANAGER
-                )),
-            );
+            let builder = reconnect_builder();
+            let mut backoff_iter = builder.build();
 
-            info!(
-                component = COMPONENT_PROCESS_MANAGER,
-                "Starting process-manager watcher"
-            );
-
-            if let Err(e) = watcher
-                .try_for_each(|event| {
-                    let cache = cache.clone();
-                    async move {
-                        Self::handle_pm_event(&cache, event).await;
-                        Ok(())
-                    }
-                })
-                .await
-            {
-                error!(
-                    component = COMPONENT_PROCESS_MANAGER,
-                    error = %e,
-                    "Process-manager watcher error"
+            loop {
+                let services: Api<Service> = Api::namespaced(client.clone(), &namespace);
+                let stream = watcher::watcher(
+                    services,
+                    watcher::Config::default().labels(&format!(
+                        "{}={}",
+                        COMPONENT_LABEL, COMPONENT_PROCESS_MANAGER
+                    )),
                 );
+
+                info!(
+                    component = COMPONENT_PROCESS_MANAGER,
+                    "Starting process-manager watcher"
+                );
+
+                let observed_event = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let outcome = {
+                    let observed_event = observed_event.clone();
+                    let cache = cache.clone();
+                    let health = health.clone();
+                    let namespace = namespace.clone();
+                    stream
+                        .try_for_each(|event| {
+                            let cache = cache.clone();
+                            let health = health.clone();
+                            let observed_event = observed_event.clone();
+                            let namespace = namespace.clone();
+                            async move {
+                                observed_event.store(true, std::sync::atomic::Ordering::Release);
+                                health.record_event(Instant::now());
+                                Self::handle_pm_event(&cache, &namespace, event).await;
+                                Ok(())
+                            }
+                        })
+                        .await
+                };
+
+                let observed = observed_event.load(std::sync::atomic::Ordering::Acquire);
+                match outcome {
+                    Ok(()) => info!(
+                        component = COMPONENT_PROCESS_MANAGER,
+                        observed_events = observed,
+                        "PM watcher stream ended; reconnecting"
+                    ),
+                    Err(e) => warn!(
+                        component = COMPONENT_PROCESS_MANAGER,
+                        error = %e,
+                        observed_events = observed,
+                        "PM watcher error; will reconnect after backoff"
+                    ),
+                }
+
+                let delay = next_reconnect_delay(observed, &mut backoff_iter, &builder);
+                tokio::time::sleep(delay).await;
             }
         });
     }
 
     async fn handle_saga_event(
         cache: &RwLock<HashMap<String, SagaService>>,
+        namespace: &str,
         event: Event<Service>,
     ) {
         match event {
             Event::Apply(svc) | Event::InitApply(svc) => {
-                if let Some(saga) = Self::extract_saga_static(&svc) {
+                if let Some(saga) = Self::extract_saga_with_namespace(&svc, namespace) {
                     debug!(
                         service = %saga.service.name,
                         source_domain = %saga.source_domain,
@@ -267,10 +486,14 @@ impl K8sServiceDiscovery {
         }
     }
 
-    async fn handle_pm_event(cache: &RwLock<HashMap<String, PmService>>, event: Event<Service>) {
+    async fn handle_pm_event(
+        cache: &RwLock<HashMap<String, PmService>>,
+        namespace: &str,
+        event: Event<Service>,
+    ) {
         match event {
             Event::Apply(svc) | Event::InitApply(svc) => {
-                if let Some(pm) = Self::extract_pm_static(&svc) {
+                if let Some(pm) = Self::extract_pm_with_namespace(&svc, namespace) {
                     debug!(
                         service = %pm.service.name,
                         subscriptions = ?pm.subscriptions,
@@ -294,11 +517,6 @@ impl K8sServiceDiscovery {
         Self::extract_saga_with_namespace(svc, &self.namespace)
     }
 
-    fn extract_saga_static(svc: &Service) -> Option<SagaService> {
-        let namespace = svc.metadata.namespace.as_deref().unwrap_or("default");
-        Self::extract_saga_with_namespace(svc, namespace)
-    }
-
     fn extract_saga_with_namespace(svc: &Service, namespace: &str) -> Option<SagaService> {
         let service = Self::extract_service_with_namespace(svc, namespace)?;
         let labels = svc.metadata.labels.as_ref();
@@ -318,11 +536,6 @@ impl K8sServiceDiscovery {
 
     fn extract_pm(&self, svc: &Service) -> Option<PmService> {
         Self::extract_pm_with_namespace(svc, &self.namespace)
-    }
-
-    fn extract_pm_static(svc: &Service) -> Option<PmService> {
-        let namespace = svc.metadata.namespace.as_deref().unwrap_or("default");
-        Self::extract_pm_with_namespace(svc, namespace)
     }
 
     fn extract_pm_with_namespace(svc: &Service, namespace: &str) -> Option<PmService> {
@@ -358,11 +571,12 @@ impl K8sServiceDiscovery {
     async fn handle_event(
         component: &str,
         cache: &RwLock<HashMap<String, DiscoveredService>>,
+        namespace: &str,
         event: Event<Service>,
     ) {
         match event {
             Event::Apply(svc) | Event::InitApply(svc) => {
-                if let Some(discovered) = Self::extract_service_static(&svc) {
+                if let Some(discovered) = Self::extract_service_with_namespace(&svc, namespace) {
                     debug!(
                         component = component,
                         service = %discovered.name,
@@ -392,11 +606,6 @@ impl K8sServiceDiscovery {
 
     fn extract_service(&self, svc: &Service) -> Option<DiscoveredService> {
         Self::extract_service_with_namespace(svc, &self.namespace)
-    }
-
-    fn extract_service_static(svc: &Service) -> Option<DiscoveredService> {
-        let namespace = svc.metadata.namespace.as_deref().unwrap_or("default");
-        Self::extract_service_with_namespace(svc, namespace)
     }
 
     fn extract_service_with_namespace(svc: &Service, namespace: &str) -> Option<DiscoveredService> {
@@ -771,10 +980,18 @@ impl ServiceDiscovery for K8sServiceDiscovery {
         if self.client.is_none() {
             return; // Static mode - no K8s watching
         }
-        self.start_watching_component(COMPONENT_AGGREGATE, self.aggregates.clone());
-        self.start_watching_component(COMPONENT_PROJECTOR, self.projectors.clone());
-        self.start_watching_sagas(self.sagas.clone());
-        self.start_watching_pms(self.pms.clone());
+        self.start_watching_component(
+            COMPONENT_AGGREGATE,
+            self.aggregates.clone(),
+            self.aggregate_health.clone(),
+        );
+        self.start_watching_component(
+            COMPONENT_PROJECTOR,
+            self.projectors.clone(),
+            self.projector_health.clone(),
+        );
+        self.start_watching_sagas(self.sagas.clone(), self.saga_health.clone());
+        self.start_watching_pms(self.pms.clone(), self.pm_health.clone());
     }
 }
 

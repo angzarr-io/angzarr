@@ -266,6 +266,147 @@ fn test_extract_command_preserves_payload_data() {
 }
 
 // ============================================================================
+// EventHandler::handle Error-Propagation Tests (H-34)
+// ============================================================================
+//
+// Prior behavior: when `execute_command_with_retry` returned `Err`, the
+// EventHandler impl logged it via `error!` and returned `Ok(())`. That
+// silently acked an async command failure — the bus saw "success" and the
+// message disappeared. Saga and Process Manager handlers each carry a
+// `propagate_errors` toggle for exactly this reason; the aggregate
+// handler needs the same toggle. The default mirrors `ProcessManagerEventHandler`
+// (propagate = true / loud-fail): an async command that fails after retry
+// is a real consistency event and ought to nack so the bus can route it
+// to the DLQ or redeliver.
+//
+// These tests pin the toggle's behavior on both sides:
+//   - default = true → handler returns Err on inner failure
+//   - opt-out via `with_error_propagation(false)` → handler returns Ok
+//     (the old silent-log behavior, preserved as an explicit opt-in)
+
+/// A factory backed by always-failing context/logic that surfaces a
+/// non-retryable `Status` from the very first pipeline stage. We use
+/// `Status::invalid_argument` from `parse_command_cover` — the command
+/// is shaped as a wrapped CommandBook with NO cover, so the pipeline
+/// fails immediately on parse without needing storage or business logic
+/// stubs.
+struct FailingFactory;
+
+impl crate::orchestration::aggregate::AggregateContextFactory for FailingFactory {
+    fn create(&self) -> Arc<dyn crate::orchestration::aggregate::AggregateContext> {
+        Arc::new(UnreachableContext)
+    }
+    fn domain(&self) -> &str {
+        "h34-test-domain"
+    }
+    fn client_logic(&self) -> Arc<dyn crate::orchestration::aggregate::ClientLogic> {
+        Arc::new(UnreachableLogic)
+    }
+}
+
+/// Context that panics if any method is invoked — proves the failure
+/// originates in pipeline pre-checks, not in storage.
+struct UnreachableContext;
+
+#[async_trait::async_trait]
+impl crate::orchestration::aggregate::AggregateContext for UnreachableContext {
+    async fn load_prior_events_with_divergence(
+        &self,
+        _: &str,
+        _: &str,
+        _: uuid::Uuid,
+        _: &crate::orchestration::aggregate::TemporalQuery,
+        _: Option<u32>,
+    ) -> Result<EventBook, Status> {
+        unreachable!("pipeline must fail at parse before reaching the context")
+    }
+    async fn persist_events(
+        &self,
+        _: &EventBook,
+        _: &EventBook,
+        _: &str,
+        _: &str,
+        _: uuid::Uuid,
+        _: &str,
+        _: Option<&str>,
+        _: Option<&crate::storage::SourceInfo>,
+    ) -> Result<crate::orchestration::aggregate::PersistOutcome, Status> {
+        unreachable!()
+    }
+    async fn post_persist(&self, _: &EventBook) -> Result<Vec<crate::proto::Projection>, Status> {
+        unreachable!()
+    }
+}
+
+struct UnreachableLogic;
+
+#[async_trait::async_trait]
+impl crate::orchestration::aggregate::ClientLogic for UnreachableLogic {
+    async fn invoke(
+        &self,
+        _: crate::proto::ContextualCommand,
+    ) -> Result<crate::proto::BusinessResponse, Status> {
+        unreachable!()
+    }
+    async fn invoke_fact(
+        &self,
+        _: crate::orchestration::aggregate::FactContext,
+    ) -> Result<EventBook, Status> {
+        unreachable!()
+    }
+}
+
+/// Build a wrapped CommandBook whose inner CommandBook has no cover —
+/// the pipeline fails at `parse_command_cover` with `Status::invalid_argument`,
+/// which is non-retryable, so `execute_command_with_retry` returns the
+/// status verbatim.
+fn make_failing_wrapped_command() -> EventBook {
+    let inner = CommandBook {
+        cover: None, // forces parse_command_cover to fail
+        pages: vec![],
+    };
+    wrap_command_for_bus(&inner)
+}
+
+/// H-34: with the default error-propagation setting, a failed async
+/// command propagates `Err` out of `EventHandler::handle`. The bus
+/// dispatch layer translates that into nack/redeliver/DLQ — which is the
+/// only outcome that's safe when an async command silently failed.
+#[tokio::test]
+async fn aggregate_handler_default_propagates_inner_failure() {
+    use crate::bus::EventHandler;
+
+    let handler = AggregateCommandHandler::new(Arc::new(FailingFactory));
+    let book = Arc::new(make_failing_wrapped_command());
+
+    let result = handler.handle(book).await;
+
+    assert!(
+        result.is_err(),
+        "Default behavior must propagate inner-pipeline failures \
+         (H-34: previously swallowed). Got Ok(())."
+    );
+}
+
+/// H-34 opt-out: explicit `with_error_propagation(false)` restores the
+/// legacy "log and ack" behavior for callers who knowingly want it.
+#[tokio::test]
+async fn aggregate_handler_with_propagation_disabled_swallows() {
+    use crate::bus::EventHandler;
+
+    let handler =
+        AggregateCommandHandler::new(Arc::new(FailingFactory)).with_error_propagation(false);
+    let book = Arc::new(make_failing_wrapped_command());
+
+    let result = handler.handle(book).await;
+
+    assert!(
+        result.is_ok(),
+        "Opt-out preserves silent-log behavior for callers that need it."
+    );
+}
+
+// ============================================================================
 // SyncProjectorEntry Tests
 // ============================================================================
 

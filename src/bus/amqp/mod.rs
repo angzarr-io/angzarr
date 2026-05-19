@@ -353,13 +353,26 @@ impl AmqpEventBus {
                         routing_key = %routing_key,
                         "Consumer connected, processing messages"
                     );
-                    // Reset backoff on successful connection
-                    backoff_iter = backoff_builder.build();
+                    // H-07: do NOT reset backoff on `setup_consumer` success
+                    // — only after the stream has actually produced at
+                    // least one delivery. A consumer that handshakes and
+                    // then immediately stream-ends (broker-side queue
+                    // churn, idle-channel reap) is NOT a real success and
+                    // resetting here would lock the agent into a tight
+                    // reconnect loop with a 100 ms first tick. See
+                    // `should_reset_backoff_on_delivery`.
+                    let mut in_session_message_count: usize = 0;
 
                     // Process messages until stream ends
                     while let Some(delivery) = consumer.next().await {
                         match delivery {
                             Ok(delivery) => {
+                                in_session_message_count =
+                                    in_session_message_count.saturating_add(1);
+                                if Self::should_reset_backoff_on_delivery(in_session_message_count)
+                                {
+                                    backoff_iter = backoff_builder.build();
+                                }
                                 Self::process_delivery(delivery, &handlers).await;
                             }
                             Err(e) => {
@@ -390,27 +403,43 @@ impl AmqpEventBus {
         }
     }
 
-    /// Set up consumer channel, queue, and bindings.
-    async fn setup_consumer(
-        pool: &Pool,
-        exchange: &str,
-        queue: &str,
-        routing_key: &str,
+    /// Dead-letter exchange name for a given primary queue.
+    ///
+    /// Convention: `{queue}.dlx`. The DLX is declared as a `fanout`
+    /// exchange so a single operator-managed DLQ can observe every
+    /// rejected/expired message regardless of routing key. See H-06.
+    pub(crate) fn dead_letter_exchange_name(queue: &str) -> String {
+        format!("{}.dlx", queue)
+    }
+
+    /// Dead-letter queue name for a given primary queue.
+    ///
+    /// Convention: `{queue}.dlq`. Operators inspect this queue (via
+    /// management UI or a sidecar consumer) to recover malformed payloads
+    /// that the framework rejected.
+    pub(crate) fn dead_letter_queue_name(queue: &str) -> String {
+        format!("{}.dlq", queue)
+    }
+
+    /// Build the `x-`-prefixed queue arguments declared on the primary
+    /// queue.
+    ///
+    /// - `x-message-ttl` (when `message_ttl_ms` is Some)
+    /// - `x-max-length` (when `max_queue_length` is Some)
+    /// - `x-dead-letter-exchange` (when `dlx_exchange` is Some) — routes
+    ///   rejected/expired/over-quota messages to the DLX. Without this
+    ///   argument, decode-rejected messages (`delivery.reject(requeue:
+    ///   false)`) are silently dropped by the broker. See H-06.
+    ///
+    /// Pure helper extracted so the table shape can be unit-tested
+    /// without a live broker.
+    pub(crate) fn build_queue_args(
         message_ttl_ms: Option<i32>,
         max_queue_length: Option<i32>,
-    ) -> Result<lapin::Consumer> {
+        dlx_exchange: Option<&str>,
+    ) -> FieldTable {
         use lapin::types::{AMQPValue, ShortString};
 
-        let conn = pool.get().await.map_err(|e: PoolError| {
-            BusError::Connection(format!("Failed to get connection from pool: {}", e))
-        })?;
-
-        let channel = conn
-            .create_channel()
-            .await
-            .map_err(|e| BusError::Connection(format!("Failed to create channel: {}", e)))?;
-
-        // Build queue arguments with TTL and max-length
         let mut queue_args = FieldTable::default();
         if let Some(ttl) = message_ttl_ms {
             queue_args.insert(ShortString::from("x-message-ttl"), AMQPValue::LongInt(ttl));
@@ -421,8 +450,103 @@ impl AmqpEventBus {
                 AMQPValue::LongInt(max_len),
             );
         }
+        if let Some(dlx) = dlx_exchange {
+            queue_args.insert(
+                ShortString::from("x-dead-letter-exchange"),
+                AMQPValue::LongString(dlx.to_string().into()),
+            );
+        }
+        queue_args
+    }
 
-        // Declare queue with TTL and max-length to prevent unbounded growth
+    /// Decide whether to reset the reconnect backoff iterator based on
+    /// how many messages have been successfully delivered in the current
+    /// consumer session.
+    ///
+    /// Pre-H-07 behavior reset the backoff inside `setup_consumer`-success,
+    /// before the consumer's stream had produced any delivery. A consumer
+    /// whose stream ends immediately (broker-side queue churn, network
+    /// blip after handshake, idle-channel reap) would then fall through to
+    /// the `backoff_iter.next()` reconnect-delay and the iterator's first
+    /// tick (100 ms). Repeat the cycle and the agent never actually exits
+    /// the inner reconnect arm, but it ALSO never advances the backoff —
+    /// the bug was inverted: a sequence of benign reconnects could grow
+    /// the backoff because the iterator was advanced (next-call) without
+    /// ever being reset on a "real" success signal.
+    ///
+    /// The post-H-07 contract: only reset when the consumer has delivered
+    /// at least one message in this session. We reset specifically on the
+    /// FIRST delivery (count == 1) so the reset is a one-shot per-session
+    /// event rather than an idempotent reset on every delivery (cheap
+    /// either way; this just keeps the contract explicit).
+    pub(crate) fn should_reset_backoff_on_delivery(in_session_message_count: usize) -> bool {
+        in_session_message_count == 1
+    }
+
+    /// Set up consumer channel, queue, and bindings.
+    async fn setup_consumer(
+        pool: &Pool,
+        exchange: &str,
+        queue: &str,
+        routing_key: &str,
+        message_ttl_ms: Option<i32>,
+        max_queue_length: Option<i32>,
+    ) -> Result<lapin::Consumer> {
+        let conn = pool.get().await.map_err(|e: PoolError| {
+            BusError::Connection(format!("Failed to get connection from pool: {}", e))
+        })?;
+
+        let channel = conn
+            .create_channel()
+            .await
+            .map_err(|e| BusError::Connection(format!("Failed to create channel: {}", e)))?;
+
+        // H-06: declare the dead-letter exchange + queue BEFORE the
+        // primary queue so the primary queue's `x-dead-letter-exchange`
+        // argument resolves to an existing exchange. Fanout so a single
+        // DLQ catches every rejected message regardless of routing key.
+        let dlx = Self::dead_letter_exchange_name(queue);
+        let dlq = Self::dead_letter_queue_name(queue);
+        channel
+            .exchange_declare(
+                &dlx,
+                ExchangeKind::Fanout,
+                ExchangeDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await
+            .map_err(|e| BusError::Subscribe(format!("Failed to declare DLX: {}", e)))?;
+        channel
+            .queue_declare(
+                &dlq,
+                QueueDeclareOptions {
+                    durable: true,
+                    ..Default::default()
+                },
+                FieldTable::default(),
+            )
+            .await
+            .map_err(|e| BusError::Subscribe(format!("Failed to declare DLQ: {}", e)))?;
+        channel
+            .queue_bind(
+                &dlq,
+                &dlx,
+                "",
+                QueueBindOptions::default(),
+                FieldTable::default(),
+            )
+            .await
+            .map_err(|e| BusError::Subscribe(format!("Failed to bind DLQ to DLX: {}", e)))?;
+
+        // Build queue arguments with TTL, max-length, and DLX routing.
+        let queue_args = Self::build_queue_args(message_ttl_ms, max_queue_length, Some(&dlx));
+
+        // Declare queue with TTL, max-length, and DLX routing so that
+        // decode-rejected messages survive in the DLQ for operator
+        // recovery (H-06).
         channel
             .queue_declare(
                 queue,
@@ -469,9 +593,13 @@ impl AmqpEventBus {
 
     /// Process a single delivery from the consumer.
     ///
-    /// Ack/nack decision (C-10):
+    /// Ack/nack decision (C-10 + H-06):
     /// - Decode error → `reject(requeue: false)`: malformed payload, no
-    ///   retry will help. (Pre-existing behavior, unchanged.)
+    ///   retry will help. The primary queue is declared with
+    ///   `x-dead-letter-exchange` (see `setup_consumer` + H-06) so a
+    ///   rejected message lands on the `{queue}.dlx` fanout and is
+    ///   captured by `{queue}.dlq` for operator recovery — NOT silently
+    ///   dropped.
     /// - Dispatch success → `ack`.
     /// - Dispatch failure (any handler returned `Err`) → `nack` with
     ///   `requeue: true` so RabbitMQ re-queues the delivery. We choose
@@ -479,9 +607,7 @@ impl AmqpEventBus {
     ///   framework's idempotency surface (sequence numbers, external_id,
     ///   handler-side dedup) makes the simple-retry path safe and
     ///   matches the Kafka transport's "don't commit on failure"
-    ///   pattern (`src/bus/kafka/bus.rs:149`). DLX routing on
-    ///   poison-pill messages is C-08 territory and orthogonal to the
-    ///   transient-failure case C-10 addresses.
+    ///   pattern (`src/bus/kafka/bus.rs:149`).
     async fn process_delivery(
         delivery: lapin::message::Delivery,
         handlers: &Arc<RwLock<Vec<Box<dyn EventHandler>>>>,
@@ -536,7 +662,11 @@ impl AmqpEventBus {
             }
             Err(e) => {
                 error!(error = %e, "Failed to decode event book");
-                // Reject message (don't requeue malformed messages)
+                // Reject (requeue=false) — the queue is declared with an
+                // `x-dead-letter-exchange` (`{queue}.dlx`, see H-06) so
+                // RabbitMQ routes the rejected message to the DLQ
+                // (`{queue}.dlq`) for operator inspection instead of
+                // silently dropping it.
                 let _ = delivery.reject(Default::default()).await;
             }
         }

@@ -619,3 +619,85 @@ async fn test_saga_rewrite_preserves_sync_mode_on_default_branch() {
          (default-deferred branch at saga/mod.rs:460)"
     );
 }
+
+// ============================================================================
+// H-15: fact_executor: None must not silently drop facts (saga side)
+// ============================================================================
+//
+// `orchestrate_saga` at saga/mod.rs:507-524 has the same silent-drop bug as
+// the PM coordinator: when `fact_executor: None` AND the SagaResponse carries
+// facts (events), every fact is silently discarded. Doc-comments at the call
+// site claim "facts are part of the transaction" but the API offers no
+// enforcement. Mirror the PM fix: return Err so callers cannot accidentally
+// regress the bc1d3db4 silent-drop class by forgetting to wire an executor.
+
+/// Saga context that emits a single fact (`SagaResponse.events`) to drive
+/// the H-15 saga-side fix.
+struct SagaWithFact;
+
+#[async_trait]
+impl SagaRetryContext for SagaWithFact {
+    async fn handle(
+        &self,
+        _destination_sequences: HashMap<String, u32>,
+    ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let fact = EventBook {
+            cover: Some(Cover {
+                domain: "inventory".to_string(),
+                correlation_id: "corr-1".to_string(),
+                ..Default::default()
+            }),
+            pages: vec![],
+            snapshot: None,
+            ..Default::default()
+        };
+        Ok(SagaResponse {
+            commands: vec![],
+            events: vec![fact],
+        })
+    }
+    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
+    fn source_cover(&self) -> Option<&Cover> {
+        None
+    }
+    fn source_max_sequence(&self) -> u32 {
+        0
+    }
+}
+
+/// H-15 (saga side): saga emits facts but `fact_executor` is None — the
+/// orchestrator must return Err rather than silently drop the facts. Mirror
+/// of the PM-side test `test_orchestrate_pm_refuses_facts_without_fact_executor`.
+#[tokio::test]
+async fn test_orchestrate_saga_refuses_facts_without_fact_executor() {
+    let ctx = SagaWithFact;
+    let executor = SuccessExecutor;
+
+    let result = orchestrate_saga(
+        &ctx,
+        &executor,
+        None, // command_bus
+        None, // fetcher
+        None, // <-- no fact_executor; facts must NOT be silently dropped
+        "test-saga",
+        "corr-1",
+        None,
+        SyncMode::Async,
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "Saga that emits facts with no fact_executor configured must return \
+         Err — silent drop hides the bc1d3db4 regression class. Got Ok."
+    );
+    if let Err(e) = result {
+        let msg = format!("{e}");
+        assert!(
+            msg.to_lowercase().contains("fact"),
+            "saga error message must name 'fact' so operators can diagnose \
+             the missing wiring. Got: {msg}"
+        );
+    }
+}

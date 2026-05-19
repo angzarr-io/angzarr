@@ -74,9 +74,10 @@ pub mod errmsg {
 
 pub use crate::utils::saga_compensation::{
     build_compensation_failed_event, build_compensation_failed_event_book,
-    build_notification_command_book, build_rejection_notification, handle_business_response,
-    CompensationContext, CompensationError, CompensationOutcome, DefaultEscalationHandler,
-    EscalationHandler, NoopEscalationHandler,
+    build_compensation_failed_event_book_with_clock, build_notification_command_book,
+    build_rejection_notification, handle_business_response, Clock, CompensationContext,
+    CompensationError, CompensationOutcome, DefaultEscalationHandler, EscalationHandler,
+    NoopEscalationHandler, SystemClock,
 };
 pub use aggregate::AggregateService;
 pub use event_query::EventQueryService;

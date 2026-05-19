@@ -41,6 +41,8 @@ pub mod grpc;
 // Local module always compiled (sqlite always on)
 pub mod local;
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use tracing::{debug, error, info, warn};
@@ -54,6 +56,47 @@ use crate::proto::{
 use super::command::{CommandExecutor, CommandOutcome};
 use super::destination::DestinationFetcher;
 use super::FactExecutor;
+
+/// Stable fingerprint for a PM event book, used to deduplicate persistence
+/// across outer-loop iterations (H-13).
+///
+/// When `persist_pm_events` returns `Retryable` on book N (with books
+/// 1..N-1 already persisted successfully), the whole outer loop restarts:
+/// the PM handler re-runs and an idempotent handler will re-emit the same
+/// earlier books. Without dedup the coordinator would persist them twice.
+///
+/// The fingerprint captures (PM root, first/last persisted sequence, page
+/// count) — sufficient to distinguish books emitted within one workflow.
+/// The PM root is the PM's own aggregate root (correlation_id-derived);
+/// page sequences are guaranteed monotone within a book by the framework's
+/// sequence-stamping contract, so first/last + count is collision-free for
+/// any pair of books a single workflow could emit.
+#[derive(Clone, Eq, Hash, PartialEq, Debug)]
+struct BookFingerprint {
+    root_hex: String,
+    first_seq: u32,
+    last_seq: u32,
+    page_count: usize,
+}
+
+impl BookFingerprint {
+    fn of(book: &EventBook) -> Self {
+        use crate::proto_ext::{CoverExt, EventPageExt};
+        let root_hex = book
+            .cover
+            .as_ref()
+            .and_then(|c| c.root_id_hex())
+            .unwrap_or_default();
+        let first_seq = book.pages.first().map(|p| p.sequence_num()).unwrap_or(0);
+        let last_seq = book.pages.last().map(|p| p.sequence_num()).unwrap_or(0);
+        Self {
+            root_hex,
+            first_seq,
+            last_seq,
+            page_count: book.pages.len(),
+        }
+    }
+}
 
 /// Result of process manager handle phase.
 ///
@@ -87,6 +130,19 @@ pub trait ProcessManagerHandler: Send + Sync + 'static {
     /// Produce commands, PM events, and facts given trigger and PM state.
     ///
     /// Returns commands to execute, optional PM events to persist, and facts to inject.
+    ///
+    /// # Idempotency Contract (H-13)
+    ///
+    /// PM handlers MUST be deterministic and idempotent on the input pair
+    /// `(trigger, process_state)`. When a `Retryable` outcome causes the
+    /// coordinator's outer loop to restart, `handle` is called again with
+    /// the same trigger and freshly-fetched PM state; the coordinator
+    /// deduplicates re-emitted PM event books at the persistence boundary
+    /// using a stable fingerprint over `(root, first/last sequence, page
+    /// count)`, but it does so only when the handler returns the *same*
+    /// books for the same input. Non-determinism between calls (e.g.
+    /// new UUIDs, wall-clock-stamped sequences) will defeat the dedup
+    /// guard and re-persist already-stored content.
     fn handle(
         &self,
         trigger: &EventBook,
@@ -253,6 +309,18 @@ pub async fn orchestrate_pm(
     let mut delays = backoff.build();
     let mut attempt = 0u32;
 
+    // H-13: dedup guard for PM-domain writes across outer-loop iterations.
+    //
+    // When the outer loop restarts after a `Retryable` on book N (with books
+    // 1..N-1 already persisted), the PM handler is called again and an
+    // idempotent handler will re-emit the same earlier books. Without this
+    // guard `persist_pm_events` would be invoked again with the same
+    // content; nothing in the persister deduplicates by sequence range.
+    //
+    // Track which book fingerprints have been persisted successfully and
+    // skip any book whose fingerprint is already in the set on re-run.
+    let mut persisted: HashSet<BookFingerprint> = HashSet::new();
+
     loop {
         // Load PM state by correlation_id.
         // Why by correlation_id? The PM's aggregate root IS the correlation_id.
@@ -304,12 +372,25 @@ pub async fn orchestrate_pm(
             if process_events.pages.is_empty() {
                 continue;
             }
+            // H-13: skip books we already persisted on a prior outer-loop
+            // iteration. Without this guard, when book N returned Retryable
+            // (causing restart) the prior books 1..N-1 would be persisted
+            // again — the persister has no sequence-range dedup of its own.
+            let fp = BookFingerprint::of(process_events);
+            if persisted.contains(&fp) {
+                debug!(
+                    fingerprint = ?fp,
+                    "Skipping already-persisted PM book on retry (H-13 dedup)"
+                );
+                continue;
+            }
             match ctx.persist_pm_events(process_events, correlation_id).await {
                 CommandOutcome::Success(_) => {
                     info!(
                         events = process_events.pages.len(),
                         "PM events persisted successfully"
                     );
+                    persisted.insert(fp);
                 }
                 CommandOutcome::Retryable { reason, .. } => match delays.next() {
                     Some(delay) => {
@@ -396,7 +477,7 @@ pub async fn orchestrate_pm(
             pm_source_seq,
             sync_mode,
         )
-        .await;
+        .await?;
 
         // Inject facts into target aggregates.
         //
@@ -407,6 +488,33 @@ pub async fn orchestrate_pm(
         // Facts must have `external_id` set in their Cover for idempotent handling.
         // Fact injection failure fails the entire PM operation — facts are not
         // best-effort, they're part of the transaction.
+        //
+        // H-15: silent-drop refused. If the PM emits any facts but no
+        // `FactExecutor` is wired, return an explicit error instead of
+        // silently discarding them. This prevents the bc1d3db4 regression
+        // class where a caller forgets to wire an executor and every fact
+        // is lost. The API can no longer swallow facts — callers must
+        // either pass an executor or guarantee an empty `facts` vec.
+        if !response.facts.is_empty() && fact_executor.is_none() {
+            let domains: Vec<&str> = response
+                .facts
+                .iter()
+                .map(|f| {
+                    f.cover
+                        .as_ref()
+                        .map(|c| c.domain.as_str())
+                        .unwrap_or("unknown")
+                })
+                .collect();
+            return Err(BusError::Publish(format!(
+                "PM '{pm_name}' produced {} fact(s) (target domains: {:?}) \
+                 but no FactExecutor is wired — facts cannot be silently \
+                 dropped (H-15). Wire a FactExecutor or guarantee handle() \
+                 returns no facts.",
+                response.facts.len(),
+                domains,
+            )));
+        }
         if let Some(fact_exec) = fact_executor {
             for fact in response.facts {
                 let domain = fact
@@ -455,7 +563,7 @@ async fn execute_pm_commands(
     pm_domain: &str,
     pm_source_seq: u32,
     sync_mode: SyncMode,
-) {
+) -> Result<(), BusError> {
     use super::shared::fill_correlation_id;
     fill_correlation_id(&mut commands, correlation_id);
 
@@ -517,6 +625,14 @@ async fn execute_pm_commands(
         }
     }
 
+    // H-14: when a per-command sync_mode override is Decision and the
+    // executor returns Retryable, the caller's await is blocked waiting
+    // for an accept/reject answer that will never arrive (the framework's
+    // delivery-retry path is asynchronous and Decision-mode callers do not
+    // observe it). Track whether any Decision-mode command degraded so we
+    // can surface a single Err at the end of the dispatch loop.
+    let mut decision_retryable_failure: Option<String> = None;
+
     for command_book in commands {
         let cmd_domain = command_book
             .cover
@@ -554,11 +670,35 @@ async fn execute_pm_commands(
                 );
             }
             CommandOutcome::Retryable { reason, .. } => {
-                warn!(
-                    domain = %cmd_domain,
-                    error = %reason,
-                    "PM command sequence conflict (will be retried)"
-                );
+                if effective_sync_mode == SyncMode::Decision {
+                    // H-14: Decision contract requires synchronous
+                    // accept/reject. A Retryable transport outcome cannot
+                    // satisfy that contract — the framework has no
+                    // synchronous retry path here. Degrade to a rejection
+                    // with operator-readable reason so the PM's
+                    // compensation handler runs AND the orchestrator
+                    // surfaces an Err to the caller (no silent log-only).
+                    let degraded = format!(
+                        "retryable transport failure under SYNC_MODE_DECISION; \
+                         retry later (underlying: {reason})"
+                    );
+                    error!(
+                        domain = %cmd_domain,
+                        error = %degraded,
+                        "PM Decision-mode command Retryable (H-14 degraded)"
+                    );
+                    ctx.on_command_rejected(&command_book, &degraded, correlation_id)
+                        .await;
+                    if decision_retryable_failure.is_none() {
+                        decision_retryable_failure = Some(degraded);
+                    }
+                } else {
+                    warn!(
+                        domain = %cmd_domain,
+                        error = %reason,
+                        "PM command sequence conflict (will be retried)"
+                    );
+                }
             }
             CommandOutcome::Rejected(reason) => {
                 error!(
@@ -571,6 +711,11 @@ async fn execute_pm_commands(
             }
         }
     }
+
+    if let Some(reason) = decision_retryable_failure {
+        return Err(BusError::Publish(reason));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -371,6 +371,99 @@ fn decode_any_to_json_matches_decode_to_json() {
 }
 
 // ============================================================================
+// H-33: Reflection-exposed surface split from internal descriptor set
+// ============================================================================
+//
+// `EMBEDDED_DESCRIPTOR` (full set) is used by the in-process pool for
+// payload rendering — DLQ admin, event-store browsing, and the
+// upcoming GraphQL gateway all need to decode framework-internal
+// messages (Confirmation, Revocation, NoOp, AngzarrDeferredSequence,
+// PMState, etc.) on the wire.
+//
+// `EMBEDDED_DESCRIPTOR_PUBLIC` (new) is what gRPC reflection clients
+// see. It includes only proto files that define publicly-callable
+// services on the binary surface (DlqAdminService and its transitive
+// imports). Framework "command-handler", "saga", "projector", "PM",
+// "query", "stream", "upcaster", "meta", "cloudevents", and the
+// internal `types.proto` (which defines Revocation/Confirmation/NoOp/
+// AngzarrDeferredSequence/PMState/...) are absent.
+//
+// Why split it: reflection clients enumerate every type they can see,
+// and the full set's internal types are not contractually stable.
+// Exposing them invites integrations against private APIs.
+
+use prost::Message as _;
+use prost_types::FileDescriptorSet;
+
+fn public_files() -> Vec<String> {
+    let set = FileDescriptorSet::decode(EMBEDDED_DESCRIPTOR_PUBLIC)
+        .expect("EMBEDDED_DESCRIPTOR_PUBLIC must be a valid FileDescriptorSet");
+    set.file.into_iter().map(|f| f.name().to_string()).collect()
+}
+
+/// The public descriptor set MUST contain `dlq_admin.proto` — that's
+/// the one user-facing service this binary advertises today.
+#[test]
+fn h33_public_descriptor_includes_dlq_admin() {
+    let files = public_files();
+    assert!(
+        files.iter().any(|f| f == "angzarr/status/dlq_admin.proto"),
+        "Public descriptor must include dlq_admin.proto. Got: {:?}",
+        files
+    );
+}
+
+/// The public descriptor set MUST NOT contain framework protos whose
+/// messages are internal (command/event-bus headers, deferred-sequence
+/// markers, two-phase confirmation/revocation, etc.).
+#[test]
+fn h33_public_descriptor_excludes_framework_internals() {
+    let files = public_files();
+
+    // These proto files declare internal types or services that we
+    // don't advertise via reflection.
+    const INTERNAL_PROTOS: &[&str] = &[
+        "angzarr_client/proto/angzarr/types.proto",
+        "angzarr_client/proto/angzarr/command_handler.proto",
+        "angzarr_client/proto/angzarr/process_manager.proto",
+        "angzarr_client/proto/angzarr/saga.proto",
+        "angzarr_client/proto/angzarr/projector.proto",
+        "angzarr_client/proto/angzarr/query.proto",
+        "angzarr_client/proto/angzarr/stream.proto",
+        "angzarr_client/proto/angzarr/upcaster.proto",
+    ];
+
+    for internal in INTERNAL_PROTOS {
+        assert!(
+            !files.iter().any(|f| f == internal),
+            "Public descriptor MUST NOT include {} (H-33 internal-surface leak). \
+             Full file list: {:?}",
+            internal,
+            files
+        );
+    }
+}
+
+/// Sanity: the full `EMBEDDED_DESCRIPTOR` still contains the framework
+/// internals (so payload-decoding paths via `init_pool` continue to
+/// work). This guards against an over-eager fix that swaps the
+/// pool's source too.
+#[test]
+fn h33_full_descriptor_still_contains_internals() {
+    let set = FileDescriptorSet::decode(EMBEDDED_DESCRIPTOR)
+        .expect("EMBEDDED_DESCRIPTOR must remain a valid FileDescriptorSet");
+    let files: Vec<String> = set.file.iter().map(|f| f.name().to_string()).collect();
+    assert!(
+        files
+            .iter()
+            .any(|f| f == "angzarr_client/proto/angzarr/types.proto"),
+        "Full descriptor pool source must retain types.proto for in-process \
+         payload decoding. Got: {:?}",
+        files
+    );
+}
+
+// ============================================================================
 // Integration Test Scaffolding
 // ============================================================================
 //
