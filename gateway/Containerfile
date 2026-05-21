@@ -10,13 +10,16 @@ RUN go install github.com/bufbuild/buf/cmd/buf@v1.47.2
 
 # Copy proto files for generation
 COPY angzarr-project/proto/ ./angzarr-project/proto/
+# core's own proto tree — gateway/buf.gen.yaml ingests `../proto` to
+# generate the angzarr-status REST surface (e.g. dlq_admin.proto).
+COPY proto/ ./proto/
 
 # Copy gateway module
 COPY gateway/ ./gateway/
 
 WORKDIR /workspace/gateway
 
-# Generate protobuf code (buf.gen.yaml inputs: ../angzarr-project/proto)
+# Generate protobuf code (buf.gen.yaml inputs: ../angzarr-project/proto, ../proto)
 # Must happen before go mod tidy so generated imports are included
 RUN buf generate
 
