@@ -178,7 +178,7 @@ pub fn ensure_initialized() -> Result<(), ReflectError> {
 /// proto3 JSON encoding for Any).
 ///
 /// `full_type_name` is the dotted protobuf type name, e.g.
-/// `"angzarr_client.proto.angzarr.AngzarrDeadLetter"`.
+/// `"angzarr_client.proto.angzarr.v1.AngzarrDeadLetter"`.
 pub fn decode_to_json(full_type_name: &str, encoded: &[u8]) -> String {
     let Ok(pool) = pool() else {
         return String::new();

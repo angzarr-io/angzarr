@@ -5,7 +5,7 @@
 //! both message types (Cover, EventBook, CommandBook, etc.) and gRPC
 //! service client/server stubs.
 
-tonic::include_proto!("angzarr_client.proto.angzarr");
+tonic::include_proto!("angzarr_client.proto.angzarr.v1");
 
 /// Operations-console gRPC surface (DLQ admin, cluster health, etc.).
 /// Lives in the `angzarr_client.proto.angzarr.status` proto package —

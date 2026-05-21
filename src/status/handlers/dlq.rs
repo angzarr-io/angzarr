@@ -588,7 +588,7 @@ impl DlqAdminHandler {
 /// Fully-qualified proto type name of `AngzarrDeadLetter` —
 /// pinned here so a future rename surfaces as a build/test failure
 /// rather than silently producing empty `payload_view` strings.
-const ANGZARR_DEAD_LETTER_TYPE_NAME: &str = "angzarr_client.proto.angzarr.AngzarrDeadLetter";
+const ANGZARR_DEAD_LETTER_TYPE_NAME: &str = "angzarr_client.proto.angzarr.v1.AngzarrDeadLetter";
 
 /// Map [`StoredDeadLetter`] (domain row) → proto wire type.
 ///

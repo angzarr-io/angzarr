@@ -225,7 +225,7 @@ fn decode_to_json_unknown_type_returns_empty() {
 fn decode_to_json_garbage_bytes_returns_empty() {
     let _ = ensure_initialized();
     let result = decode_to_json(
-        "angzarr_client.proto.angzarr.AngzarrDeadLetter",
+        "angzarr_client.proto.angzarr.v1.AngzarrDeadLetter",
         &[0xff, 0xff, 0xff, 0xff],
     );
     assert_eq!(result, "");
@@ -250,7 +250,7 @@ fn decode_to_json_roundtrip_angzarr_dead_letter() {
         ..Default::default()
     };
     let bytes = dl.encode_to_vec();
-    let json = decode_to_json("angzarr_client.proto.angzarr.AngzarrDeadLetter", &bytes);
+    let json = decode_to_json("angzarr_client.proto.angzarr.v1.AngzarrDeadLetter", &bytes);
 
     assert!(!json.is_empty(), "json must be non-empty on happy path");
     // Field-name spot checks against the proto3 JSON encoding.
@@ -308,7 +308,7 @@ fn decode_any_to_json_roundtrip_known_type() {
         edition: None,
     };
     let any = Any {
-        type_url: "type.googleapis.com/angzarr_client.proto.angzarr.Cover".to_string(),
+        type_url: "type.googleapis.com/angzarr_client.proto.angzarr.v1.Cover".to_string(),
         value: cover.encode_to_vec(),
     };
     let json = decode_any_to_json(&any);
@@ -339,7 +339,7 @@ fn decode_any_to_json_garbage_bytes_returns_empty() {
     use prost_types::Any;
     let _ = ensure_initialized();
     let any = Any {
-        type_url: "type.googleapis.com/angzarr_client.proto.angzarr.Cover".to_string(),
+        type_url: "type.googleapis.com/angzarr_client.proto.angzarr.v1.Cover".to_string(),
         value: vec![0xff; 16],
     };
     assert_eq!(decode_any_to_json(&any), "");
@@ -361,9 +361,9 @@ fn decode_any_to_json_matches_decode_to_json() {
         edition: None,
     };
     let bytes = cover.encode_to_vec();
-    let from_bytes = decode_to_json("angzarr_client.proto.angzarr.Cover", &bytes);
+    let from_bytes = decode_to_json("angzarr_client.proto.angzarr.v1.Cover", &bytes);
     let from_any = decode_any_to_json(&Any {
-        type_url: "type.googleapis.com/angzarr_client.proto.angzarr.Cover".to_string(),
+        type_url: "type.googleapis.com/angzarr_client.proto.angzarr.v1.Cover".to_string(),
         value: bytes,
     });
     assert!(!from_bytes.is_empty());
@@ -456,7 +456,7 @@ fn h33_full_descriptor_still_contains_internals() {
     assert!(
         files
             .iter()
-            .any(|f| f == "angzarr_client/proto/angzarr/types.proto"),
+            .any(|f| f == "angzarr_client/proto/angzarr/v1/types.proto"),
         "Full descriptor pool source must retain types.proto for in-process \
          payload decoding. Got: {:?}",
         files
