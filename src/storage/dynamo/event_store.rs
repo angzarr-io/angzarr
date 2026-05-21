@@ -127,7 +127,7 @@ impl DynamoEventStore {
             .expression_attribute_values(":from", AttributeValue::N(from.to_string()))
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB query failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
 
         let mut events = Vec::new();
         if let Some(items) = result.items {
@@ -161,7 +161,7 @@ impl DynamoEventStore {
             .limit(1)
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB query failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
 
         if let Some(items) = result.items {
             if let Some(item) = items.first() {
@@ -198,7 +198,7 @@ impl DynamoEventStore {
             .expression_attribute_values(":to", AttributeValue::N((until_seq - 1).to_string()))
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB query failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
 
         let mut events = Vec::new();
         if let Some(items) = result.items {
@@ -292,7 +292,7 @@ impl EventStore for DynamoEventStore {
                 .send()
                 .await
                 .map_err(|e| {
-                    StorageError::NotImplemented(format!(
+                    StorageError::Backend(format!(
                         "DynamoDB external_id idempotency query failed: {}",
                         e
                     ))
@@ -449,7 +449,7 @@ impl EventStore for DynamoEventStore {
                         actual: seq,
                     });
                 }
-                return Err(StorageError::NotImplemented(format!(
+                return Err(StorageError::Backend(format!(
                     "DynamoDB put_item failed: {}",
                     err
                 )));
@@ -480,7 +480,7 @@ impl EventStore for DynamoEventStore {
             .expression_attribute_values(":pk", AttributeValue::S(pk))
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB query failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
 
         let mut events = Vec::new();
         if let Some(items) = result.items {
@@ -542,7 +542,7 @@ impl EventStore for DynamoEventStore {
             .expression_attribute_values(":to", AttributeValue::N(to_inclusive.to_string()))
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB query failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
 
         let mut events = Vec::new();
         if let Some(items) = result.items {
@@ -577,7 +577,7 @@ impl EventStore for DynamoEventStore {
             .projection_expression("pk")
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB scan failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB scan failed: {}", e)))?;
 
         let mut roots = std::collections::HashSet::new();
         if let Some(items) = result.items {
@@ -602,7 +602,7 @@ impl EventStore for DynamoEventStore {
             .projection_expression("pk")
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB scan failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB scan failed: {}", e)))?;
 
         let mut domains = std::collections::HashSet::new();
         if let Some(items) = result.items {
@@ -632,9 +632,7 @@ impl EventStore for DynamoEventStore {
                 .limit(1)
                 .send()
                 .await
-                .map_err(|e| {
-                    StorageError::NotImplemented(format!("DynamoDB query failed: {}", e))
-                })?;
+                .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
 
             if let Some(items) = result.items {
                 if let Some(item) = items.first() {
@@ -666,7 +664,7 @@ impl EventStore for DynamoEventStore {
             .limit(1)
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB query failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
 
         if let Some(items) = result.items {
             if let Some(item) = items.first() {
@@ -722,9 +720,7 @@ impl EventStore for DynamoEventStore {
             .expression_attribute_values(":cid", AttributeValue::S(correlation_id.to_string()))
             .send()
             .await
-            .map_err(|e| {
-                StorageError::NotImplemented(format!("DynamoDB GSI query failed: {}", e))
-            })?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB GSI query failed: {}", e)))?;
 
         // Group events by (domain, edition, root)
         let mut events_by_root: HashMap<(String, String, Uuid), Vec<EventPage>> = HashMap::new();
@@ -794,7 +790,7 @@ impl EventStore for DynamoEventStore {
             .projection_expression("pk, seq")
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB scan failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB scan failed: {}", e)))?;
 
         if let Some(items) = result.items {
             for item in items {
@@ -862,7 +858,7 @@ impl EventStore for DynamoEventStore {
             .send()
             .await
             .map_err(|e| {
-                StorageError::NotImplemented(format!("DynamoDB find_by_source query failed: {}", e))
+                StorageError::Backend(format!("DynamoDB find_by_source query failed: {}", e))
             })?;
 
         let Some(items) = result.items else {
@@ -922,10 +918,7 @@ impl EventStore for DynamoEventStore {
             .send()
             .await
             .map_err(|e| {
-                StorageError::NotImplemented(format!(
-                    "DynamoDB find_by_external_id query failed: {}",
-                    e
-                ))
+                StorageError::Backend(format!("DynamoDB find_by_external_id query failed: {}", e))
             })?;
 
         let Some(items) = result.items else {
@@ -971,7 +964,7 @@ impl EventStore for DynamoEventStore {
             .send()
             .await
             .map_err(|e| {
-                StorageError::NotImplemented(format!("DynamoDB cascade-index scan failed: {}", e))
+                StorageError::Backend(format!("DynamoDB cascade-index scan failed: {}", e))
             })?;
 
         // Track state per cascade_id
@@ -1037,7 +1030,7 @@ impl EventStore for DynamoEventStore {
             .send()
             .await
             .map_err(|e| {
-                StorageError::NotImplemented(format!("DynamoDB cascade-index query failed: {}", e))
+                StorageError::Backend(format!("DynamoDB cascade-index query failed: {}", e))
             })?;
 
         // Group by (domain, edition, root), collect sequences for uncommitted events

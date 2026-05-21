@@ -104,10 +104,7 @@ impl BigtableEventStore {
         let connection = if let Some(host) = emulator_host {
             BigTableConnection::new_with_emulator(host, project_id, instance_id, false, None)
                 .map_err(|e| {
-                    StorageError::NotImplemented(format!(
-                        "Bigtable emulator connection failed: {}",
-                        e
-                    ))
+                    StorageError::Backend(format!("Bigtable emulator connection failed: {}", e))
                 })?
         } else {
             BigTableConnection::new(
@@ -118,9 +115,7 @@ impl BigtableEventStore {
                 Some(Duration::from_secs(30)),
             )
             .await
-            .map_err(|e| {
-                StorageError::NotImplemented(format!("Bigtable connection failed: {}", e))
-            })?
+            .map_err(|e| StorageError::Backend(format!("Bigtable connection failed: {}", e)))?
         };
 
         let client = Arc::new(Mutex::new(connection.client()));
@@ -422,9 +417,10 @@ impl BigtableEventStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         let mut events = Vec::new();
         for (_, cells) in result {
@@ -478,9 +474,10 @@ impl BigtableEventStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         for (row_key, _) in result {
             if let Some((_, _, _, seq)) = Self::parse_row_key(&row_key) {
@@ -530,9 +527,10 @@ impl BigtableEventStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         let mut events = Vec::new();
         for (_, cells) in result {
@@ -620,9 +618,10 @@ impl BigtableEventStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         let mut max_seq: Option<u32> = None;
         for (row_key, _) in result {
@@ -678,9 +677,10 @@ impl BigtableEventStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         let mut rows: Vec<AggregateRowSnapshot> = Vec::new();
         for (row_key, cells) in result {
@@ -815,7 +815,7 @@ impl EventStore for BigtableEventStore {
             };
 
             let response = client.check_and_mutate_row(request).await.map_err(|e| {
-                StorageError::NotImplemented(format!("Bigtable check_and_mutate_row failed: {}", e))
+                StorageError::Backend(format!("Bigtable check_and_mutate_row failed: {}", e))
             })?;
 
             if response.predicate_matched {
@@ -838,7 +838,7 @@ impl EventStore for BigtableEventStore {
                 };
 
                 client.mutate_row(cascade_request).await.map_err(|e| {
-                    StorageError::NotImplemented(format!(
+                    StorageError::Backend(format!(
                         "Bigtable cascade index mutate_row failed: {}",
                         e
                     ))
@@ -924,9 +924,10 @@ impl EventStore for BigtableEventStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         let mut events = Vec::new();
         for (_, cells) in result {
@@ -979,9 +980,10 @@ impl EventStore for BigtableEventStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         let mut roots = std::collections::HashSet::new();
         for (row_key, _) in result {
@@ -1002,9 +1004,10 @@ impl EventStore for BigtableEventStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         let mut domains = std::collections::HashSet::new();
         for (row_key, _) in result {
@@ -1089,9 +1092,10 @@ impl EventStore for BigtableEventStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         let mut events_by_root: HashMap<(String, String, Uuid), Vec<EventPage>> = HashMap::new();
 
@@ -1184,9 +1188,10 @@ impl EventStore for BigtableEventStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         let mut deleted_count = 0u32;
 
@@ -1337,7 +1342,7 @@ impl EventStore for BigtableEventStore {
         };
 
         let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable cascade index scan failed: {}", e))
+            StorageError::Backend(format!("Bigtable cascade index scan failed: {}", e))
         })?;
 
         // Track state per cascade_id
@@ -1435,7 +1440,7 @@ impl EventStore for BigtableEventStore {
         };
 
         let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable cascade index query failed: {}", e))
+            StorageError::Backend(format!("Bigtable cascade index query failed: {}", e))
         })?;
 
         // Group by (domain, edition, root), collect sequences for uncommitted events

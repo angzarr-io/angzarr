@@ -216,7 +216,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = Server::builder()
         .layer(grpc_trace_layer())
         .add_service(health_service)
-        .add_service(angzarr::proto_reflect::reflection_service())
+        // Framework-internal binary: no gRPC reflection. The status binary is
+        // the only public-API surface (see H-33 in deep-review-remediation.md);
+        // advertising the public descriptor subset here would falsely list
+        // DlqAdminService while hiding the framework services this binary
+        // actually serves.
         .add_service(
             CommandHandlerCoordinatorServiceServer::new(aggregate_service)
                 .max_decoding_message_size(msg_size)

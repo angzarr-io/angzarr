@@ -114,6 +114,31 @@ enum Outbox {
 /// root X can be recovered AFTER seq=N+k for X has already gone out the
 /// normal path, regressing downstream consumer state. See C-13 in
 /// `plans/deep-review-remediation.md`.
+///
+/// # Consumer-contract caveat (Option A)
+///
+/// The framework chose "drop the superseded orphan" over "block the
+/// newer publish until the orphan recovers". A consumer that subscribes
+/// to the bus alone (no storage-replay reconciliation) WILL observe
+/// gaps in this scenario: if TX1's publish (seq=3) is orphaned and
+/// TX2 (seq=5) goes through, the bus delivers `{5}` to a fresh
+/// consumer — `{3}` is in storage but never reaches the bus stream.
+/// Bus-only consumers must therefore either (a) reconcile via the
+/// EventStore for any sequence gap they detect, or (b) tolerate
+/// at-most-once-on-failure semantics on the recovery boundary. CQRS-ES
+/// projector deployments using this codebase typically gap-fill from
+/// storage so this is acceptable; pure bus consumers are not.
+///
+/// # Root-less events
+///
+/// Root-less events (no Cover.root) collapse to a single `(domain, "")`
+/// bucket. Because their relative ordering is undefined on this transport
+/// AND distinct root-less events are not dedup-equivalent (they're
+/// genuinely different messages, not retries of one another), the
+/// supersession check MUST be skipped for them — otherwise the first
+/// successful publish would bump the watermark and every subsequent
+/// orphaned root-less event would be silently dropped. The recovery
+/// path checks `root.is_empty()` and unconditionally republishes.
 #[derive(Iden)]
 enum OutboxPublishedSeq {
     #[iden = "outbox_published_seq"]
@@ -370,19 +395,27 @@ impl PostgresOutboxEventBus {
                     // emitting it now would regress the consumer past
                     // newer state. Drop the row from the outbox without
                     // republishing.
+                    //
+                    // Root-less events (root == "") cannot be checked this
+                    // way — see the `OutboxPublishedSeq` doc-comment. They
+                    // bypass supersession and are always republished.
                     let (domain, root, max_seq) = extract_routing_key(&book);
-                    let superseded = match self.read_published_watermark(&domain, &root).await {
-                        Ok(Some(watermark)) => watermark >= max_seq,
-                        Ok(None) => false,
-                        Err(e) => {
-                            // Fail-safe: on a watermark read error, treat
-                            // as not-superseded and proceed to republish.
-                            // Preserves at-least-once at the cost of a
-                            // possible duplicate (consumer should be
-                            // idempotent — sequence-based dedup).
-                            warn!(id = %id, domain = %domain, root = %root, error = %e,
-                                  "Failed to read outbox published-sequence watermark; proceeding with republish (at-least-once preserved)");
-                            false
+                    let superseded = if root.is_empty() {
+                        false
+                    } else {
+                        match self.read_published_watermark(&domain, &root).await {
+                            Ok(Some(watermark)) => watermark >= max_seq,
+                            Ok(None) => false,
+                            Err(e) => {
+                                // Fail-safe: on a watermark read error, treat
+                                // as not-superseded and proceed to republish.
+                                // Preserves at-least-once at the cost of a
+                                // possible duplicate (consumer should be
+                                // idempotent — sequence-based dedup).
+                                warn!(id = %id, domain = %domain, root = %root, error = %e,
+                                      "Failed to read outbox published-sequence watermark; proceeding with republish (at-least-once preserved)");
+                                false
+                            }
                         }
                     };
 
@@ -733,17 +766,23 @@ impl SqliteOutboxEventBus {
 
         let (domain, root, max_seq) = extract_routing_key(&book);
 
-        // C-13 ordering guard.
-        let superseded = match self.read_published_watermark(&domain, &root).await {
-            Ok(Some(watermark)) => watermark >= max_seq,
-            Ok(None) => false,
-            Err(e) => {
-                // Fail-safe: on a watermark read error, treat as
-                // not-superseded and proceed to republish — preserves
-                // at-least-once at the cost of a possible duplicate.
-                warn!(id = %id, domain = %domain, root = %root, error = %e,
-                      "Failed to read outbox published-sequence watermark; proceeding with republish (at-least-once preserved)");
-                false
+        // C-13 ordering guard. Root-less events bypass — see the
+        // `OutboxPublishedSeq` doc for the rationale (distinct root-less
+        // events share a key but aren't dedup-equivalent).
+        let superseded = if root.is_empty() {
+            false
+        } else {
+            match self.read_published_watermark(&domain, &root).await {
+                Ok(Some(watermark)) => watermark >= max_seq,
+                Ok(None) => false,
+                Err(e) => {
+                    // Fail-safe: on a watermark read error, treat as
+                    // not-superseded and proceed to republish — preserves
+                    // at-least-once at the cost of a possible duplicate.
+                    warn!(id = %id, domain = %domain, root = %root, error = %e,
+                          "Failed to read outbox published-sequence watermark; proceeding with republish (at-least-once preserved)");
+                    false
+                }
             }
         };
         if superseded {

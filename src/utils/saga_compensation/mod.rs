@@ -495,12 +495,24 @@ pub fn build_compensation_failed_event(
 /// breaking idempotency and the "snapshot derivable from events alone"
 /// invariant.
 ///
-/// The root is now SHA-256 over a canonical concatenation of:
+/// The root is now SHA-256 over a separator-delimited concatenation of:
 ///   - source aggregate's domain (UTF-8 bytes)
 ///   - source aggregate's root UUID bytes (empty if absent)
 ///   - source_seq (little-endian u64)
-///   - rejected command's encoded proto bytes (already canonical)
+///   - rejected command's encoded proto bytes
 ///   - compensation failure reason (UTF-8 bytes)
+///
+/// **Determinism caveat**: protobuf wire format is NOT canonical by spec.
+/// Prost's encoder is deterministic within a single binary version, so the
+/// derived root is stable across replays of the same process and across
+/// recompilations of the same `prost` major. A prost upgrade, a switch to a
+/// different proto runtime, or a change to the proto schema's field numbering
+/// can shift the bytes and therefore the derived root — at which point a
+/// re-delivery of the *same logical* failed saga command would land on a
+/// different fallback-domain aggregate (the idempotency invariant the fix
+/// pins would silently break). Callers depending on cross-version stability
+/// should hash a stable projection (sorted field numbers + length-delimited
+/// values) instead of the wire bytes.
 ///
 /// We slice the digest to the first 16 bytes to fit a UUID. Different
 /// logical compensation events still discriminate (SHA-256 collisions on

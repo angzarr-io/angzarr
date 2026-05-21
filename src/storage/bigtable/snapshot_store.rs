@@ -45,10 +45,7 @@ impl BigtableSnapshotStore {
         let connection = if let Some(host) = emulator_host {
             BigTableConnection::new_with_emulator(host, project_id, instance_id, false, None)
                 .map_err(|e| {
-                    StorageError::NotImplemented(format!(
-                        "Bigtable emulator connection failed: {}",
-                        e
-                    ))
+                    StorageError::Backend(format!("Bigtable emulator connection failed: {}", e))
                 })?
         } else {
             BigTableConnection::new(
@@ -59,9 +56,7 @@ impl BigtableSnapshotStore {
                 Some(Duration::from_secs(30)),
             )
             .await
-            .map_err(|e| {
-                StorageError::NotImplemented(format!("Bigtable connection failed: {}", e))
-            })?
+            .map_err(|e| StorageError::Backend(format!("Bigtable connection failed: {}", e)))?
         };
 
         let client = Arc::new(Mutex::new(connection.client()));
@@ -173,9 +168,10 @@ impl SnapshotStore for BigtableSnapshotStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         let mut best_snapshot: Option<(u32, Snapshot)> = None;
 
@@ -225,9 +221,10 @@ impl SnapshotStore for BigtableSnapshotStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         for (_, cells) in result {
             for cell in cells {
@@ -269,9 +266,10 @@ impl SnapshotStore for BigtableSnapshotStore {
             ..Default::default()
         };
 
-        client.mutate_row(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable mutate_row failed: {}", e))
-        })?;
+        client
+            .mutate_row(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable mutate_row failed: {}", e)))?;
 
         debug!(
             domain = %domain,
@@ -314,9 +312,10 @@ impl SnapshotStore for BigtableSnapshotStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         // Delete each row
         for (row_key, _) in result {
@@ -335,9 +334,10 @@ impl SnapshotStore for BigtableSnapshotStore {
                 ..Default::default()
             };
 
-            client.mutate_row(delete_request).await.map_err(|e| {
-                StorageError::NotImplemented(format!("Bigtable mutate_row failed: {}", e))
-            })?;
+            client
+                .mutate_row(delete_request)
+                .await
+                .map_err(|e| StorageError::Backend(format!("Bigtable mutate_row failed: {}", e)))?;
         }
 
         debug!(

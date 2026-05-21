@@ -958,4 +958,85 @@ mod sqlite_tests {
             "non-superseded event must be removed from outbox after success"
         );
     }
+
+    /// C-13 follow-up: root-less events MUST bypass the supersession check.
+    ///
+    /// All root-less events share the same `(domain, "")` bucket but are
+    /// genuinely distinct messages (they're not retries of one another).
+    /// Without the root-less bypass, the first successful publish bumps the
+    /// `(domain, "")` watermark, and every subsequent orphaned root-less
+    /// event in that domain gets dropped as "superseded" — silent data loss.
+    #[tokio::test]
+    async fn test_recovery_republishes_rootless_orphan_even_when_watermark_present() {
+        let pool = create_test_pool().await;
+        let inner = Arc::new(MockEventBus::new());
+        let outbox = Arc::new(SqliteOutboxEventBus::new(
+            inner.clone(),
+            pool.clone(),
+            OutboxConfig::default(),
+        ));
+        outbox.init().await.unwrap();
+
+        // A root-less book: Cover without a root. `extract_routing_key`
+        // yields root_hex = "" and max_seq = 0 for both publishes.
+        fn rootless_book(domain: &str) -> EventBook {
+            EventBook {
+                cover: Some(crate::proto::Cover {
+                    domain: domain.to_string(),
+                    root: None,
+                    correlation_id: String::new(),
+                    edition: None,
+                }),
+                pages: vec![make_event_page(0)],
+                snapshot: None,
+                ..Default::default()
+            }
+        }
+
+        // (a) First root-less publish goes through the normal path. The
+        //     watermark for ("orders", "") gets bumped to 0.
+        outbox
+            .publish(Arc::new(rootless_book("orders")))
+            .await
+            .expect("first root-less publish must succeed");
+        assert_eq!(
+            inner.published_count().await,
+            1,
+            "first root-less publish must reach the inner bus"
+        );
+
+        // (b) A different root-less event for the same domain is orphaned
+        //     in the outbox (e.g., publish failed on a transient SDK error
+        //     and the row stayed behind). It has the same (domain, "")
+        //     supersession key — but it is NOT the same message.
+        let bytes_two = rootless_book("orders").encode_to_vec();
+        insert_orphaned_event(&pool, "rootless-orphan", "orders", &bytes_two, 60, 0).await;
+        // The helper writes root='test-root' — overwrite to the canonical
+        // "" so the recovery path sees an actual root-less row.
+        sqlx::query("UPDATE outbox SET root = '' WHERE id = ?")
+            .bind("rootless-orphan")
+            .execute(&pool)
+            .await
+            .expect("failed to clear root for orphaned root-less event");
+
+        // (c) Recovery fires.
+        let recovered = outbox
+            .recover_orphaned()
+            .await
+            .expect("recovery must succeed");
+
+        assert_eq!(
+            recovered, 1,
+            "the orphaned root-less event MUST be republished, not dropped as superseded"
+        );
+        assert_eq!(
+            inner.published_count().await,
+            2,
+            "inner bus must observe BOTH root-less events"
+        );
+        assert!(
+            get_outbox_entry(&pool, "rootless-orphan").await.is_none(),
+            "orphaned row should be deleted after successful republish"
+        );
+    }
 }
