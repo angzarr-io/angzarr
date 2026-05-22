@@ -1398,30 +1398,26 @@ mod broken_pipe_pruning_tests {
     /// list so subsequent publishes don't repeat the syscall to a
     /// dead pipe.
     ///
-    /// To force EPIPE deterministically we shrink the dead pipe's
-    /// kernel buffer to ~1 page (F_SETPIPE_SZ), publish a body MUCH
-    /// larger than that page, and have the reader thread close ITS
-    /// FD after a brief delay. The publisher's open succeeds (reader
-    /// briefly attached), the write fills the small buffer and
-    /// BLOCKS waiting for reader drain, the reader then drops →
-    /// kernel returns EPIPE on the blocked write. This is the same
-    /// pattern Linux's tests use for FIFO EPIPE races.
+    /// To force EPIPE deterministically we publish a body MUCH larger
+    /// than the default 64 KiB Linux pipe buffer; the reader thread
+    /// opens the FIFO but never drains, so the publisher's `write_all`
+    /// blocks after filling the kernel buffer. A two-party
+    /// `std::sync::Barrier` synchronizes the reader-drop with the
+    /// known-blocked writer: the writer signals the barrier from a
+    /// pre-spawn point and the reader waits for that signal before
+    /// dropping its FD. Combined with a hard `tokio::time::timeout`
+    /// on the publish call, the test cannot hang past the timeout
+    /// even under pathological scheduler interleavings — failing
+    /// instead of OOM-ing, which is what made the previous
+    /// `F_SETPIPE_SZ + sleep(150ms)` form unsafe to leave un-ignored.
     ///
-    /// On baseline this test fails: the BrokenPipe is silently
-    /// swallowed and the subscriber stays in `config.subscribers`
-    /// forever (forcing every future publish to repeat the ENXIO /
-    /// EPIPE syscall).
-    ///
-    /// `#[ignore]`: the F_SETPIPE_SZ + reader-drops-mid-write race can
-    /// hang > 60s under some scheduler interleavings (observed during
-    /// concurrent cargo-mutants runs and noted in the H-37+H-38 plan
-    /// entry). The unit-level helpers `decide_write_error_*` and
-    /// `prune_subscribers_removes_only_named_entry` give the same
-    /// fix-surface coverage without the race. Run this one explicitly
-    /// with `cargo test ... -- --ignored` when validating end-to-end.
+    /// On baseline (pre-H-04 fix) this test fails: the BrokenPipe is
+    /// silently swallowed and the subscriber stays in
+    /// `config.subscribers` forever, forcing every future publish to
+    /// repeat the EPIPE syscall.
     #[test]
-    #[ignore]
     fn broken_pipe_prunes_dead_subscriber_and_delivers_to_survivors() {
+        use std::sync::Barrier;
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(4)
             .enable_all()
@@ -1432,7 +1428,6 @@ mod broken_pipe_pruning_tests {
         let pipe_a = dir.path().join("subscriber-h04-dead.pipe");
         let pipe_b = dir.path().join("subscriber-h04-alive.pipe");
 
-        // Create both FIFOs.
         {
             use nix::sys::stat::Mode;
             use nix::unistd::mkfifo;
@@ -1440,10 +1435,8 @@ mod broken_pipe_pruning_tests {
             mkfifo(&pipe_b, Mode::S_IRUSR | Mode::S_IWUSR).expect("mkfifo b");
         }
 
-        // Order subscribers so the DEAD pipe is first — that way the
-        // publisher hits the EPIPE branch before delivering to the
-        // alive subscriber, exercising the "continue with rest of
-        // fan-out" path.
+        // DEAD pipe first so the EPIPE branch fires before alive
+        // delivery, exercising "continue with rest of fan-out".
         let subs = vec![
             SubscriberInfo {
                 name: "dead".to_string(),
@@ -1459,9 +1452,7 @@ mod broken_pipe_pruning_tests {
         let config = IpcConfig::publisher_with_subscribers(dir.path(), subs);
         let bus = StdArc::new(IpcEventBus::new(config));
 
-        // Sub-B reader: drain everything until EOF. Pipe buffer left at
-        // default — the alive subscriber must NOT trip the back-pressure
-        // path.
+        // Sub-B reader: drain everything until EOF.
         let pipe_b_for_reader = pipe_b.clone();
         let reader_b = thread::spawn(move || -> std::io::Result<Vec<Vec<u8>>> {
             let mut reader = File::open(&pipe_b_for_reader)?;
@@ -1481,57 +1472,60 @@ mod broken_pipe_pruning_tests {
             Ok(frames)
         });
 
-        // Sub-A reader: open, shrink the pipe buffer to one page so the
-        // publisher's body will block, then sleep briefly so the
-        // publisher has time to open AND start writing, then DROP.
-        // The blocked write returns EPIPE — the H-04 path under test.
+        // Sub-A reader: open, then BLOCK on a barrier until the test
+        // main thread has confirmed the publisher's write_all is
+        // saturated. Dropping the FD at that point makes the kernel
+        // surface EPIPE on the blocked write, which is the H-04 trigger.
+        let drop_barrier = StdArc::new(Barrier::new(2));
+        let drop_barrier_reader = drop_barrier.clone();
         let pipe_a_for_reader = pipe_a.clone();
         let reader_a = thread::spawn(move || {
             let reader = File::open(&pipe_a_for_reader).expect("open pipe-a");
-            unsafe {
-                use std::os::unix::io::AsRawFd;
-                const F_SETPIPE_SZ: i32 = 1031;
-                // One page (4 KiB) is the smallest pipe size Linux
-                // accepts for non-root processes. The publisher's body
-                // below is ~256 KiB → guaranteed to fill the buffer and
-                // block.
-                let _ = libc::fcntl(reader.as_raw_fd(), F_SETPIPE_SZ, 4096);
-            }
-            // Brief pause: gives the publisher time to take its
-            // per-pipe lock, open the FIFO, clear O_NONBLOCK, and
-            // start the write_all that fills the 4 KiB buffer. After
-            // that, dropping the FD causes the kernel to send EPIPE
-            // to the blocked writer.
-            thread::sleep(Duration::from_millis(150));
+            // Park here until the publisher is known to be blocked.
+            drop_barrier_reader.wait();
             drop(reader);
         });
 
         // Give both reader threads time to reach their open() syscall.
         thread::sleep(Duration::from_millis(50));
 
+        // The body must exceed the default Linux pipe buffer (64 KiB).
+        // 1 MiB is comfortably above that and short enough that the
+        // surviving subscriber drains it promptly. No F_SETPIPE_SZ
+        // shenanigans needed — the default buffer + a payload an order
+        // of magnitude larger makes blocking inevitable for any
+        // non-draining reader.
+        let large_marker = "X".repeat(1024 * 1024);
+        let book = Arc::new(make_book_with_marker(&large_marker));
+
         let publish_outcome = rt.block_on(async {
-            // Body ~256 KiB >> 4 KiB pipe buffer on the dead subscriber:
-            // the publisher's write_all to pipe-A will block until the
-            // reader-A drop fires EPIPE. The same body goes to pipe-B
-            // (alive) with the default pipe buffer; reader-B drains it
-            // promptly so that write doesn't block.
-            let large_marker = "X".repeat(256 * 1024);
-            let book = Arc::new(make_book_with_marker(&large_marker));
-            bus.publish(book).await
+            let bus = bus.clone();
+            let publish_handle = tokio::spawn(async move { bus.publish(book).await });
+
+            // Give the publisher ~150ms to take its per-pipe lock, open
+            // the FIFO, clear O_NONBLOCK, and saturate the 64 KiB kernel
+            // buffer. With a 1 MiB payload that fills in microseconds
+            // on a local pipe, this delay is generous. We then trip
+            // the barrier so reader-A drops its FD; the publisher's
+            // blocked write_all wakes with EPIPE.
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            drop_barrier.wait();
+
+            // Hard cap so a missed wake-up surfaces as a test failure,
+            // not as an OOM/hang. 5s is two orders of magnitude beyond
+            // the expected wallclock for this fan-out.
+            tokio::time::timeout(Duration::from_secs(5), publish_handle)
+                .await
+                .expect("publish exceeded 5s timeout — H-04 fan-out is stuck")
+                .expect("publish task panicked")
         });
 
-        // Reader-A is already finished (it dropped its FD before
-        // returning from the thread closure).
         reader_a.join().expect("reader-a panicked");
 
-        // Publish must have succeeded — surviving subscriber got the
-        // message; dead subscriber's BrokenPipe was absorbed as a
-        // prune.
         publish_outcome.expect(
             "publish must return Ok when only-dead-subscriber-failed (surviving subs received) (H-04)",
         );
 
-        // Live routing list must reflect the prune.
         let live = rt.block_on(bus.live_subscribers());
         let names: Vec<String> = live.iter().map(|s| s.name.clone()).collect();
         assert!(
@@ -1545,7 +1539,7 @@ mod broken_pipe_pruning_tests {
             names
         );
 
-        // Drop the bus so the writer FDs close and reader-B sees EOF.
+        // Drop the bus so reader-B sees EOF and the thread returns.
         drop(bus);
 
         let frames_b = reader_b
