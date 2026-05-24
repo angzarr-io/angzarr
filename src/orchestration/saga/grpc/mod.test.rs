@@ -24,6 +24,7 @@ fn make_source_event_book(domain: &str) -> EventBook {
                 name: "v1".to_string(),
                 divergences: vec![],
             }),
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,
@@ -84,6 +85,7 @@ fn test_compensation_context_requires_angzarr_deferred() {
             root: None,
             correlation_id: "corr-123".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
     };
@@ -113,6 +115,7 @@ fn test_compensation_context_captures_saga_source() {
             }),
             correlation_id: "corr-456".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
@@ -126,6 +129,7 @@ fn test_compensation_context_captures_saga_source() {
                             }),
                             correlation_id: "corr-456".to_string(),
                             edition: None,
+                            ext: None,
                         }),
                         source_seq: 5,
                     },

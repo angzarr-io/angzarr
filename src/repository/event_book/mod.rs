@@ -32,9 +32,10 @@ use uuid::Uuid;
 
 use std::collections::HashSet;
 
+use super::SnapshotRepository;
 use crate::proto::{Cover, Edition, EventBook, Uuid as ProtoUuid};
 use crate::proto_ext::{calculate_set_next_seq, EventPageExt};
-use crate::storage::{AddOutcome, EventStore, Result, SnapshotStore, StorageError};
+use crate::storage::{AddOutcome, EventStore, Result, StorageError};
 
 /// Extract domain, root UUID, and correlation_id from an EventBook.
 fn extract_cover(book: &EventBook) -> Result<(&str, Uuid, &str)> {
@@ -46,66 +47,49 @@ fn extract_cover(book: &EventBook) -> Result<(&str, Uuid, &str)> {
 
 /// Repository for EventBook operations.
 ///
-/// Handles loading aggregates with snapshot optimization
-/// and persisting new events.
+/// Handles loading aggregates with snapshot optimization and persisting
+/// new events. Snapshot policy (read_enabled / write_enabled) lives on
+/// the injected `SnapshotRepository`, not here — single source of truth
+/// so a new caller can't accidentally skip the policy by going around
+/// this repository.
+///
+/// # When snapshot reads are disabled
+///
+/// Several scenarios require full event replay:
+/// 1. **State migration**: snapshot format changes; old snapshots
+///    incompatible.
+/// 2. **Debugging/auditing**: compare state-from-snapshot vs
+///    state-from-full-replay.
+/// 3. **Snapshot regeneration**: after a bug fix in apply logic.
+/// 4. **Testing**: exercise the full replay path independent of
+///    snapshot machinery.
+///
+/// All four are toggled via `SnapshotRepository`'s `read_enabled`
+/// flag, which `get` here transparently honors via `snapshot_repo.get`
+/// returning `None` when reads are disabled.
 pub struct EventBookRepository {
     event_store: Arc<dyn EventStore>,
-    snapshot_store: Arc<dyn SnapshotStore>,
-    /// When false, snapshots are not loaded; all events are replayed from the beginning.
-    ///
-    /// # Why Disable Snapshot Reading?
-    ///
-    /// Several scenarios require full event replay:
-    ///
-    /// 1. **State migration**: When the snapshot format changes (new fields, renamed
-    ///    fields, structural changes), old snapshots may be incompatible. Disabling
-    ///    snapshot reads forces full replay through the new event handlers.
-    ///
-    /// 2. **Debugging/auditing**: To verify that snapshot creation is correct, compare
-    ///    state-from-snapshot vs state-from-full-replay. They should be identical.
-    ///
-    /// 3. **Snapshot regeneration**: After a bug fix in event application logic, old
-    ///    snapshots contain incorrect state. Replay from scratch to regenerate them.
-    ///
-    /// 4. **Testing**: Unit tests may want to exercise the full replay path to ensure
-    ///    event handlers are correct, independent of snapshot machinery.
-    snapshot_read_enabled: bool,
+    snapshot_repo: Arc<SnapshotRepository>,
 }
 
 impl EventBookRepository {
-    /// Create a new EventBook repository with snapshots enabled.
-    pub fn new(event_store: Arc<dyn EventStore>, snapshot_store: Arc<dyn SnapshotStore>) -> Self {
+    /// Create a new EventBook repository.
+    pub fn new(event_store: Arc<dyn EventStore>, snapshot_repo: Arc<SnapshotRepository>) -> Self {
         Self {
             event_store,
-            snapshot_store,
-            snapshot_read_enabled: true,
-        }
-    }
-
-    /// Create a new EventBook repository with configurable snapshot reading.
-    pub fn with_config(
-        event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
-        snapshot_read_enabled: bool,
-    ) -> Self {
-        Self {
-            event_store,
-            snapshot_store,
-            snapshot_read_enabled,
+            snapshot_repo,
         }
     }
 
     /// Load an EventBook for an aggregate.
     ///
-    /// If snapshot reading is enabled and a snapshot exists, loads events
-    /// from the snapshot sequence. Otherwise, loads all events from the beginning.
+    /// If a snapshot exists and snapshot reads are enabled (on the
+    /// repository), loads events from `snapshot.sequence + 1`.
+    /// Otherwise loads all events from the beginning.
     pub async fn get(&self, domain: &str, edition: &str, root: Uuid) -> Result<EventBook> {
-        // Try to load snapshot (only if snapshot reading is enabled)
-        let snapshot = if self.snapshot_read_enabled {
-            self.snapshot_store.get(domain, edition, root).await?
-        } else {
-            None
-        };
+        // SnapshotRepository.get returns None when read_enabled=false,
+        // so the gating lives in one place and we don't branch here.
+        let snapshot = self.snapshot_repo.get(domain, edition, root).await?;
 
         // Determine starting sequence
         // Snapshot sequence is the last event sequence used to create the snapshot,
@@ -129,6 +113,7 @@ impl EventBookRepository {
                     name: edition.to_string(),
                     divergences: vec![],
                 }),
+                ext: None,
             }),
             snapshot,
             pages: events,
@@ -163,6 +148,7 @@ impl EventBookRepository {
                     name: edition.to_string(),
                     divergences: vec![],
                 }),
+                ext: None,
             }),
             snapshot: None,
             pages: events,
@@ -173,19 +159,20 @@ impl EventBookRepository {
     }
 
     /// Load an EventBook as-of a timestamp (no snapshots).
+    /// Load an EventBook as-of a wall-clock timestamp.
     ///
-    /// Returns events from sequence 0 with created_at <= until.
-    ///
-    /// # Why Temporal Queries Skip Snapshots
-    ///
-    /// Snapshots represent state at a SPECIFIC point in time — the moment they were
-    /// created. If we're querying "what was the state at time T", we can't use a
-    /// snapshot created at time T+5 (it would include future events) nor one at T-10
-    /// (we'd still need to replay events from T-10 to T, negating the benefit).
-    ///
-    /// The only correct approach is replaying all events from the beginning through
-    /// the requested point in time. This is O(n) but temporal queries are typically
-    /// for debugging, auditing, or occasional analytics — not hot paths.
+    /// Returns the framework's reconstructed state at `until`:
+    /// - If a snapshot exists with `snapshot.created_at <= until`,
+    ///   uses it and layers events with `seq > snapshot.sequence`
+    ///   AND `created_at <= until`. The snapshot represents state
+    ///   at its persist time; the layered events bring state from
+    ///   the snapshot's moment up to `until`.
+    /// - A snapshot newer than `until` is ignored — using it would
+    ///   produce future state.
+    /// - A snapshot with no `created_at` (persisted before
+    ///   R2-SNAP-6) is ignored as well, since its temporal
+    ///   position is unknown. Safe degradation.
+    /// - Otherwise full replay through `until`.
     pub async fn get_temporal_by_time(
         &self,
         domain: &str,
@@ -193,10 +180,35 @@ impl EventBookRepository {
         root: Uuid,
         until: &str,
     ) -> Result<EventBook> {
+        let until_dt = chrono::DateTime::parse_from_rfc3339(until)
+            .map_err(|e| StorageError::InvalidTimestampFormat(e.to_string()))?;
+
+        let snapshot_to_carry = self
+            .snapshot_repo
+            .get(domain, edition, root)
+            .await?
+            .and_then(|snap| {
+                // Snapshots with no created_at have unknown temporal
+                // position — refuse to use them for temporal-by-time.
+                let ts = snap.created_at.as_ref()?;
+                let snap_dt = chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)?;
+                (snap_dt <= until_dt).then_some(snap)
+            });
+
         let events = self
             .event_store
             .get_until_timestamp(domain, edition, root, until)
             .await?;
+
+        // When a snapshot is used, drop the prefix it represents.
+        let pages = if let Some(ref snap) = snapshot_to_carry {
+            events
+                .into_iter()
+                .filter(|e| e.sequence_num() > snap.sequence)
+                .collect()
+        } else {
+            events
+        };
 
         let mut book = EventBook {
             cover: Some(Cover {
@@ -209,24 +221,27 @@ impl EventBookRepository {
                     name: edition.to_string(),
                     divergences: vec![],
                 }),
+                ext: None,
             }),
-            snapshot: None,
-            pages: events,
+            snapshot: snapshot_to_carry,
+            pages,
             ..Default::default()
         };
         calculate_set_next_seq(&mut book);
         Ok(book)
     }
 
-    /// Load an EventBook as-of a sequence number (no snapshots).
+    /// Load an EventBook as-of a sequence number.
     ///
-    /// Returns events from sequence 0 through `sequence` inclusive.
+    /// Returns the framework's reconstructed state at `sequence`:
+    /// - If a snapshot exists with `snapshot.sequence <= sequence`,
+    ///   uses it and layers events `snapshot.sequence + 1 .. sequence + 1`
+    ///   on top (same state a full replay would produce, but
+    ///   skipping the prefix the snapshot already represents).
+    /// - Otherwise replays from 0 through `sequence` inclusive.
     ///
-    /// # Why Sequence-Based Temporal Queries Skip Snapshots
-    ///
-    /// Same reasoning as timestamp-based queries: snapshots capture state at a
-    /// specific sequence, and using the wrong snapshot would produce incorrect
-    /// historical state. Full replay ensures correctness.
+    /// A snapshot newer than `sequence` is ignored — using it would
+    /// produce future state, not historical.
     pub async fn get_temporal_by_sequence(
         &self,
         domain: &str,
@@ -234,10 +249,31 @@ impl EventBookRepository {
         root: Uuid,
         sequence: u32,
     ) -> Result<EventBook> {
-        let events = self
-            .event_store
-            .get_from_to(domain, edition, root, 0, sequence.saturating_add(1))
-            .await?;
+        // Probe snapshot via the repo (returns None when reads are disabled).
+        let snapshot = self.snapshot_repo.get(domain, edition, root).await?;
+
+        let (snapshot_to_carry, events) = match snapshot {
+            Some(snap) if snap.sequence <= sequence => {
+                let from = snap.sequence + 1;
+                // sequence is inclusive; get_from_to upper bound is exclusive.
+                let upper = sequence.saturating_add(1);
+                let events = if from >= upper {
+                    Vec::new()
+                } else {
+                    self.event_store
+                        .get_from_to(domain, edition, root, from, upper)
+                        .await?
+                };
+                (Some(snap), events)
+            }
+            _ => {
+                let events = self
+                    .event_store
+                    .get_from_to(domain, edition, root, 0, sequence.saturating_add(1))
+                    .await?;
+                (None, events)
+            }
+        };
 
         let mut book = EventBook {
             cover: Some(Cover {
@@ -250,8 +286,9 @@ impl EventBookRepository {
                     name: edition.to_string(),
                     divergences: vec![],
                 }),
+                ext: None,
             }),
-            snapshot: None,
+            snapshot: snapshot_to_carry,
             pages: events,
             ..Default::default()
         };
@@ -312,6 +349,7 @@ impl EventBookRepository {
                     name: edition.to_string(),
                     divergences: vec![],
                 }),
+                ext: None,
             }),
             snapshot: None,
             pages: filtered_events,

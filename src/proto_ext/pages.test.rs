@@ -40,6 +40,7 @@ fn sample_cover() -> Cover {
         }),
         correlation_id: "corr-123".to_string(),
         edition: None,
+        ext: None,
     }
 }
 

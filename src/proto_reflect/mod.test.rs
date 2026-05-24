@@ -243,6 +243,7 @@ fn decode_to_json_roundtrip_angzarr_dead_letter() {
             root: None,
             correlation_id: "trace-xyz".to_string(),
             edition: None,
+            ext: None,
         }),
         rejection_reason: "test failure".to_string(),
         source_component: "agg-player".to_string(),
@@ -306,6 +307,7 @@ fn decode_any_to_json_roundtrip_known_type() {
         root: None,
         correlation_id: "trace-cover".to_string(),
         edition: None,
+        ext: None,
     };
     let any = Any {
         type_url: "type.googleapis.com/angzarr_client.proto.angzarr.v1.Cover".to_string(),
@@ -359,6 +361,7 @@ fn decode_any_to_json_matches_decode_to_json() {
         root: None,
         correlation_id: "trace-sym".to_string(),
         edition: None,
+        ext: None,
     };
     let bytes = cover.encode_to_vec();
     let from_bytes = decode_to_json("angzarr_client.proto.angzarr.v1.Cover", &bytes);

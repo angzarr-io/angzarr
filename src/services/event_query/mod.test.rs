@@ -67,6 +67,7 @@ async fn test_get_event_book_empty_aggregate() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -109,6 +110,7 @@ async fn test_get_event_book_with_data() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -135,6 +137,7 @@ async fn test_get_event_book_missing_root() {
             root: None,
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -159,6 +162,7 @@ async fn test_get_event_book_invalid_uuid() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -211,6 +215,7 @@ async fn test_get_event_book_with_range() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: Some(Selection::Range(SequenceRange {
             lower: 2,
@@ -243,6 +248,7 @@ async fn test_get_events_empty_aggregate() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -289,6 +295,7 @@ async fn test_get_events_with_data() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -314,6 +321,7 @@ async fn test_get_events_missing_root() {
             root: None,
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -337,6 +345,7 @@ async fn test_get_events_invalid_uuid() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -492,6 +501,7 @@ async fn test_get_event_book_by_correlation_id() {
             root: None,
             correlation_id: correlation_id.to_string(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -514,6 +524,7 @@ async fn test_get_event_book_by_correlation_id_not_found() {
             root: None,
             correlation_id: "nonexistent".to_string(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -564,6 +575,7 @@ async fn test_get_events_by_correlation_id_multiple_aggregates() {
             root: None,
             correlation_id: correlation_id.to_string(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -650,6 +662,7 @@ async fn test_get_event_book_temporal_by_time() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: Some(Selection::Temporal(TemporalQuery {
             point_in_time: Some(PointInTime::AsOfTime(Timestamp {
@@ -704,6 +717,7 @@ async fn test_get_event_book_temporal_by_sequence() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: Some(Selection::Temporal(TemporalQuery {
             point_in_time: Some(PointInTime::AsOfSequence(2)),
@@ -732,6 +746,7 @@ async fn test_get_event_book_temporal_empty_point_in_time() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: Some(Selection::Temporal(TemporalQuery {
             point_in_time: None,
@@ -784,6 +799,7 @@ async fn test_get_event_book_returns_all_events_despite_snapshot() {
             value: vec![1, 2, 3],
         }),
         retention: crate::proto::SnapshotRetention::RetentionDefault as i32,
+        created_at: None,
     };
     snapshot_store
         .put("customer", "", root, snapshot)
@@ -799,6 +815,7 @@ async fn test_get_event_book_returns_all_events_despite_snapshot() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -859,6 +876,7 @@ async fn test_get_event_book_with_sequences() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: Some(Selection::Sequences(crate::proto::SequenceSet {
             values: vec![1, 3],
@@ -949,8 +967,14 @@ async fn test_get_events_missing_cover() {
 async fn test_dispatch_selection_temporal_missing_point_returns_descriptive_message() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo =
-        crate::repository::EventBookRepository::with_config(event_store, snapshot_store, false);
+    let repo = crate::repository::EventBookRepository::new(
+        event_store,
+        std::sync::Arc::new(crate::repository::SnapshotRepository::with_flags(
+            snapshot_store,
+            false,
+            false,
+        )),
+    );
 
     let result = super::dispatch_selection(
         &repo,
@@ -1007,8 +1031,14 @@ async fn test_dispatch_selection_range_upper_is_inclusive() {
             .unwrap();
     }
 
-    let repo =
-        crate::repository::EventBookRepository::with_config(event_store, snapshot_store, false);
+    let repo = crate::repository::EventBookRepository::new(
+        event_store,
+        std::sync::Arc::new(crate::repository::SnapshotRepository::with_flags(
+            snapshot_store,
+            false,
+            false,
+        )),
+    );
 
     let book = super::dispatch_selection(
         &repo,
@@ -1062,8 +1092,14 @@ async fn test_dispatch_selection_matches_get_event_book_on_same_range() {
     }
 
     let service = create_test_service_with_mocks(event_store.clone(), snapshot_store.clone());
-    let repo =
-        crate::repository::EventBookRepository::with_config(event_store, snapshot_store, false);
+    let repo = crate::repository::EventBookRepository::new(
+        event_store,
+        std::sync::Arc::new(crate::repository::SnapshotRepository::with_flags(
+            snapshot_store,
+            false,
+            false,
+        )),
+    );
 
     let range = SequenceRange {
         lower: 1,
@@ -1079,6 +1115,7 @@ async fn test_dispatch_selection_matches_get_event_book_on_same_range() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: Some(Selection::Range(range)),
     };
@@ -1132,8 +1169,14 @@ async fn test_dispatch_selection_range_upper_none_returns_to_latest() {
             .unwrap();
     }
 
-    let repo =
-        crate::repository::EventBookRepository::with_config(event_store, snapshot_store, false);
+    let repo = crate::repository::EventBookRepository::new(
+        event_store,
+        std::sync::Arc::new(crate::repository::SnapshotRepository::with_flags(
+            snapshot_store,
+            false,
+            false,
+        )),
+    );
 
     let book = super::dispatch_selection(
         &repo,

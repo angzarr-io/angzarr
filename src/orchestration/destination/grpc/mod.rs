@@ -60,6 +60,7 @@ impl GrpcDestinationFetcher {
                 root: Some(root.clone()),
                 correlation_id: correlation_id.clone(),
                 edition: cover.edition.clone(),
+                ext: None,
             }),
             selection: None,
         };
@@ -99,6 +100,7 @@ impl DestinationFetcher for GrpcDestinationFetcher {
                 root: None,
                 correlation_id: correlation_id.to_string(),
                 edition: None, // correlation lookups don't have edition context
+                ext: None,
             }),
             selection: None,
         };

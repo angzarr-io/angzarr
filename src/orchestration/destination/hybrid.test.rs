@@ -79,6 +79,7 @@ fn make_cover(domain: &str, root: Uuid, correlation_id: &str) -> Cover {
             name: "main".to_string(),
             divergences: vec![],
         }),
+        ext: None,
     }
 }
 
@@ -97,13 +98,9 @@ fn create_hybrid_fetcher(
 ) -> HybridDestinationFetcher {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let snapshot_repo = Arc::new(crate::repository::SnapshotRepository::new(snapshot_store));
 
-    HybridDestinationFetcher::new(
-        local_domain.to_string(),
-        event_store,
-        snapshot_store,
-        remote,
-    )
+    HybridDestinationFetcher::new(local_domain.to_string(), event_store, snapshot_repo, remote)
 }
 
 // ============================================================================
@@ -153,6 +150,7 @@ async fn test_fetch_local_domain_missing_root_returns_none() {
         root: None, // Missing root
         correlation_id: "corr-123".to_string(),
         edition: None,
+        ext: None,
     };
     let result = fetcher.fetch(&cover).await;
 
@@ -172,6 +170,7 @@ async fn test_fetch_local_domain_invalid_root_returns_none() {
         }),
         correlation_id: "corr-123".to_string(),
         edition: None,
+        ext: None,
     };
     let result = fetcher.fetch(&cover).await;
 
@@ -217,12 +216,13 @@ async fn test_fetch_by_correlation_non_local_returns_none_from_remote() {
 fn test_hybrid_fetcher_stores_local_domain() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let snapshot_repo = Arc::new(crate::repository::SnapshotRepository::new(snapshot_store));
     let remote: Arc<dyn DestinationFetcher> = Arc::new(MockRemoteFetcher::new());
 
     let fetcher = HybridDestinationFetcher::new(
         "my-local-domain".to_string(),
         event_store,
-        snapshot_store,
+        snapshot_repo,
         remote,
     );
 

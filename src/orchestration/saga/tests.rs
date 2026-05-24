@@ -329,6 +329,7 @@ impl CommandExecutor for RetryableWithStateExecutor {
                     }),
                     correlation_id: "corr-1".to_string(),
                     edition: None,
+                    ext: None,
                 }),
                 pages: vec![],
                 snapshot: None,

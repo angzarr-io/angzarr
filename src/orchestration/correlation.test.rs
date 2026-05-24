@@ -26,6 +26,7 @@ fn make_command_book(with_correlation: bool) -> CommandBook {
                 String::new()
             },
             edition: None,
+            ext: None,
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
@@ -80,6 +81,7 @@ fn test_extract_rejects_invalid_format() {
             }),
             correlation_id: "invalid/chars!here".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
     };

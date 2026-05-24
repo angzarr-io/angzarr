@@ -34,6 +34,7 @@ fn make_angzarr_deferred() -> AngzarrDeferredSequence {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         source_seq: 5,
     }
@@ -48,6 +49,7 @@ fn make_test_command() -> CommandBook {
             }),
             correlation_id: "corr-123".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
@@ -111,6 +113,7 @@ fn test_compensation_context_from_non_saga_command() {
             }),
             correlation_id: "corr-123".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
@@ -252,6 +255,7 @@ async fn test_handle_business_response_with_events() {
                 root: None,
                 correlation_id: "corr-123".to_string(),
                 edition: None,
+                ext: None,
             }),
             pages: vec![EventPage {
                 header: Some(PageHeader {

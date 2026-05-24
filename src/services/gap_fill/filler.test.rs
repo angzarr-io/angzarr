@@ -290,6 +290,7 @@ fn make_event_book(domain: &str, root: Uuid, edition: &str, sequences: Vec<u32>)
                 name: edition.to_string(),
                 divergences: vec![],
             }),
+            ext: None,
         }),
         snapshot: None,
         pages: sequences.into_iter().map(make_event_page).collect(),
@@ -302,6 +303,7 @@ fn make_snapshot(sequence: u32) -> Snapshot {
         sequence,
         state: None,
         retention: 0, // TRANSIENT
+        created_at: None,
     }
 }
 
@@ -310,10 +312,10 @@ fn test_root() -> Uuid {
 }
 
 fn make_repo(event_store: Arc<MockEventStore>) -> Arc<EventBookRepository> {
-    Arc::new(EventBookRepository::new(
-        event_store,
-        Arc::new(NoOpSnapshotStore),
-    ))
+    let snapshot_repo = Arc::new(crate::repository::SnapshotRepository::new(Arc::new(
+        NoOpSnapshotStore,
+    )));
+    Arc::new(EventBookRepository::new(event_store, snapshot_repo))
 }
 
 fn make_event_source(event_store: Arc<MockEventStore>) -> LocalEventSource {

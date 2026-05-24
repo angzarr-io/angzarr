@@ -22,8 +22,9 @@ use crate::proto::{
     SpeculateCommandHandlerRequest,
 };
 use crate::proto_ext::CoverExt;
+use crate::repository::SnapshotRepository;
 use crate::services::upcaster::Upcaster;
-use crate::storage::{EventStore, SnapshotStore};
+use crate::storage::EventStore;
 use crate::utils::retry::saga_backoff;
 use crate::validation::validate_command_book;
 
@@ -35,13 +36,9 @@ use crate::validation::validate_command_book;
 /// Uses the shared aggregate pipeline for both async and sync operations.
 pub struct AggregateService {
     event_store: Arc<dyn EventStore>,
-    snapshot_store: Arc<dyn SnapshotStore>,
+    snapshot_repo: Arc<SnapshotRepository>,
     business: Arc<dyn ClientLogic>,
     event_bus: Arc<dyn EventBus>,
-    /// When false, snapshots are not written even if client logic returns snapshot_state.
-    snapshot_write_enabled: bool,
-    /// When false, snapshots are not read (for testing/debugging).
-    snapshot_read_enabled: bool,
     /// Service discovery for projectors (sync operations).
     discovery: Arc<dyn ServiceDiscovery>,
     /// Upcaster for event version transformation.
@@ -51,44 +48,25 @@ pub struct AggregateService {
 }
 
 impl AggregateService {
-    /// Create a new aggregate service with snapshots enabled.
+    /// Create a new aggregate service.
+    ///
+    /// Snapshot policy (read_enabled / write_enabled) lives on the
+    /// passed-in `SnapshotRepository`. Callers building one with
+    /// defaults: `Arc::new(SnapshotRepository::new(store))`. Callers
+    /// wanting explicit flags:
+    /// `Arc::new(SnapshotRepository::with_flags(store, read, write))`.
     pub fn new(
         event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
+        snapshot_repo: Arc<SnapshotRepository>,
         business_client: CommandHandlerServiceClient<Channel>,
         event_bus: Arc<dyn EventBus>,
         discovery: Arc<dyn ServiceDiscovery>,
     ) -> Self {
         Self {
             event_store,
-            snapshot_store,
+            snapshot_repo,
             business: Arc::new(GrpcBusinessLogic::new(business_client)),
             event_bus,
-            snapshot_write_enabled: true,
-            snapshot_read_enabled: true,
-            discovery,
-            upcaster: None,
-            limits: ResourceLimits::default(),
-        }
-    }
-
-    /// Create a new aggregate service with configurable snapshot behavior.
-    pub fn with_config(
-        event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
-        business_client: CommandHandlerServiceClient<Channel>,
-        event_bus: Arc<dyn EventBus>,
-        discovery: Arc<dyn ServiceDiscovery>,
-        snapshot_read_enabled: bool,
-        snapshot_write_enabled: bool,
-    ) -> Self {
-        Self {
-            event_store,
-            snapshot_store,
-            business: Arc::new(GrpcBusinessLogic::new(business_client)),
-            event_bus,
-            snapshot_write_enabled,
-            snapshot_read_enabled,
             discovery,
             upcaster: None,
             limits: ResourceLimits::default(),
@@ -109,47 +87,21 @@ impl AggregateService {
 
     /// Create a new aggregate service with injected business logic.
     ///
-    /// This constructor accepts `Arc<dyn ClientLogic>` directly instead of a gRPC client,
-    /// enabling unit testing with mock implementations.
+    /// Test-only constructor: accepts `Arc<dyn ClientLogic>` directly
+    /// instead of a gRPC client.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_business_logic(
         event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
+        snapshot_repo: Arc<SnapshotRepository>,
         business: Arc<dyn ClientLogic>,
         event_bus: Arc<dyn EventBus>,
         discovery: Arc<dyn ServiceDiscovery>,
     ) -> Self {
         Self {
             event_store,
-            snapshot_store,
+            snapshot_repo,
             business,
             event_bus,
-            snapshot_write_enabled: true,
-            snapshot_read_enabled: true,
-            discovery,
-            upcaster: None,
-            limits: ResourceLimits::default(),
-        }
-    }
-
-    /// Create with injected business logic and configurable snapshot behavior.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn with_business_logic_and_config(
-        event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
-        business: Arc<dyn ClientLogic>,
-        event_bus: Arc<dyn EventBus>,
-        discovery: Arc<dyn ServiceDiscovery>,
-        snapshot_read_enabled: bool,
-        snapshot_write_enabled: bool,
-    ) -> Self {
-        Self {
-            event_store,
-            snapshot_store,
-            business,
-            event_bus,
-            snapshot_write_enabled,
-            snapshot_read_enabled,
             discovery,
             upcaster: None,
             limits: ResourceLimits::default(),
@@ -158,13 +110,11 @@ impl AggregateService {
 
     /// Create an async context (no sync projector calls).
     fn create_async_context(&self) -> GrpcAggregateContext {
-        let mut ctx = GrpcAggregateContext::with_config(
+        let mut ctx = GrpcAggregateContext::new(
             self.event_store.clone(),
-            self.snapshot_store.clone(),
+            self.snapshot_repo.clone(),
             self.discovery.clone(),
             self.event_bus.clone(),
-            self.snapshot_read_enabled,
-            self.snapshot_write_enabled,
         );
         if let Some(ref upcaster) = self.upcaster {
             ctx = ctx.with_upcaster(upcaster.clone());
@@ -174,13 +124,11 @@ impl AggregateService {
 
     /// Create a sync context (calls sync projectors).
     fn create_sync_context(&self, sync_mode: crate::proto::SyncMode) -> GrpcAggregateContext {
-        let mut ctx = GrpcAggregateContext::with_config(
+        let mut ctx = GrpcAggregateContext::new(
             self.event_store.clone(),
-            self.snapshot_store.clone(),
+            self.snapshot_repo.clone(),
             self.discovery.clone(),
             self.event_bus.clone(),
-            self.snapshot_read_enabled,
-            self.snapshot_write_enabled,
         )
         .with_sync_mode(sync_mode);
         if let Some(ref upcaster) = self.upcaster {

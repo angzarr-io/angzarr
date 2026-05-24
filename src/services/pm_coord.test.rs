@@ -163,6 +163,7 @@ fn test_event_book() -> EventBook {
                 name: String::new(),
                 divergences: vec![],
             }),
+            ext: None,
         }),
         pages: vec![EventPage::default()],
         ..Default::default()

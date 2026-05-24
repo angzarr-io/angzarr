@@ -15,8 +15,40 @@
 use super::*;
 use crate::proto::{event_page, page_header, EventPage, PageHeader, Snapshot, SnapshotRetention};
 use crate::proto_ext::EventPageExt;
+use crate::repository::SnapshotRepository;
 use crate::storage::mock::{MockEventStore, MockSnapshotStore};
+use crate::storage::SnapshotStore;
 use crate::test_utils::{make_event_book_with_root, make_event_page};
+
+/// Build an EventBookRepository wrapping the snapshot store in a
+/// default-policy SnapshotRepository (both flags enabled). Keeps the
+/// existing test call sites short; explicit-policy tests use the
+/// `make_repo_with_read_enabled` variant below.
+fn make_repo(
+    event_store: Arc<dyn crate::storage::EventStore>,
+    snapshot_store: Arc<dyn SnapshotStore>,
+) -> EventBookRepository {
+    EventBookRepository::new(
+        event_store,
+        Arc::new(SnapshotRepository::new(snapshot_store)),
+    )
+}
+
+/// Variant for tests that need to toggle snapshot reads.
+fn make_repo_with_read_enabled(
+    event_store: Arc<dyn crate::storage::EventStore>,
+    snapshot_store: Arc<dyn SnapshotStore>,
+    read_enabled: bool,
+) -> EventBookRepository {
+    EventBookRepository::new(
+        event_store,
+        Arc::new(SnapshotRepository::with_flags(
+            snapshot_store,
+            read_enabled,
+            true,
+        )),
+    )
+}
 
 // ============================================================================
 // Basic CRUD Tests
@@ -27,7 +59,7 @@ use crate::test_utils::{make_event_book_with_root, make_event_page};
 async fn test_get_returns_empty_book_for_new_aggregate() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo = EventBookRepository::new(event_store, snapshot_store);
+    let repo = make_repo(event_store, snapshot_store);
 
     let root = Uuid::new_v4();
     let book = repo.get("orders", "test", root).await.unwrap();
@@ -42,7 +74,7 @@ async fn test_get_returns_empty_book_for_new_aggregate() {
 async fn test_put_and_get_roundtrip() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo = EventBookRepository::new(event_store, snapshot_store);
+    let repo = make_repo(event_store, snapshot_store);
 
     let root = Uuid::new_v4();
     let book =
@@ -66,7 +98,7 @@ async fn test_put_and_get_roundtrip() {
 async fn test_get_with_snapshot_starts_from_snapshot_sequence() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo = EventBookRepository::new(event_store.clone(), snapshot_store.clone());
+    let repo = make_repo(event_store.clone(), snapshot_store.clone());
 
     let root = Uuid::new_v4();
 
@@ -94,6 +126,7 @@ async fn test_get_with_snapshot_starts_from_snapshot_sequence() {
                 sequence: 3,
                 state: None,
                 retention: SnapshotRetention::RetentionDefault as i32,
+                created_at: None,
             },
         )
         .await
@@ -116,7 +149,7 @@ async fn test_get_with_snapshot_starts_from_snapshot_sequence() {
 async fn test_get_from_to_returns_range() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo = EventBookRepository::new(event_store.clone(), snapshot_store);
+    let repo = make_repo(event_store.clone(), snapshot_store);
 
     let root = Uuid::new_v4();
 
@@ -151,7 +184,7 @@ async fn test_get_from_to_returns_range() {
 async fn test_put_missing_cover_returns_error() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo = EventBookRepository::new(event_store, snapshot_store);
+    let repo = make_repo(event_store, snapshot_store);
 
     let book = EventBook {
         cover: None,
@@ -170,7 +203,7 @@ async fn test_put_missing_cover_returns_error() {
 async fn test_put_missing_root_returns_error() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo = EventBookRepository::new(event_store, snapshot_store);
+    let repo = make_repo(event_store, snapshot_store);
 
     let book = EventBook {
         cover: Some(Cover {
@@ -178,6 +211,7 @@ async fn test_put_missing_root_returns_error() {
             root: None,
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,
@@ -194,7 +228,7 @@ async fn test_put_missing_root_returns_error() {
 async fn test_put_invalid_uuid_returns_error() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo = EventBookRepository::new(event_store, snapshot_store);
+    let repo = make_repo(event_store, snapshot_store);
 
     let book = EventBook {
         cover: Some(Cover {
@@ -204,6 +238,7 @@ async fn test_put_invalid_uuid_returns_error() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,
@@ -221,7 +256,7 @@ async fn test_get_propagates_store_error() {
     let event_store = Arc::new(MockEventStore::new());
     event_store.set_fail_on_get(true).await;
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo = EventBookRepository::new(event_store, snapshot_store);
+    let repo = make_repo(event_store, snapshot_store);
 
     let result = repo.get("orders", "test", Uuid::new_v4()).await;
 
@@ -234,7 +269,7 @@ async fn test_put_propagates_store_error() {
     let event_store = Arc::new(MockEventStore::new());
     event_store.set_fail_on_add(true).await;
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo = EventBookRepository::new(event_store, snapshot_store);
+    let repo = make_repo(event_store, snapshot_store);
 
     let root = Uuid::new_v4();
     let book = make_event_book_with_root("orders", root, vec![]);
@@ -255,7 +290,7 @@ async fn test_put_propagates_store_error() {
 async fn test_with_config_snapshot_read_disabled_ignores_snapshot() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo = EventBookRepository::with_config(event_store.clone(), snapshot_store.clone(), false);
+    let repo = make_repo_with_read_enabled(event_store.clone(), snapshot_store.clone(), false);
 
     let root = Uuid::new_v4();
 
@@ -283,6 +318,7 @@ async fn test_with_config_snapshot_read_disabled_ignores_snapshot() {
                 sequence: 3,
                 state: None,
                 retention: SnapshotRetention::RetentionDefault as i32,
+                created_at: None,
             },
         )
         .await
@@ -300,7 +336,7 @@ async fn test_with_config_snapshot_read_disabled_ignores_snapshot() {
 async fn test_with_config_snapshot_read_enabled_uses_snapshot() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo = EventBookRepository::with_config(event_store.clone(), snapshot_store.clone(), true);
+    let repo = make_repo_with_read_enabled(event_store.clone(), snapshot_store.clone(), true);
 
     let root = Uuid::new_v4();
 
@@ -328,6 +364,7 @@ async fn test_with_config_snapshot_read_enabled_uses_snapshot() {
                 sequence: 3,
                 state: None,
                 retention: SnapshotRetention::RetentionDefault as i32,
+                created_at: None,
             },
         )
         .await
@@ -348,9 +385,9 @@ async fn test_with_config_defaults_match_new_constructor() {
     let snapshot_store = Arc::new(MockSnapshotStore::new());
 
     // with_config(true) should behave the same as new()
-    let repo_new = EventBookRepository::new(event_store.clone(), snapshot_store.clone());
+    let repo_new = make_repo(event_store.clone(), snapshot_store.clone());
     let repo_config =
-        EventBookRepository::with_config(event_store.clone(), snapshot_store.clone(), true);
+        make_repo_with_read_enabled(event_store.clone(), snapshot_store.clone(), true);
 
     let root = Uuid::new_v4();
 
@@ -376,6 +413,7 @@ async fn test_with_config_defaults_match_new_constructor() {
                 sequence: 2,
                 state: None,
                 retention: SnapshotRetention::RetentionDefault as i32,
+                created_at: None,
             },
         )
         .await
@@ -429,6 +467,7 @@ mod mock_integration {
                 value: vec![10, 20, 30],
             }),
             retention: SnapshotRetention::RetentionDefault as i32,
+            created_at: None,
         }
     }
 
@@ -439,7 +478,7 @@ mod mock_integration {
     ) {
         let event_store = Arc::new(MockEventStore::new());
         let snapshot_store = Arc::new(MockSnapshotStore::new());
-        let repo = EventBookRepository::new(event_store.clone(), snapshot_store.clone());
+        let repo = make_repo(event_store.clone(), snapshot_store.clone());
         (repo, event_store, snapshot_store)
     }
 
@@ -448,9 +487,151 @@ mod mock_integration {
     // - Temporal queries (by time, by sequence)
     // - Sparse sequence queries (get_sequences)
 
-    /// Temporal by-time query ignores snapshots and replays from beginning.
+    fn test_snapshot_with_created_at(sequence: u32, created_at_secs: i64) -> Snapshot {
+        Snapshot {
+            sequence,
+            state: Some(Any {
+                type_url: "type.googleapis.com/TestState".to_string(),
+                value: vec![10, 20, 30],
+            }),
+            retention: SnapshotRetention::RetentionDefault as i32,
+            created_at: Some(Timestamp {
+                seconds: created_at_secs,
+                nanos: 0,
+            }),
+        }
+    }
+
+    /// R2-SNAP-7: temporal-by-time USES the snapshot when its
+    /// `created_at` is before (or equal to) the target timestamp.
+    /// Pre-fix: the snapshot was always ignored. The snapshot
+    /// represents rolled-up state as of its `created_at`; layering
+    /// post-snapshot events that themselves predate the target gives
+    /// the same state as a full replay.
     #[tokio::test]
-    async fn test_get_temporal_by_time_skips_snapshots() {
+    async fn test_get_temporal_by_time_uses_snapshot_when_created_at_is_before_target() {
+        let (repo, event_store, snapshot_store) = setup_shared();
+
+        let domain = "test_domain";
+        let root = Uuid::new_v4();
+
+        // Events at 1-second intervals from 1704067200 (epoch).
+        // seq=0 → 1704067200, seq=4 → 1704067204
+        use crate::storage::EventStore;
+        event_store
+            .add(
+                domain,
+                "test",
+                root,
+                vec![
+                    test_event(0, "Event0"),
+                    test_event(1, "Event1"),
+                    test_event(2, "Event2"),
+                    test_event(3, "Event3"),
+                    test_event(4, "Event4"),
+                ],
+                "",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Snapshot at seq=2, persisted at 1704067202 (== event 2's time).
+        // Target T = 1704067203 (== event 3's time). Snapshot is behind T.
+        use crate::storage::SnapshotStore;
+        snapshot_store
+            .put(
+                domain,
+                "test",
+                root,
+                test_snapshot_with_created_at(2, 1704067202),
+            )
+            .await
+            .unwrap();
+
+        let book = repo
+            .get_temporal_by_time(domain, "test", root, "2024-01-01T00:00:03+00:00")
+            .await
+            .unwrap();
+
+        assert!(
+            book.snapshot.is_some(),
+            "snapshot.created_at <= target → must use snapshot"
+        );
+        assert_eq!(book.snapshot.as_ref().unwrap().sequence, 2);
+        // Layered events: seq > 2 AND created_at <= target.
+        // Event 3 at 1704067203 (== T, ✓), event 4 at 1704067204 (> T, ✗).
+        assert_eq!(
+            book.pages.len(),
+            1,
+            "only event 3 should layer; got {:?}",
+            book.pages
+                .iter()
+                .map(|p| p.sequence_num())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(book.pages[0].sequence_num(), 3);
+    }
+
+    /// R2-SNAP-7: snapshot AHEAD of target timestamp is ignored.
+    #[tokio::test]
+    async fn test_get_temporal_by_time_skips_snapshot_when_created_at_is_after_target() {
+        let (repo, event_store, snapshot_store) = setup_shared();
+
+        let domain = "test_domain";
+        let root = Uuid::new_v4();
+
+        use crate::storage::EventStore;
+        event_store
+            .add(
+                domain,
+                "test",
+                root,
+                vec![
+                    test_event(0, "Event0"),
+                    test_event(1, "Event1"),
+                    test_event(2, "Event2"),
+                ],
+                "",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Snapshot persisted at 1704067210 — way after target 1704067201.
+        use crate::storage::SnapshotStore;
+        snapshot_store
+            .put(
+                domain,
+                "test",
+                root,
+                test_snapshot_with_created_at(2, 1704067210),
+            )
+            .await
+            .unwrap();
+
+        let book = repo
+            .get_temporal_by_time(domain, "test", root, "2024-01-01T00:00:01+00:00")
+            .await
+            .unwrap();
+
+        assert!(
+            book.snapshot.is_none(),
+            "snapshot.created_at > target → must be ignored to avoid future state"
+        );
+        // Full replay returns events 0, 1 (both with ts <= target).
+        assert_eq!(book.pages.len(), 2);
+    }
+
+    /// R2-SNAP-7 safe-degradation: snapshots persisted before R2-SNAP-6
+    /// landed have `created_at = None`. Reader must treat them as
+    /// "unusable for temporal-by-time" and fall through to full replay,
+    /// rather than risk using a snapshot whose temporal position is
+    /// unknown.
+    #[tokio::test]
+    async fn test_get_temporal_by_time_skips_snapshot_when_created_at_is_unset() {
         let (repo, event_store, snapshot_store) = setup_shared();
 
         let domain = "test_domain";
@@ -494,9 +675,124 @@ mod mock_integration {
         assert_eq!(book.pages.len(), 3); // Events 0, 1, 2
     }
 
-    /// Temporal by-sequence query ignores snapshots and replays from beginning.
+    /// R2-SNAP-5: temporal by-sequence USES the snapshot when it's
+    /// behind (or at) the target sequence. The snapshot represents
+    /// rolled-up state through `snapshot.sequence`; layering events
+    /// `snapshot.sequence + 1 .. target + 1` on top gives the same
+    /// state a full replay would.
     #[tokio::test]
-    async fn test_get_temporal_by_sequence_skips_snapshots() {
+    async fn test_get_temporal_by_sequence_uses_snapshot_when_behind_target() {
+        let (repo, event_store, snapshot_store) = setup_shared();
+
+        let domain = "test_domain";
+        let root = Uuid::new_v4();
+
+        use crate::storage::EventStore;
+        event_store
+            .add(
+                domain,
+                "test",
+                root,
+                vec![
+                    test_event(0, "Event0"),
+                    test_event(1, "Event1"),
+                    test_event(2, "Event2"),
+                    test_event(3, "Event3"),
+                    test_event(4, "Event4"),
+                ],
+                "",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        // Snapshot at sequence 1 — behind target sequence 3.
+        use crate::storage::SnapshotStore;
+        snapshot_store
+            .put(domain, "test", root, test_snapshot(1))
+            .await
+            .unwrap();
+
+        let book = repo
+            .get_temporal_by_sequence(domain, "test", root, 3)
+            .await
+            .unwrap();
+
+        assert!(
+            book.snapshot.is_some(),
+            "snapshot behind target must be used; pre-fix returned None"
+        );
+        assert_eq!(book.snapshot.as_ref().unwrap().sequence, 1);
+        // Events layered on top: 2, 3 (from snapshot.sequence + 1 through target inclusive)
+        assert_eq!(
+            book.pages.len(),
+            2,
+            "events from snapshot.sequence+1 (=2) through target (=3): {:?}",
+            book.pages
+                .iter()
+                .map(|p| p.sequence_num())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(book.pages[0].sequence_num(), 2);
+        assert_eq!(book.pages[1].sequence_num(), 3);
+    }
+
+    /// R2-SNAP-5 boundary: snapshot exactly at target → use it,
+    /// layer zero events.
+    #[tokio::test]
+    async fn test_get_temporal_by_sequence_uses_snapshot_when_exactly_at_target() {
+        let (repo, event_store, snapshot_store) = setup_shared();
+
+        let domain = "test_domain";
+        let root = Uuid::new_v4();
+
+        use crate::storage::EventStore;
+        event_store
+            .add(
+                domain,
+                "test",
+                root,
+                vec![
+                    test_event(0, "Event0"),
+                    test_event(1, "Event1"),
+                    test_event(2, "Event2"),
+                ],
+                "",
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        use crate::storage::SnapshotStore;
+        snapshot_store
+            .put(domain, "test", root, test_snapshot(2))
+            .await
+            .unwrap();
+
+        let book = repo
+            .get_temporal_by_sequence(domain, "test", root, 2)
+            .await
+            .unwrap();
+
+        assert!(book.snapshot.is_some());
+        assert_eq!(book.snapshot.as_ref().unwrap().sequence, 2);
+        assert!(
+            book.pages.is_empty(),
+            "snapshot==target → no events layered; got {:?}",
+            book.pages
+                .iter()
+                .map(|p| p.sequence_num())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// R2-SNAP-5: snapshot AHEAD of target is ignored — full replay.
+    /// (Same scenario as the legacy test below; kept as the explicit
+    /// regression guard for the "snapshot newer than target" case.)
+    #[tokio::test]
+    async fn test_get_temporal_by_sequence_skips_snapshot_when_ahead_of_target() {
         let (repo, event_store, snapshot_store) = setup_shared();
 
         let domain = "test_domain";

@@ -134,6 +134,7 @@ fn test_event_book() -> EventBook {
                 name: "v1".to_string(),
                 divergences: vec![],
             }),
+            ext: None,
         }),
         pages: vec![EventPage::default()],
         ..Default::default()

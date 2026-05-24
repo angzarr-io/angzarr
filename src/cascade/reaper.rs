@@ -143,6 +143,7 @@ impl<S: EventStore + 'static> CascadeReaper<S> {
                 }),
                 correlation_id: String::new(),
                 edition: None,
+                ext: None,
             }),
             sequences: participant.sequences.clone(),
             cascade_id: cascade_id.to_string(),

@@ -10,9 +10,8 @@ use crate::proto::{
     temporal_query::PointInTime, AggregateRoot, EventBook, Query, Uuid as ProtoUuid,
 };
 use crate::proto_ext::CoverExt;
-use crate::repository::EventBookRepository;
-use crate::storage::EventStore;
-use crate::storage::SnapshotStore;
+use crate::repository::{EventBookRepository, SnapshotRepository};
+use crate::storage::{EventStore, SnapshotStore};
 use crate::validation;
 
 /// Event query service.
@@ -43,12 +42,16 @@ impl EventQueryService {
         snapshot_store: Arc<dyn SnapshotStore>,
         enable_snapshots: bool,
     ) -> Self {
+        // write_enabled=false because EventQueryService never persists
+        // snapshots — it's a read-only surface. read_enabled mirrors the
+        // caller's preference.
+        let snapshot_repo = Arc::new(SnapshotRepository::with_flags(
+            snapshot_store,
+            enable_snapshots,
+            false,
+        ));
         Self {
-            event_book_repo: Arc::new(EventBookRepository::with_config(
-                event_store.clone(),
-                snapshot_store,
-                enable_snapshots,
-            )),
+            event_book_repo: Arc::new(EventBookRepository::new(event_store.clone(), snapshot_repo)),
             event_store,
         }
     }

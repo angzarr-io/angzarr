@@ -34,6 +34,7 @@ fn make_event_book() -> EventBook {
                 name: String::new(),
                 divergences: vec![],
             }),
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,
