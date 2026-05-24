@@ -472,3 +472,53 @@ fn h33_full_descriptor_still_contains_internals() {
 // 2. Test proto messages with known field structures
 //
 // These will be added as integration tests in tests/standalone_integration/state_diff.rs
+
+// ============================================================================
+// build_pool_with_extras — R2-WIRE-STATUS-DESCRIPTORS
+// ============================================================================
+//
+// `build_pool_with_extras` returns a `DescriptorPool` containing the
+// framework's embedded descriptors plus any operator-mounted
+// `.protoset` files. Tests verify the merge succeeds, that the
+// framework types remain reachable, and that the helper is tolerant
+// of malformed extras (per the scaffold's resilience contract).
+
+use super::{build_pool_with_extras, EMBEDDED_DESCRIPTOR};
+
+/// Framework types are present after a no-extras build — sanity check.
+#[test]
+fn build_pool_with_extras_empty_extras_contains_framework_types() {
+    let pool =
+        build_pool_with_extras(EMBEDDED_DESCRIPTOR, &[]).expect("framework descriptors must build");
+    // Snapshot is a known framework message — its presence proves the
+    // embedded set loaded successfully.
+    assert!(
+        pool.get_message_by_name("angzarr_client.proto.angzarr.v1.Snapshot")
+            .is_some(),
+        "framework Snapshot type must be in the pool"
+    );
+}
+
+/// Malformed extras are skipped (logged), not fatal — tolerance contract.
+#[test]
+fn build_pool_with_extras_skips_malformed_bytes() {
+    let extras = vec![vec![0xff, 0xff, 0xff]]; // not a valid FileDescriptorSet
+    let pool = build_pool_with_extras(EMBEDDED_DESCRIPTOR, &extras)
+        .expect("malformed extras must not abort the build");
+    // Framework types still reachable.
+    assert!(pool
+        .get_message_by_name("angzarr_client.proto.angzarr.v1.Snapshot")
+        .is_some());
+}
+
+/// Duplicate extras (same bytes as embedded) are silently de-duped
+/// by prost-reflect — no error, framework types unchanged.
+#[test]
+fn build_pool_with_extras_handles_duplicate_extras() {
+    let extras = vec![EMBEDDED_DESCRIPTOR.to_vec()];
+    let pool = build_pool_with_extras(EMBEDDED_DESCRIPTOR, &extras)
+        .expect("duplicate extras must not error");
+    assert!(pool
+        .get_message_by_name("angzarr_client.proto.angzarr.v1.Snapshot")
+        .is_some());
+}

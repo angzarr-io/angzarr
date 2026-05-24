@@ -142,6 +142,51 @@ pub fn init_from_embedded() -> Result<(), ReflectError> {
     init_pool(EMBEDDED_DESCRIPTOR)
 }
 
+/// Build a `DescriptorPool` from the embedded framework descriptor
+/// set plus operator-supplied `FileDescriptorSet` blobs.
+///
+/// Pure function (no `OnceLock` interaction) so it's unit-testable.
+/// Per the status console's resilience contract:
+/// - Malformed embedded bytes → hard error (framework bug, fail loud).
+/// - Malformed individual extras → log + skip; framework types stay
+///   reachable. Operators see a degraded payload-view in the UI, not
+///   a binary that refuses to boot.
+/// - Duplicate files across extras / embedded → silently deduped by
+///   `prost-reflect`.
+pub fn build_pool_with_extras(
+    embedded: &[u8],
+    extras: &[Vec<u8>],
+) -> Result<prost_reflect::DescriptorPool, ReflectError> {
+    let mut pool = prost_reflect::DescriptorPool::decode(embedded)
+        .map_err(|e| ReflectError::PoolDecode(e.to_string()))?;
+    for (idx, bytes) in extras.iter().enumerate() {
+        if let Err(e) = pool.decode_file_descriptor_set(bytes.as_slice()) {
+            tracing::warn!(
+                extra_index = idx,
+                error = %e,
+                "failed to merge operator-mounted descriptor set; skipping"
+            );
+        }
+    }
+    Ok(pool)
+}
+
+/// Initialize the global descriptor pool from the embedded set plus
+/// operator-mounted extras (typically from `ANGZARR_STATUS_DESCRIPTORS_DIR`).
+///
+/// # Errors
+///
+/// Returns `AlreadyInitialized` if a pool is already set, or
+/// `PoolDecode` if the embedded set itself fails to decode. Individual
+/// malformed extras are tolerated (logged + skipped) — see
+/// [`build_pool_with_extras`].
+pub fn init_from_embedded_with_extras(extras: &[Vec<u8>]) -> Result<(), ReflectError> {
+    let pool = build_pool_with_extras(EMBEDDED_DESCRIPTOR, extras)?;
+    DESCRIPTOR_POOL
+        .set(pool)
+        .map_err(|_| ReflectError::AlreadyInitialized)
+}
+
 /// Initialize the pool from the embedded descriptor set, idempotently.
 ///
 /// Calls [`init_from_embedded`] but treats the
