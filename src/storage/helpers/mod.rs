@@ -55,6 +55,7 @@ pub fn assemble_event_books(
                     name: edition,
                     divergences: vec![],
                 }),
+                ext: None,
             }),
             pages,
             snapshot: None,

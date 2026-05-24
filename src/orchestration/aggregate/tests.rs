@@ -49,6 +49,7 @@ fn make_command_book_with_strategy(
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
@@ -92,6 +93,7 @@ fn make_event_book(domain: &str, root: Uuid, last_sequence: Option<u32>) -> Even
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages,
         snapshot: None,
@@ -151,6 +153,7 @@ fn test_parse_command_cover_missing_root() {
             root: None,
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
     };
@@ -224,6 +227,7 @@ fn test_next_sequence_from_snapshot() {
         sequence: 10,
         state: None,
         retention: SnapshotRetention::RetentionDefault as i32,
+        created_at: None,
     });
     calculate_set_next_seq(&mut events);
 
@@ -310,6 +314,7 @@ fn test_build_combined_events_merges_pages() {
         }),
         correlation_id: String::new(),
         edition: None,
+        ext: None,
     });
 
     let prior = EventBook {
@@ -370,6 +375,7 @@ fn test_build_combined_events_uses_received_snapshot() {
         }),
         correlation_id: String::new(),
         edition: None,
+        ext: None,
     });
 
     let prior = EventBook {
@@ -382,6 +388,7 @@ fn test_build_combined_events_uses_received_snapshot() {
                 value: vec![1, 2, 3],
             }),
             retention: 0,
+            created_at: None,
         }),
         next_sequence: 1,
     };
@@ -396,6 +403,7 @@ fn test_build_combined_events_uses_received_snapshot() {
                 value: vec![4, 5, 6],
             }),
             retention: 0,
+            created_at: None,
         }),
         next_sequence: 2,
     };
@@ -427,6 +435,7 @@ fn test_build_events_up_to_sequence_filters_correctly() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![
             crate::proto::EventPage {
@@ -487,6 +496,7 @@ fn test_build_events_up_to_sequence_zero_returns_empty() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![crate::proto::EventPage {
             header: Some(PageHeader {
@@ -623,6 +633,7 @@ fn test_parse_event_cover_missing_root() {
             root: None,
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,

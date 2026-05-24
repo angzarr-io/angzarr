@@ -34,6 +34,7 @@ fn make_cover(domain: &str, root: Uuid, correlation_id: &str) -> Cover {
         root: Some(make_proto_uuid(root)),
         correlation_id: correlation_id.to_string(),
         edition: None,
+        ext: None,
     }
 }
 

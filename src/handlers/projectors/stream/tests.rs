@@ -11,6 +11,7 @@ fn make_test_event_book(correlation_id: &str) -> EventBook {
             }),
             correlation_id: correlation_id.to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![EventPage {
             header: Some(PageHeader {

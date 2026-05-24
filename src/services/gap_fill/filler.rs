@@ -331,6 +331,7 @@ impl EventSource for RemoteEventSource {
                     name: edition.to_string(),
                     divergences: vec![],
                 }),
+                ext: None,
             }),
             // Proto SequenceRange upper bound is inclusive.
             // EventSource trait uses [from, to) exclusive upper bound.

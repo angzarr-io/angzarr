@@ -666,6 +666,7 @@ mod handler_failure_checkpoint_tests {
                 }),
                 correlation_id: "c10-test".to_string(),
                 edition: None,
+                ext: None,
             }),
             pages: vec![EventPage {
                 header: Some(PageHeader {
@@ -859,6 +860,7 @@ mod concurrent_publisher_framing_tests {
                 root: None,
                 correlation_id,
                 edition: None,
+                ext: None,
             }),
             ..Default::default()
         }
@@ -1264,6 +1266,7 @@ mod broken_pipe_pruning_tests {
                 root: None,
                 correlation_id: marker.to_string(),
                 edition: None,
+                ext: None,
             }),
             ..Default::default()
         }

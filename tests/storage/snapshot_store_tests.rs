@@ -23,6 +23,7 @@ pub fn make_snapshot(seq: u32) -> Snapshot {
             value: vec![10, 20, 30, seq as u8],
         }),
         retention: SnapshotRetention::RetentionDefault as i32,
+        created_at: None,
     }
 }
 
@@ -35,6 +36,7 @@ pub fn make_snapshot_with_data(seq: u32, data: Vec<u8>) -> Snapshot {
             value: data,
         }),
         retention: SnapshotRetention::RetentionDefault as i32,
+        created_at: None,
     }
 }
 
@@ -293,6 +295,7 @@ pub fn make_snapshot_with_retention(seq: u32, retention: SnapshotRetention) -> S
             value: vec![10, 20, seq as u8],
         }),
         retention: retention as i32,
+        created_at: None,
     }
 }
 
@@ -586,6 +589,7 @@ pub async fn test_large_state_100kb<S: SnapshotStore>(store: &S) {
             value: data.clone(),
         }),
         retention: SnapshotRetention::RetentionDefault as i32,
+        created_at: None,
     };
 
     store

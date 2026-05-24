@@ -29,8 +29,8 @@ use tracing::{debug, warn};
 
 use crate::proto::{Cover, EventBook};
 use crate::proto_ext::CoverExt;
-use crate::repository::EventBookRepository;
-use crate::storage::{EventStore, SnapshotStore};
+use crate::repository::{EventBookRepository, SnapshotRepository};
+use crate::storage::EventStore;
 
 use super::DestinationFetcher;
 
@@ -41,22 +41,22 @@ use super::DestinationFetcher;
 pub struct HybridDestinationFetcher {
     local_domain: String,
     local_event_store: Arc<dyn EventStore>,
-    local_snapshot_store: Arc<dyn SnapshotStore>,
+    local_snapshot_repo: Arc<SnapshotRepository>,
     remote: Arc<dyn DestinationFetcher>,
 }
 
 impl HybridDestinationFetcher {
-    /// Create with the local domain name, stores, and remote fetcher for other domains.
+    /// Create with the local domain name, repositories, and remote fetcher for other domains.
     pub fn new(
         local_domain: String,
         local_event_store: Arc<dyn EventStore>,
-        local_snapshot_store: Arc<dyn SnapshotStore>,
+        local_snapshot_repo: Arc<SnapshotRepository>,
         remote: Arc<dyn DestinationFetcher>,
     ) -> Self {
         Self {
             local_domain,
             local_event_store,
-            local_snapshot_store,
+            local_snapshot_repo,
             remote,
         }
     }
@@ -75,7 +75,7 @@ impl DestinationFetcher for HybridDestinationFetcher {
             // Use EventBookRepository to properly load snapshot + subsequent events
             let repo = EventBookRepository::new(
                 self.local_event_store.clone(),
-                self.local_snapshot_store.clone(),
+                self.local_snapshot_repo.clone(),
             );
 
             match repo.get(&self.local_domain, edition, root).await {
@@ -171,7 +171,7 @@ impl DestinationFetcher for HybridDestinationFetcher {
 
             let repo = EventBookRepository::new(
                 self.local_event_store.clone(),
-                self.local_snapshot_store.clone(),
+                self.local_snapshot_repo.clone(),
             );
 
             match repo.get(domain, edition, root_uuid).await {

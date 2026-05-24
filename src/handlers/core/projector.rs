@@ -192,6 +192,7 @@ fn create_projection_event_book(
             root: None,
             correlation_id: correlation_id.to_string(),
             edition: source_edition,
+            ext: None,
         }),
     };
 

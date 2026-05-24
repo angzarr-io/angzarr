@@ -35,6 +35,7 @@ fn make_command_book(with_correlation: bool) -> CommandBook {
                 String::new()
             },
             edition: None,
+            ext: None,
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
@@ -92,6 +93,7 @@ fn test_extract_events_from_response_with_events() {
             root: None,
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,
@@ -166,6 +168,7 @@ fn test_extract_events_from_response_notification() {
                 root: None,
                 correlation_id: "upstream-correlation".to_string(),
                 edition: None,
+                ext: None,
             }),
             ..Default::default()
         })),
@@ -196,6 +199,7 @@ async fn test_publish_and_build_response_success() {
             root: None,
             correlation_id: "test-correlation".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,

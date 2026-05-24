@@ -26,6 +26,7 @@ fn make_cover(domain: &str) -> Cover {
         root: None,
         correlation_id: String::new(),
         edition: None,
+        ext: None,
     }
 }
 
@@ -451,6 +452,7 @@ fn make_event_book(domain: &str) -> EventBook {
             root: None,
             correlation_id: "test-corr".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,

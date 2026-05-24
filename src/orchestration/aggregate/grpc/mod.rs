@@ -18,12 +18,13 @@ use crate::proto::saga_coordinator_service_client::SagaCoordinatorServiceClient;
 use crate::proto::{
     AngzarrDeferredSequence, CascadeErrorMode, CommandBook, Cover, Edition, EventBook, EventPage,
     EventRequest, MergeStrategy, ProcessManagerCoordinatorRequest, Projection, SagaHandleRequest,
-    Snapshot, SnapshotRetention, Uuid as ProtoUuid,
+    Snapshot, Uuid as ProtoUuid,
 };
 use crate::proto_ext::{correlated_request, CoverExt, EventPageExt};
 use crate::repository::EventBookRepository;
+use crate::repository::SnapshotRepository;
 use crate::services::upcaster::Upcaster;
-use crate::storage::{EventStore, SnapshotStore, StorageError};
+use crate::storage::{EventStore, StorageError};
 use crate::utils::single_sequence_check::sequence_mismatch_error_with_state;
 
 use crate::storage::AddOutcome;
@@ -87,6 +88,7 @@ fn build_event_book(
                 name: edition.to_string(),
                 divergences: vec![],
             }),
+            ext: None,
         }),
         pages,
         snapshot,
@@ -107,11 +109,10 @@ fn calculate_set_next_seq(book: &mut EventBook) {
 pub struct GrpcAggregateContext {
     event_store: Arc<dyn EventStore>,
     event_book_repo: Arc<EventBookRepository>,
-    snapshot_store: Arc<dyn SnapshotStore>,
+    snapshot_repo: Arc<SnapshotRepository>,
     discovery: Arc<dyn ServiceDiscovery>,
     event_bus: Arc<dyn EventBus>,
     upcaster: Option<Arc<Upcaster>>,
-    snapshot_write_enabled: bool,
     /// When Some, call projectors synchronously with this mode.
     /// When None, only publish to event bus (async mode).
     sync_mode: Option<crate::proto::SyncMode>,
@@ -126,9 +127,14 @@ pub struct GrpcAggregateContext {
 
 impl GrpcAggregateContext {
     /// Create a new gRPC aggregate context (async mode - no sync projectors).
+    ///
+    /// Takes the `SnapshotRepository` directly so snapshot policy
+    /// (read_enabled / write_enabled) flows from a single source of
+    /// truth — see `crate::repository::SnapshotRepository`. The
+    /// underlying `EventBookRepository` shares the same instance.
     pub fn new(
         event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
+        snapshot_repo: Arc<SnapshotRepository>,
         discovery: Arc<dyn ServiceDiscovery>,
         event_bus: Arc<dyn EventBus>,
     ) -> Self {
@@ -136,41 +142,12 @@ impl GrpcAggregateContext {
             event_store: Arc::clone(&event_store),
             event_book_repo: Arc::new(EventBookRepository::new(
                 event_store,
-                Arc::clone(&snapshot_store),
+                Arc::clone(&snapshot_repo),
             )),
-            snapshot_store,
+            snapshot_repo,
             discovery,
             event_bus,
             upcaster: None,
-            snapshot_write_enabled: true,
-            sync_mode: None,
-            dlq_publisher: Arc::new(NoopDeadLetterPublisher),
-            component_name: "aggregate".to_string(),
-            cascade_id: None,
-        }
-    }
-
-    /// Create with configurable snapshot behavior.
-    pub fn with_config(
-        event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
-        discovery: Arc<dyn ServiceDiscovery>,
-        event_bus: Arc<dyn EventBus>,
-        snapshot_read_enabled: bool,
-        snapshot_write_enabled: bool,
-    ) -> Self {
-        Self {
-            event_store: Arc::clone(&event_store),
-            event_book_repo: Arc::new(EventBookRepository::with_config(
-                event_store,
-                Arc::clone(&snapshot_store),
-                snapshot_read_enabled,
-            )),
-            snapshot_store,
-            discovery,
-            event_bus,
-            upcaster: None,
-            snapshot_write_enabled,
             sync_mode: None,
             dlq_publisher: Arc::new(NoopDeadLetterPublisher),
             component_name: "aggregate".to_string(),
@@ -396,12 +373,42 @@ impl AggregateContext for GrpcAggregateContext {
     ) -> Result<EventBook, Status> {
         match temporal {
             TemporalQuery::Current => {
-                // For explicit divergence, skip snapshot and use get_with_divergence
-                // This loads events from main timeline up to divergence point
-                if explicit_divergence.is_some() {
+                // R2-SNAP-4: explicit_divergence used to unconditionally
+                // skip the snapshot store on the grounds that a fresh
+                // branch wouldn't have one. That's true for new branches
+                // but wrong for branches that have run long enough to
+                // accumulate their own snapshot — the framework's
+                // documented contract is "if a snapshot exists, load it
+                // and layer events from snapshot.sequence + 1 on top;
+                // otherwise from 0".
+                //
+                // Probe the snapshot store first. When a snapshot exists
+                // for this (domain, edition, root) the EventBookRepo
+                // handles the snapshot + post-snapshot events path
+                // identically to the no-divergence case. Only fall
+                // through to get_with_divergence when no snapshot
+                // exists — the new-branch case the original code was
+                // designed for.
+                if let Some(div) = explicit_divergence {
+                    let snapshot = self
+                        .snapshot_repo
+                        .get(domain, edition, root)
+                        .await
+                        .map_err(|e| Status::internal(format!("Failed to probe snapshot: {e}")))?;
+                    if snapshot.is_some() {
+                        tracing::debug!(
+                            ?div,
+                            "explicit_divergence + snapshot present; using snapshot path"
+                        );
+                        return self
+                            .event_book_repo
+                            .get(domain, edition, root)
+                            .await
+                            .map_err(|e| Status::internal(format!("Failed to load events: {e}")));
+                    }
                     tracing::debug!(
-                        ?explicit_divergence,
-                        "Using explicit divergence for event loading"
+                        ?div,
+                        "explicit_divergence + no snapshot; using get_with_divergence"
                     );
                     let events = self
                         .event_store
@@ -493,6 +500,7 @@ impl AggregateContext for GrpcAggregateContext {
                     }),
                     correlation_id: correlation_id.to_string(),
                     edition: None,
+                    ext: None,
                 })
             });
             let events_to_persist = EventBook {
@@ -527,29 +535,28 @@ impl AggregateContext for GrpcAggregateContext {
             }
         }
 
-        // Persist snapshot if changed and enabled
-        if self.snapshot_write_enabled && snapshot_changed {
-            if let Some(ref snapshot) = received.snapshot {
-                if let Some(ref state) = snapshot.state {
-                    // Compute sequence from the last event
-                    let last_seq = new_pages
-                        .last()
-                        .map(|p| p.sequence_num())
-                        .or(prior_max_seq)
-                        .unwrap_or(0);
-                    let persisted_snapshot = Snapshot {
-                        sequence: last_seq,
-                        state: Some(state.clone()),
-                        retention: SnapshotRetention::RetentionDefault as i32,
-                    };
-                    self.snapshot_store
-                        .put(domain, edition, root, persisted_snapshot)
-                        .await
-                        .map_err(|e| {
-                            Status::internal(format!("Failed to persist snapshot: {e}"))
-                        })?;
-                }
-            }
+        // Persist snapshot only when the client-provided state actually
+        // changed since the last persist. write_enabled gating lives
+        // inside snapshot_repo (single source of truth); the
+        // snapshot_changed gate avoids re-writing identical bytes when
+        // the handler returns the same snapshot object across calls.
+        if snapshot_changed {
+            // Choose the sequence the snapshot represents: prefer the
+            // last NEW event's seq (this snapshot reflects state through
+            // it). When the handler emits a snapshot-only update with
+            // no new events, fall back to the prior tip so the snapshot
+            // is anchored at the most recent event we know about.
+            let new_max_seq = new_pages.last().map(|p| p.sequence_num());
+            let fallback_sequence = new_max_seq.or(prior_max_seq);
+            crate::services::snapshot_handler::persist_snapshot_if_present(
+                &self.snapshot_repo,
+                received,
+                domain,
+                edition,
+                root,
+                fallback_sequence,
+            )
+            .await?;
         }
 
         // Return with only new pages - ensure cover is set
@@ -561,6 +568,7 @@ impl AggregateContext for GrpcAggregateContext {
                 }),
                 correlation_id: correlation_id.to_string(),
                 edition: None,
+                ext: None,
             })
         });
         Ok(PersistOutcome::Persisted(EventBook {
@@ -666,8 +674,14 @@ impl AggregateContext for GrpcAggregateContext {
     }
 
     /// Look up cached events for a saga-produced command by source provenance.
-    /// Mirrors the `LocalAggregateContext` impl — see that comment for the
-    /// at-least-once redelivery rationale.
+    ///
+    /// At-least-once redelivery rationale: a saga that emits a deferred
+    /// command may be redelivered by the bus after the destination
+    /// aggregate already persisted the resulting events. The destination
+    /// must return the cached EventBook rather than re-execute the
+    /// command, which would double-write. `find_by_source` looks up by
+    /// the source aggregate's `(domain, root, seq)` triple stamped into
+    /// the deferred header.
     async fn check_deferred_idempotency(
         &self,
         domain: &str,
@@ -686,8 +700,14 @@ impl AggregateContext for GrpcAggregateContext {
         Ok(pages.map(|pages| build_event_book(domain, edition, root, pages, None)))
     }
 
-    /// External-fact equivalent — see `LocalAggregateContext` impl for
-    /// the at-least-once webhook redelivery rationale.
+    /// External-fact idempotency lookup.
+    ///
+    /// Webhook providers retry on transient failures (network blips,
+    /// 5xx responses, ack timeouts). The framework must return the
+    /// cached EventBook for a previously-processed `external_id` rather
+    /// than re-execute the fact, which would double-write. Key shape
+    /// matches the producer's chosen `external_id` — typically the
+    /// webhook provider's event UUID.
     async fn check_external_idempotency(
         &self,
         domain: &str,
@@ -740,23 +760,26 @@ impl AggregateContext for GrpcAggregateContext {
 pub struct GrpcAggregateContextFactory {
     domain: String,
     event_store: Arc<dyn EventStore>,
-    snapshot_store: Arc<dyn SnapshotStore>,
+    snapshot_repo: Arc<SnapshotRepository>,
     discovery: Arc<dyn ServiceDiscovery>,
     event_bus: Arc<dyn EventBus>,
     client_logic: Arc<dyn ClientLogic>,
     upcaster: Option<Arc<Upcaster>>,
     sync_mode: Option<crate::proto::SyncMode>,
     dlq_publisher: Arc<dyn DeadLetterPublisher>,
-    snapshot_read_enabled: bool,
-    snapshot_write_enabled: bool,
 }
 
 impl GrpcAggregateContextFactory {
     /// Create a new factory for the given domain.
+    ///
+    /// Caller controls snapshot policy by building the
+    /// `SnapshotRepository` themselves (`SnapshotRepository::new(store)`
+    /// for both-enabled default; `with_flags(...)` for explicit
+    /// configuration) and passing it in.
     pub fn new(
         domain: String,
         event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
+        snapshot_repo: Arc<SnapshotRepository>,
         discovery: Arc<dyn ServiceDiscovery>,
         event_bus: Arc<dyn EventBus>,
         client_logic: Arc<dyn ClientLogic>,
@@ -764,15 +787,13 @@ impl GrpcAggregateContextFactory {
         Self {
             domain,
             event_store,
-            snapshot_store,
+            snapshot_repo,
             discovery,
             event_bus,
             client_logic,
             upcaster: None,
             sync_mode: None,
             dlq_publisher: Arc::new(NoopDeadLetterPublisher),
-            snapshot_read_enabled: true,
-            snapshot_write_enabled: true,
         }
     }
 
@@ -793,24 +814,15 @@ impl GrpcAggregateContextFactory {
         self.dlq_publisher = publisher;
         self
     }
-
-    /// Configure snapshot behavior.
-    pub fn with_snapshot_config(mut self, read_enabled: bool, write_enabled: bool) -> Self {
-        self.snapshot_read_enabled = read_enabled;
-        self.snapshot_write_enabled = write_enabled;
-        self
-    }
 }
 
 impl AggregateContextFactory for GrpcAggregateContextFactory {
     fn create(&self) -> Arc<dyn AggregateContext> {
-        let mut ctx = GrpcAggregateContext::with_config(
+        let mut ctx = GrpcAggregateContext::new(
             self.event_store.clone(),
-            self.snapshot_store.clone(),
+            self.snapshot_repo.clone(),
             self.discovery.clone(),
             self.event_bus.clone(),
-            self.snapshot_read_enabled,
-            self.snapshot_write_enabled,
         )
         .with_dlq_publisher(self.dlq_publisher.clone())
         .with_component_name(&self.domain);

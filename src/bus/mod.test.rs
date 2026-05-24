@@ -12,6 +12,7 @@ fn make_event_book(domain: &str, event_types: &[&str]) -> EventBook {
             }),
             correlation_id: "test-correlation".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: event_types
             .iter()

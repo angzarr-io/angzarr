@@ -592,6 +592,7 @@ pub fn build_compensation_failed_event_book_with_clock(
             root: Some(ProtoUuid { value: root_bytes }),
             correlation_id: context.correlation_id.clone(),
             edition: None,
+            ext: None,
         }),
         pages: vec![EventPage {
             header: Some(PageHeader {

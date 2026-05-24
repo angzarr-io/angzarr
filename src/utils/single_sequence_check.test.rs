@@ -143,6 +143,7 @@ fn test_sequence_mismatch_error_with_state_roundtrip() {
             }),
             correlation_id: "corr-123".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![EventPage {
             header: Some(PageHeader {
@@ -228,6 +229,7 @@ fn test_single_sequence_check_module_path_resolves_with_state() {
             }),
             correlation_id: "corr".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,

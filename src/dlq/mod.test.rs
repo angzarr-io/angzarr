@@ -28,6 +28,7 @@ fn make_test_command(domain: &str, root: Uuid) -> CommandBook {
             }),
             correlation_id: "test-corr-123".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
@@ -131,6 +132,7 @@ fn test_from_event_processing_failure() {
             }),
             correlation_id: "test-corr".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,

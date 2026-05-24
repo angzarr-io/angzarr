@@ -1,8 +1,8 @@
 //! Snapshot handling logic for AggregateService.
 //!
-//! Handles snapshot loading, state extraction from EventBook, and persistence.
-
-use std::sync::Arc;
+//! Canonical persist path: every code path that needs to persist a
+//! snapshot calls `persist_snapshot_if_present`. The helper goes
+//! through `SnapshotRepository`, which owns the `write_enabled` policy.
 
 use tonic::Status;
 use tracing::instrument;
@@ -10,74 +10,75 @@ use uuid::Uuid;
 
 use crate::proto::{EventBook, Snapshot, SnapshotRetention};
 use crate::proto_ext::EventPageExt;
-use crate::storage::SnapshotStore;
+use crate::repository::SnapshotRepository;
 
-/// Computes the snapshot sequence from the last event in an EventBook.
+/// Compute the sequence the snapshot represents.
 ///
-/// The snapshot sequence is the sequence number of the last event used
-/// to create this snapshot (not incremented).
-pub fn compute_snapshot_sequence(event_book: &EventBook) -> u32 {
+/// Prefers the seq of the last event in `event_book.pages` (this
+/// snapshot reflects state THROUGH that event). When the handler emits
+/// a snapshot-only update with no new events, callers pass
+/// `fallback_sequence = Some(prior_max_seq)` so the snapshot is
+/// anchored at the most recent persisted event.
+pub fn compute_snapshot_sequence(event_book: &EventBook, fallback_sequence: Option<u32>) -> u32 {
     event_book
         .pages
         .last()
         .map(|p| p.sequence_num())
+        .or(fallback_sequence)
         .unwrap_or(0)
 }
 
-/// Persists a snapshot if the EventBook contains new events and a snapshot with state.
+/// Persist a snapshot when the client included state, going through
+/// `SnapshotRepository` (which gates on `write_enabled`).
 ///
-/// Only persists when:
-/// - write_enabled is true
-/// - pages is non-empty (there are new events to snapshot)
-/// - snapshot.state is Some (client explicitly provided state to snapshot)
-///
-/// The snapshot's sequence is computed from the last event in pages, not from
-/// the snapshot.sequence field (which may be stale from loading).
+/// Behaviour:
+/// - If `event_book.snapshot.state` is `None`, no-op (the client did
+///   not signal "snapshot me here").
+/// - Otherwise persist with sequence = last event's seq, falling back
+///   to `fallback_sequence` for snapshot-only updates with no new
+///   events.
+/// - The repository drops the put silently if `write_enabled = false`.
 ///
 /// # Arguments
-/// * `snapshot_store` - The storage backend for snapshots
-/// * `event_book` - The EventBook potentially containing a snapshot to persist
-/// * `domain` - The domain name for the aggregate
-/// * `edition` - The edition identifier for multi-tenant partitioning
-/// * `root_uuid` - The aggregate root UUID
-/// * `write_enabled` - Whether snapshot writing is enabled
-///
-/// # Returns
-/// Ok(()) on success, or a Status error if persistence fails
+/// * `snapshot_repo` - Single owner of snapshot policy.
+/// * `event_book` - EventBook whose `.snapshot` carries the
+///   client-supplied state to persist.
+/// * `domain`, `edition`, `root_uuid` - aggregate identity.
+/// * `fallback_sequence` - sequence to use when `event_book.pages` is
+///   empty (snapshot-only update). Pass `prior_max_seq` from the
+///   caller's persist context, or `None` to default to 0.
 #[instrument(name = "snapshot.persist", skip_all, fields(%domain, %root_uuid))]
 pub async fn persist_snapshot_if_present(
-    snapshot_store: &Arc<dyn SnapshotStore>,
+    snapshot_repo: &SnapshotRepository,
     event_book: &EventBook,
     domain: &str,
     edition: &str,
     root_uuid: Uuid,
-    write_enabled: bool,
+    fallback_sequence: Option<u32>,
 ) -> Result<(), Status> {
-    if !write_enabled {
-        return Ok(());
-    }
-
-    // Only persist if there are new events AND snapshot state is provided
-    if event_book.pages.is_empty() {
-        return Ok(());
-    }
-
     if let Some(ref snapshot) = event_book.snapshot {
         if let Some(ref state) = snapshot.state {
-            // Compute sequence from the last event being persisted
-            let snapshot_sequence = compute_snapshot_sequence(event_book);
+            let snapshot_sequence = compute_snapshot_sequence(event_book, fallback_sequence);
+            let now = chrono::Utc::now();
             let persisted_snapshot = Snapshot {
                 sequence: snapshot_sequence,
                 state: Some(state.clone()),
                 retention: SnapshotRetention::RetentionDefault as i32,
+                // Wall-clock stamp at persist time. Required by
+                // temporal-by-time queries (R2-SNAP-7) to decide
+                // whether the snapshot's coverage predates the
+                // target timestamp.
+                created_at: Some(prost_types::Timestamp {
+                    seconds: now.timestamp(),
+                    nanos: now.timestamp_subsec_nanos() as i32,
+                }),
             };
-            snapshot_store
+            snapshot_repo
                 .put(domain, edition, root_uuid, persisted_snapshot)
                 .await
                 .map_err(|e| Status::internal(format!("Failed to persist snapshot: {e}")))?;
         }
     }
-
     Ok(())
 }
 

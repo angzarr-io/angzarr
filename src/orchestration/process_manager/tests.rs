@@ -138,6 +138,7 @@ fn trigger_event() -> EventBook {
             root: None,
             correlation_id: "corr-1".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,
@@ -342,6 +343,7 @@ impl ProcessManagerContext for PmWithSyncOverride {
             root: None,
             correlation_id: "corr-1".to_string(),
             edition: None,
+            ext: None,
         };
         Ok(PmHandleResponse {
             commands: vec![CommandBook {
@@ -486,6 +488,7 @@ fn pm_book_for_root(root_bytes: Vec<u8>, first_seq: u32, last_seq: u32) -> Event
             root: Some(ProtoUuid { value: root_bytes }),
             correlation_id: "corr-1".to_string(),
             edition: None,
+            ext: None,
         }),
         pages,
         snapshot: None,
@@ -646,6 +649,7 @@ impl ProcessManagerContext for RejectionRecordingPm {
             root: None,
             correlation_id: "corr-1".to_string(),
             edition: None,
+            ext: None,
         };
         Ok(PmHandleResponse {
             commands: vec![CommandBook {
@@ -763,6 +767,7 @@ impl ProcessManagerContext for PmWithFact {
                 root: None,
                 correlation_id: "corr-1".to_string(),
                 edition: None,
+                ext: None,
             }),
             pages: vec![],
             snapshot: None,

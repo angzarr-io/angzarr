@@ -26,6 +26,7 @@ fn make_event_book(domain: &str, root: Uuid, event_count: usize) -> EventBook {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: (0..event_count)
             .map(|i| EventPage {

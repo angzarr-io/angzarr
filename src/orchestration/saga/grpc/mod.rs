@@ -98,8 +98,10 @@ impl SagaRetryContext for GrpcSagaContext {
 
         // Audit #86 contract: always-override propagation of source
         // cover's edition (full struct including divergences) onto every
-        // outgoing book — commands AND events. See LocalSagaContext for
-        // rationale; same logic must run on the gRPC path.
+        // outgoing book — commands AND events. Sagas are stateless
+        // domain bridges, so the framework guarantees the source
+        // timeline carries through to every emission rather than
+        // letting handlers opt in or out per command.
         if let Some(source_cover) = self.source.cover.as_ref() {
             for cmd in &mut response.commands {
                 if let Some(c) = &mut cmd.cover {

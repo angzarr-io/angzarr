@@ -335,6 +335,7 @@ async fn test_reaper_revocation_recognized_by_two_phase_transform() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages,
         snapshot: None,

@@ -579,6 +579,7 @@ async fn execute_pm_commands(
         }),
         correlation_id: correlation_id.to_string(),
         edition: None,
+        ext: None,
     };
 
     // Stamp angzarr_deferred on commands for provenance and compensation routing.
