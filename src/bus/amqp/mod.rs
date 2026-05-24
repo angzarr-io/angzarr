@@ -25,6 +25,7 @@ use super::config::EventBusMode;
 use super::error::{BusError, Result};
 use super::factory::BusBackend;
 use super::traits::{EventBus, EventHandler, PublishResult};
+use crate::advice::InstrumentedBus;
 use crate::proto::EventBook;
 use crate::proto_ext::CoverExt;
 
@@ -66,7 +67,12 @@ inventory::submit! {
                 match AmqpEventBus::new(amqp_config).await {
                     Ok(bus) => {
                         info!(messaging_type = "amqp", "Event bus initialized");
-                        Some(Ok(Arc::new(bus) as Arc<dyn EventBus>))
+                        // R2-WIRE-ADVICE: wrap with `InstrumentedBus`
+                        // under the "amqp" label so BUS_PUBLISH_*
+                        // metrics fire. No-op when `otel` is off.
+                        Some(Ok(
+                            Arc::new(InstrumentedBus::new(bus, "amqp")) as Arc<dyn EventBus>
+                        ))
                     }
                     Err(e) => Some(Err(e)),
                 }

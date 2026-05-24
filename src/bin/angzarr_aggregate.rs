@@ -190,9 +190,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+    // Default snapshot policy (reads and writes enabled). Operators
+    // wanting to disable either flag build the SnapshotRepository
+    // explicitly via SnapshotRepository::with_flags(...).
+    let snapshot_repo = Arc::new(angzarr::repository::SnapshotRepository::new(
+        snapshot_store.clone(),
+    ));
     let mut aggregate_service = AggregateService::new(
         event_store.clone(),
-        snapshot_store.clone(),
+        snapshot_repo,
         client_logic_client,
         event_bus,
         discovery,

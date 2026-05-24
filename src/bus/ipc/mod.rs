@@ -48,6 +48,7 @@ use tracing::info;
 use super::config::EventBusMode;
 use super::factory::BusBackend;
 use super::traits::EventBus;
+use crate::advice::InstrumentedBus;
 
 mod broker;
 pub(crate) mod checkpoint;
@@ -89,7 +90,10 @@ inventory::submit! {
 
                 let bus = IpcEventBus::new(ipc_config);
                 info!(messaging_type = "ipc", "Event bus initialized");
-                Some(Ok(Arc::new(bus) as Arc<dyn EventBus>))
+                // R2-WIRE-ADVICE: wrap with `InstrumentedBus` under "ipc".
+                Some(Ok(
+                    Arc::new(InstrumentedBus::new(bus, "ipc")) as Arc<dyn EventBus>
+                ))
             })
         },
     }

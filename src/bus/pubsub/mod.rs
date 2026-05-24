@@ -24,6 +24,7 @@ use tracing::info;
 use super::config::EventBusMode;
 use super::factory::BusBackend;
 use super::traits::EventBus;
+use crate::advice::InstrumentedBus;
 
 pub use bus::PubSubEventBus;
 pub use config::PubSubConfig;
@@ -88,7 +89,10 @@ inventory::submit! {
                 match PubSubEventBus::new(pubsub_config).await {
                     Ok(bus) => {
                         info!(messaging_type = "pubsub", "Event bus initialized");
-                        Some(Ok(Arc::new(bus) as Arc<dyn EventBus>))
+                        // R2-WIRE-ADVICE: wrap with `InstrumentedBus` under "pubsub".
+                        Some(Ok(
+                            Arc::new(InstrumentedBus::new(bus, "pubsub")) as Arc<dyn EventBus>
+                        ))
                     }
                     Err(e) => Some(Err(e)),
                 }

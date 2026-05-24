@@ -47,14 +47,14 @@ pub struct SnsSqsEventBus {
     publish_counter: Arc<AtomicU64>,
     /// Per-bus-instance nonce mixed into the dedup_id alongside `publish_counter`.
     ///
-    /// The counter alone resets to 0 on every `new()`, so the dominant retry
-    /// case in CQRS-ES — outbox recovery after a process restart — would
-    /// re-emit the same `{domain}-{root}-{seq}-0` dedup_id that the original
-    /// (pre-crash) publish used and silently lose the retry inside AWS's
-    /// 5-minute FIFO dedup window. A fresh UUID per bus instance breaks that
-    /// collision: P1's dedup_ids are `{...}-{u1}-{N}`, P2's are
-    /// `{...}-{u2}-{M}`, and even if both processes restart within the dedup
-    /// window the IDs no longer alias. Truncated to 12 hex chars to leave
+    /// The counter alone resets to 0 on every `new()`, so any cross-restart
+    /// republish (operator-driven replay, persist-and-publish retry after a
+    /// crash) would re-emit the same `{domain}-{root}-{seq}-0` dedup_id that
+    /// the original (pre-crash) publish used and silently lose the retry
+    /// inside AWS's 5-minute FIFO dedup window. A fresh UUID per bus
+    /// instance breaks that collision: P1's dedup_ids are `{...}-{u1}-{N}`,
+    /// P2's are `{...}-{u2}-{M}`, and even if both processes restart within
+    /// the dedup window the IDs no longer alias. Truncated to 12 hex chars to leave
     /// budget inside the 128-char cap; 48 bits of nonce + the counter is
     /// well past the birthday bound for the dedup window.
     instance_nonce: String,
@@ -78,8 +78,8 @@ pub struct SnsSqsEventBus {
 /// **MessageDeduplicationId includes a per-bus-instance nonce + monotonic
 /// publish counter.** Without it, legitimate retries of the same logical
 /// event (same `{domain}-{root}-{max_seq}` triple) would collide inside
-/// AWS's 5-minute FIFO dedup window and be silently dropped — defeating the
-/// framework's at-least-once republish flows (outbox recovery,
+/// AWS's 5-minute FIFO dedup window and be silently dropped — defeating
+/// at-least-once republish flows (operator-driven replay,
 /// persist-and-publish retry). The counter alone is process-local and
 /// resets to 0 on restart, so an in-process-only counter would still alias
 /// across a crash+restart within the 5-minute window. The instance nonce
@@ -161,8 +161,8 @@ impl SnsSqsEventBus {
         );
 
         // 12 hex chars of a fresh UUID. See `instance_nonce` field doc for
-        // why a process-local counter alone is insufficient against outbox
-        // recovery after a restart inside AWS's 5-minute dedup window.
+        // why a process-local counter alone is insufficient against a
+        // cross-restart republish inside AWS's 5-minute dedup window.
         let instance_nonce = format!("{:x}", Uuid::new_v4().as_u128() & 0xFFFF_FFFF_FFFF);
 
         Ok(Self {

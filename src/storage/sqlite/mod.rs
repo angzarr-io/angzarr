@@ -9,6 +9,7 @@ use tracing::info;
 
 use super::factory::{PositionBackend, StoresBackend};
 use super::{EventStore, PositionStore, SnapshotStore};
+use crate::advice::Instrumented;
 
 mod event_store;
 
@@ -58,8 +59,15 @@ inventory::submit! {
                     return Some(Err(super::error::StorageError::Database(e.into())));
                 }
 
-                let event_store: Arc<dyn EventStore> = Arc::new(SqliteEventStore::new(pool.clone()));
-                let snapshot_store: Arc<dyn SnapshotStore> = Arc::new(SqliteSnapshotStore::new(pool));
+                // R2-WIRE-ADVICE: wrap each store in `Instrumented<_>` so
+                // the advice/metrics statics (STORAGE_DURATION,
+                // EVENTS_STORED_TOTAL, SNAPSHOTS_*_TOTAL, etc.) actually
+                // get emitted under the "sqlite" label. The wrapper is a
+                // no-op when the `otel` feature is off.
+                let event_store: Arc<dyn EventStore> =
+                    Arc::new(Instrumented::new(SqliteEventStore::new(pool.clone()), "sqlite"));
+                let snapshot_store: Arc<dyn SnapshotStore> =
+                    Arc::new(Instrumented::new(SqliteSnapshotStore::new(pool), "sqlite"));
 
                 Some(Ok((event_store, snapshot_store)))
             })
@@ -100,7 +108,8 @@ inventory::submit! {
                     return Some(Err(super::error::StorageError::Database(e.into())));
                 }
 
-                let position_store: Arc<dyn PositionStore> = Arc::new(SqlitePositionStore::new(pool));
+                let position_store: Arc<dyn PositionStore> =
+                    Arc::new(Instrumented::new(SqlitePositionStore::new(pool), "sqlite"));
 
                 Some(Ok(position_store))
             })

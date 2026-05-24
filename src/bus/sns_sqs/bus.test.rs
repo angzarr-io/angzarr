@@ -120,9 +120,8 @@ fn build_fifo_attributes_rejects_empty_root_bytes() {
 
 /// C-12 bug 3: a legitimate retry of the SAME logical EventBook must
 /// produce a DISTINCT MessageDeduplicationId, or AWS's 5-minute FIFO
-/// dedup window silently drops the retry. The framework's
-/// at-least-once republish flows (outbox recovery, persist-and-publish
-/// retry) depend on this.
+/// dedup window silently drops the retry. At-least-once republish flows
+/// (operator-driven replay, persist-and-publish retry) depend on this.
 ///
 /// Baseline behaviour: dedup_id is a pure function of
 /// `{domain}-{root}-{max_seq}` — two calls produce identical IDs.
@@ -135,8 +134,7 @@ fn build_fifo_attributes_retries_get_distinct_dedup_ids() {
     let book = book_with_root("orders", root, 3);
 
     // Simulate two consecutive publishes of the same logical event
-    // (e.g., the outbox retrying after a transient failure on the first
-    // attempt).
+    // (e.g., a retry after a transient failure on the first attempt).
     let (group_a, dedup_a) =
         build_fifo_attributes(&book, "nonce0", 0).expect("first publish must succeed");
     let (group_b, dedup_b) = build_fifo_attributes(&book, "nonce0", 1).expect("retry must succeed");
@@ -178,21 +176,20 @@ fn build_fifo_attributes_distinct_roots_get_distinct_group_ids() {
 }
 
 /// C-12 follow-up: the per-bus-instance nonce must differentiate dedup_ids
-/// across a process restart. The dominant retry mode in CQRS-ES is outbox
-/// recovery after a crash; both the original (pre-crash) process and the
-/// new process start their `publish_counter` at 0, so without the instance
-/// nonce the dedup_id would alias inside AWS's 5-minute dedup window and
-/// the retry would be silently dropped.
+/// across a process restart. Any cross-restart republish (operator-driven
+/// replay, persist-and-publish retry after a crash) has both the original
+/// (pre-crash) process and the new process starting their `publish_counter`
+/// at 0, so without the instance nonce the dedup_id would alias inside AWS's
+/// 5-minute dedup window and the retry would be silently dropped.
 #[test]
 fn build_fifo_attributes_distinct_instance_nonces_produce_distinct_dedup_ids() {
     let root = Uuid::new_v4();
     let book = book_with_root("orders", root, 3);
 
     // Simulate "process P1 published this event with counter=0, then
-    // crashed; process P2 starts up and the outbox recovery republishes
-    // the same logical event, also at counter=0". Without an instance
-    // nonce both would compute the identical dedup_id; AWS would dedup-
-    // drop P2's retry.
+    // crashed; process P2 starts up and republishes the same logical
+    // event, also at counter=0". Without an instance nonce both would
+    // compute the identical dedup_id; AWS would dedup-drop P2's retry.
     let (group_a, dedup_a) =
         build_fifo_attributes(&book, "instanceA", 0).expect("P1 publish must succeed");
     let (group_b, dedup_b) =
