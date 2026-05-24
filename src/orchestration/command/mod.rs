@@ -1,12 +1,9 @@
 //! Command execution abstraction.
 //!
-//! `CommandExecutor` sends commands to aggregates and classifies the outcome.
-//! - `local/`: calls in-process `CommandRouter::execute_command()`
-//! - `grpc/`: calls remote `AggregateCoordinatorServiceClient` via gRPC
+//! `CommandExecutor` sends commands to aggregates and classifies the outcome
+//! via `grpc/`'s remote `AggregateCoordinatorServiceClient`.
 
 pub mod grpc;
-// Local module always compiled (sqlite always on)
-pub mod local;
 
 use async_trait::async_trait;
 

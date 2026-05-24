@@ -52,11 +52,9 @@ impl ProcessManagerEventHandler {
     ///
     /// # When to Use
     ///
-    /// Use this when you already have a `PMContextFactory` implementation:
-    /// - In-process mode: `LocalPMContextFactory`
-    /// - Distributed mode with custom wiring
-    ///
-    /// For standard distributed mode with gRPC client, use `new()` instead.
+    /// Use this when you already have a `PMContextFactory` implementation
+    /// (typically a custom-wired distributed factory). For standard
+    /// distributed mode with the gRPC client, use `new()` instead.
     ///
     /// # Error Propagation
     ///

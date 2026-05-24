@@ -89,7 +89,7 @@ fn book_with_empty_root(domain: &str) -> EventBook {
 #[test]
 fn build_fifo_attributes_rejects_rootless_event_book() {
     let book = book_without_root("orders");
-    let result = build_fifo_attributes(&book, 0);
+    let result = build_fifo_attributes(&book, "nonce0", 0);
     assert!(
         result.is_err(),
         "root-less EventBook must be rejected (FIFO MessageGroupId cannot be empty); got Ok({:?})",
@@ -110,7 +110,7 @@ fn build_fifo_attributes_rejects_rootless_event_book() {
 #[test]
 fn build_fifo_attributes_rejects_empty_root_bytes() {
     let book = book_with_empty_root("orders");
-    let result = build_fifo_attributes(&book, 0);
+    let result = build_fifo_attributes(&book, "nonce0", 0);
     assert!(
         result.is_err(),
         "EventBook with present-but-empty root must be rejected; got Ok({:?})",
@@ -120,9 +120,8 @@ fn build_fifo_attributes_rejects_empty_root_bytes() {
 
 /// C-12 bug 3: a legitimate retry of the SAME logical EventBook must
 /// produce a DISTINCT MessageDeduplicationId, or AWS's 5-minute FIFO
-/// dedup window silently drops the retry. The framework's
-/// at-least-once republish flows (outbox recovery, persist-and-publish
-/// retry) depend on this.
+/// dedup window silently drops the retry. At-least-once republish flows
+/// (operator-driven replay, persist-and-publish retry) depend on this.
 ///
 /// Baseline behaviour: dedup_id is a pure function of
 /// `{domain}-{root}-{max_seq}` — two calls produce identical IDs.
@@ -135,10 +134,10 @@ fn build_fifo_attributes_retries_get_distinct_dedup_ids() {
     let book = book_with_root("orders", root, 3);
 
     // Simulate two consecutive publishes of the same logical event
-    // (e.g., the outbox retrying after a transient failure on the first
-    // attempt).
-    let (group_a, dedup_a) = build_fifo_attributes(&book, 0).expect("first publish must succeed");
-    let (group_b, dedup_b) = build_fifo_attributes(&book, 1).expect("retry must succeed");
+    // (e.g., a retry after a transient failure on the first attempt).
+    let (group_a, dedup_a) =
+        build_fifo_attributes(&book, "nonce0", 0).expect("first publish must succeed");
+    let (group_b, dedup_b) = build_fifo_attributes(&book, "nonce0", 1).expect("retry must succeed");
 
     // Group_id must remain stable across retries — that's the entire
     // point of FIFO ordering by aggregate root.
@@ -167,12 +166,43 @@ fn build_fifo_attributes_distinct_roots_get_distinct_group_ids() {
     let book_a = book_with_root("orders", root_a, 1);
     let book_b = book_with_root("orders", root_b, 1);
 
-    let (group_a, _) = build_fifo_attributes(&book_a, 0).expect("publish A must succeed");
-    let (group_b, _) = build_fifo_attributes(&book_b, 1).expect("publish B must succeed");
+    let (group_a, _) = build_fifo_attributes(&book_a, "nonce0", 0).expect("publish A must succeed");
+    let (group_b, _) = build_fifo_attributes(&book_b, "nonce0", 1).expect("publish B must succeed");
 
     assert_ne!(
         group_a, group_b,
         "distinct aggregate roots must land in distinct ordering groups"
+    );
+}
+
+/// C-12 follow-up: the per-bus-instance nonce must differentiate dedup_ids
+/// across a process restart. Any cross-restart republish (operator-driven
+/// replay, persist-and-publish retry after a crash) has both the original
+/// (pre-crash) process and the new process starting their `publish_counter`
+/// at 0, so without the instance nonce the dedup_id would alias inside AWS's
+/// 5-minute dedup window and the retry would be silently dropped.
+#[test]
+fn build_fifo_attributes_distinct_instance_nonces_produce_distinct_dedup_ids() {
+    let root = Uuid::new_v4();
+    let book = book_with_root("orders", root, 3);
+
+    // Simulate "process P1 published this event with counter=0, then
+    // crashed; process P2 starts up and republishes the same logical
+    // event, also at counter=0". Without an instance nonce both would
+    // compute the identical dedup_id; AWS would dedup-drop P2's retry.
+    let (group_a, dedup_a) =
+        build_fifo_attributes(&book, "instanceA", 0).expect("P1 publish must succeed");
+    let (group_b, dedup_b) =
+        build_fifo_attributes(&book, "instanceB", 0).expect("P2 republish must succeed");
+
+    assert_eq!(
+        group_a, group_b,
+        "MessageGroupId must remain stable across processes for the same root"
+    );
+    assert_ne!(
+        dedup_a, dedup_b,
+        "dedup_id must differ across bus-instance nonces; identical IDs are silently \
+         dropped by AWS within the 5-minute dedup window"
     );
 }
 
@@ -184,7 +214,7 @@ fn build_fifo_attributes_happy_path_returns_non_empty_values() {
     let root = Uuid::new_v4();
     let book = book_with_root("orders", root, 5);
     let (group_id, dedup_id) =
-        build_fifo_attributes(&book, 42).expect("happy-path publish must succeed");
+        build_fifo_attributes(&book, "nonce0", 42).expect("happy-path publish must succeed");
 
     assert!(
         !group_id.is_empty(),

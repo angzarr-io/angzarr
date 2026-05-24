@@ -72,9 +72,7 @@ impl PositionStore for DynamoPositionStore {
             .key("pk", AttributeValue::S(pk))
             .send()
             .await
-            .map_err(|e| {
-                StorageError::NotImplemented(format!("DynamoDB get_item failed: {}", e))
-            })?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB get_item failed: {}", e)))?;
 
         if let Some(item) = result.item {
             if let Some(AttributeValue::N(seq_str)) = item.get("sequence") {
@@ -117,9 +115,7 @@ impl PositionStore for DynamoPositionStore {
             .set_item(Some(item))
             .send()
             .await
-            .map_err(|e| {
-                StorageError::NotImplemented(format!("DynamoDB put_item failed: {}", e))
-            })?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB put_item failed: {}", e)))?;
 
         debug!(
             handler = %handler,

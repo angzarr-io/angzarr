@@ -446,6 +446,13 @@ pub struct IpcEventBus {
     /// Per-subscriber granularity means publishes to different subscribers
     /// stay parallel; only writes to the SAME pipe are serialized.
     ///
+    /// **Runtime-safety**: the actual blocking syscalls (open + fcntl +
+    /// write_all) run inside `tokio::task::spawn_blocking` so a slow reader
+    /// on a full FIFO blocks a blocking-pool thread, never a runtime worker.
+    /// The tokio Mutex is held across the spawn_blocking's `.await`; tokio
+    /// Mutex is designed for this and the contract still serializes writes
+    /// to the SAME pipe.
+    ///
     /// **Cross-process scope**: this mutex serializes ONLY publishers within
     /// the same process. When multiple processes publish to the same FIFO,
     /// the kernel still guarantees atomicity only for writes ≤ PIPE_BUF.
@@ -631,6 +638,9 @@ impl EventBus for IpcEventBus {
         let mut framed: Vec<u8> = Vec::with_capacity(4 + serialized.len());
         framed.extend_from_slice(&(serialized.len() as u32).to_be_bytes());
         framed.extend_from_slice(&serialized);
+        // Wrap in Arc so each subscriber's spawn_blocking closure can hold a
+        // cheap clone instead of copying the whole frame.
+        let framed = Arc::new(framed);
 
         // Names of subscribers to prune from the routing list after this
         // publish. Collected during the fan-out loop and applied in a
@@ -643,92 +653,94 @@ impl EventBus for IpcEventBus {
                 continue;
             }
 
-            // Acquire the per-pipe write mutex BEFORE opening the FD so
+            // Acquire the per-pipe write mutex BEFORE the blocking I/O so
             // that the open() + write_all() pair is sequenced with respect
             // to any other publisher within this process targeting the
-            // same FIFO. Holding it across the open is a defensive choice:
-            // it adds no contention beyond the write itself (the open is
-            // O_NONBLOCK and returns immediately) but eliminates an
-            // entire class of FD-ordering races that would otherwise need
-            // separate reasoning.
+            // same FIFO. Holding it across the spawn_blocking is fine —
+            // tokio::Mutex is designed for await-spanning critical
+            // sections, and the actual blocking syscalls now run on a
+            // blocking-pool thread (not on a runtime worker), so a slow
+            // reader on the FIFO can no longer steal a worker thread or
+            // deadlock current-thread runtimes.
             let pipe_lock = self.pipe_lock(&subscriber.pipe_path).await;
             let _write_guard = pipe_lock.lock().await;
 
-            // Open the pipe O_NONBLOCK so we get ENXIO (rather than hang)
-            // if no reader is attached. Once `open()` succeeds, we know a
-            // reader IS attached for this FD; clear O_NONBLOCK on the FD
-            // so the subsequent `write_all` BLOCKS on a full pipe instead
-            // of returning WouldBlock. That kept-in-the-pipe partial state
-            // is what created the C-09 "half-written frame" desync: the
-            // failed publisher would return Err leaving a length prefix
-            // (and possibly some body bytes) in the pipe with no way to
-            // resync the reader. Blocking writes give back-pressure
-            // instead of corruption.
-            match OpenOptions::new()
-                .write(true)
-                .custom_flags(libc::O_NONBLOCK)
-                .open(&subscriber.pipe_path)
-            {
-                Ok(mut file) => {
-                    // Clear O_NONBLOCK on this FD so write_all blocks on a
-                    // full pipe (back-pressure) instead of leaving a
-                    // half-written frame.
-                    if let Err(e) = clear_nonblock(&file) {
-                        // Drop the per-pipe lock guard before the early
-                        // return so we don't hold it across the await for
-                        // the (now-unreachable) prune apply path.
-                        return Err(BusError::Publish(format!(
-                            "Failed to clear O_NONBLOCK for subscriber '{}': {}",
-                            subscriber.name, e
-                        )));
-                    }
-
-                    if let Err(e) = file.write_all(&framed) {
-                        match decide_write_error(&e) {
-                            WriteErrorOutcome::Prune => {
-                                // H-04: BrokenPipe means the subscriber's
-                                // reader closed its end of the FIFO. Treat
-                                // as an unannounced unregister: drop the
-                                // subscriber from the routing list and
-                                // continue with the rest of the fan-out.
-                                // Surviving subscribers still get their
-                                // copies; the publish call returns Ok
-                                // because every subscriber that is still
-                                // alive received the event.
-                                debug!(
-                                    subscriber = %subscriber.name,
-                                    "Subscriber pipe closed (broken pipe); pruning from routing list"
-                                );
-                                to_prune.push(subscriber.name.clone());
-                            }
-                            WriteErrorOutcome::Err => {
-                                return Err(BusError::Publish(format!(
-                                    "Failed to write to IPC pipe for subscriber '{}': {}",
-                                    subscriber.name, e
-                                )));
-                            }
+            // Run the open + clear_nonblock + write_all in a
+            // spawn_blocking closure. The framed buffer is small (few KiB
+            // typical, ≤10 MiB cap from the reader side) so cloning into
+            // the closure is cheap relative to the syscall path. We open
+            // O_NONBLOCK so the open returns ENXIO when no reader is
+            // attached (instead of hanging); once it succeeds we clear
+            // O_NONBLOCK so write_all BLOCKS on a full pipe (back-pressure)
+            // rather than returning WouldBlock mid-frame — that's the
+            // original C-09 "half-written frame" desync.
+            let pipe_path = subscriber.pipe_path.clone();
+            let framed_for_write = Arc::clone(&framed);
+            let write_result: std::io::Result<WriteOutcome> =
+                tokio::task::spawn_blocking(move || {
+                    let mut file = match OpenOptions::new()
+                        .write(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&pipe_path)
+                    {
+                        Ok(f) => f,
+                        Err(e) if e.raw_os_error() == Some(libc::ENXIO) => {
+                            // ENXIO = no reader yet; benign during bring-up.
+                            return Ok(WriteOutcome::NoReader);
                         }
-                    } else {
+                        Err(e) => return Err(e),
+                    };
+                    clear_nonblock(&file)?;
+                    match file.write_all(framed_for_write.as_slice()) {
+                        Ok(()) => Ok(WriteOutcome::Wrote),
+                        Err(e) => Err(e),
+                    }
+                })
+                .await
+                .map_err(|join_err| {
+                    BusError::Publish(format!(
+                        "IPC publish blocking task panicked for subscriber '{}': {}",
+                        subscriber.name, join_err
+                    ))
+                })?;
+
+            match write_result {
+                Ok(WriteOutcome::Wrote) => {
+                    debug!(
+                        subscriber = %subscriber.name,
+                        routing_key = %routing_key,
+                        "Published event to pipe"
+                    );
+                }
+                Ok(WriteOutcome::NoReader) => {
+                    // Bring-up race; leave subscriber in the routing list.
+                }
+                Err(e) => match decide_write_error(&e) {
+                    WriteErrorOutcome::Prune => {
+                        // H-04: BrokenPipe means the subscriber's reader
+                        // closed its end of the FIFO. Treat as an
+                        // unannounced unregister: drop the subscriber from
+                        // the routing list and continue with the rest of
+                        // the fan-out. Surviving subscribers still get
+                        // their copies.
                         debug!(
                             subscriber = %subscriber.name,
-                            routing_key = %routing_key,
-                            "Published event to pipe"
+                            "Subscriber pipe closed (broken pipe); pruning from routing list"
                         );
+                        to_prune.push(subscriber.name.clone());
                     }
-                }
-                Err(e) => {
-                    // ENXIO = no reader yet, that's okay (subscriber hasn't started).
-                    // This is explicitly NOT a prune trigger — bring-up
-                    // races are a normal part of orchestration and the
-                    // subscriber stays in the routing list, eligible for
-                    // the next publish once it actually starts.
-                    if e.raw_os_error() != Some(libc::ENXIO) {
+                    WriteErrorOutcome::Err => {
+                        // Apply any prunes we accumulated before the failure
+                        // so we don't keep targeting dead subscribers on the
+                        // next publish.
+                        drop(_write_guard);
+                        self.prune_subscribers(&to_prune).await;
                         return Err(BusError::Publish(format!(
-                            "Failed to open IPC pipe for subscriber '{}': {}",
+                            "Failed to write to IPC pipe for subscriber '{}': {}",
                             subscriber.name, e
                         )));
                     }
-                }
+                },
             }
             // _write_guard drops here, releasing the per-pipe mutex.
         }
@@ -817,6 +829,17 @@ fn clear_nonblock(file: &File) -> std::io::Result<()> {
 /// - domains contains the routing_key
 fn matches_domain_filter(routing_key: &str, domains: &[String]) -> bool {
     domains.is_empty() || domains.iter().any(|d| d == "#" || d == routing_key)
+}
+
+/// Outcome of a successful per-subscriber publish attempt against a FIFO.
+///
+/// `Wrote` is the happy path. `NoReader` is the orchestration bring-up race
+/// — open returned `ENXIO` because no reader is attached yet; not an error,
+/// and not a prune trigger.
+#[derive(Debug, PartialEq, Eq)]
+enum WriteOutcome {
+    Wrote,
+    NoReader,
 }
 
 /// Outcome of classifying a per-subscriber `write_all` failure.

@@ -17,6 +17,7 @@ use super::config::{EventBusMode, KafkaConfig, MessagingConfig};
 use super::error::Result;
 use super::factory::BusBackend;
 use super::traits::EventBus;
+use crate::advice::InstrumentedBus;
 
 pub use bus::KafkaEventBus;
 pub use config::KafkaEventBusConfig;
@@ -82,7 +83,10 @@ async fn try_create(
     match KafkaEventBus::new(kafka_config).await {
         Ok(bus) => {
             info!(messaging_type = "kafka", "Event bus initialized");
-            Some(Ok(Arc::new(bus)))
+            // R2-WIRE-ADVICE: wrap with `InstrumentedBus` under "kafka".
+            Some(Ok(
+                Arc::new(InstrumentedBus::new(bus, "kafka")) as Arc<dyn EventBus>
+            ))
         }
         Err(e) => Some(Err(e)),
     }

@@ -123,8 +123,11 @@ impl SqliteReplayAuditWriter {
         Ok(Self { pool })
     }
 
-    /// Construct from an existing pool. Test entry point that bypasses the
-    /// H-32 replica guard (production callers go through `new`).
+    /// Construct from an existing pool. Test-only entry point that bypasses
+    /// the H-32 replica guard — production callers MUST go through `new` so
+    /// the guard runs. Gated to `#[cfg(test)]` so a future production caller
+    /// can't accidentally skip the safety check.
+    #[cfg(test)]
     pub fn from_pool(pool: sqlx::SqlitePool) -> Self {
         Self { pool }
     }
@@ -246,6 +249,11 @@ impl PostgresReplayAuditWriter {
         Ok(Self { pool })
     }
 
+    /// Test-only entry point. Gated to `#[cfg(test)]` so production callers
+    /// must go through `new()` — symmetry with `SqliteReplayAuditWriter`
+    /// (the SQLite twin's `from_pool` skips the H-32 single-writer guard,
+    /// which would be silently dangerous to use in production).
+    #[cfg(test)]
     pub fn from_pool(pool: sqlx::PgPool) -> Self {
         Self { pool }
     }

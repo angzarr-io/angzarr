@@ -148,11 +148,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (command_executor, remote_fetcher, fact_executor) =
         connect_endpoints(&endpoints_str).await?;
 
-    // Wrap the remote fetcher with hybrid that handles PM domain locally
+    // Wrap the remote fetcher with hybrid that handles PM domain locally.
+    // Default snapshot policy (reads and writes enabled) — the PM only
+    // reads its own state here; writes go through the aggregate path.
+    let pm_snapshot_repo = Arc::new(angzarr::repository::SnapshotRepository::new(snapshot_store));
     let hybrid_fetcher: Arc<HybridDestinationFetcher> = Arc::new(HybridDestinationFetcher::new(
         bootstrap.domain.clone(),
         event_store.clone(),
-        snapshot_store,
+        pm_snapshot_repo,
         remote_fetcher,
     ));
 
@@ -225,7 +228,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let coordinator_server = Server::builder()
         .layer(grpc_trace_layer())
         .add_service(health_service)
-        .add_service(angzarr::proto_reflect::reflection_service())
+        // Framework-internal binary: no gRPC reflection. See H-33.
         .add_service(
             ProcessManagerCoordinatorServiceServer::new(pm_coord)
                 .max_decoding_message_size(msg_size)

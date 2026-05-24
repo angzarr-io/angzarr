@@ -29,8 +29,6 @@
 //! - `grpc/`: remote gRPC saga client calls (distributed mode)
 
 pub mod grpc;
-// Local module always compiled (sqlite always on)
-pub mod local;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -179,9 +177,6 @@ struct SagaOperation<'a> {
     /// SIMPLE: commands executed synchronously with bus publishing.
     sync_mode: SyncMode,
     commands: Vec<CommandBook>,
-    /// Events (facts) to inject after all commands succeed.
-    #[allow(dead_code)]
-    events: Vec<EventBook>,
     /// Tracks which domains had sequence conflicts for retry logging.
     failed_domains: HashSet<String>,
 }
@@ -286,7 +281,6 @@ struct SagaRetryBuilder<'a> {
     correlation_id: &'a str,
     sync_mode: SyncMode,
     commands: Vec<CommandBook>,
-    events: Vec<EventBook>,
     backoff: ExponentialBuilder,
 }
 
@@ -306,7 +300,6 @@ impl<'a> SagaRetryBuilder<'a> {
             correlation_id,
             sync_mode,
             commands: Vec::new(),
-            events: Vec::new(),
             backoff: ExponentialBuilder::default(),
         }
     }
@@ -318,11 +311,6 @@ impl<'a> SagaRetryBuilder<'a> {
 
     fn commands(mut self, commands: Vec<CommandBook>) -> Self {
         self.commands = commands;
-        self
-    }
-
-    fn events(mut self, events: Vec<EventBook>) -> Self {
-        self.events = events;
         self
     }
 
@@ -346,7 +334,6 @@ impl<'a> SagaRetryBuilder<'a> {
             correlation_id: self.correlation_id,
             sync_mode: self.sync_mode,
             commands: self.commands,
-            events: self.events,
             failed_domains: HashSet::new(),
         };
 
@@ -502,7 +489,6 @@ pub async fn orchestrate_saga(
     SagaRetryBuilder::new(ctx, executor, saga_name, correlation_id, sync_mode)
         .command_bus(command_bus)
         .commands(commands)
-        .events(events.clone())
         .backoff(backoff)
         .execute()
         .await;

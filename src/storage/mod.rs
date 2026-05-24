@@ -99,10 +99,14 @@ impl DomainStorage {
 
     /// Create an EventBookRepository for this domain's stores.
     ///
-    /// Consolidates the repeated pattern of creating repositories from
-    /// event_store and snapshot_store Arcs.
+    /// Wraps the snapshot store in a default-policy
+    /// `SnapshotRepository` (both reads and writes enabled). Callers
+    /// needing explicit policy should build the `SnapshotRepository`
+    /// themselves and construct `EventBookRepository::new` directly.
     pub fn event_book_repo(&self) -> EventBookRepository {
-        EventBookRepository::new(self.event_store.clone(), self.snapshot_store.clone())
+        use crate::repository::SnapshotRepository;
+        let snapshot_repo = Arc::new(SnapshotRepository::new(self.snapshot_store.clone()));
+        EventBookRepository::new(self.event_store.clone(), snapshot_repo)
     }
 }
 

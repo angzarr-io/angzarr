@@ -39,6 +39,7 @@ use super::config::EventBusMode;
 use super::error::BusError;
 use super::factory::BusBackend;
 use super::traits::EventBus;
+use crate::advice::InstrumentedBus;
 
 pub use bus::NatsEventBus;
 pub use config::NatsBusConfig;
@@ -92,7 +93,10 @@ inventory::submit! {
                 match NatsEventBus::with_config(client, bus_config).await {
                     Ok(bus) => {
                         info!(messaging_type = "nats", "Event bus initialized");
-                        Some(Ok(Arc::new(bus) as Arc<dyn EventBus>))
+                        // R2-WIRE-ADVICE: wrap with `InstrumentedBus` under "nats".
+                        Some(Ok(
+                            Arc::new(InstrumentedBus::new(bus, "nats")) as Arc<dyn EventBus>
+                        ))
                     }
                     Err(e) => Some(Err(BusError::Connection(format!(
                         "NATS setup failed: {}",

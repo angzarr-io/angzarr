@@ -41,10 +41,7 @@ impl BigtablePositionStore {
         let connection = if let Some(host) = emulator_host {
             BigTableConnection::new_with_emulator(host, project_id, instance_id, false, None)
                 .map_err(|e| {
-                    StorageError::NotImplemented(format!(
-                        "Bigtable emulator connection failed: {}",
-                        e
-                    ))
+                    StorageError::Backend(format!("Bigtable emulator connection failed: {}", e))
                 })?
         } else {
             BigTableConnection::new(
@@ -55,9 +52,7 @@ impl BigtablePositionStore {
                 Some(Duration::from_secs(30)),
             )
             .await
-            .map_err(|e| {
-                StorageError::NotImplemented(format!("Bigtable connection failed: {}", e))
-            })?
+            .map_err(|e| StorageError::Backend(format!("Bigtable connection failed: {}", e)))?
         };
 
         let client = Arc::new(Mutex::new(connection.client()));
@@ -117,9 +112,10 @@ impl PositionStore for BigtablePositionStore {
             ..Default::default()
         };
 
-        let result = client.read_rows(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable read_rows failed: {}", e))
-        })?;
+        let result = client
+            .read_rows(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
 
         for (_, cells) in result {
             for cell in cells {
@@ -174,9 +170,10 @@ impl PositionStore for BigtablePositionStore {
             ..Default::default()
         };
 
-        client.mutate_row(request).await.map_err(|e| {
-            StorageError::NotImplemented(format!("Bigtable mutate_row failed: {}", e))
-        })?;
+        client
+            .mutate_row(request)
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable mutate_row failed: {}", e)))?;
 
         debug!(
             handler = %handler,

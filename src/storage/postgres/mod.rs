@@ -6,6 +6,7 @@ use tracing::info;
 
 use super::factory::{PositionBackend, StoresBackend};
 use super::{EventStore, PositionStore, SnapshotStore};
+use crate::advice::Instrumented;
 
 mod event_store;
 
@@ -39,8 +40,17 @@ inventory::submit! {
                     return Some(Err(super::error::StorageError::Database(e.into())));
                 }
 
-                let event_store: Arc<dyn EventStore> = Arc::new(PostgresEventStore::new(pool.clone()));
-                let snapshot_store: Arc<dyn SnapshotStore> = Arc::new(PostgresSnapshotStore::new(pool));
+                // R2-WIRE-ADVICE: wrap each store in `Instrumented<_>`
+                // under the "postgres" label so the advice/metrics
+                // statics fire. No-op when the `otel` feature is off.
+                let event_store: Arc<dyn EventStore> = Arc::new(Instrumented::new(
+                    PostgresEventStore::new(pool.clone()),
+                    "postgres",
+                ));
+                let snapshot_store: Arc<dyn SnapshotStore> = Arc::new(Instrumented::new(
+                    PostgresSnapshotStore::new(pool),
+                    "postgres",
+                ));
 
                 Some(Ok((event_store, snapshot_store)))
             })
@@ -69,7 +79,8 @@ inventory::submit! {
                     return Some(Err(super::error::StorageError::Database(e.into())));
                 }
 
-                let position_store: Arc<dyn PositionStore> = Arc::new(PostgresPositionStore::new(pool));
+                let position_store: Arc<dyn PositionStore> =
+                    Arc::new(Instrumented::new(PostgresPositionStore::new(pool), "postgres"));
 
                 Some(Ok(position_store))
             })

@@ -72,10 +72,11 @@ impl EventQueryService {
 /// - `Internal` for any storage / repository error.
 ///
 /// Currently exercised only by the H-35/H-36 regression tests; production
-/// `get_event_book` / `synchronize` still inline the same branch logic with
-/// matching semantics. A future refactor will collapse both methods onto
-/// this helper.
-#[allow(dead_code)]
+/// The canonical selection-dispatch helper used by both the unary
+/// `get_event_book` and the bidi-stream `synchronize` RPC. Centralizes the
+/// inclusive→exclusive range conversion (H-36) and the
+/// missing-temporal-point invalid_argument message (H-35) so the two RPCs
+/// can't drift on their semantics.
 pub(crate) async fn dispatch_selection(
     repo: &EventBookRepository,
     domain: &str,
@@ -180,58 +181,20 @@ impl EventQueryTrait for EventQueryService {
             "GetEventBook starting query"
         );
 
-        // Handle selection: range, specific sequences, temporal, or full query
-        let book = match query.selection {
-            Some(Selection::Range(ref range)) => {
-                let lower = range.lower;
-                // Proto uses inclusive upper bound, storage uses exclusive.
-                // Convert: inclusive N → exclusive N+1 (saturating to avoid overflow)
-                let upper = range
-                    .upper
-                    .map(|u| u.saturating_add(1))
-                    .unwrap_or(u32::MAX);
-                info!(domain = %domain, root = %root_uuid, lower = lower, upper = upper, "GetEventBook range query");
-                self.event_book_repo
-                    .get_from_to(&domain, edition, root_uuid, lower, upper)
-                    .await
-            }
-            Some(Selection::Sequences(ref seq_set)) => {
-                info!(domain = %domain, root = %root_uuid, sequences = ?seq_set.values, "GetEventBook sequences query");
-                self.event_book_repo
-                    .get_sequences(&domain, edition, root_uuid, &seq_set.values)
-                    .await
-            }
-            Some(Selection::Temporal(ref tq)) => {
-                match tq.point_in_time {
-                    Some(PointInTime::AsOfTime(ref ts)) => {
-                        let rfc3339 = crate::storage::helpers::timestamp_to_rfc3339(ts)
-                            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                        info!(domain = %domain, root = %root_uuid, as_of = %rfc3339, "GetEventBook temporal time query");
-                        self.event_book_repo
-                            .get_temporal_by_time(&domain, edition, root_uuid, &rfc3339)
-                            .await
-                    }
-                    Some(PointInTime::AsOfSequence(seq)) => {
-                        info!(domain = %domain, root = %root_uuid, as_of_sequence = seq, "GetEventBook temporal sequence query");
-                        self.event_book_repo
-                            .get_temporal_by_sequence(&domain, edition, root_uuid, seq)
-                            .await
-                    }
-                    None => {
-                        return Err(Status::invalid_argument(
-                            crate::services::errmsg::TEMPORAL_QUERY_MISSING_POINT,
-                        ));
-                    }
-                }
-            }
-            None => {
-                info!(domain = %domain, root = %root_uuid, "GetEventBook full query");
-                self.event_book_repo.get(&domain, edition, root_uuid).await
-            }
-        }
-        .map_err(|e| {
-            error!(domain = %domain, root = %root_uuid, error = %e, "GetEventBook query failed");
-            Status::internal(e.to_string())
+        // Selection dispatch goes through the shared `dispatch_selection`
+        // helper so the unary RPC and the `synchronize` bidi-stream
+        // produce the same event set for the same Query (H-35 / H-36).
+        let book = dispatch_selection(
+            &self.event_book_repo,
+            &domain,
+            edition,
+            root_uuid,
+            query.selection,
+        )
+        .await
+        .map_err(|status| {
+            error!(domain = %domain, root = %root_uuid, status = %status, "GetEventBook query failed");
+            status
         })?;
 
         info!(domain = %domain, root = %root_uuid, pages = book.pages.len(), "GetEventBook completed");
@@ -375,69 +338,24 @@ impl EventQueryTrait for EventQueryService {
                             }
                         };
 
-                        // Handle selection: range, specific sequences, temporal, or full query
-                        // H-36: match get_event_book's inclusive→exclusive
-                        // conversion so the same Query produces the same
-                        // event set whether the caller goes through the
-                        // unary or the bidi-stream RPC.
-                        let result = match query.selection {
-                            Some(Selection::Range(ref range)) => {
-                                let lower = range.lower;
-                                let upper =
-                                    range.upper.map(|u| u.saturating_add(1)).unwrap_or(u32::MAX);
-                                event_book_repo
-                                    .get_from_to(&domain, edition, root, lower, upper)
-                                    .await
-                            }
-                            Some(Selection::Sequences(ref seq_set)) => {
-                                event_book_repo
-                                    .get_sequences(&domain, edition, root, &seq_set.values)
-                                    .await
-                            }
-                            Some(Selection::Temporal(ref tq)) => match tq.point_in_time {
-                                Some(PointInTime::AsOfTime(ref ts)) => {
-                                    match crate::storage::helpers::timestamp_to_rfc3339(ts) {
-                                        Ok(rfc3339) => {
-                                            event_book_repo
-                                                .get_temporal_by_time(
-                                                    &domain, edition, root, &rfc3339,
-                                                )
-                                                .await
-                                        }
-                                        Err(e) => {
-                                            if tx
-                                                .send(Err(Status::invalid_argument(e.to_string())))
-                                                .await
-                                                .is_err()
-                                            {
-                                                debug!("Client disconnected during synchronize");
-                                                break;
-                                            }
-                                            continue;
-                                        }
-                                    }
-                                }
-                                Some(PointInTime::AsOfSequence(seq)) => {
-                                    event_book_repo
-                                        .get_temporal_by_sequence(&domain, edition, root, seq)
-                                        .await
-                                }
-                                None => {
-                                    if tx
-                                        .send(Err(Status::invalid_argument(
-                                            crate::services::errmsg::TEMPORAL_QUERY_MISSING_POINT,
-                                        )))
-                                        .await
-                                        .is_err()
-                                    {
-                                        debug!("Client disconnected during synchronize");
-                                        break;
-                                    }
-                                    continue;
-                                }
-                            },
-                            None => event_book_repo.get(&domain, edition, root).await,
-                        };
+                        // Selection dispatch goes through the shared
+                        // `dispatch_selection` helper so this bidi-stream
+                        // path and the unary `get_event_book` produce the
+                        // same event set for the same Query
+                        // (H-35 / H-36). `dispatch_selection` returns a
+                        // pre-wrapped `Status` covering both the
+                        // invalid_argument cases (missing temporal point,
+                        // unparseable timestamp) and the internal-storage
+                        // case, so the send path collapses to a single
+                        // Ok/Err match.
+                        let result = dispatch_selection(
+                            &event_book_repo,
+                            &domain,
+                            edition,
+                            root,
+                            query.selection,
+                        )
+                        .await;
 
                         match result {
                             Ok(book) => {
@@ -446,9 +364,9 @@ impl EventQueryTrait for EventQueryService {
                                     break; // Client disconnected
                                 }
                             }
-                            Err(e) => {
-                                error!(domain = %domain, root = %root, error = %e, "Synchronize: failed to get events");
-                                if tx.send(Err(Status::internal(e.to_string()))).await.is_err() {
+                            Err(status) => {
+                                error!(domain = %domain, root = %root, status = %status, "Synchronize: failed to get events");
+                                if tx.send(Err(status)).await.is_err() {
                                     break;
                                 }
                             }

@@ -59,7 +59,10 @@ pub struct CheckpointConfig {
     ///
     /// Retained for API stability; current `update()` flushes synchronously
     /// on every write (per H-05 remediation). If future profiling motivates
-    /// batched writes, this is the knob.
+    /// batched writes, this is the knob. The `#[allow(dead_code)]` is
+    /// load-bearing — clippy's `dead-code` lint still fires on pub fields
+    /// that no in-crate reader touches, even though external callers
+    /// constructing `CheckpointConfig { flush_interval, .. }` consume it.
     #[allow(dead_code)]
     pub flush_interval: Duration,
     /// Whether checkpointing is enabled.

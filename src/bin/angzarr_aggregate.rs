@@ -190,9 +190,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+    // Default snapshot policy (reads and writes enabled). Operators
+    // wanting to disable either flag build the SnapshotRepository
+    // explicitly via SnapshotRepository::with_flags(...).
+    let snapshot_repo = Arc::new(angzarr::repository::SnapshotRepository::new(
+        snapshot_store.clone(),
+    ));
     let mut aggregate_service = AggregateService::new(
         event_store.clone(),
-        snapshot_store.clone(),
+        snapshot_repo,
         client_logic_client,
         event_bus,
         discovery,
@@ -216,7 +222,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = Server::builder()
         .layer(grpc_trace_layer())
         .add_service(health_service)
-        .add_service(angzarr::proto_reflect::reflection_service())
+        // Framework-internal binary: no gRPC reflection. The status binary is
+        // the only public-API surface (see H-33 in deep-review-remediation.md);
+        // advertising the public descriptor subset here would falsely list
+        // DlqAdminService while hiding the framework services this binary
+        // actually serves.
         .add_service(
             CommandHandlerCoordinatorServiceServer::new(aggregate_service)
                 .max_decoding_message_size(msg_size)

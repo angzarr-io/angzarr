@@ -24,6 +24,7 @@ use tracing::info;
 
 use super::factory::{PositionBackend, StoresBackend};
 use super::{EventStore, PositionStore, SnapshotStore};
+use crate::advice::Instrumented;
 
 mod event_store;
 mod position_store;
@@ -85,13 +86,15 @@ inventory::submit! {
                     dynamo_config.positions_table
                 );
 
+                // R2-WIRE-ADVICE: wrap with `Instrumented<_>` under
+                // the "dynamo" label so advice/metrics statics fire.
                 let event_store = match DynamoEventStore::new(
                     &dynamo_config.events_table,
                     dynamo_config.endpoint_url.as_deref(),
                 )
                 .await
                 {
-                    Ok(store) => Arc::new(store) as Arc<dyn EventStore>,
+                    Ok(store) => Arc::new(Instrumented::new(store, "dynamo")) as Arc<dyn EventStore>,
                     Err(e) => return Some(Err(e)),
                 };
 
@@ -101,7 +104,9 @@ inventory::submit! {
                 )
                 .await
                 {
-                    Ok(store) => Arc::new(store) as Arc<dyn SnapshotStore>,
+                    Ok(store) => {
+                        Arc::new(Instrumented::new(store, "dynamo")) as Arc<dyn SnapshotStore>
+                    }
                     Err(e) => return Some(Err(e)),
                 };
 
@@ -132,7 +137,9 @@ inventory::submit! {
                 )
                 .await
                 {
-                    Ok(store) => Arc::new(store) as Arc<dyn PositionStore>,
+                    Ok(store) => {
+                        Arc::new(Instrumented::new(store, "dynamo")) as Arc<dyn PositionStore>
+                    }
                     Err(e) => return Some(Err(e)),
                 };
 

@@ -18,7 +18,6 @@ use tracing::{debug, error};
 
 use crate::bus::CommandBus;
 use crate::orchestration::command::CommandExecutor;
-use crate::orchestration::destination::DestinationFetcher;
 use crate::orchestration::saga::{orchestrate_saga, OutputDomainValidator, SagaContextFactory};
 use crate::orchestration::FactExecutor;
 use crate::proto::{
@@ -39,9 +38,6 @@ pub struct SagaCoord {
     executor: Arc<dyn CommandExecutor>,
     /// Command bus for ASYNC mode (optional).
     command_bus: Option<Arc<dyn CommandBus>>,
-    /// Destination fetcher (unused in new model, kept for interface).
-    #[allow(dead_code)]
-    fetcher: Option<Arc<dyn DestinationFetcher>>,
     /// Fact executor for injecting saga-produced facts.
     fact_executor: Option<Arc<dyn FactExecutor>>,
     /// Output domain validator for routing validation.
@@ -59,7 +55,6 @@ impl SagaCoord {
             factory,
             executor,
             command_bus: None,
-            fetcher: None,
             fact_executor: None,
             output_validator: None,
             backoff: ExponentialBuilder::default(),

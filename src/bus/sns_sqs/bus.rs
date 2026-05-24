@@ -12,6 +12,7 @@ use aws_sdk_sqs::Client as SqsClient;
 use prost::Message;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
+use uuid::Uuid;
 
 use crate::bus::error::{BusError, Result};
 use crate::bus::traits::{EventBus, EventHandler, PublishResult};
@@ -41,9 +42,22 @@ pub struct SnsSqsEventBus {
     /// MessageDeduplicationId so legitimate retries of the same logical event
     /// (which would otherwise produce identical `{domain}-{root}-{max_seq}`
     /// dedup IDs) are not silently dropped by AWS's 5-minute FIFO dedup
-    /// window. AWS dedup-id length cap is 128 chars — a u64 counter fits
-    /// comfortably alongside the rest of the key.
+    /// window. AWS dedup-id length cap is 128 chars — a u64 counter +
+    /// the instance nonce both fit comfortably alongside the rest of the key.
     publish_counter: Arc<AtomicU64>,
+    /// Per-bus-instance nonce mixed into the dedup_id alongside `publish_counter`.
+    ///
+    /// The counter alone resets to 0 on every `new()`, so any cross-restart
+    /// republish (operator-driven replay, persist-and-publish retry after a
+    /// crash) would re-emit the same `{domain}-{root}-{seq}-0` dedup_id that
+    /// the original (pre-crash) publish used and silently lose the retry
+    /// inside AWS's 5-minute FIFO dedup window. A fresh UUID per bus
+    /// instance breaks that collision: P1's dedup_ids are `{...}-{u1}-{N}`,
+    /// P2's are `{...}-{u2}-{M}`, and even if both processes restart within
+    /// the dedup window the IDs no longer alias. Truncated to 12 hex chars to leave
+    /// budget inside the 128-char cap; 48 bits of nonce + the counter is
+    /// well past the birthday bound for the dedup window.
+    instance_nonce: String,
 }
 
 /// Build the FIFO `(MessageGroupId, MessageDeduplicationId)` pair for an
@@ -61,13 +75,18 @@ pub struct SnsSqsEventBus {
 /// clear, root-cause-naming error at the boundary instead of an opaque
 /// AWS validation failure several layers down.
 ///
-/// **MessageDeduplicationId includes a per-bus monotonic publish counter.**
-/// Without it, legitimate retries of the same logical event (same
-/// `{domain}-{root}-{max_seq}` triple) would collide inside AWS's 5-minute
-/// FIFO dedup window and be silently dropped — defeating the framework's
-/// at-least-once republish flows (outbox recovery, persist-and-publish
-/// retry). AWS allows up to 128 characters in the dedup_id; a u64 counter
-/// fits comfortably alongside the rest of the key.
+/// **MessageDeduplicationId includes a per-bus-instance nonce + monotonic
+/// publish counter.** Without it, legitimate retries of the same logical
+/// event (same `{domain}-{root}-{max_seq}` triple) would collide inside
+/// AWS's 5-minute FIFO dedup window and be silently dropped — defeating
+/// at-least-once republish flows (operator-driven replay,
+/// persist-and-publish retry). The counter alone is process-local and
+/// resets to 0 on restart, so an in-process-only counter would still alias
+/// across a crash+restart within the 5-minute window. The instance nonce
+/// (12 hex chars of a fresh UUID, ~48 bits) closes that gap: two distinct
+/// bus instances cannot produce the same dedup_id even if their counters
+/// happen to align. AWS allows up to 128 characters in the dedup_id; nonce
+/// + u64 counter + the rest of the key fit comfortably.
 ///
 /// # Purity
 ///
@@ -76,6 +95,7 @@ pub struct SnsSqsEventBus {
 /// `bus.test.rs` for the C-12 regression suite.
 pub(crate) fn build_fifo_attributes(
     book: &EventBook,
+    instance_nonce: &str,
     publish_counter: u64,
 ) -> Result<(String, String)> {
     let root_id = book.root_id_hex().ok_or_else(|| {
@@ -106,7 +126,10 @@ pub(crate) fn build_fifo_attributes(
         .map(|p| p.sequence_num())
         .max()
         .unwrap_or(0);
-    let dedup_id = format!("{}-{}-{}-{}", domain, root_id, max_seq, publish_counter);
+    let dedup_id = format!(
+        "{}-{}-{}-{}-{}",
+        domain, root_id, max_seq, instance_nonce, publish_counter
+    );
 
     Ok((root_id, dedup_id))
 }
@@ -137,6 +160,11 @@ impl SnsSqsEventBus {
             "Connected to AWS SNS/SQS"
         );
 
+        // 12 hex chars of a fresh UUID. See `instance_nonce` field doc for
+        // why a process-local counter alone is insufficient against a
+        // cross-restart republish inside AWS's 5-minute dedup window.
+        let instance_nonce = format!("{:x}", Uuid::new_v4().as_u128() & 0xFFFF_FFFF_FFFF);
+
         Ok(Self {
             sns,
             sqs,
@@ -145,6 +173,7 @@ impl SnsSqsEventBus {
             topic_arns: Arc::new(RwLock::new(HashMap::new())),
             queue_urls: Arc::new(RwLock::new(HashMap::new())),
             publish_counter: Arc::new(AtomicU64::new(0)),
+            instance_nonce,
         })
     }
 
@@ -278,7 +307,7 @@ impl EventBus for SnsSqsEventBus {
         // Failing early on a root-less EventBook avoids the wasteful side
         // effect of provisioning a topic for a publish we cannot perform.
         let counter = self.publish_counter.fetch_add(1, Ordering::Relaxed);
-        let (root_id, dedup_id) = build_fifo_attributes(&book, counter)?;
+        let (root_id, dedup_id) = build_fifo_attributes(&book, &self.instance_nonce, counter)?;
 
         let topic_arn = self.get_or_create_topic(domain).await?;
 

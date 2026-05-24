@@ -72,7 +72,7 @@ impl SnapshotStore for DynamoSnapshotStore {
             .limit(1)
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB query failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
 
         if let Some(items) = result.items {
             if let Some(item) = items.first() {
@@ -109,7 +109,7 @@ impl SnapshotStore for DynamoSnapshotStore {
             .limit(1)
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB query failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
 
         if let Some(items) = result.items {
             if let Some(item) = items.first() {
@@ -149,9 +149,7 @@ impl SnapshotStore for DynamoSnapshotStore {
             .set_item(Some(item))
             .send()
             .await
-            .map_err(|e| {
-                StorageError::NotImplemented(format!("DynamoDB put_item failed: {}", e))
-            })?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB put_item failed: {}", e)))?;
 
         // Clean up old transient snapshots
         let result = self
@@ -163,7 +161,7 @@ impl SnapshotStore for DynamoSnapshotStore {
             .expression_attribute_values(":seq", AttributeValue::N(seq.to_string()))
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB query failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
 
         if let Some(items) = result.items {
             for item in items {
@@ -207,7 +205,7 @@ impl SnapshotStore for DynamoSnapshotStore {
             .projection_expression("pk, seq")
             .send()
             .await
-            .map_err(|e| StorageError::NotImplemented(format!("DynamoDB query failed: {}", e)))?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
 
         if let Some(items) = result.items {
             for item in items {

@@ -32,6 +32,7 @@ use tracing::info;
 use angzarr::dlq::NoopDeadLetterReader;
 use angzarr::proto::status::dlq_admin_service_server::DlqAdminServiceServer;
 use angzarr::proto_reflect;
+use angzarr::status::descriptors;
 use angzarr::status::handlers::dlq::DlqAdminHandler;
 use angzarr::transport::{grpc_trace_layer, serve_with_transport};
 use angzarr::utils::bootstrap::startup;
@@ -40,15 +41,34 @@ use angzarr::utils::bootstrap::startup;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = startup()?;
 
-    // Initialize the framework descriptor pool so DLQ admin handlers
-    // can decode payloads to JSON for the SPA. Tolerant: a failure
-    // here logs but doesn't kill the binary — the handlers fall back
-    // to raw bytes when payload_view is empty. Per the plan's
-    // resilience contract.
-    if let Err(e) = proto_reflect::ensure_initialized() {
+    // Initialize the descriptor pool: framework descriptors plus any
+    // operator-mounted `.protoset` files under
+    // `ANGZARR_STATUS_DESCRIPTORS_DIR` (typically a Helm-managed
+    // ConfigMap at /etc/angzarr/descriptors/). Tolerant per the
+    // resilience contract: any failure here logs but doesn't kill the
+    // binary — the DLQ admin handler falls back to raw bytes when the
+    // pool can't decode a payload.
+    let extras = match descriptors::descriptors_dir_from_env() {
+        Some(dir) => {
+            let files = descriptors::load_protoset_files(&dir);
+            tracing::info!(
+                path = %dir.display(),
+                count = files.len(),
+                "loaded pre-staged descriptor files"
+            );
+            files
+        }
+        None => {
+            tracing::debug!(
+                "no ANGZARR_STATUS_DESCRIPTORS_DIR mount; using framework descriptors only"
+            );
+            Vec::new()
+        }
+    };
+    if let Err(e) = proto_reflect::init_from_embedded_with_extras(&extras) {
         tracing::warn!(
             error = %e,
-            "framework descriptor pool init failed — payload_view will be empty until P3 reflection-pull lands"
+            "descriptor pool init failed — payload_view will be empty until P3 reflection-pull lands"
         );
     }
 

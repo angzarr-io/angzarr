@@ -30,8 +30,6 @@ pub mod mock;
 #[cfg(feature = "nats")]
 pub mod nats;
 pub mod offloading;
-// Outbox is always available (sqlite always compiled)
-pub mod outbox;
 #[cfg(feature = "pubsub")]
 pub mod pubsub;
 #[cfg(feature = "sns-sqs")]

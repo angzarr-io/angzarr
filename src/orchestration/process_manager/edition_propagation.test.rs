@@ -1,13 +1,8 @@
 //! Tests for the PM coordinator's edition propagation contract per
 //! `coordinator-contract/edition_propagation.feature` (audit #86).
 //!
-//! Why test the helper, not `LocalPMContext::handle` directly?
-//! `LocalPMContext` requires `DomainStorage` + `EventBus` — heavy
-//! testcontainers infra for what is, in this slice, a pure
-//! transformation. The helper `propagate_trigger_edition` is the unit
-//! that needs verification; both `LocalPMContext::handle` and
-//! `GrpcPMContext::handle` delegate to it. Tests at the helper level
-//! cover both paths.
+//! Tests at the helper level because the helper is a pure
+//! transformation that the gRPC pipeline (`grpc/mod.rs`) delegates to.
 //!
 //! Maps to:
 //! - C-0143 PM propagates trigger edition to outgoing commands
