@@ -81,10 +81,10 @@ impl ProcessManagerContext for GrpcPMContext {
         let mut process_events = response.process_events;
         let mut facts = response.facts;
 
-        // Audit #86 contract: same propagation logic as
-        // `LocalPMContext` — factored into a shared helper so the
-        // local + gRPC paths cannot drift.
-        super::local::propagate_trigger_edition(
+        // Audit #86 contract: stamp the trigger cover's edition onto
+        // every outgoing book. See `super::edition_propagation` for
+        // the contract details and tests.
+        super::edition_propagation::propagate_trigger_edition(
             trigger.cover.as_ref(),
             &mut commands,
             &mut process_events,

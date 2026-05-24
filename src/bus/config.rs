@@ -2,8 +2,6 @@
 
 use serde::Deserialize;
 
-// Outbox is always available (sqlite always compiled)
-use super::outbox;
 use crate::dlq::config::DlqConfig;
 
 /// Messaging configuration.
@@ -31,8 +29,6 @@ pub struct MessagingConfig {
     pub pubsub: PubSubBusConfig,
     /// AWS SNS/SQS-specific configuration.
     pub sns_sqs: SnsSqsBusConfig,
-    /// Outbox pattern configuration for guaranteed delivery.
-    pub outbox: outbox::OutboxConfig,
     /// Dead letter queue configuration.
     pub dlq: DlqConfig,
 }
@@ -48,7 +44,6 @@ impl Default for MessagingConfig {
             nats: NatsBusConfig::default(),
             pubsub: PubSubBusConfig::default(),
             sns_sqs: SnsSqsBusConfig::default(),
-            outbox: outbox::OutboxConfig::default(),
             dlq: DlqConfig::default(),
         }
     }

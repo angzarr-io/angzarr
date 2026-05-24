@@ -1,13 +1,11 @@
 //! Destination fetching abstraction.
 //!
-//! `DestinationFetcher` loads EventBook state for saga/PM destinations.
-//! - `local/`: reads from in-process `DomainStorage` maps
-//! - `grpc/`: wraps `EventQueryServiceClient` for remote fetching
+//! `DestinationFetcher` loads EventBook state for saga/PM destinations
+//! via `grpc/`'s `EventQueryServiceClient`. `hybrid/` combines remote
+//! gRPC fetching with local fallback logic.
 
 pub mod grpc;
 pub mod hybrid;
-// Local module always compiled (sqlite always on)
-pub mod local;
 
 use async_trait::async_trait;
 

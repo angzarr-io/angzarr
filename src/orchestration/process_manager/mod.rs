@@ -38,8 +38,8 @@
 //! - `grpc/`: remote gRPC PM client calls (distributed mode)
 
 pub mod grpc;
-// Local module always compiled (sqlite always on)
-pub mod local;
+
+mod edition_propagation;
 
 use std::collections::HashSet;
 

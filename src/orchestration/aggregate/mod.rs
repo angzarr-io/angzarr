@@ -45,8 +45,6 @@
 
 // Submodule implementations
 pub mod grpc;
-// Local module always compiled (sqlite always on)
-pub mod local;
 
 // Internal modules
 mod client;

@@ -6,6 +6,7 @@
 //! observability breaks and PMs cannot correlate related events.
 
 use super::*;
+use crate::proto::Cover;
 
 fn make_command_with_correlation(domain: &str, correlation_id: &str) -> CommandBook {
     CommandBook {

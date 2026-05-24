@@ -29,8 +29,6 @@
 //! - `grpc/`: remote gRPC saga client calls (distributed mode)
 
 pub mod grpc;
-// Local module always compiled (sqlite always on)
-pub mod local;
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
