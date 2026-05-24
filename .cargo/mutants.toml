@@ -5,30 +5,70 @@
 # Or set: CARGO_MUTANTS_JOBS=8
 
 # Timeout settings
-# Multiplier for baseline build/test times (handles slow CI runners)
+# Multipliers for baseline build/test times (handles slow CI runners + the
+# extra wall-clock incremental-compile penalty per mutation).
+#
+# `build_timeout_multiplier = 4.0` is load-bearing — at 2.0 (the prior
+# setting), a baseline build of ~5.5s gives a per-mutant build cap of
+# ~11s, but the first cold-incremental mutant build routinely takes
+# ~10.9s and silently times out (observed during the .cargo/mutants.toml
+# fix that landed alongside this bump). 4.0 gives ~22s of headroom
+# without slowing down the run on the happy path.
 timeout_multiplier = 1.5
-build_timeout_multiplier = 2.0
+build_timeout_multiplier = 4.0
 minimum_test_timeout = 30
 
 # Test configuration
 test_tool = "cargo"
-# sqlite is always compiled (no feature gate) — see Cargo.toml
+# sqlite is always compiled (no feature gate) — see Cargo.toml.
+#
+# `--lib` is load-bearing on both passes — without it, `cargo mutants`
+# drives the default `--all-targets` scope, which makes Cargo try to
+# link every binary crate (angzarr-saga / -aggregate / -process-manager
+# / -upcaster / -status). Those bins inherit `[profile.dev] strip = true`
+# from Cargo.toml (an unusual choice that strips symbols off rlib
+# artifacts during compile-time) and then fail to link with hundreds
+# of "undefined reference" errors against generic instantiations in
+# serde_json, tonic, std::thread::local, etc. — the cause behind every
+# "mutants infra broken on this host" note in
+# plans/deep-review-remediation.md before this fix. The bins compile
+# fine via `just _container build`'s `.cargo-container` target dir,
+# but the ephemeral mutants container runs in its own `/cargo-target`
+# overlay so every fresh mutants run hits the bin-link failure on
+# cold start. `--lib` keeps cargo-mutants scoped to the library +
+# its in-crate unit tests, which is the surface mutation testing
+# actually exercises. `exclude_globs` below already drops `src/bin/**`,
+# so no bin-side mutants are lost either.
+# `additional_cargo_args` applies to BOTH the baseline `cargo build`
+# and each per-mutant `cargo test`, so `--lib` lives here only.
+# `additional_cargo_test_args` extends THAT set for the test pass, so
+# repeating `--lib` here would surface as `cargo test --lib --lib …`
+# (which cargo rejects with "the argument '--lib' cannot be used
+# multiple times").
+additional_cargo_args = ["--lib"]
 additional_cargo_test_args = ["--features", "test-utils"]
 
 # Cap lints to avoid warnings causing build failures in mutated code
 cap_lints = true
 
-# Files to examine (focus on core business logic, skip generated code)
-examine_globs = [
-  "src/handlers/**/*.rs",
-  "src/orchestration/**/*.rs",
-  "src/storage/**/*.rs",
-  "src/bus/**/*.rs",
-  "src/utils/**/*.rs",
-  "src/validation/**/*.rs",
-]
+# NOTE on `examine_globs`: intentionally NOT set.
+#
+# An allowlist here silently neuters the `just mutants <file>` workflow:
+# cargo-mutants does NOT treat `-f` as an override against examine_globs
+# — if `<file>` doesn't match an examine_globs entry, cargo-mutants
+# falls back to mutating EVERY file matched by examine_globs (~2000
+# mutants), and the operator gets no warning. The previous allowlist
+# (`src/handlers,storage,bus,utils,validation,orchestration`) silently
+# expanded `just mutants src/dlq/publishers/audit_writer.rs` to mutate
+# every storage backend in the workspace.
+#
+# `exclude_globs` below covers the real "don't mutate" cases (generated
+# proto code, build scripts, test files, bin entry points). Leaving
+# `examine_globs` unset lets `-f` (and `cargo mutants` with no
+# arguments) Do The Right Thing without silent expansion.
 
-# Files to exclude
+# Files to exclude. (Active filter — see `examine_globs` note above for
+# why we don't allowlist.)
 exclude_globs = [
   # Generated code
   "src/proto/**",
@@ -39,9 +79,21 @@ exclude_globs = [
   "**/*.test.rs",
   "**/tests/**",
   "**/test_*.rs",
+  "tests/**",
 
   # Build/config
   "build.rs",
+  "**/build.rs",
+
+  # Binary entry points. We also pass `--lib` via
+  # `additional_cargo_args` above to skip linking these; this glob
+  # keeps mutants from being generated for the `fn main()` wrappers
+  # in the first place.
+  "src/bin/**",
+  "examples/rust/*/agg/src/main.rs",
+  "examples/rust/*/saga-*/src/main.rs",
+  "examples/rust/*/pmg-*/src/main.rs",
+  "examples/rust/*/prj-*/src/main.rs",
 ]
 
 # Skip mutations in calls to these functions
@@ -69,6 +121,21 @@ skip_calls = [
 # Use built-in skip_calls defaults (debug_assert, etc.)
 skip_calls_defaults = true
 exclude_re = [
+  # Trait implementations that are pure delegation. The same set the
+  # workspace-root `./mutants.toml` previously carried — promoted here
+  # so a single config file owns the full picture.
+  "fn default\\(",
+  "fn fmt\\(",
+  "fn from\\(",
+  "fn into\\(",
+  "fn clone\\(",
+  # Logging and tracing (side effect only)
+  "fn trace\\(",
+  "fn debug\\(",
+  "fn info\\(",
+  "fn warn\\(",
+  "fn error\\(",
+
   # Auto-generated by: cargo xtask gen-mutants-exclude
   "<impl .*GatewayClient.*for CommandClient>::execute",
   "CommandClient::domains",

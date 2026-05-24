@@ -19,6 +19,19 @@ build-release:
 check:
     cargo check
 
+# Check code compiles with all feature-gated backends enabled.
+# Used to verify changes that touch backend-registration sites
+# (postgres / dynamo / bigtable / nats / kafka / etc.) without
+# requiring the full test suite.
+check-full:
+    cargo check --features full
+
+# Check code compiles for a single named feature set. Useful when
+# `check-full` fails on a pre-existing breakage in an unrelated
+# feature and you want to validate a specific backend.
+check-features FEATURES:
+    cargo check --features "{{FEATURES}}"
+
 # Check formatting (use fmt-fix to auto-format)
 fmt:
     cargo fmt --check
@@ -406,6 +419,16 @@ MUTANTS_TIMEOUT := "600"
 # --features sqlite errors with "package 'angzarr' does not contain this
 # feature: sqlite" and breaks every mutants run. Match the plain test
 # recipe (just `--features test-utils`).
+#
+# `--lib` scoping for cargo-mutants (so it doesn't try to link the
+# binary crates, which fail under the dev profile's `strip = true`
+# setting — see `.cargo/mutants.toml::additional_cargo_args` for the
+# full rationale) lives in `.cargo/mutants.toml`, not here. Note that
+# `additional_cargo_test_args = ["--features", "test-utils"]` is
+# already in that file too, so `MUTANTS_FEATURES` is technically
+# redundant — kept for readability + to match the operator-facing
+# "what features does this run with" question without forcing them to
+# open `.cargo/mutants.toml`.
 MUTANTS_FEATURES := "--features test-utils"
 
 # Regenerate exclude_re patterns from #[trivial_delegation] attributes

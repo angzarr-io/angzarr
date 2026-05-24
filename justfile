@@ -403,6 +403,10 @@ build-release:
 check:
     just _container check
 
+# Check code compiles with all feature-gated backends enabled.
+check-full:
+    just _container check-full
+
 # Format code
 fmt:
     just _container fmt
