@@ -176,8 +176,24 @@ spec:
                 secretKeyRef:
                   name: {{ $.Values.storage.postgres.existingSecret }}
                   key: uri
+            # Registry-style storage config: core reads StorageRegistryConfig (a
+            # named-backend map under storage.backends), not storage.postgres.uri.
+            # Mirror the URI into the "default" backend that the event / snapshot
+            # / position stores reference, else the coordinator falls back to its
+            # localhost default and dies with PoolTimedOut.
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__TYPE
+              value: "postgres"
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.storage.postgres.existingSecret }}
+                  key: uri
             {{- else }}
             - name: ANGZARR__STORAGE__POSTGRES__URI
+              value: {{ $.Values.storage.postgres.uri | quote }}
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__TYPE
+              value: "postgres"
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__URI
               value: {{ $.Values.storage.postgres.uri | quote }}
             {{- end }}
             {{- end }}
@@ -401,8 +417,24 @@ spec:
                 secretKeyRef:
                   name: {{ $.Values.storage.postgres.existingSecret }}
                   key: uri
+            # Registry-style storage config: core reads StorageRegistryConfig (a
+            # named-backend map under storage.backends), not storage.postgres.uri.
+            # Mirror the URI into the "default" backend that the event / snapshot
+            # / position stores reference, else the coordinator falls back to its
+            # localhost default and dies with PoolTimedOut.
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__TYPE
+              value: "postgres"
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.storage.postgres.existingSecret }}
+                  key: uri
             {{- else }}
             - name: ANGZARR__STORAGE__POSTGRES__URI
+              value: {{ $.Values.storage.postgres.uri | quote }}
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__TYPE
+              value: "postgres"
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__URI
               value: {{ $.Values.storage.postgres.uri | quote }}
             {{- end }}
             {{- end }}
@@ -605,8 +637,24 @@ spec:
                 secretKeyRef:
                   name: {{ $.Values.storage.postgres.existingSecret }}
                   key: uri
+            # Registry-style storage config: core reads StorageRegistryConfig (a
+            # named-backend map under storage.backends), not storage.postgres.uri.
+            # Mirror the URI into the "default" backend that the event / snapshot
+            # / position stores reference, else the coordinator falls back to its
+            # localhost default and dies with PoolTimedOut.
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__TYPE
+              value: "postgres"
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.storage.postgres.existingSecret }}
+                  key: uri
             {{- else }}
             - name: ANGZARR__STORAGE__POSTGRES__URI
+              value: {{ $.Values.storage.postgres.uri | quote }}
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__TYPE
+              value: "postgres"
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__URI
               value: {{ $.Values.storage.postgres.uri | quote }}
             {{- end }}
             {{- end }}
@@ -779,8 +827,24 @@ spec:
                 secretKeyRef:
                   name: {{ $.Values.storage.postgres.existingSecret }}
                   key: uri
+            # Registry-style storage config: core reads StorageRegistryConfig (a
+            # named-backend map under storage.backends), not storage.postgres.uri.
+            # Mirror the URI into the "default" backend that the event / snapshot
+            # / position stores reference, else the coordinator falls back to its
+            # localhost default and dies with PoolTimedOut.
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__TYPE
+              value: "postgres"
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__URI
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.storage.postgres.existingSecret }}
+                  key: uri
             {{- else }}
             - name: ANGZARR__STORAGE__POSTGRES__URI
+              value: {{ $.Values.storage.postgres.uri | quote }}
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__TYPE
+              value: "postgres"
+            - name: ANGZARR__STORAGE__BACKENDS__DEFAULT__URI
               value: {{ $.Values.storage.postgres.uri | quote }}
             {{- end }}
             {{- end }}
