@@ -51,6 +51,7 @@ use crate::utils::retry::{run_with_retry, RetryOutcome, RetryableOperation};
 
 use super::command::{CommandExecutor, CommandOutcome};
 use super::destination::DestinationFetcher;
+use super::shared::fill_fact_correlation_id;
 use super::FactExecutor;
 
 /// Validator for saga output domain routing.
@@ -212,8 +213,14 @@ struct SagaOperation<'a> {
     /// SIMPLE: commands executed synchronously with bus publishing.
     sync_mode: SyncMode,
     commands: Vec<CommandBook>,
-    /// Tracks which domains had sequence conflicts for retry logging.
-    failed_domains: HashSet<String>,
+    /// Positions (within `commands`) that hit a Retryable outcome THIS
+    /// attempt. O11/F4: tracked per-INDEX, not per-domain — one invocation
+    /// may emit multiple commands to the same domain (that's why
+    /// `command_index` provenance exists), and a domain-keyed retry set
+    /// would re-execute a succeeded command (duplicate destination events)
+    /// or re-fire a Rejected one (duplicate compensation + DLQ entries)
+    /// whenever it shares a domain with a failed command.
+    failed_indices: HashSet<usize>,
     /// Shared accumulator the builder reads on retry exhaustion to emit
     /// per-command DLQ entries. See [`RetryExhaustionTracker`].
     tracker: Arc<Mutex<RetryExhaustionTracker>>,
@@ -229,10 +236,12 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
     }
 
     async fn try_execute(&mut self) -> RetryOutcome<Self::Success, Self::Failure> {
-        // Clear failed_domains at the start of each attempt. This is intentional:
-        // we only care about which domains failed THIS attempt, not previous ones.
-        // The cache persists across attempts; failed_domains is per-attempt tracking.
-        self.failed_domains.clear();
+        // Clear failed_indices at the start of each attempt. This is intentional:
+        // we only care about which commands failed THIS attempt, not previous ones.
+        // The cache persists across attempts; failed_indices is per-attempt
+        // tracking (positions within the CURRENT `self.commands`, which
+        // `prepare_for_retry` trims between attempts).
+        self.failed_indices.clear();
 
         // Reset the shared retry-exhaustion tracker for this attempt.
         // On retry exhaustion, the builder reads the LAST attempt's state.
@@ -242,7 +251,7 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
             tracker.attempts = tracker.attempts.saturating_add(1);
         }
 
-        for command in &self.commands {
+        for (idx, command) in self.commands.iter().enumerate() {
             let mut command = command.clone();
             if let Some(ref mut cover) = command.cover {
                 if cover.correlation_id.is_empty() {
@@ -264,8 +273,26 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
                         }
                         Err(e) => {
                             error!(%domain, error = %e, "Failed to publish command to bus");
-                            // Bus publish failure is not retryable — infrastructure error
-                            return RetryOutcome::Fatal(format!("Command bus publish failed: {e}"));
+                            // O8: a bus publish failure aborts the pass with
+                            // Fatal (infrastructure error — not retryable).
+                            // Fatal never populates the retry-exhaustion
+                            // tracker, so without this the failing command AND
+                            // every command after it (never attempted) would be
+                            // silently lost — `orchestrate_saga` still returns
+                            // Ok and the retry-exhausted DLQ path drains only
+                            // the tracker. Record `self.commands[idx..]` — the
+                            // failing command plus the un-attempted remainder —
+                            // so the DLQ captures them. Commands published
+                            // earlier this pass (`..idx`) are in flight and are
+                            // NOT re-recorded. Fatal semantics are preserved.
+                            let reason = format!("Command bus publish failed: {e}");
+                            {
+                                let mut tracker = self.tracker.lock().await;
+                                for lost in &self.commands[idx..] {
+                                    tracker.failed_commands.push((lost.clone(), reason.clone()));
+                                }
+                            }
+                            return RetryOutcome::Fatal(reason);
                         }
                     }
                     continue;
@@ -280,7 +307,7 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
                 }
                 CommandOutcome::Retryable { reason, .. } => {
                     warn!(%domain, error = %reason, "Sequence conflict, will retry with fresh state");
-                    self.failed_domains.insert(domain);
+                    self.failed_indices.insert(idx);
                     // Record for potential DLQ on retry exhaustion. The
                     // builder reads `tracker.failed_commands` after
                     // `run_with_retry` returns Err.
@@ -298,7 +325,7 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
             }
         }
 
-        if !self.failed_domains.is_empty() {
+        if !self.failed_indices.is_empty() {
             RetryOutcome::Retryable("Sequence conflict".to_string())
         } else {
             RetryOutcome::Success(vec![])
@@ -317,8 +344,33 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
         // Commands are produced once with angzarr_deferred sequences.
         // Retry happens at the delivery level (executor handles sequence stamping).
         //
-        // This prepare_for_retry just clears the failed domains for the next attempt.
-        self.failed_domains.clear();
+        // O11: trim the retry set to only the commands that actually returned
+        // Retryable THIS attempt. Re-iterating the full command set each retry
+        // re-executes already-succeeded commands, republishing their
+        // destination events (duplicate event storms; cyclic topologies
+        // self-sustain). Idempotency (O1/D-5) is untouched — we simply stop
+        // dispatching commands that already succeeded (or were Rejected —
+        // re-dispatching those would re-fire on_command_rejected and emit
+        // duplicate immediate-rejection DLQ entries every retry).
+        //
+        // F4: filter by INDEX, not domain — one invocation may emit multiple
+        // commands to the same domain, and a succeeded/Rejected command must
+        // not ride along just because a sibling in its domain failed.
+        // Positions are relative to the CURRENT `self.commands`; the next
+        // `try_execute` pass repopulates `failed_indices` against the trimmed
+        // vec, so indices never go stale across attempts.
+        //
+        // `mem::take` hands ownership to the retain closure (avoiding a
+        // borrow conflict between `self.commands` and `self.failed_indices`)
+        // AND empties `failed_indices` for the next attempt — replacing the
+        // explicit clear the old code did here.
+        let failed_indices = std::mem::take(&mut self.failed_indices);
+        let mut position = 0usize;
+        self.commands.retain(|_| {
+            let keep = failed_indices.contains(&position);
+            position += 1;
+            keep
+        });
 
         Ok(())
     }
@@ -464,7 +516,7 @@ impl<'a> SagaRetryBuilder<'a> {
             correlation_id: self.correlation_id,
             sync_mode: self.sync_mode,
             commands: self.commands,
-            failed_domains: HashSet::new(),
+            failed_indices: HashSet::new(),
             tracker,
         };
 
@@ -517,15 +569,33 @@ pub async fn orchestrate_saga(
     if !output_domains.is_empty() {
         if let Some(fetcher) = fetcher {
             for domain in output_domains {
-                // Fetch by correlation_id to get current sequence for this workflow
-                if let Some(dest_book) = fetcher.fetch_by_correlation(domain, correlation_id).await
-                {
-                    destination_sequences.insert(domain.clone(), dest_book.next_sequence);
-                    debug!(%domain, next_seq = dest_book.next_sequence, "Fetched destination sequence");
-                } else {
-                    // Domain doesn't exist yet for this correlation - start at 0
-                    destination_sequences.insert(domain.clone(), 0);
-                    debug!(%domain, "Destination not found, using sequence 0");
+                // Fetch by correlation_id to get current sequence for this workflow.
+                //
+                // O9: only Ok(None) means "destination doesn't exist yet →
+                // sequence 0". A fetch ERROR must fail the whole orchestration
+                // attempt here — D-5 made this fetch load-bearing (handler-
+                // stamped explicit sequences come from this map), so defaulting
+                // to 0 on a transient gRPC blip would stamp commands against a
+                // fabricated destination sequence. Failing lets normal bus
+                // redelivery retry the saga.
+                match fetcher.fetch_by_correlation(domain, correlation_id).await {
+                    Ok(Some(dest_book)) => {
+                        destination_sequences.insert(domain.clone(), dest_book.next_sequence);
+                        debug!(%domain, next_seq = dest_book.next_sequence, "Fetched destination sequence");
+                    }
+                    Ok(None) => {
+                        // Domain doesn't exist yet for this correlation - start at 0
+                        destination_sequences.insert(domain.clone(), 0);
+                        debug!(%domain, "Destination not found, using sequence 0");
+                    }
+                    Err(e) => {
+                        error!(
+                            %domain,
+                            error = %e,
+                            "Destination sequence fetch failed; failing saga orchestration (O9)"
+                        );
+                        return Err(BusError::Grpc(e));
+                    }
                 }
             }
         } else {
@@ -543,7 +613,7 @@ pub async fn orchestrate_saga(
         .map_err(|e| BusError::Publish(e.to_string()))?;
 
     let mut commands = saga_response.commands;
-    let events = saga_response.events;
+    let mut events = saga_response.events;
 
     // Stamp angzarr_deferred on commands for provenance and compensation routing:
     //
@@ -677,6 +747,11 @@ pub async fn orchestrate_saga(
         });
     }
     if let Some(fact_exec) = fact_executor {
+        // O10: facts inherit the workflow correlation_id (like commands do in
+        // `SagaOperation::try_execute`) so downstream PMs don't skip them —
+        // an empty correlation on an injected fact means no correlated PM ever
+        // triggers on it.
+        fill_fact_correlation_id(&mut events, correlation_id);
         for fact in events {
             let domain = fact
                 .cover

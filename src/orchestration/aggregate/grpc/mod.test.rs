@@ -14,7 +14,7 @@ use crate::proto::Snapshot;
 use crate::repository::SnapshotRepository;
 use crate::storage::mock::{MockEventStore, MockSnapshotStore};
 use crate::storage::{AddMeta, SnapshotStore};
-use crate::test_utils::make_event_page;
+use crate::test_utils::{make_event_page, make_uncommitted_event_page};
 
 fn build_ctx_with_stores(
     event_store: Arc<MockEventStore>,
@@ -216,6 +216,411 @@ async fn test_load_explicit_divergence_falls_back_when_no_snapshot() {
 }
 
 // ============================================================================
+// O2: post_persist must NOT publish provisional (no_commit) pages to the bus
+// ============================================================================
+//
+// Cascade pages persisted with no_commit=true are PROVISIONAL — a later
+// Revocation may undo them (see cascade::reaper / two_phase). Publishing them
+// to the bus lets downstream async consumers observe a commit that may never
+// become real (a "phantom commit"). post_persist must publish only committed
+// pages; provisional pages are published later, at the confirmation point.
+
+/// Build a context wired to a MockEventBus we retain for assertions, plus an
+/// empty StaticServiceDiscovery so the sync projector/saga/PM fan-out is a
+/// no-op. sync_mode is left None: `should_skip_post_persist(None)` is false
+/// (only ISOLATED skips) so the bus publish runs, and
+/// `should_call_sync_projectors(None)` is false so no discovery is needed.
+fn build_ctx_with_bus() -> (GrpcAggregateContext, Arc<MockEventBus>) {
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store: Arc<MockSnapshotStore> = Arc::new(MockSnapshotStore::default());
+    let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store));
+    let bus = Arc::new(MockEventBus::new());
+    let ctx = GrpcAggregateContext::new(
+        event_store,
+        snapshot_repo,
+        Arc::new(StaticServiceDiscovery::new()),
+        bus.clone(),
+    );
+    (ctx, bus)
+}
+
+fn book_with_cover(pages: Vec<crate::proto::EventPage>) -> EventBook {
+    EventBook {
+        cover: Some(Cover {
+            domain: "orders".to_string(),
+            root: None,
+            correlation_id: String::new(),
+            edition: None,
+            ext: None,
+        }),
+        pages,
+        snapshot: None,
+        next_sequence: 0,
+    }
+}
+
+/// A fully provisional book (every page no_commit=true) must publish NOTHING —
+/// the whole book is an in-flight cascade that may still be revoked.
+#[tokio::test]
+async fn post_persist_suppresses_fully_provisional_book() {
+    use crate::orchestration::aggregate::traits::AggregateContext;
+    let (ctx, bus) = build_ctx_with_bus();
+
+    let provisional = book_with_cover(vec![
+        make_uncommitted_event_page(0, "cascade-x"),
+        make_uncommitted_event_page(1, "cascade-x"),
+    ]);
+    ctx.post_persist(&provisional).await.unwrap();
+
+    assert_eq!(
+        bus.published_count().await,
+        0,
+        "provisional (no_commit) pages must not be published — publishing them \
+         would be a phantom commit visible downstream before the cascade commits"
+    );
+}
+
+/// A fully committed book publishes normally (regression guard: the O2 filter
+/// must not suppress ordinary, non-cascade commits).
+#[tokio::test]
+async fn post_persist_publishes_committed_book() {
+    use crate::orchestration::aggregate::traits::AggregateContext;
+    let (ctx, bus) = build_ctx_with_bus();
+
+    let committed = book_with_cover(vec![make_event_page(0), make_event_page(1)]);
+    ctx.post_persist(&committed).await.unwrap();
+
+    let published = bus.take_published().await;
+    assert_eq!(published.len(), 1, "committed events must be published");
+    assert_eq!(
+        published[0].pages.len(),
+        2,
+        "all committed pages must reach the bus"
+    );
+}
+
+/// A mixed book publishes ONLY the committed pages — the filter is per-page,
+/// not all-or-nothing. Kills mutants that publish the whole book (or nothing)
+/// when any/all pages are provisional.
+#[tokio::test]
+async fn post_persist_publishes_only_committed_pages_from_mixed_book() {
+    use crate::orchestration::aggregate::traits::AggregateContext;
+    let (ctx, bus) = build_ctx_with_bus();
+
+    let mixed = book_with_cover(vec![
+        make_event_page(0),                          // committed
+        make_uncommitted_event_page(1, "cascade-y"), // provisional
+    ]);
+    ctx.post_persist(&mixed).await.unwrap();
+
+    let published = bus.take_published().await;
+    assert_eq!(published.len(), 1, "the committed page must be published");
+    assert_eq!(
+        published[0].pages.len(),
+        1,
+        "only the committed page is published; the provisional page is withheld"
+    );
+    assert!(
+        !published[0].pages[0].no_commit,
+        "the published page must be the committed one"
+    );
+}
+
+// ============================================================================
+// O2 carve-out: per-leg visibility of provisional pages in the sync fan-out
+// ============================================================================
+//
+// The three sync fan-out legs deliberately see DIFFERENT views of a book that
+// carries provisional (no_commit) pages:
+//
+//   - PROJECTOR leg: committed-only. Projectors write externally visible read
+//     models; a provisional page they consume may later be revoked, and there
+//     is NO framework path mapping a Revocation to a read-model undo. Same
+//     phantom-commit hazard as the bus publish, same filter.
+//   - SAGA / PM legs: FULL book, provisional pages included. In CASCADE mode
+//     these calls ARE the cascade's forward propagation — sagas/PMs react to
+//     the provisional events to emit the next aggregate's commands. Filtering
+//     here would halt every multi-aggregate cascade at its first hop.
+//
+// The tests below capture what each leg actually receives via in-process
+// tonic servers (same pattern as services/projector_coord.test.rs).
+
+use crate::proto::process_manager_coordinator_service_server::{
+    ProcessManagerCoordinatorService as PmCoordServiceTrait, ProcessManagerCoordinatorServiceServer,
+};
+use crate::proto::projector_coordinator_service_server::{
+    ProjectorCoordinatorService as ProjectorCoordServiceTrait, ProjectorCoordinatorServiceServer,
+};
+use crate::proto::saga_coordinator_service_server::{
+    SagaCoordinatorService as SagaCoordServiceTrait, SagaCoordinatorServiceServer,
+};
+use crate::proto::{
+    ProcessManagerHandleResponse, SagaResponse, SpeculatePmRequest, SpeculateProjectorRequest,
+    SpeculateSagaRequest,
+};
+
+/// Captures the EventRequest a projector coordinator receives from the sync
+/// projector leg.
+#[derive(Clone, Default)]
+struct CapturingProjectorServer {
+    requests: Arc<Mutex<Vec<EventRequest>>>,
+}
+
+#[tonic::async_trait]
+impl ProjectorCoordServiceTrait for CapturingProjectorServer {
+    async fn handle_sync(
+        &self,
+        request: tonic::Request<EventRequest>,
+    ) -> Result<tonic::Response<Projection>, Status> {
+        self.requests.lock().await.push(request.into_inner());
+        Ok(tonic::Response::new(Projection::default()))
+    }
+
+    async fn handle(
+        &self,
+        _request: tonic::Request<EventBook>,
+    ) -> Result<tonic::Response<()>, Status> {
+        Err(Status::unimplemented("not exercised by these tests"))
+    }
+
+    async fn handle_speculative(
+        &self,
+        _request: tonic::Request<SpeculateProjectorRequest>,
+    ) -> Result<tonic::Response<Projection>, Status> {
+        Err(Status::unimplemented("not exercised by these tests"))
+    }
+}
+
+/// Captures the SagaHandleRequest a saga coordinator receives from the
+/// CASCADE saga leg.
+#[derive(Clone, Default)]
+struct CapturingSagaServer {
+    requests: Arc<Mutex<Vec<SagaHandleRequest>>>,
+}
+
+#[tonic::async_trait]
+impl SagaCoordServiceTrait for CapturingSagaServer {
+    async fn execute(
+        &self,
+        request: tonic::Request<SagaHandleRequest>,
+    ) -> Result<tonic::Response<SagaResponse>, Status> {
+        self.requests.lock().await.push(request.into_inner());
+        Ok(tonic::Response::new(SagaResponse::default()))
+    }
+
+    async fn execute_speculative(
+        &self,
+        _request: tonic::Request<SpeculateSagaRequest>,
+    ) -> Result<tonic::Response<SagaResponse>, Status> {
+        Err(Status::unimplemented("not exercised by these tests"))
+    }
+}
+
+/// Captures the ProcessManagerCoordinatorRequest a PM coordinator receives
+/// from the CASCADE PM leg.
+#[derive(Clone, Default)]
+struct CapturingPmServer {
+    requests: Arc<Mutex<Vec<ProcessManagerCoordinatorRequest>>>,
+}
+
+#[tonic::async_trait]
+impl PmCoordServiceTrait for CapturingPmServer {
+    async fn handle(
+        &self,
+        request: tonic::Request<ProcessManagerCoordinatorRequest>,
+    ) -> Result<tonic::Response<ProcessManagerHandleResponse>, Status> {
+        self.requests.lock().await.push(request.into_inner());
+        Ok(tonic::Response::new(ProcessManagerHandleResponse::default()))
+    }
+
+    async fn handle_speculative(
+        &self,
+        _request: tonic::Request<SpeculatePmRequest>,
+    ) -> Result<tonic::Response<ProcessManagerHandleResponse>, Status> {
+        Err(Status::unimplemented("not exercised by these tests"))
+    }
+}
+
+/// Bind an ephemeral local port and return (listener, port). The caller adds
+/// services and serves on the listener (pattern from projector_coord.test.rs).
+async fn bind_ephemeral() -> (tokio::net::TcpListener, u16) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
+}
+
+/// O2 carve-out (projector half): a mixed committed/provisional book must
+/// reach the sync PROJECTOR leg with ONLY the committed pages. Kills the
+/// mutant/regression where `post_persist` hands projectors the raw `events`
+/// book — which would let a read model materialize a provisional page that a
+/// later Revocation undoes, with no framework path to un-project it.
+#[tokio::test]
+async fn post_persist_projector_leg_receives_only_committed_pages() {
+    use crate::orchestration::aggregate::traits::AggregateContext;
+
+    // In-process projector coordinator capturing what it is sent.
+    let projector = CapturingProjectorServer::default();
+    let captured = projector.requests.clone();
+    let (listener, port) = bind_ephemeral().await;
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(ProjectorCoordinatorServiceServer::new(projector))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let discovery = Arc::new(StaticServiceDiscovery::new());
+    discovery
+        .register_projector("prj-capture", "orders", "127.0.0.1", port)
+        .await;
+
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_repo = Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new())));
+    let ctx = GrpcAggregateContext::new(
+        event_store,
+        snapshot_repo,
+        discovery,
+        Arc::new(MockEventBus::new()),
+    )
+    // SIMPLE runs the projector leg but not the saga/PM legs — isolates the
+    // projector-side assertion.
+    .with_sync_mode(crate::proto::SyncMode::Simple);
+
+    let mixed = book_with_cover(vec![
+        make_event_page(0),                          // committed
+        make_uncommitted_event_page(1, "cascade-p"), // provisional
+    ]);
+    ctx.post_persist(&mixed).await.unwrap();
+
+    let requests = captured.lock().await;
+    assert_eq!(requests.len(), 1, "projector must be called exactly once");
+    let sent = requests[0]
+        .events
+        .as_ref()
+        .expect("projector EventRequest must carry events");
+    assert_eq!(
+        sent.pages.len(),
+        1,
+        "projector must receive ONLY the committed page; sending the \
+         provisional page would materialize a phantom commit in a read model"
+    );
+    assert!(
+        !sent.pages[0].no_commit,
+        "the page the projector receives must be the committed one"
+    );
+}
+
+/// O2 carve-out PIN (saga/PM half): the saga and PM legs must receive the
+/// FULL book INCLUDING provisional (no_commit) pages.
+///
+/// WHY THIS PIN EXISTS: this is a deliberate carve-out from the O2
+/// phantom-commit filter, not an oversight. In CASCADE mode the sync
+/// saga/PM calls are the cascade's forward propagation — the saga/PM reads
+/// the provisional events of the current hop to emit the commands that drive
+/// the NEXT hop, all before anything is confirmed. Filtering no_commit pages
+/// out of these legs (e.g. by a future "consistency" refactor that reuses the
+/// projector/bus filter here) would silently halt every multi-aggregate
+/// cascade at its first hop: the saga would see an empty/committed-only book
+/// and never produce the follow-on commands. The review explicitly flagged
+/// that nothing pinned this behavior; this test is that pin.
+#[tokio::test]
+async fn post_persist_saga_and_pm_legs_receive_full_book_including_provisional() {
+    use crate::orchestration::aggregate::traits::AggregateContext;
+
+    // One in-process server hosting BOTH coordinator services.
+    let saga = CapturingSagaServer::default();
+    let pm = CapturingPmServer::default();
+    let saga_captured = saga.requests.clone();
+    let pm_captured = pm.requests.clone();
+    let (listener, port) = bind_ephemeral().await;
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(SagaCoordinatorServiceServer::new(saga))
+            .add_service(ProcessManagerCoordinatorServiceServer::new(pm))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let discovery = Arc::new(StaticServiceDiscovery::new());
+    discovery
+        .register_saga("saga-orders-capture", "orders", "127.0.0.1", port)
+        .await;
+    discovery
+        .register_pm("pm-capture", &["orders"], "127.0.0.1", port)
+        .await;
+    // No projectors registered: the projector leg no-ops (empty client list),
+    // keeping this test focused on the saga/PM carve-out.
+
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_repo = Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new())));
+    let ctx = GrpcAggregateContext::new(
+        event_store,
+        snapshot_repo,
+        discovery,
+        Arc::new(MockEventBus::new()),
+    )
+    .with_sync_mode(crate::proto::SyncMode::Cascade);
+
+    // Cover needs a correlation_id: the PM leg skips books without one.
+    let mixed = EventBook {
+        cover: Some(Cover {
+            domain: "orders".to_string(),
+            root: None,
+            correlation_id: "corr-cascade".to_string(),
+            edition: None,
+            ext: None,
+        }),
+        pages: vec![
+            make_event_page(0),                          // committed
+            make_uncommitted_event_page(1, "cascade-q"), // provisional
+        ],
+        snapshot: None,
+        next_sequence: 0,
+    };
+    ctx.post_persist(&mixed).await.unwrap();
+
+    // Saga leg: full book, provisional page intact.
+    let saga_requests = saga_captured.lock().await;
+    assert_eq!(saga_requests.len(), 1, "saga must be called exactly once");
+    let saga_book = saga_requests[0]
+        .source
+        .as_ref()
+        .expect("SagaHandleRequest must carry source events");
+    assert_eq!(
+        saga_book.pages.len(),
+        2,
+        "saga must receive the FULL book (committed + provisional); filtering \
+         would break cascade forward propagation"
+    );
+    assert!(
+        saga_book.pages.iter().any(|p| p.no_commit),
+        "the provisional page must reach the saga with no_commit intact"
+    );
+
+    // PM leg: full book, provisional page intact.
+    let pm_requests = pm_captured.lock().await;
+    assert_eq!(pm_requests.len(), 1, "PM must be called exactly once");
+    let pm_book = pm_requests[0]
+        .trigger
+        .as_ref()
+        .expect("ProcessManagerCoordinatorRequest must carry trigger events");
+    assert_eq!(
+        pm_book.pages.len(),
+        2,
+        "PM must receive the FULL book (committed + provisional); filtering \
+         would break cascade forward propagation"
+    );
+    assert!(
+        pm_book.pages.iter().any(|p| p.no_commit),
+        "the provisional page must reach the PM with no_commit intact"
+    );
+}
+
+// ============================================================================
 // publish_aggregate_sequence_mismatch_dlq (R2-15 step 4 seam, refactored
 // 2026-05-27 to be testable without a full GrpcAggregateContext)
 // ============================================================================
@@ -301,6 +706,198 @@ async fn publish_aggregate_sequence_mismatch_dlq_builds_correct_shape() {
         }
         other => panic!("expected SequenceMismatch details, got {other:?}"),
     }
+}
+
+// ============================================================================
+// O5: snapshot persistence is best-effort — its failure must never fail an
+// already-persisted command
+// ============================================================================
+//
+// persist_events commits the new event pages FIRST, then writes the snapshot.
+// Events are the source of truth; the snapshot is derived, rebuildable state.
+// Pre-fix, a snapshot-store blip after the events committed `?`-propagated as
+// `Status::internal` — retryable per retry.rs — so the retry wrapper re-entered
+// the pipeline with events already stored and never published: spurious
+// retry-exhaust (STRICT), spurious DLQ (MANUAL), or a genuine double-apply
+// (AGGREGATE_HANDLES re-runs the handler against state containing its own
+// events).
+
+/// SnapshotStore double whose `put` always fails; reads/deletes delegate to an
+/// inner MockSnapshotStore. Models a snapshot-store blip at exactly the wrong
+/// moment: after the events committed.
+struct FailingPutSnapshotStore {
+    inner: MockSnapshotStore,
+}
+
+#[async_trait]
+impl SnapshotStore for FailingPutSnapshotStore {
+    async fn get(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+    ) -> crate::storage::Result<Option<Snapshot>> {
+        self.inner.get(domain, edition, root).await
+    }
+
+    async fn get_at_seq(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        seq: u32,
+    ) -> crate::storage::Result<Option<Snapshot>> {
+        self.inner.get_at_seq(domain, edition, root, seq).await
+    }
+
+    async fn put(
+        &self,
+        _domain: &str,
+        _edition: &str,
+        _root: Uuid,
+        _snapshot: Snapshot,
+    ) -> crate::storage::Result<()> {
+        Err(StorageError::Backend(
+            "injected snapshot put failure".to_string(),
+        ))
+    }
+
+    async fn delete(&self, domain: &str, edition: &str, root: Uuid) -> crate::storage::Result<()> {
+        self.inner.delete(domain, edition, root).await
+    }
+}
+
+/// EventBook carrying `pages` plus a client-supplied snapshot state (the
+/// "snapshot me here" signal that makes persist_events attempt the write).
+fn book_with_snapshot_state(pages: Vec<crate::proto::EventPage>) -> EventBook {
+    EventBook {
+        cover: None, // persist_events builds the cover from its parameters
+        pages,
+        snapshot: Some(Snapshot {
+            sequence: 0, // recomputed by the persist helper
+            state: Some(prost_types::Any {
+                type_url: "test.State".to_string(),
+                value: vec![1, 2, 3],
+            }),
+            retention: crate::proto::SnapshotRetention::RetentionDefault as i32,
+            created_at: None,
+        }),
+        ..Default::default()
+    }
+}
+
+/// O5 core contract: once the events committed, the command HAS succeeded.
+/// A snapshot-store failure after that point must be swallowed (logged) —
+/// persist_events returns Ok(Persisted) and the events remain durably stored.
+/// Pre-fix this returned a retryable Internal error, re-running the command
+/// on top of its own already-persisted events.
+#[tokio::test]
+async fn persist_events_snapshot_put_failure_does_not_fail_command() {
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(FailingPutSnapshotStore {
+        inner: MockSnapshotStore::new(),
+    });
+    let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store));
+    let ctx = GrpcAggregateContext::new(
+        event_store.clone(),
+        snapshot_repo,
+        Arc::new(StaticServiceDiscovery::new()),
+        Arc::new(MockEventBus::new()),
+    );
+    let root = Uuid::new_v4();
+
+    let prior = EventBook::default();
+    let received = book_with_snapshot_state(vec![make_event_page(0)]);
+
+    let outcome = ctx
+        .persist_events(&prior, &received, "orders", "", root, "corr-o5", None, None)
+        .await
+        .expect("snapshot put failure must NOT fail the command — events already committed");
+
+    match outcome {
+        PersistOutcome::Persisted(book) => {
+            assert_eq!(book.pages.len(), 1, "the new event page is the outcome");
+        }
+        other => panic!("expected Persisted, got {other:?}"),
+    }
+    let stored = event_store.get("orders", "", root).await.unwrap();
+    assert_eq!(
+        stored.len(),
+        1,
+        "events must be durably persisted despite the snapshot blip"
+    );
+}
+
+/// Best-effort applies to snapshot-only updates too (no new events, changed
+/// snapshot state). Snapshots never carry new facts — all state is derivable
+/// from already-persisted events — so their write failure is never a command
+/// error; the snapshot is simply rewritten on the next state change.
+#[tokio::test]
+async fn persist_events_snapshot_only_update_put_failure_returns_ok() {
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(FailingPutSnapshotStore {
+        inner: MockSnapshotStore::new(),
+    });
+    let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store));
+    let ctx = GrpcAggregateContext::new(
+        event_store,
+        snapshot_repo,
+        Arc::new(StaticServiceDiscovery::new()),
+        Arc::new(MockEventBus::new()),
+    );
+    let root = Uuid::new_v4();
+
+    // Prior already holds events 0..2; received repeats them (no new pages)
+    // and adds only a snapshot state.
+    let prior = EventBook {
+        pages: vec![make_event_page(0), make_event_page(1)],
+        ..Default::default()
+    };
+    let received = book_with_snapshot_state(vec![make_event_page(0), make_event_page(1)]);
+
+    let outcome = ctx
+        .persist_events(
+            &prior, &received, "orders", "", root, "corr-o5b", None, None,
+        )
+        .await
+        .expect("snapshot-only put failure must not surface as a command error");
+    match outcome {
+        PersistOutcome::Persisted(book) => {
+            assert!(
+                book.pages.is_empty(),
+                "no new pages in a snapshot-only update"
+            );
+        }
+        other => panic!("expected Persisted, got {other:?}"),
+    }
+}
+
+/// Regression guard: the swallow is for SNAPSHOT failures only. An
+/// events-persist failure happens BEFORE anything is durable — the command
+/// has NOT succeeded — so it must still propagate (and stay retryable).
+#[tokio::test]
+async fn persist_events_event_store_failure_still_propagates() {
+    let event_store = Arc::new(MockEventStore::new());
+    event_store.set_fail_on_add(true).await;
+    let snapshot_store: Arc<MockSnapshotStore> = Arc::new(MockSnapshotStore::new());
+    let ctx = build_ctx_with_stores(event_store, snapshot_store);
+    let root = Uuid::new_v4();
+
+    let prior = EventBook::default();
+    let received = book_with_snapshot_state(vec![make_event_page(0)]);
+
+    let err = ctx
+        .persist_events(
+            &prior, &received, "orders", "", root, "corr-o5c", None, None,
+        )
+        .await
+        .expect_err("events-persist failure must fail the command");
+    assert_eq!(err.code(), tonic::Code::Internal);
+    assert!(
+        err.message().contains("Failed to persist events"),
+        "must be the events-persist error, not a snapshot error: {}",
+        err.message()
+    );
 }
 
 /// `send_to_dlq` on the full `GrpcAggregateContext` delegates to the

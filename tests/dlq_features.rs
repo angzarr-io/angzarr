@@ -922,15 +922,15 @@ async fn run_pm(
 struct NoOpDestFetcher;
 #[async_trait]
 impl DestinationFetcher for NoOpDestFetcher {
-    async fn fetch(&self, _cover: &Cover) -> Option<EventBook> {
-        None
+    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(None)
     }
     async fn fetch_by_correlation(
         &self,
         _domain: &str,
         _correlation_id: &str,
-    ) -> Option<EventBook> {
-        None
+    ) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(None)
     }
 }
 

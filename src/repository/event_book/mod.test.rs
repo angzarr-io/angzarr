@@ -182,6 +182,439 @@ async fn test_get_from_to_returns_range() {
 }
 
 // ============================================================================
+// Two-Phase Visibility Tests (F3)
+// ============================================================================
+//
+// WHY this section exists: cascades write provisional pages with
+// `no_commit=true`; `post_persist` (O2) suppresses them from bus publishes,
+// which leaves sequence holes that gap-fill consumers backfill through
+// `get_from_to` / `get_sequences`. Before the F3 fix those reads returned
+// the RAW stream, so a consumer backfilling a hole received revoked or
+// still-pending business events as if live — the exact phantom O2 closed
+// at the front door, reintroduced through the back door. These tests pin
+// the repository-seam invariant: no reader outside cascade propagation may
+// see raw unresolved `no_commit` pages.
+
+mod two_phase_visibility {
+    use super::*;
+    use crate::proto::{Confirmation, NoOp, Revocation};
+    use crate::proto_ext::type_url;
+    use crate::storage::EventStore;
+    use crate::test_utils::make_uncommitted_event_page;
+    use prost::Message;
+
+    const CASCADE: &str = "cascade-f3";
+
+    fn add_meta() -> AddMeta<'static> {
+        AddMeta {
+            correlation_id: "",
+            external_id: None,
+            source_info: None,
+            ext: None,
+        }
+    }
+
+    /// Committed Revocation marker page revoking `revoked` sequences.
+    fn make_revocation_page(seq: u32, revoked: Vec<u32>) -> EventPage {
+        let rev = Revocation {
+            target: None,
+            sequences: revoked,
+            cascade_id: CASCADE.to_string(),
+            reason: "reaper-timeout".to_string(),
+        };
+        EventPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::Sequence(seq)),
+            }),
+            payload: Some(event_page::Payload::Event(prost_types::Any {
+                type_url: type_url::REVOCATION.to_string(),
+                value: rev.encode_to_vec(),
+            })),
+            ..Default::default()
+        }
+    }
+
+    /// Committed Confirmation marker page confirming `confirmed` sequences.
+    fn make_confirmation_page(seq: u32, confirmed: Vec<u32>) -> EventPage {
+        let conf = Confirmation {
+            target: None,
+            sequences: confirmed,
+            cascade_id: CASCADE.to_string(),
+        };
+        EventPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::Sequence(seq)),
+            }),
+            payload: Some(event_page::Payload::Event(prost_types::Any {
+                type_url: type_url::CONFIRMATION.to_string(),
+                value: conf.encode_to_vec(),
+            })),
+            ..Default::default()
+        }
+    }
+
+    /// Assert a page is a sequence-preserving NoOp placeholder with the
+    /// given transform reason. Sequence preservation matters: it keeps
+    /// gap-filled books contiguous so consumers' checkpoints advance
+    /// instead of re-fetching the same hole forever.
+    fn assert_noop_placeholder(page: &EventPage, expected_seq: u32, expected_reason: &str) {
+        assert_eq!(
+            page.sequence_num(),
+            expected_seq,
+            "placeholder must preserve the original sequence"
+        );
+        assert!(
+            !page.no_commit,
+            "placeholder must not itself be provisional"
+        );
+        let any = match page.payload.as_ref() {
+            Some(event_page::Payload::Event(any)) => any,
+            other => panic!("expected Event payload, got {other:?}"),
+        };
+        assert_eq!(
+            any.type_url,
+            type_url::NOOP,
+            "withheld page must surface as a NoOp placeholder, not the business event"
+        );
+        let noop = NoOp::decode(any.value.as_slice()).expect("NoOp must decode");
+        assert_eq!(noop.reason, expected_reason);
+        assert_eq!(noop.original_sequence, expected_seq);
+    }
+
+    /// Extract the payload type_url of a page (panics on non-Event payload).
+    fn payload_type_url(page: &EventPage) -> &str {
+        match page.payload.as_ref() {
+            Some(event_page::Payload::Event(any)) => &any.type_url,
+            other => panic!("expected Event payload, got {other:?}"),
+        }
+    }
+
+    /// Seed the store with committed events 0..=4 followed by the extra
+    /// pages, all in one stream.
+    async fn seed(event_store: &MockEventStore, root: Uuid, extra: Vec<EventPage>) {
+        let mut pages: Vec<EventPage> = (0..5).map(make_event_page).collect();
+        pages.extend(extra);
+        event_store
+            .add("orders", "test", root, pages, &add_meta())
+            .await
+            .unwrap();
+    }
+
+    fn setup() -> (EventBookRepository, Arc<MockEventStore>) {
+        let event_store = Arc::new(MockEventStore::new());
+        let repo = make_repo(event_store.clone(), Arc::new(MockSnapshotStore::new()));
+        (repo, event_store)
+    }
+
+    /// F3 scenario, marker outside the fetched range: cascade wrote 5-6
+    /// provisional (suppressed from the bus), nothing has resolved them
+    /// yet, and a gap-filling consumer backfills [3, 7). The committed
+    /// prefix must flow; the pending pages must be withheld as
+    /// placeholders — they will arrive via the bus on confirmation, the
+    /// same contract as the post_persist suppression at the front door.
+    #[tokio::test]
+    async fn test_get_from_to_withholds_unresolved_provisional_pages() {
+        let (repo, event_store) = setup();
+        let root = Uuid::new_v4();
+        seed(
+            &event_store,
+            root,
+            vec![
+                make_uncommitted_event_page(5, CASCADE),
+                make_uncommitted_event_page(6, CASCADE),
+            ],
+        )
+        .await;
+
+        let book = repo
+            .get_from_to("orders", "test", root, 3, 7)
+            .await
+            .unwrap();
+
+        assert_eq!(book.pages.len(), 4, "range [3,7) must stay contiguous");
+        assert_eq!(payload_type_url(&book.pages[0]), "test.Event3");
+        assert_eq!(payload_type_url(&book.pages[1]), "test.Event4");
+        assert_noop_placeholder(&book.pages[2], 5, "uncommitted");
+        assert_noop_placeholder(&book.pages[3], 6, "uncommitted");
+    }
+
+    /// F3 exact failure mode: reaper revoked 5-6 via a marker at 7. A
+    /// backfill of [5, 8) must NOT deliver the revoked business events as
+    /// live — pre-fix, this returned the raw pages and consumers replayed
+    /// a cancelled cascade.
+    #[tokio::test]
+    async fn test_get_from_to_withholds_revoked_pages() {
+        let (repo, event_store) = setup();
+        let root = Uuid::new_v4();
+        seed(
+            &event_store,
+            root,
+            vec![
+                make_uncommitted_event_page(5, CASCADE),
+                make_uncommitted_event_page(6, CASCADE),
+                make_revocation_page(7, vec![5, 6]),
+            ],
+        )
+        .await;
+
+        let book = repo
+            .get_from_to("orders", "test", root, 5, 8)
+            .await
+            .unwrap();
+
+        assert_eq!(book.pages.len(), 3);
+        assert_noop_placeholder(&book.pages[0], 5, "revoked");
+        assert_noop_placeholder(&book.pages[1], 6, "revoked");
+        // The marker itself is framework plumbing, not a business event.
+        assert_noop_placeholder(&book.pages[2], 7, "framework_event");
+        // Belt and braces: no business payload survives anywhere.
+        assert!(
+            book.pages
+                .iter()
+                .all(|p| !payload_type_url(p).starts_with("test.Event")),
+            "revoked business events must never flow"
+        );
+    }
+
+    /// Confirmed provisional pages are RESOLVED, not withheld: once a
+    /// Confirmation marker covers them they are committed history and must
+    /// flow with their original payloads — matching the front door, which
+    /// publishes suppressed pages on confirmation.
+    #[tokio::test]
+    async fn test_get_from_to_delivers_confirmed_provisional_pages() {
+        let (repo, event_store) = setup();
+        let root = Uuid::new_v4();
+        seed(
+            &event_store,
+            root,
+            vec![
+                make_uncommitted_event_page(5, CASCADE),
+                make_uncommitted_event_page(6, CASCADE),
+                make_confirmation_page(7, vec![5, 6]),
+            ],
+        )
+        .await;
+
+        let book = repo
+            .get_from_to("orders", "test", root, 5, 8)
+            .await
+            .unwrap();
+
+        assert_eq!(book.pages.len(), 3);
+        assert_eq!(payload_type_url(&book.pages[0]), "test.Event5");
+        assert_eq!(payload_type_url(&book.pages[1]), "test.Event6");
+        assert_eq!(book.pages[0].sequence_num(), 5);
+        assert_eq!(book.pages[1].sequence_num(), 6);
+        assert_noop_placeholder(&book.pages[2], 7, "framework_event");
+    }
+
+    /// Regression guard for 2PC machinery: the deliberately-raw path must
+    /// keep returning provisional pages and markers exactly as stored —
+    /// marker inspection and cascade tooling break if the transform leaks
+    /// into `get_from_to_raw`.
+    #[tokio::test]
+    async fn test_get_from_to_raw_returns_raw_provisional_pages_and_markers() {
+        let (repo, event_store) = setup();
+        let root = Uuid::new_v4();
+        seed(
+            &event_store,
+            root,
+            vec![
+                make_uncommitted_event_page(5, CASCADE),
+                make_uncommitted_event_page(6, CASCADE),
+                make_revocation_page(7, vec![5, 6]),
+            ],
+        )
+        .await;
+
+        let book = repo
+            .get_from_to_raw("orders", "test", root, 5, 8)
+            .await
+            .unwrap();
+
+        assert_eq!(book.pages.len(), 3);
+        assert!(book.pages[0].no_commit, "raw path must keep no_commit");
+        assert!(book.pages[1].no_commit, "raw path must keep no_commit");
+        assert_eq!(payload_type_url(&book.pages[0]), "test.Event5");
+        assert_eq!(payload_type_url(&book.pages[1]), "test.Event6");
+        assert_eq!(
+            payload_type_url(&book.pages[2]),
+            type_url::REVOCATION,
+            "raw path must keep the marker readable"
+        );
+        assert_eq!(
+            book.pages[0].cascade_id.as_deref(),
+            Some(CASCADE),
+            "raw path must keep cascade attribution"
+        );
+
+        // Book assembly guards: the raw book must stay self-describing —
+        // cascade tooling routes on the cover's (domain, root, edition) —
+        // and must never attach a snapshot (raw range reads exist for
+        // marker inspection, not state rebuilding).
+        let cover = book.cover.as_ref().expect("raw book must carry a cover");
+        assert_eq!(cover.domain, "orders");
+        assert_eq!(
+            cover.root.as_ref().map(|r| r.value.clone()),
+            Some(root.as_bytes().to_vec())
+        );
+        assert_eq!(
+            cover.edition.as_ref().map(|e| e.name.as_str()),
+            Some("test")
+        );
+        assert!(
+            book.snapshot.is_none(),
+            "raw range reads never attach a snapshot"
+        );
+    }
+
+    /// A fully-committed range is untouched by the visibility transform:
+    /// resolved and raw reads must be byte-identical. Guards against the
+    /// transform mangling ordinary history (the overwhelmingly common
+    /// case) while closing F3.
+    #[tokio::test]
+    async fn test_get_from_to_fully_committed_range_identical_to_raw() {
+        let (repo, event_store) = setup();
+        let root = Uuid::new_v4();
+        // seed() writes committed 0..=4 with no extras.
+        seed(&event_store, root, vec![]).await;
+
+        let resolved = repo
+            .get_from_to("orders", "test", root, 1, 4)
+            .await
+            .unwrap();
+        let raw = repo
+            .get_from_to_raw("orders", "test", root, 1, 4)
+            .await
+            .unwrap();
+
+        assert_eq!(resolved.pages, raw.pages);
+        assert_eq!(resolved.next_sequence, raw.next_sequence);
+        assert_eq!(resolved.pages.len(), 3); // 1, 2, 3
+    }
+
+    /// Sparse `get_sequences` must resolve against the FULL stream before
+    /// filtering: the Revocation marker at 7 is NOT in the requested set,
+    /// but it still governs the visibility of 5 and 6. Filtering first
+    /// would drop the marker and leak (or misclassify) the revoked pages.
+    #[tokio::test]
+    async fn test_get_sequences_sparse_resolves_markers_outside_requested_set() {
+        let (repo, event_store) = setup();
+        let root = Uuid::new_v4();
+        seed(
+            &event_store,
+            root,
+            vec![
+                make_uncommitted_event_page(5, CASCADE),
+                make_uncommitted_event_page(6, CASCADE),
+                make_revocation_page(7, vec![5, 6]),
+            ],
+        )
+        .await;
+
+        // {0, 5, 6} is non-contiguous → exercises the sparse path.
+        let book = repo
+            .get_sequences("orders", "test", root, &[0, 5, 6])
+            .await
+            .unwrap();
+
+        assert_eq!(book.pages.len(), 3);
+        assert_eq!(payload_type_url(&book.pages[0]), "test.Event0");
+        assert_noop_placeholder(&book.pages[1], 5, "revoked");
+        assert_noop_placeholder(&book.pages[2], 6, "revoked");
+
+        // Book assembly guards: the sparse path builds its own book after
+        // filtering — it must still carry the identifying cover (consumers
+        // route gap-filled books by it) and never attach a snapshot
+        // (get_sequences does not consult the snapshot repository).
+        let cover = book.cover.as_ref().expect("sparse book must carry a cover");
+        assert_eq!(cover.domain, "orders");
+        assert_eq!(
+            cover.root.as_ref().map(|r| r.value.clone()),
+            Some(root.as_bytes().to_vec())
+        );
+        assert_eq!(
+            cover.edition.as_ref().map(|e| e.name.as_str()),
+            Some("test")
+        );
+        assert!(
+            book.snapshot.is_none(),
+            "sequence reads never attach a snapshot"
+        );
+    }
+
+    /// The contiguous fast path is detected by `max - min + 1 == len` and
+    /// delegates to the WINDOWED range read `get_from_to(min, max+1)`,
+    /// whose marker visibility is bounded by that window. This test pins
+    /// the arithmetic (and thus which path runs) for a min > 0 request —
+    /// where `max + min + 1` would misclassify a contiguous request as
+    /// sparse: the Confirmation marker at 7 sits OUTSIDE the requested
+    /// window [4,7), so the range read fails safe and withholds 5-6 as
+    /// "uncommitted" placeholders (their payloads arrive via the bus on
+    /// confirmation). The sparse path resolves against the FULL stream and
+    /// would deliver the confirmed payloads early — silently changing the
+    /// documented range-read contract and paying an O(all events) fetch.
+    #[tokio::test]
+    async fn test_get_sequences_contiguous_window_bounds_marker_visibility() {
+        let (repo, event_store) = setup();
+        let root = Uuid::new_v4();
+        seed(
+            &event_store,
+            root,
+            vec![
+                make_uncommitted_event_page(5, CASCADE),
+                make_uncommitted_event_page(6, CASCADE),
+                make_confirmation_page(7, vec![5, 6]),
+            ],
+        )
+        .await;
+
+        // {4, 5, 6}: contiguous with min > 0 → must take the range path
+        // and see only the [4, 7) window (marker at 7 excluded).
+        let book = repo
+            .get_sequences("orders", "test", root, &[4, 5, 6])
+            .await
+            .unwrap();
+
+        assert_eq!(book.pages.len(), 3);
+        assert_eq!(payload_type_url(&book.pages[0]), "test.Event4");
+        assert_noop_placeholder(&book.pages[1], 5, "uncommitted");
+        assert_noop_placeholder(&book.pages[2], 6, "uncommitted");
+    }
+
+    /// Contiguous `get_sequences` delegates to the resolved range read, so
+    /// unresolved provisional pages are withheld there too — the two
+    /// internal paths of `get_sequences` must not diverge on visibility.
+    #[tokio::test]
+    async fn test_get_sequences_contiguous_withholds_unresolved_provisional() {
+        let (repo, event_store) = setup();
+        let root = Uuid::new_v4();
+        seed(
+            &event_store,
+            root,
+            vec![
+                make_uncommitted_event_page(5, CASCADE),
+                make_uncommitted_event_page(6, CASCADE),
+            ],
+        )
+        .await;
+
+        // {4, 5, 6} is contiguous → exercises the range fast path.
+        let book = repo
+            .get_sequences("orders", "test", root, &[4, 5, 6])
+            .await
+            .unwrap();
+
+        assert_eq!(book.pages.len(), 3);
+        assert_eq!(payload_type_url(&book.pages[0]), "test.Event4");
+        assert_noop_placeholder(&book.pages[1], 5, "uncommitted");
+        assert_noop_placeholder(&book.pages[2], 6, "uncommitted");
+    }
+}
+
+// ============================================================================
 // Error Handling Tests
 // ============================================================================
 

@@ -267,9 +267,19 @@ fn make_noop_with_cascade(page: &EventPage, cascade_id: &str, reason: &str) -> E
 }
 
 /// Check if an event page is a NoOp placeholder.
+///
+/// O15: recognize a NoOp by its fully-qualified proto name (via
+/// [`is_framework_event_kind`]), NOT by exact `type_url` string equality.
+/// `make_noop*` stamps the bare canonical `type_url::NOOP`
+/// (`/io.angzarr.v1.NoOp`), but a NoOp `Any` that arrives with a different
+/// resolver prefix — e.g. a cross-language producer's
+/// `type.googleapis.com/io.angzarr.v1.NoOp`, or a round-tripped Any — must
+/// still be identified as a NoOp. Exact-equality missed those and treated a
+/// placeholder as a live business event, exactly the prefix-sensitivity that
+/// `is_framework_event`/`matches_kind` already avoid.
 pub fn is_noop(page: &EventPage) -> bool {
     if let Some(event_page::Payload::Event(any)) = &page.payload {
-        any.type_url == type_url::NOOP
+        is_framework_event_kind(any, "io.angzarr.v1.NoOp")
     } else {
         false
     }

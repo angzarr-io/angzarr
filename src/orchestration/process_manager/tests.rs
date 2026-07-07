@@ -92,20 +92,21 @@ impl ProcessManagerContext for PmWithEvents {
     }
 }
 
-/// Destination fetcher that returns no state — simulates missing aggregates.
+/// Destination fetcher that returns no state — simulates missing aggregates
+/// (Ok(None) = the store answered and genuinely holds nothing).
 struct NoOpFetcher;
 
 #[async_trait]
 impl DestinationFetcher for NoOpFetcher {
-    async fn fetch(&self, _cover: &Cover) -> Option<EventBook> {
-        None
+    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(None)
     }
     async fn fetch_by_correlation(
         &self,
         _domain: &str,
         _correlation_id: &str,
-    ) -> Option<EventBook> {
-        None
+    ) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(None)
     }
 }
 
@@ -1424,5 +1425,507 @@ async fn test_pm_honors_handler_stamped_explicit_sequence() {
         header.sequence_type,
         Some(SequenceType::Sequence(9)),
         "handler-stamped explicit sequence must travel to the destination untouched (D-5)"
+    );
+}
+
+/// A handler-stamped `AngzarrDeferred` entry is MERGED, not replaced: its
+/// `source` cover and `source_seq` (the handler's own provenance claim —
+/// e.g. re-attributing a compensating command to the PM state that made the
+/// original decision) survive the rewrite, while the framework still stamps
+/// what it alone owns — `source_component` and `command_index` (the O1
+/// idempotency-key parts). If this match arm fell through to the default
+/// arm, the handler's provenance would be silently overwritten with the PM
+/// cover + current `pm_source_seq`, so a later rejection would compensate
+/// against the WRONG source state.
+#[tokio::test]
+async fn test_pm_preserves_handler_stamped_deferred_source_and_seq() {
+    let upstream_cover = Cover {
+        domain: "upstream-agg".to_string(),
+        root: Some(ProtoUuid {
+            value: vec![0xAB; 16],
+        }),
+        correlation_id: "corr-1".to_string(),
+        edition: None,
+        ext: None,
+    };
+    let ctx = PmEmittingHeaders {
+        headers: vec![Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(SequenceType::AngzarrDeferred(AngzarrDeferredSequence {
+                source: Some(upstream_cover.clone()),
+                // Distinct from pm_source_seq (0 here: no PM state, no PM
+                // events) so an overwrite is observable.
+                source_seq: 7,
+                // Handler-scribbled values for the framework-owned fields:
+                // these MUST be normalized by the rewrite.
+                source_component: "handler-scribble".to_string(),
+                command_index: 99,
+            })),
+        })],
+    };
+    let executor = BookCapturingExecutor::new();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger_event(),
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async,
+        fast_backoff(),
+    )
+    .await;
+    assert!(result.is_ok(), "orchestrate_pm should succeed");
+
+    let captured = executor.seen.lock().await;
+    assert_eq!(captured.len(), 1);
+    let deferred = captured_deferred(&captured[0]);
+
+    // Handler-owned provenance survives the rewrite.
+    assert_eq!(
+        deferred.source_seq, 7,
+        "handler-stamped source_seq must be preserved — the default arm would \
+         overwrite it with pm_source_seq (0)"
+    );
+    assert_eq!(
+        deferred.source.as_ref().map(|s| s.domain.as_str()),
+        Some("upstream-agg"),
+        "handler-stamped source cover must be preserved — the default arm would \
+         overwrite it with the PM's own cover"
+    );
+
+    // Framework-owned provenance is stamped regardless of handler input (O1).
+    assert_eq!(
+        deferred.source_component, "pmg-fulfillment",
+        "source_component is framework provenance, never handler data"
+    );
+    assert_eq!(
+        deferred.command_index, 0,
+        "command_index is framework provenance, never handler data"
+    );
+}
+
+// ============================================================================
+// O7 / D-11: PM stamps a correlation-derived provenance root
+// ============================================================================
+//
+// `execute_pm_commands` builds the PM cover whose `root` is stamped onto every
+// command's angzarr_deferred.source so rejections route back to the PM
+// aggregate. Pre-fix that root was `parse_str(correlation_id).unwrap_or(NIL)`
+// — any friendly (non-UUID) correlation id collapsed to the NIL uuid, so ALL
+// friendly-id workflows shared one root and rejection notifications routed to
+// the wrong, shared aggregate. The fix derives the root via the one shared
+// rule (`CorrelationRootExt::correlation_root`), identical to the persist
+// path, so stamp-site and persist-site roots always agree.
+
+/// O7/D-11: for a friendly (non-UUID) correlation id, the PM stamps its
+/// provenance root as `correlation_root(id)` — the UUIDv5 derivation — NOT the
+/// NIL uuid. This is the exact bug: friendly-id workflows must each get a
+/// distinct provenance root instead of sharing NIL.
+#[tokio::test]
+async fn test_pm_stamps_correlation_derived_root_for_friendly_id() {
+    use crate::orchestration::shared::CorrelationRootExt;
+
+    let ctx = PmEmittingHeaders {
+        headers: vec![None],
+    };
+    let executor = BookCapturingExecutor::new();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger_event(),
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "order-42", // friendly (non-UUID) correlation id
+        SyncMode::Async,
+        fast_backoff(),
+    )
+    .await;
+    assert!(result.is_ok(), "orchestrate_pm should succeed");
+
+    let captured = executor.seen.lock().await;
+    let deferred = captured_deferred(&captured[0]);
+    let source = deferred
+        .source
+        .as_ref()
+        .expect("default arm must stamp the PM's own cover");
+    let root = source.root.as_ref().expect("PM cover must carry a root");
+
+    let expected = "order-42".correlation_root();
+    assert_eq!(
+        root.value,
+        expected.as_bytes().to_vec(),
+        "PM provenance root must equal the shared correlation→root derivation \
+         so a rejection routes back to the persisted PM aggregate"
+    );
+    assert_ne!(
+        root.value,
+        uuid::Uuid::nil().as_bytes().to_vec(),
+        "a friendly-id correlation must NOT collapse to the NIL root (O7)"
+    );
+}
+
+// ============================================================================
+// O10: PM injected facts inherit the workflow correlation_id
+// ============================================================================
+//
+// Commands emitted by a PM get the correlation_id backfilled in
+// `execute_pm_commands`, but injected FACTS did not. Downstream PMs skip
+// events with an empty correlation_id, so a fact injected without the workflow
+// correlation silently fails to advance any correlated PM. The fix backfills
+// the correlation onto facts on the same rule used for commands.
+
+/// FactExecutor that captures injected facts so a test can inspect the
+/// correlation_id the coordinator stamped on them.
+struct CapturingFactExecutor {
+    injected: tokio::sync::Mutex<Vec<EventBook>>,
+}
+
+impl CapturingFactExecutor {
+    fn new() -> Self {
+        Self {
+            injected: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl FactExecutor for CapturingFactExecutor {
+    async fn inject(
+        &self,
+        fact: EventBook,
+    ) -> Result<(), crate::orchestration::FactInjectionError> {
+        self.injected.lock().await.push(fact);
+        Ok(())
+    }
+}
+
+/// PM that emits one fact whose cover carries `fact_correlation`, so a test
+/// can drive both the empty (backfill) and explicit (preserve) cases.
+struct PmEmittingFact {
+    fact_correlation: String,
+}
+
+#[async_trait]
+impl ProcessManagerContext for PmEmittingFact {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        _pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(PmHandleResponse {
+            commands: vec![],
+            process_events: vec![],
+            facts: vec![EventBook {
+                cover: Some(Cover {
+                    domain: "inventory".to_string(),
+                    root: None,
+                    correlation_id: self.fact_correlation.clone(),
+                    edition: None,
+                    ext: None,
+                }),
+                pages: vec![],
+                snapshot: None,
+                ..Default::default()
+            }],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        _process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+/// O10 (PM side): a fact emitted with an empty correlation_id is backfilled
+/// with the workflow correlation_id before injection, so downstream PMs can
+/// correlate it. Pre-fix the fact was injected with an empty correlation and
+/// silently skipped by every correlated PM.
+#[tokio::test]
+async fn test_orchestrate_pm_backfills_correlation_id_on_facts() {
+    let ctx = PmEmittingFact {
+        fact_correlation: String::new(),
+    };
+    let fact_exec = CapturingFactExecutor::new();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &NoOpExecutor,
+        Some(&fact_exec),
+        &trigger_event(),
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-42",
+        SyncMode::Async,
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(result.is_ok(), "orchestrate_pm should succeed");
+    let injected = fact_exec.injected.lock().await;
+    assert_eq!(injected.len(), 1, "the fact must be injected");
+    assert_eq!(
+        injected[0].cover.as_ref().unwrap().correlation_id,
+        "corr-42",
+        "an empty fact correlation_id must be backfilled with the workflow \
+         correlation_id (O10) so downstream PMs don't skip it"
+    );
+}
+
+/// O10 (PM side): a fact that already carries an explicit correlation_id is
+/// preserved — a PM may deliberately route a fact into a different workflow.
+#[tokio::test]
+async fn test_orchestrate_pm_preserves_explicit_fact_correlation_id() {
+    let ctx = PmEmittingFact {
+        fact_correlation: "explicit-other".to_string(),
+    };
+    let fact_exec = CapturingFactExecutor::new();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &NoOpExecutor,
+        Some(&fact_exec),
+        &trigger_event(),
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-42",
+        SyncMode::Async,
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(result.is_ok());
+    let injected = fact_exec.injected.lock().await;
+    assert_eq!(
+        injected[0].cover.as_ref().unwrap().correlation_id,
+        "explicit-other",
+        "an explicitly-set fact correlation_id must be preserved (O10)"
+    );
+}
+
+// ============================================================================
+// O9: fetch ERRORS are not "no state" — a failed PM state fetch must fail
+// the orchestration attempt, never restart the workflow from empty
+// ============================================================================
+//
+// Pre-fix, `DestinationFetcher` returned `Option<EventBook>` and every impl
+// mapped transport/storage errors to `None`. `orchestrate_pm` reads `None`
+// as "brand-new workflow", so a gRPC blip mid-workflow silently re-ran the
+// PM handler with empty state — re-issuing commands and corrupting the
+// workflow. The trait now returns `Result<Option<EventBook>, Status>`:
+// Ok(None) = genuinely no state; Err = fetch failed, propagate.
+
+/// Fetcher whose every method fails — simulates a transient transport or
+/// storage outage while the workflow state still exists at the source.
+struct FailingFetcher;
+
+#[async_trait]
+impl DestinationFetcher for FailingFetcher {
+    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+        Err(tonic::Status::unavailable("event query connection refused"))
+    }
+    async fn fetch_by_correlation(
+        &self,
+        _domain: &str,
+        _correlation_id: &str,
+    ) -> Result<Option<EventBook>, tonic::Status> {
+        Err(tonic::Status::unavailable("event query connection refused"))
+    }
+}
+
+/// PM context that records how the coordinator drove it: how often handle()
+/// ran, what `pm_state` it was given, and how often persistence ran.
+struct StateObservingPm {
+    handle_calls: AtomicU32,
+    persist_calls: AtomicU32,
+    saw_state: std::sync::Mutex<Vec<bool>>, // pm_state.is_some() per handle()
+}
+
+impl StateObservingPm {
+    fn new() -> Self {
+        Self {
+            handle_calls: AtomicU32::new(0),
+            persist_calls: AtomicU32::new(0),
+            saw_state: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl ProcessManagerContext for StateObservingPm {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::EventPage;
+        self.handle_calls.fetch_add(1, Ordering::SeqCst);
+        self.saw_state.lock().unwrap().push(pm_state.is_some());
+        // Emit one PM event book so the persist site would fire if reached.
+        Ok(PmHandleResponse {
+            commands: vec![],
+            process_events: vec![EventBook {
+                cover: None,
+                pages: vec![EventPage::default()],
+                snapshot: None,
+                ..Default::default()
+            }],
+            facts: vec![],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        _process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        self.persist_calls.fetch_add(1, Ordering::SeqCst);
+        CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+/// O9 (the defect): when the PM state fetch FAILS, the orchestration attempt
+/// must fail with the propagated error — the handler must NOT run (it would
+/// see `None` and treat a live workflow as brand new) and nothing may be
+/// persisted. Bus redelivery then retries the trigger with state intact.
+#[tokio::test]
+async fn test_orchestrate_pm_fetch_error_fails_attempt_without_restarting_workflow() {
+    let ctx = StateObservingPm::new();
+    let fetcher = FailingFetcher;
+    let executor = NoOpExecutor;
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &fetcher,
+        &executor,
+        None,
+        &trigger,
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async,
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a failed PM state fetch must fail the orchestration attempt, not \
+         be treated as a new workflow (O9). Got Ok."
+    );
+    assert_eq!(
+        ctx.handle_calls.load(Ordering::SeqCst),
+        0,
+        "handler must NOT be invoked on fetch failure — invoking it with \
+         pm_state=None restarts a live workflow from empty (O9)"
+    );
+    assert_eq!(
+        ctx.persist_calls.load(Ordering::SeqCst),
+        0,
+        "nothing may be persisted when the state fetch failed (O9)"
+    );
+}
+
+/// O9 regression guard: Ok(None) still means "genuinely new workflow" — the
+/// handler runs exactly once with `pm_state = None` and orchestration
+/// succeeds. Error propagation must not break first-event workflows.
+#[tokio::test]
+async fn test_orchestrate_pm_fetch_none_still_means_new_workflow() {
+    let ctx = StateObservingPm::new();
+    let fetcher = NoOpFetcher; // Ok(None): store answered, holds nothing
+    let executor = NoOpExecutor;
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &fetcher,
+        &executor,
+        None,
+        &trigger,
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async,
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Ok(None) is a valid new workflow: {result:?}"
+    );
+    assert_eq!(
+        ctx.handle_calls.load(Ordering::SeqCst),
+        1,
+        "handler runs once for a new workflow"
+    );
+    assert_eq!(
+        ctx.saw_state.lock().unwrap().as_slice(),
+        &[false],
+        "a genuinely-absent PM state must be handed to the handler as None"
+    );
+}
+
+/// O9 regression guard: Ok(Some(book)) hands the fetched workflow state to
+/// the handler — the Result migration must not drop existing state.
+#[tokio::test]
+async fn test_orchestrate_pm_fetch_some_hands_state_to_handler() {
+    /// Fetcher that returns existing PM state for the workflow.
+    struct StateFetcher;
+
+    #[async_trait]
+    impl DestinationFetcher for StateFetcher {
+        async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+            Ok(None)
+        }
+        async fn fetch_by_correlation(
+            &self,
+            _domain: &str,
+            _correlation_id: &str,
+        ) -> Result<Option<EventBook>, tonic::Status> {
+            Ok(Some(EventBook {
+                next_sequence: 3,
+                ..Default::default()
+            }))
+        }
+    }
+
+    let ctx = StateObservingPm::new();
+    let executor = NoOpExecutor;
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &StateFetcher,
+        &executor,
+        None,
+        &trigger,
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async,
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "existing state must orchestrate: {result:?}"
+    );
+    assert_eq!(
+        ctx.saw_state.lock().unwrap().as_slice(),
+        &[true],
+        "fetched PM state must reach the handler as Some (in-flight \
+         workflow continues, not restarts)"
     );
 }

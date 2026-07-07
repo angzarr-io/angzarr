@@ -231,7 +231,10 @@ fn apply_two_phase_transform(
 /// STRICT is skipped for deferred commands (they never claim a destination
 /// sequence, so optimistic concurrency is meaningless and would loop forever);
 /// COMMUTATIVE defers to the post-execution field-overlap check; MANUAL routes
-/// to the DLQ for human review; AGGREGATE_HANDLES self-manages (H-18).
+/// to the DLQ for human review — except for deferred commands, which (like
+/// STRICT) never claim a sequence, so their DLQ decision is deferred to the
+/// post-execution field-overlap gate (`enforce_deferred_manual_gate`, D-7);
+/// AGGREGATE_HANDLES self-manages (H-18).
 async fn enforce_merge_strategy(
     ctx: &dyn AggregateContext,
     command_book: &CommandBook,
@@ -260,14 +263,27 @@ async fn enforce_merge_strategy(
             );
         }
         MergeStrategy::MergeManual => {
-            // MANUAL: DLQ for human review, return ABORTED (non-retryable).
-            ctx.send_to_dlq(command_book, expected, actual, domain)
-                .await;
-            return Err(Status::aborted(format!(
-                "{}{expected}, aggregate at {actual}{}",
-                crate::orchestration::errmsg::SEQUENCE_MISMATCH,
-                crate::orchestration::errmsg::SEQUENCE_MISMATCH_DLQ_SUFFIX
-            )));
+            // MANUAL: a genuine sequence conflict routes to the DLQ for human
+            // review, returning ABORTED (non-retryable).
+            //
+            // Deferred (saga-produced) commands are the exception (D-7): they
+            // never claim a destination sequence, so `expected` is a
+            // placeholder 0 and `expected != actual` fires for EVERY deferred
+            // command landing on a non-empty aggregate — which is NOT a
+            // conflict. DLQ'ing them here would dead-letter every deferred
+            // MANUAL command against a non-empty aggregate. Instead their DLQ
+            // decision is deferred to the post-execution field-overlap gate
+            // (`enforce_deferred_manual_gate`), which DLQs only on a genuine
+            // field conflict. (Mirrors the STRICT `!is_deferred` skip above.)
+            if !is_deferred {
+                ctx.send_to_dlq(command_book, expected, actual, domain)
+                    .await;
+                return Err(Status::aborted(format!(
+                    "{}{expected}, aggregate at {actual}{}",
+                    crate::orchestration::errmsg::SEQUENCE_MISMATCH,
+                    crate::orchestration::errmsg::SEQUENCE_MISMATCH_DLQ_SUFFIX
+                )));
+            }
         }
         MergeStrategy::MergeAggregateHandles => {
             // No validation - aggregate handles it.
@@ -351,6 +367,86 @@ async fn enforce_commutative_gate(
             )))
         }
     }
+}
+
+/// The sequence window a deferred-command conflict check runs over: the
+/// command's claimed basis (`expected` — placeholder 0 for deferred commands
+/// today; a real origin-stamped basis once D-7 basis stamping lands) vs the
+/// destination's current head (`actual`).
+struct SeqWindow {
+    expected: u32,
+    actual: u32,
+}
+
+/// Post-execution field-overlap gate for deferred (saga-produced) MANUAL
+/// commands (D-7).
+///
+/// A deferred command never claims a destination sequence (`expected` is a
+/// placeholder 0), so the upfront MANUAL sequence gate would DLQ *every*
+/// deferred command landing on a non-empty aggregate — even when the
+/// saga-produced events touch fields nothing has changed since. That
+/// over-DLQs harmless saga work. Instead we wait until after the handler runs,
+/// so `received_events` reveals which fields the command actually touched, and
+/// route to the DLQ only on a genuine field conflict.
+///
+/// Reuses the same `check_commutative_overlap` used by the COMMUTATIVE gate
+/// (deferred COMMUTATIVE commands already run it with `expected == 0`), so
+/// deferred MANUAL and deferred COMMUTATIVE agree on what "overlap" means; they
+/// differ only in the mismatch outcome:
+/// - `Disjoint` → proceed with the merge (no conflict, no human review needed).
+/// - `Overlap` → DLQ + ABORTED (non-retryable) for human review.
+/// - Replay unavailable (`Err`) → conservatively DLQ + ABORTED, preserving the
+///   original MANUAL "human decides" contract when overlap cannot be computed
+///   (mirrors the COMMUTATIVE gate degrading to STRICT on the same failure).
+async fn enforce_deferred_manual_gate(
+    ctx: &dyn AggregateContext,
+    business: &dyn ClientLogic,
+    command_book: &CommandBook,
+    prior_events: &EventBook,
+    received_events: &EventBook,
+    window: SeqWindow,
+    domain: &str,
+) -> Result<(), Status> {
+    let SeqWindow { expected, actual } = window;
+    // Disjoint short-circuits with the merge; Overlap and an undetermined
+    // (replay-unavailable) result both fall through to the single DLQ+abort
+    // path below with a distinguishing reason for the log.
+    let reason =
+        match check_commutative_overlap(business, prior_events, received_events, expected).await {
+            Ok(CommutativeMergeResult::Disjoint) => {
+                tracing::debug!(
+                expected,
+                actual,
+                "MANUAL(deferred): disjoint fields — no genuine conflict, proceeding with merge"
+            );
+                return Ok(());
+            }
+            Ok(CommutativeMergeResult::Overlap) => "field-overlap",
+            Err(e) => {
+                tracing::debug!(
+                    expected,
+                    actual,
+                    error = %e,
+                    "MANUAL(deferred): overlap undetermined (replay unavailable), \
+                     conservatively routing to DLQ"
+                );
+                "replay-unavailable"
+            }
+        };
+
+    tracing::warn!(
+        expected,
+        actual,
+        reason,
+        "MANUAL(deferred): genuine conflict — routing to DLQ for human review"
+    );
+    ctx.send_to_dlq(command_book, expected, actual, domain)
+        .await;
+    Err(Status::aborted(format!(
+        "{}{expected}, aggregate at {actual}{}",
+        crate::orchestration::errmsg::SEQUENCE_MISMATCH,
+        crate::orchestration::errmsg::SEQUENCE_MISMATCH_DLQ_SUFFIX
+    )))
 }
 
 /// Map a command's `PersistOutcome` to `(events, is_noop)`.
@@ -605,6 +701,14 @@ async fn execute_mode(
     let needs_commutative_check =
         sequence_mismatch && merge_strategy == MergeStrategy::MergeCommutative;
 
+    // Track if we need the post-execution deferred-MANUAL field-overlap gate
+    // (D-7). A deferred MANUAL command can't use the upfront sequence gate
+    // (`expected` is a placeholder 0), so `enforce_merge_strategy` lets it
+    // through and we DLQ only on a genuine field conflict after the handler
+    // reveals which fields the command touched.
+    let needs_deferred_manual_check =
+        sequence_mismatch && merge_strategy == MergeStrategy::MergeManual && is_deferred;
+
     if sequence_mismatch {
         enforce_merge_strategy(
             ctx,
@@ -617,6 +721,11 @@ async fn execute_mode(
         )
         .await?;
     }
+
+    // The deferred-MANUAL gate below routes the command to the DLQ on a genuine
+    // conflict, so keep a copy before `command_book` is moved into the handler
+    // call. Cloned only when that gate will actually run.
+    let deferred_manual_command = needs_deferred_manual_check.then(|| command_book.clone());
 
     // Invoke client logic
     let contextual_command = ContextualCommand {
@@ -651,6 +760,22 @@ async fn execute_mode(
     if needs_commutative_check {
         enforce_commutative_gate(business, &prior_events, &received_events, expected, actual)
             .await?;
+    }
+
+    // Post-execution deferred-MANUAL gate (D-7): DLQ only on a genuine field
+    // conflict, not merely because the deferred command landed on a non-empty
+    // aggregate.
+    if let Some(command) = deferred_manual_command.as_ref() {
+        enforce_deferred_manual_gate(
+            ctx,
+            business,
+            command,
+            &prior_events,
+            &received_events,
+            SeqWindow { expected, actual },
+            &domain,
+        )
+        .await?;
     }
 
     // Persist (compares prior with received to detect new events/snapshot)

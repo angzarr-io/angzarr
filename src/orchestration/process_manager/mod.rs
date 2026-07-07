@@ -420,9 +420,23 @@ pub async fn orchestrate_pm(
         // This is a design choice: a PM instance is identified by the workflow
         // it coordinates, not by an arbitrary UUID. This simplifies lookups and
         // ensures all events for a workflow flow through one PM instance.
+        //
+        // O9: a fetch ERROR is NOT "no state". Only Ok(None) means a new
+        // workflow. Treating a transient gRPC/storage failure as None made
+        // the PM rebuild the workflow from empty — re-issuing commands and
+        // corrupting state. Fail this attempt instead; bus redelivery (the
+        // handler propagates errors) retries the trigger with state intact.
         let pm_state = fetcher
             .fetch_by_correlation(pm_domain, correlation_id)
-            .await;
+            .await
+            .map_err(|e| {
+                error!(
+                    error = %e,
+                    "PM state fetch failed; failing PM attempt instead of \
+                     restarting workflow from empty (O9)"
+                );
+                BusError::Grpc(e)
+            })?;
 
         if pm_state.is_none() {
             debug!("No existing PM state (new workflow)");
@@ -431,7 +445,7 @@ pub async fn orchestrate_pm(
         // Handle — produce commands + PM events + facts
         // Use original trigger (from bus) so PM sees the actual triggering event pages.
         // PM state provides workflow context; PMs do not rebuild destination state.
-        let response = ctx
+        let mut response = ctx
             .handle(trigger, pm_state.as_ref())
             .await
             .map_err(|e| BusError::Publish(e.to_string()))?;
@@ -616,6 +630,11 @@ pub async fn orchestrate_pm(
             )));
         }
         if let Some(fact_exec) = fact_executor {
+            // O10: injected facts must carry the workflow correlation_id, or
+            // downstream PMs skip them (empty correlation ⇒ no PM trigger).
+            // Commands are already backfilled in `execute_pm_commands`; facts
+            // were not, so backfill them here on the same shared rule.
+            super::shared::fill_fact_correlation_id(&mut response.facts, correlation_id);
             for fact in response.facts {
                 let domain = fact
                     .cover
@@ -664,7 +683,7 @@ async fn execute_pm_commands(
     pm_source_seq: u32,
     sync_mode: SyncMode,
 ) -> Result<(), BusError> {
-    use super::shared::fill_correlation_id;
+    use super::shared::{fill_correlation_id, CorrelationRootExt};
     fill_correlation_id(&mut commands, correlation_id);
 
     // Build PM cover for angzarr_deferred — PM is the triggering aggregate
@@ -672,10 +691,13 @@ async fn execute_pm_commands(
     let pm_cover = Cover {
         domain: pm_domain.to_string(),
         root: Some(ProtoUuid {
-            value: uuid::Uuid::parse_str(correlation_id)
-                .unwrap_or_else(|_| uuid::Uuid::nil())
-                .as_bytes()
-                .to_vec(),
+            // O7/D-11: derive the PM root from the correlation id via the one
+            // shared rule (already-UUID passes through; friendly id → UUIDv5).
+            // Pre-fix a non-UUID id collapsed to the NIL uuid, so every
+            // friendly-id workflow shared one root and rejection
+            // notifications routed to the wrong, shared aggregate. This MUST
+            // match the persist-side derivation in `persist_pm_event_book`.
+            value: correlation_id.correlation_root().as_bytes().to_vec(),
         }),
         correlation_id: correlation_id.to_string(),
         edition: None,

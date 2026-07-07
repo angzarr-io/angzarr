@@ -107,6 +107,38 @@ fn calculate_set_next_seq(book: &mut EventBook) {
     book.next_sequence = max_from_pages.max(max_from_snapshot) + 1;
 }
 
+/// O2 (phantom-commit guard): committed-only view of an EventBook for
+/// EXTERNALLY-VISIBLE consumers — the event bus and the sync projector leg.
+///
+/// Pages persisted with `no_commit=true` are PROVISIONAL: they belong to an
+/// in-flight cascade that a Revocation may still undo (see
+/// `crate::cascade::reaper` and `super::two_phase`). Letting the bus or a
+/// projector consume them surfaces a "commit" that may never become real — a
+/// phantom commit — and for projectors specifically there is NO framework path
+/// mapping a later Revocation back to a read-model undo.
+///
+/// Returns `None` when no committed pages remain, so both consumers share the
+/// same skip-entirely semantics. Deliberately NOT applied to the saga/PM
+/// cascade fan-out, which must see provisional pages (forward propagation).
+/// Single helper so the bus filter and the projector filter cannot drift.
+fn committed_only_book(events: &EventBook) -> Option<EventBook> {
+    let committed_pages: Vec<EventPage> = events
+        .pages
+        .iter()
+        .filter(|page| !page.no_commit)
+        .cloned()
+        .collect();
+    if committed_pages.is_empty() {
+        return None;
+    }
+    Some(EventBook {
+        cover: events.cover.clone(),
+        pages: committed_pages,
+        snapshot: events.snapshot.clone(),
+        next_sequence: events.next_sequence,
+    })
+}
+
 /// gRPC aggregate context using EventBookRepository and K8s service discovery.
 pub struct GrpcAggregateContext {
     event_store: Arc<dyn EventStore>,
@@ -550,7 +582,18 @@ impl AggregateContext for GrpcAggregateContext {
             // is anchored at the most recent event we know about.
             let new_max_seq = new_pages.last().map(|p| p.sequence_num());
             let fallback_sequence = new_max_seq.or(prior_max_seq);
-            crate::services::snapshot_handler::persist_snapshot_if_present(
+            // O5: snapshot persistence is BEST-EFFORT. Events are the
+            // source of truth and were committed above; the snapshot is
+            // derived, rebuildable state (rehydration just replays more
+            // events until the next successful snapshot write). By this
+            // point the command HAS succeeded, so a snapshot-store blip
+            // must not surface as a command error: the resulting
+            // `Status::internal` is retryable (retry.rs), and re-entering
+            // the pipeline with events already stored means spurious
+            // retry-exhaust/DLQ reporting (STRICT/MANUAL) or a genuine
+            // double-apply (AGGREGATE_HANDLES re-runs the handler against
+            // state that already contains its own events).
+            if let Err(error) = crate::services::snapshot_handler::persist_snapshot_if_present(
                 &self.snapshot_repo,
                 received,
                 domain,
@@ -558,7 +601,18 @@ impl AggregateContext for GrpcAggregateContext {
                 root,
                 fallback_sequence,
             )
-            .await?;
+            .await
+            {
+                tracing::error!(
+                    %domain,
+                    %edition,
+                    %root,
+                    %error,
+                    "snapshot persist failed after events committed; \
+                     continuing — snapshot is derived state and will be \
+                     rewritten on the next state change"
+                );
+            }
         }
 
         // Return with only new pages - ensure cover is set
@@ -591,11 +645,29 @@ impl AggregateContext for GrpcAggregateContext {
         // Publish FIRST — ensures events reach the bus even if sync calls below fail.
         // Without this ordering, a sync projector/saga/PM failure would leave events
         // persisted in PostgreSQL but never published to the bus.
-        let bus_events = Arc::new(events.clone());
-        self.event_bus
-            .publish(bus_events)
-            .await
-            .map_err(|e| Status::unavailable(format!("Failed to publish events: {e}")))?;
+        //
+        // O2 (phantom-commit guard): pages written with `no_commit=true` are
+        // PROVISIONAL — they belong to an in-flight cascade that a Revocation may
+        // still undo (see `crate::cascade::reaper` and `super::two_phase`).
+        // Publishing them to the bus would let downstream consumers (async
+        // projectors/sagas) observe a "commit" that may never become real — a
+        // phantom commit. Publish only the COMMITTED pages here; provisional
+        // pages are published later, at the confirmation point, once the cascade
+        // actually commits.
+        //
+        // The saga/PM fan-out BELOW still receives the full `events` book:
+        // inside CASCADE mode those calls ARE the cascade's forward propagation
+        // (sagas/PMs react to the provisional events to emit the next
+        // aggregate's commands), so they must see the provisional pages. The
+        // two externally-visible consumers — the bus publish and the sync
+        // PROJECTOR leg (read models) — both get the committed-only view.
+        let committed_book = committed_only_book(events).map(Arc::new);
+        if let Some(bus_events) = &committed_book {
+            self.event_bus
+                .publish(Arc::clone(bus_events))
+                .await
+                .map_err(|e| Status::unavailable(format!("Failed to publish events: {e}")))?;
+        }
 
         // ASYNC mode: fire-and-forget — no sync projectors.
         // SIMPLE and CASCADE: call sync projectors. DECISION / None / ISOLATED:
@@ -603,14 +675,22 @@ impl AggregateContext for GrpcAggregateContext {
         // policy is centralized in `super::sync_policy` so it cannot drift
         // from the local context's identical decision; that drift was bug
         // C-05.
-        let projections = if should_call_sync_projectors(self.sync_mode) {
-            // Unwrap is safe: should_call_sync_projectors returns true only
-            // for Some(Simple) / Some(Cascade), both of which carry a
-            // concrete SyncMode.
-            self.call_sync_projectors(events, self.sync_mode.unwrap())
-                .await?
-        } else {
-            vec![]
+        //
+        // O2 carve-out: projectors get the COMMITTED-ONLY view, not the full
+        // book. Unlike sagas/PMs, projectors do not propagate the cascade —
+        // they write externally visible read models, and a `no_commit` page
+        // they consume may later be revoked with NO framework path mapping
+        // Revocation → read-model undo. Same phantom-commit hazard as the bus,
+        // so same filter (and same skip-when-nothing-committed semantics).
+        let projections = match (&committed_book, should_call_sync_projectors(self.sync_mode)) {
+            (Some(committed), true) => {
+                // Unwrap is safe: should_call_sync_projectors returns true only
+                // for Some(Simple) / Some(Cascade), both of which carry a
+                // concrete SyncMode.
+                self.call_sync_projectors(committed, self.sync_mode.unwrap())
+                    .await?
+            }
+            _ => vec![],
         };
 
         // CASCADE mode: call sync sagas and PMs after publishing to bus

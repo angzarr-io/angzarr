@@ -904,3 +904,535 @@ async fn test_reaper_second_run_is_noop_on_clean_cascade() {
         after_second
     );
 }
+
+// ============================================================================
+// O14: participant_already_resolved (pure predicate) unit tests
+// ============================================================================
+
+use super::participant_already_resolved;
+
+/// A participant is resolved when a COMMITTED page carries the cascade_id
+/// (a Confirmation/Revocation marker). This is the exact rule the storage
+/// layer's `query_cascade_participants` uses; the reaper's pre-write recheck
+/// must agree with it, so encode the rule once and pin it here.
+#[test]
+fn participant_already_resolved_true_for_committed_cascade_row() {
+    let pages = vec![
+        make_test_event(0, true, Some("cas"), Utc::now()), // provisional
+        make_test_event(1, false, Some("cas"), Utc::now()), // committed marker
+    ];
+    assert!(
+        participant_already_resolved(&pages, "cas"),
+        "a committed page carrying the cascade_id marks the participant resolved"
+    );
+}
+
+/// Only-uncommitted pages for the cascade → NOT resolved (this is precisely the
+/// state the reaper must revoke). Kills a mutant that ignores `no_commit`.
+#[test]
+fn participant_already_resolved_false_when_only_uncommitted() {
+    let pages = vec![
+        make_test_event(0, true, Some("cas"), Utc::now()),
+        make_test_event(1, true, Some("cas"), Utc::now()),
+    ];
+    assert!(
+        !participant_already_resolved(&pages, "cas"),
+        "uncommitted cascade pages do NOT resolve the participant"
+    );
+}
+
+/// A committed page for a DIFFERENT cascade must not resolve this one. Kills a
+/// mutant that drops the cascade_id comparison.
+#[test]
+fn participant_already_resolved_false_for_other_cascade() {
+    let pages = vec![
+        make_test_event(0, true, Some("cas"), Utc::now()),
+        make_test_event(1, false, Some("other"), Utc::now()), // committed, other cascade
+        make_test_event(2, false, None, Utc::now()),          // committed, no cascade
+    ];
+    assert!(
+        !participant_already_resolved(&pages, "cas"),
+        "a committed row for a different cascade must not resolve this cascade"
+    );
+}
+
+// ============================================================================
+// O2(b): reaper publishes its Revocation to the event bus when one is wired
+// ============================================================================
+
+use crate::bus::MockEventBus;
+
+/// The reaper must publish each Revocation it writes so downstream consumers
+/// learn a provisional commit was undone. Pre-fix `write_revocation` did
+/// `store.add(...)` then only `debug!` — it never published, so downstream
+/// never saw the rollback. With a bus wired, a Revocation page must appear on
+/// the bus carrying the canonical `type_url::REVOCATION`.
+#[tokio::test]
+async fn reaper_publishes_revocation_to_bus() {
+    use crate::proto::event_page;
+    use crate::proto_ext::{type_url, EventPageExt};
+
+    let store = Arc::new(MockEventStore::new());
+    let bus = Arc::new(MockEventBus::new());
+    let root = Uuid::new_v4();
+    let cascade_id = "cascade-published";
+
+    let old_time = Utc::now() - chrono::Duration::hours(2);
+    store
+        .add(
+            "test",
+            "angzarr",
+            root,
+            vec![make_test_event(0, true, Some(cascade_id), old_time)],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let reaper = CascadeReaper::new(Arc::clone(&store), Duration::from_secs(3600))
+        .with_event_bus(bus.clone());
+    let revoked = reaper.run_once().await.unwrap();
+    assert_eq!(revoked, 1, "reaper should revoke the stale participant");
+
+    let published = bus.take_published().await;
+    assert_eq!(
+        published.len(),
+        1,
+        "reaper must publish exactly one Revocation book to the bus"
+    );
+    let page = &published[0].pages[0];
+    let actual_type_url = match &page.payload {
+        Some(event_page::Payload::Event(any)) => any.type_url.as_str(),
+        _ => panic!("published Revocation page must carry an Event payload"),
+    };
+    assert_eq!(
+        actual_type_url,
+        type_url::REVOCATION,
+        "published page must be a Revocation with the canonical type_url"
+    );
+    assert!(
+        !page.no_commit,
+        "the published Revocation is a committed page"
+    );
+
+    // Mutation pin (reaper.rs `next_sequence: next_sequence + 1` at the
+    // publish site): the published book's `next_sequence` is wire-visible
+    // metadata that downstream gap-fill logic consumes to detect missing
+    // history — an off-by-anything value silently corrupts gap detection.
+    // The store was seeded with exactly one page at seq 0, so the Revocation
+    // lands at seq 1; the expected next_sequence is derived from the
+    // published page's own sequence (revocation seq + 1) rather than
+    // hardcoded, so it tracks the store-driven sequence. Kills the `+`→`-`
+    // and `+`→`*` mutants that survived the original test.
+    let revocation_seq = page.sequence_num();
+    assert_eq!(
+        revocation_seq, 1,
+        "revocation must land at the head of the stream, after the stale \
+         page at seq 0"
+    );
+    assert_eq!(
+        published[0].next_sequence,
+        revocation_seq + 1,
+        "published Revocation book must advertise next_sequence = revocation \
+         sequence + 1 so downstream gap-fill sees a consistent stream head"
+    );
+}
+
+/// When NO bus is wired, the reaper still persists the Revocation and reports
+/// success — publishing is best-effort, not a precondition for cleanup.
+/// (Regression guard so the optional-bus path stays a no-op, not a panic.)
+#[tokio::test]
+async fn reaper_without_bus_still_revokes() {
+    let store = Arc::new(MockEventStore::new());
+    let root = Uuid::new_v4();
+    let cascade_id = "cascade-nobus";
+    let old_time = Utc::now() - chrono::Duration::hours(2);
+    store
+        .add(
+            "test",
+            "angzarr",
+            root,
+            vec![make_test_event(0, true, Some(cascade_id), old_time)],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let reaper = CascadeReaper::new(Arc::clone(&store), Duration::from_secs(3600));
+    let revoked = reaper.run_once().await.unwrap();
+    assert_eq!(revoked, 1, "reaper must revoke even with no bus configured");
+    let pages = store.get("test", "angzarr", root).await.unwrap();
+    assert_eq!(pages.len(), 2, "original + persisted Revocation");
+}
+
+// ============================================================================
+// O14: all-or-retry-all (fail-fast) + confirmation-interleave recheck
+// ============================================================================
+//
+// Shared proxy: forces the reaper's stale/participant queries (to simulate a
+// TOCTOU snapshot) and/or fails a specific Revocation `add` (to exercise the
+// fail-fast loop). `get`/`add`/everything-else delegate to the real inner
+// store so the reaper's pre-write recheck sees real state.
+
+use crate::storage::CascadeParticipant;
+
+struct ReaperProxyStore {
+    inner: Arc<MockEventStore>,
+    /// Fail EXACTLY the Nth Revocation `add` (1-based); all others pass.
+    fail_nth_revocation: Option<usize>,
+    revocation_attempts: tokio::sync::Mutex<usize>,
+    /// When set, `query_stale_cascades` returns just this cascade_id.
+    forced_cascade: Option<String>,
+    /// When non-empty, `query_cascade_participants` returns these verbatim for
+    /// `forced_cascade` (simulating a stale snapshot that still lists a
+    /// participant which has since been resolved).
+    forced_participants: Vec<CascadeParticipant>,
+}
+
+impl ReaperProxyStore {
+    fn fail_nth(inner: Arc<MockEventStore>, nth: usize) -> Self {
+        Self {
+            inner,
+            fail_nth_revocation: Some(nth),
+            revocation_attempts: tokio::sync::Mutex::new(0),
+            forced_cascade: None,
+            forced_participants: Vec::new(),
+        }
+    }
+
+    fn healthy(inner: Arc<MockEventStore>) -> Self {
+        Self {
+            inner,
+            fail_nth_revocation: None,
+            revocation_attempts: tokio::sync::Mutex::new(0),
+            forced_cascade: None,
+            forced_participants: Vec::new(),
+        }
+    }
+
+    fn forced(
+        inner: Arc<MockEventStore>,
+        cascade_id: &str,
+        participants: Vec<CascadeParticipant>,
+    ) -> Self {
+        Self {
+            inner,
+            fail_nth_revocation: None,
+            revocation_attempts: tokio::sync::Mutex::new(0),
+            forced_cascade: Some(cascade_id.to_string()),
+            forced_participants: participants,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl EventStore for ReaperProxyStore {
+    async fn add(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        events: Vec<crate::proto::EventPage>,
+        meta: &AddMeta<'_>,
+    ) -> crate::storage::Result<crate::storage::AddOutcome> {
+        use crate::proto::event_page;
+        use crate::proto_ext::type_url;
+
+        let has_revocation = events.iter().any(|page| match &page.payload {
+            Some(event_page::Payload::Event(any)) => any.type_url == type_url::REVOCATION,
+            _ => false,
+        });
+        if has_revocation {
+            let mut count = self.revocation_attempts.lock().await;
+            *count += 1;
+            if self.fail_nth_revocation == Some(*count) {
+                return Err(crate::storage::StorageError::NotFound {
+                    domain: domain.to_string(),
+                    root,
+                });
+            }
+        }
+        self.inner.add(domain, edition, root, events, meta).await
+    }
+
+    async fn get(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+    ) -> crate::storage::Result<Vec<crate::proto::EventPage>> {
+        self.inner.get(domain, edition, root).await
+    }
+
+    async fn get_from(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        from: u32,
+    ) -> crate::storage::Result<Vec<crate::proto::EventPage>> {
+        self.inner.get_from(domain, edition, root, from).await
+    }
+
+    async fn get_from_to(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        from: u32,
+        to: u32,
+    ) -> crate::storage::Result<Vec<crate::proto::EventPage>> {
+        self.inner
+            .get_from_to(domain, edition, root, from, to)
+            .await
+    }
+
+    async fn list_roots(&self, domain: &str, edition: &str) -> crate::storage::Result<Vec<Uuid>> {
+        self.inner.list_roots(domain, edition).await
+    }
+
+    async fn list_domains(&self) -> crate::storage::Result<Vec<String>> {
+        self.inner.list_domains().await
+    }
+
+    async fn get_next_sequence(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+    ) -> crate::storage::Result<u32> {
+        self.inner.get_next_sequence(domain, edition, root).await
+    }
+
+    async fn get_until_timestamp(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        until: &str,
+    ) -> crate::storage::Result<Vec<crate::proto::EventPage>> {
+        self.inner
+            .get_until_timestamp(domain, edition, root, until)
+            .await
+    }
+
+    async fn get_by_correlation(
+        &self,
+        correlation_id: &str,
+    ) -> crate::storage::Result<Vec<crate::proto::EventBook>> {
+        self.inner.get_by_correlation(correlation_id).await
+    }
+
+    async fn find_by_source(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        source_info: &crate::storage::SourceInfo,
+    ) -> crate::storage::Result<Option<Vec<crate::proto::EventPage>>> {
+        self.inner
+            .find_by_source(domain, edition, root, source_info)
+            .await
+    }
+
+    async fn find_by_external_id(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        external_id: &str,
+    ) -> crate::storage::Result<Option<Vec<crate::proto::EventPage>>> {
+        self.inner
+            .find_by_external_id(domain, edition, root, external_id)
+            .await
+    }
+
+    async fn delete_edition_events(
+        &self,
+        domain: &str,
+        edition: &str,
+    ) -> crate::storage::Result<u32> {
+        self.inner.delete_edition_events(domain, edition).await
+    }
+
+    async fn query_stale_cascades(&self, threshold: &str) -> crate::storage::Result<Vec<String>> {
+        if let Some(cascade) = &self.forced_cascade {
+            return Ok(vec![cascade.clone()]);
+        }
+        self.inner.query_stale_cascades(threshold).await
+    }
+
+    async fn query_cascade_participants(
+        &self,
+        cascade_id: &str,
+    ) -> crate::storage::Result<Vec<CascadeParticipant>> {
+        if self.forced_cascade.as_deref() == Some(cascade_id)
+            && !self.forced_participants.is_empty()
+        {
+            return Ok(self.forced_participants.clone());
+        }
+        self.inner.query_cascade_participants(cascade_id).await
+    }
+}
+
+/// O14 all-or-retry-all (fail-fast): when one participant's Revocation `add`
+/// fails mid-cascade, the reaper must STOP (not `continue`) — abandoning this
+/// cascade's pass so the WHOLE cascade retries next cycle, rather than driving
+/// it deeper into a partial (split-brain) state.
+///
+/// Three participants, same cascade; the proxy fails EXACTLY the 2nd Revocation
+/// `add`. Under the fixed fail-fast loop the reaper writes participant #1, hits
+/// #2's failure, and BREAKS — so participant #3 is left untouched and exactly
+/// ONE committed Revocation exists after the pass. (The old `continue` loop
+/// would have skipped #2 and gone on to revoke #3, leaving TWO — this test
+/// distinguishes the two behaviors.) A healthy second pass then recovers the
+/// remaining participants (idempotency).
+#[tokio::test]
+async fn reaper_fail_fast_stops_cascade_pass_on_first_error() {
+    let inner = Arc::new(MockEventStore::new());
+    let cascade_id = "cascade-failfast";
+    let old_time = Utc::now() - chrono::Duration::hours(2);
+
+    let root1 = Uuid::new_v4();
+    let root2 = Uuid::new_v4();
+    let root3 = Uuid::new_v4();
+    let roots = [root1, root2, root3];
+    for root in &roots {
+        inner
+            .add(
+                "test",
+                "angzarr",
+                *root,
+                vec![make_test_event(0, true, Some(cascade_id), old_time)],
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    // First pass: fail EXACTLY the 2nd Revocation add.
+    let proxy = Arc::new(ReaperProxyStore::fail_nth(Arc::clone(&inner), 2));
+    let reaper = CascadeReaper::new(Arc::clone(&proxy), Duration::from_secs(60));
+    let _ = reaper.run_once().await; // per-cascade abort surfaces via storage state
+
+    let after_first =
+        count_committed_revocations(&inner, "test", "angzarr", &roots, cascade_id).await;
+    assert_eq!(
+        after_first, 1,
+        "fail-fast: reaper must BREAK on the 2nd participant's failure, leaving \
+         participant #3 untouched → exactly 1 committed Revocation (the old \
+         `continue` loop would have produced 2); got {after_first}"
+    );
+
+    // Second pass (healthy): recover the remaining participants.
+    let healthy = Arc::new(ReaperProxyStore::healthy(Arc::clone(&inner)));
+    let reaper2 = CascadeReaper::new(Arc::clone(&healthy), Duration::from_secs(60));
+    reaper2.run_once().await.unwrap();
+
+    let after_second =
+        count_committed_revocations(&inner, "test", "angzarr", &roots, cascade_id).await;
+    assert_eq!(
+        after_second, 3,
+        "a healthy retry pass must revoke the remaining participants (all-or-\
+         retry-all), reaching 3 committed Revocations; got {after_second}"
+    );
+}
+
+/// O14 confirmation-interleave guard: if a participant is confirmed (a
+/// committed cascade row appears) in the window between the stale-cascade query
+/// and the Revocation write, the reaper must NOT write a Revocation — otherwise
+/// it would land after the Confirmation and, because the 2PC transform lets
+/// "revoked win over confirmed", silently UNDO a committed cascade.
+///
+/// We force the reaper's queries to still list a participant that the inner
+/// store already shows as confirmed (a committed marker present). The pre-write
+/// recheck must see that marker and SKIP: no Revocation written, nothing
+/// counted.
+#[tokio::test]
+async fn reaper_skips_participant_confirmed_after_query() {
+    use crate::proto::event_page;
+    use crate::proto_ext::type_url;
+
+    let inner = Arc::new(MockEventStore::new());
+    let cascade_id = "cascade-raced";
+    let root = Uuid::new_v4();
+    let old_time = Utc::now() - chrono::Duration::hours(2);
+
+    // Provisional page + a COMMITTED cascade marker (a Confirmation committed
+    // the cascade for this participant). Any committed row carrying the
+    // cascade_id counts as resolution — same rule the storage queries use.
+    inner
+        .add(
+            "test",
+            "angzarr",
+            root,
+            vec![
+                make_test_event(0, true, Some(cascade_id), old_time),
+                make_test_event(1, false, Some(cascade_id), Utc::now()),
+            ],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Force the reaper to still see this (now-resolved) participant as stale,
+    // simulating a query snapshot taken before the Confirmation landed.
+    let forced_participant = CascadeParticipant {
+        domain: "test".to_string(),
+        edition: "angzarr".to_string(),
+        root,
+        sequences: vec![0],
+    };
+    let proxy = Arc::new(ReaperProxyStore::forced(
+        Arc::clone(&inner),
+        cascade_id,
+        vec![forced_participant],
+    ));
+
+    let reaper = CascadeReaper::new(Arc::clone(&proxy), Duration::from_secs(60));
+    let revoked = reaper.run_once().await.unwrap();
+    assert_eq!(
+        revoked, 0,
+        "a participant confirmed after the query must be SKIPPED, not revoked"
+    );
+
+    // No Revocation page must have been written — the two original pages remain.
+    let pages = inner.get("test", "angzarr", root).await.unwrap();
+    assert_eq!(
+        pages.len(),
+        2,
+        "no Revocation may be written for an already-confirmed participant"
+    );
+    let revocations = pages
+        .iter()
+        .filter(|p| match &p.payload {
+            Some(event_page::Payload::Event(any)) => any.type_url == type_url::REVOCATION,
+            _ => false,
+        })
+        .count();
+    assert_eq!(
+        revocations, 0,
+        "writing a Revocation here would clobber the committed cascade (undo a \
+         confirmed commit); the recheck must prevent it"
+    );
+}

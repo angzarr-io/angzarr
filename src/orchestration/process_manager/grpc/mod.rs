@@ -17,8 +17,9 @@ use tracing::error;
 use crate::bus::EventBus;
 use crate::dlq::DeadLetterPublisher;
 use crate::orchestration::command::CommandOutcome;
+use crate::orchestration::shared::CorrelationRootExt;
 use crate::proto::process_manager_service_client::ProcessManagerServiceClient;
-use crate::proto::{CommandResponse, EventBook, ProcessManagerHandleRequest};
+use crate::proto::{CommandResponse, EventBook, ProcessManagerHandleRequest, Uuid as ProtoUuid};
 use crate::proto_ext::{correlated_request, CoverExt};
 use crate::storage::EventStore;
 
@@ -54,12 +55,14 @@ pub async fn persist_pm_event_book(
     process_events: &EventBook,
     correlation_id: &str,
 ) -> CommandOutcome {
-    let pm_root = process_events
-        .cover
-        .as_ref()
-        .and_then(|c| c.root.as_ref())
-        .and_then(|r| uuid::Uuid::from_slice(&r.value).ok())
-        .unwrap_or_else(uuid::Uuid::nil);
+    // O7/D-11: the PM aggregate root is derived from the correlation id via
+    // the one shared rule — identical to the stamping site in
+    // `execute_pm_commands`, so a rejection notification stamped there always
+    // reaches the PM state persisted here. Pre-fix this read `cover.root` and
+    // fell back to the NIL uuid, which could disagree with the stamped root
+    // (and collapsed every missing/invalid root onto one shared NIL
+    // aggregate). The correlation id is the authoritative PM root by design.
+    let pm_root = correlation_id.correlation_root();
     let edition = process_events.edition().unwrap_or_default();
 
     // Persist directly to event store (bypasses command pipeline)
@@ -112,9 +115,17 @@ pub async fn persist_pm_event_book(
     // Stamp the in-flight `correlation_id` onto the published cover so
     // downstream subscribers always see the active correlation, even
     // if the PM service returned a cover with a stale/default value.
+    //
+    // F6/O7: also stamp the correlation-derived `pm_root` onto the
+    // published cover. Storage keys this book by `pm_root` (above); if
+    // the publish kept the handler's `cover.root`, bus consumers keying
+    // by root would see a different identity than storage.
     let mut cover = process_events.cover.clone();
     if let Some(c) = cover.as_mut() {
         c.correlation_id = correlation_id.to_string();
+        c.root = Some(ProtoUuid {
+            value: pm_root.as_bytes().to_vec(),
+        });
     }
     // `snapshot` defaults to None via `..Default::default()` — leaving it
     // unset rather than explicit eliminates a no-op `delete field snapshot`

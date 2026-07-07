@@ -84,10 +84,13 @@ _build-images:
         # Fall back to the most-recently-created commit-tagged image of
         # each kind. If both exist we still skip skaffold; otherwise we
         # take the slow path below.
+        # `|| true`: grep exits 1 when no commit-tagged image exists yet
+        # (fresh machine); under set -euo pipefail that would kill the
+        # recipe silently before the slow path below can bootstrap.
         BASE_TAG=$(docker images --format "{{ "{{.Repository}}:{{.Tag}}" }} {{ "{{.CreatedAt}}" }}" ghcr.io/angzarr-io/angzarr-base 2>/dev/null \
-            | grep -E ":v[0-9]" | sort -k2 -r | head -1 | awk '{print $1}')
+            | grep -E ":v[0-9]" | sort -k2 -r | head -1 | awk '{print $1}' || true)
         RUST_TAG=$(docker images --format "{{ "{{.Repository}}:{{.Tag}}" }} {{ "{{.CreatedAt}}" }}" ghcr.io/angzarr-io/angzarr-rust 2>/dev/null \
-            | grep -E ":v[0-9]" | sort -k2 -r | head -1 | awk '{print $1}')
+            | grep -E ":v[0-9]" | sort -k2 -r | head -1 | awk '{print $1}' || true)
     fi
     if [ -n "$BASE_TAG" ] && [ -n "$RUST_TAG" ]; then
         printf '{"builds":[{"imageName":"ghcr.io/angzarr-io/angzarr-base","tag":"%s"},{"imageName":"ghcr.io/angzarr-io/angzarr-rust","tag":"%s"}]}\n' \

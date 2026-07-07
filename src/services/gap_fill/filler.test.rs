@@ -4,6 +4,9 @@
 //! - Checkpoint lookups via HandlerPositionStore
 //! - Gap fetching via EventBookRepository
 //! - EventBook merging (gap events + original events)
+//! - Two-phase visibility of the fetched gap (F3): backfilled ranges must
+//!   withhold unresolved/revoked `no_commit` pages instead of replaying
+//!   them raw (see the `two_phase_visibility` section below)
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -80,6 +83,13 @@ impl MockEventStore {
     fn set_events(&self, domain: &str, edition: &str, root: Uuid, sequences: Vec<u32>) {
         let key = Self::key(domain, edition, root);
         let pages: Vec<EventPage> = sequences.into_iter().map(make_event_page).collect();
+        self.events.write().unwrap().insert(key, pages);
+    }
+
+    /// Store explicit pages (for 2PC tests that need `no_commit` flags,
+    /// payloads, and cascade markers rather than bare sequence stubs).
+    fn set_pages(&self, domain: &str, edition: &str, root: Uuid, pages: Vec<EventPage>) {
+        let key = Self::key(domain, edition, root);
         self.events.write().unwrap().insert(key, pages);
     }
 }
@@ -450,6 +460,165 @@ async fn test_fill_with_snapshot() {
     // Snapshot covers the gap - no fetching needed
     assert_eq!(result.pages.len(), 2);
     assert!(result.snapshot.is_some());
+}
+
+// ============================================================================
+// Two-Phase Visibility Tests (F3)
+// ============================================================================
+//
+// WHY: post_persist (O2) suppresses `no_commit` pages from bus publishes,
+// leaving sequence holes — the very holes GapFiller backfills. Pre-fix,
+// the backfill fetched the missing range RAW, so a consumer received the
+// revoked/pending business events O2 had suppressed, as if live. The
+// resolution lives at the EventBookRepository seam (get_from_to); these
+// tests prove the invariant holds end-to-end through GapFiller +
+// LocalEventSource, i.e. through the exact wiring projector/saga/PM
+// coordinators use (RemoteEventSource reaches the same repository method
+// via the EventQuery service).
+
+mod two_phase_visibility {
+    use super::*;
+    use crate::proto::{event_page, Revocation};
+    use crate::proto_ext::type_url;
+    use prost::Message;
+
+    const CASCADE: &str = "cascade-f3";
+
+    /// A provisional (`no_commit`) business event page with a real payload,
+    /// so a leak is distinguishable from a placeholder.
+    fn make_provisional_page(sequence: u32) -> EventPage {
+        let mut page = make_event_page(sequence);
+        page.no_commit = true;
+        page.cascade_id = Some(CASCADE.to_string());
+        page.payload = Some(event_page::Payload::Event(prost_types::Any {
+            type_url: format!("test.Business{}", sequence),
+            value: vec![1, 2, 3],
+        }));
+        page
+    }
+
+    /// A committed Revocation marker page (what the reaper persists and the
+    /// bus publishes when it kills a stale cascade).
+    fn make_revocation_page(sequence: u32, revoked: Vec<u32>) -> EventPage {
+        let rev = Revocation {
+            target: None,
+            sequences: revoked,
+            cascade_id: CASCADE.to_string(),
+            reason: "reaper-timeout".to_string(),
+        };
+        let mut page = make_event_page(sequence);
+        page.payload = Some(event_page::Payload::Event(prost_types::Any {
+            type_url: type_url::REVOCATION.to_string(),
+            value: rev.encode_to_vec(),
+        }));
+        page
+    }
+
+    fn payload_type_url(page: &EventPage) -> &str {
+        match page.payload.as_ref() {
+            Some(event_page::Payload::Event(any)) => &any.type_url,
+            _ => "",
+        }
+    }
+
+    /// The exact F3 failure mode, end to end: cascade wrote 5-6 provisional
+    /// (suppressed from the bus), the reaper revoked them with a marker at
+    /// 7 (published). The consumer's checkpoint is 4, the bus delivers the
+    /// marker at 7, and GapFiller backfills [5, 7). Pre-fix the backfill
+    /// returned the raw revoked business events and the consumer processed
+    /// a cancelled cascade as live. Post-fix the gap arrives as
+    /// sequence-preserving NoOp placeholders — contiguous (so the
+    /// checkpoint advances, no refetch loop) but payload-free.
+    #[tokio::test]
+    async fn test_fill_gap_withholds_revoked_provisional_pages() {
+        let root = test_root();
+        let position_store = MockPositionStore::new();
+        position_store.set_checkpoint(root.as_bytes(), 4);
+
+        let event_store = Arc::new(MockEventStore::new());
+        let mut pages: Vec<EventPage> = (0..=4).map(make_event_page).collect();
+        pages.push(make_provisional_page(5));
+        pages.push(make_provisional_page(6));
+        pages.push(make_revocation_page(7, vec![5, 6]));
+        event_store.set_pages("orders", "", root, pages);
+
+        let event_source = make_event_source(event_store);
+        let filler = GapFiller::new(position_store, event_source);
+
+        // Incoming bus book: just the published Revocation marker at 7.
+        let mut book = make_event_book("orders", root, "", vec![]);
+        book.pages = vec![make_revocation_page(7, vec![5, 6])];
+
+        let result = filler.fill_if_needed(book).await.unwrap();
+
+        // Gap [5,7) filled and contiguous with the incoming page.
+        assert_eq!(result.pages.len(), 3);
+        assert_eq!(result.pages[0].sequence_num(), 5);
+        assert_eq!(result.pages[1].sequence_num(), 6);
+        assert_eq!(result.pages[2].sequence_num(), 7);
+        // Withheld, not leaked: placeholders in place of the suppressed
+        // business events. (The marker lives OUTSIDE the fetched range, so
+        // the pages resolve as "unresolved provisional" — fail-safe: still
+        // withheld.)
+        assert_eq!(payload_type_url(&result.pages[0]), type_url::NOOP);
+        assert_eq!(payload_type_url(&result.pages[1]), type_url::NOOP);
+        assert!(!result.pages[0].no_commit, "placeholders read as committed");
+        assert!(
+            result
+                .pages
+                .iter()
+                .all(|p| !payload_type_url(p).starts_with("test.Business")),
+            "revoked cascade payloads must never reach the consumer"
+        );
+    }
+
+    /// The ProjectorCoord wiring: NoOpPositionStore has no checkpoint, so
+    /// any book not starting at 0 triggers a full backfill of
+    /// [0, first_seq) — the widest possible F3 exposure, since it always
+    /// re-reads history that may contain suppressed provisional pages.
+    /// Committed history must flow; pending pages must be withheld.
+    #[tokio::test]
+    async fn test_fill_new_aggregate_backfill_withholds_unresolved_provisional() {
+        let root = test_root();
+
+        let event_store = Arc::new(MockEventStore::new());
+        let mut pages: Vec<EventPage> = (0..=2).map(make_event_page).collect();
+        pages.push(make_provisional_page(3));
+        pages.push(make_provisional_page(4));
+        pages.push(make_event_page(5));
+        event_store.set_pages("orders", "", root, pages);
+
+        let event_source = make_event_source(event_store);
+        // Production type used by projector/saga/PM coordinators.
+        let filler = GapFiller::new(NoOpPositionStore, event_source);
+
+        let book = make_event_book("orders", root, "", vec![5]);
+        let result = filler.fill_if_needed(book).await.unwrap();
+
+        assert_eq!(result.pages.len(), 6, "backfill [0,5) + incoming page 5");
+        for (i, page) in result.pages.iter().enumerate() {
+            assert_eq!(page.sequence_num(), i as u32, "book must stay contiguous");
+        }
+        // Committed prefix flows unchanged: the fixture's committed pages
+        // carry no payload, and the transform must not have replaced them
+        // with placeholders.
+        for i in [0usize, 1, 2] {
+            assert!(
+                result.pages[i].payload.is_none(),
+                "committed page {i} must pass through untouched"
+            );
+        }
+        // Pending pages withheld as placeholders.
+        assert_eq!(payload_type_url(&result.pages[3]), type_url::NOOP);
+        assert_eq!(payload_type_url(&result.pages[4]), type_url::NOOP);
+        assert!(
+            result
+                .pages
+                .iter()
+                .all(|p| !payload_type_url(p).starts_with("test.Business")),
+            "pending cascade payloads must never reach the consumer"
+        );
+    }
 }
 
 // ============================================================================

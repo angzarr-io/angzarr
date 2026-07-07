@@ -1,10 +1,19 @@
 //! Unit tests for `execute_mode`'s extracted phase helpers.
 //!
-//! `execute_mode` itself is a private async orchestrator with no direct unit
-//! test (only indirect coverage via the gherkin/integration suites). When it was
-//! decomposed into named phase helpers, those helpers became individually
-//! testable — that was a core motivation for the split. These tests pin each
-//! helper's branching directly so mutations in them are caught.
+//! `execute_mode` itself is a private async orchestrator historically covered
+//! only indirectly (gherkin/integration suites). When it was decomposed into
+//! named phase helpers, those helpers became individually testable — that was
+//! a core motivation for the split. These tests pin each helper's branching
+//! directly so mutations in them are caught.
+//!
+//! Exception: the deferred-MANUAL gate (D-7) is ALSO pinned at `execute_mode`
+//! WIRING level (see the "execute_mode wiring" section near the end).
+//! Helper-level tests alone leave the call-site mutants alive (gate call
+//! deleted / `needs_deferred_manual_check` forced false), under which a
+//! deferred MANUAL command with a genuine field conflict would silently merge
+//! with no DLQ — the exact hole D-7 closes — while every helper test stays
+//! green. `execute_mode` is reachable here because this module is a child of
+//! pipeline.rs (`use super::*`).
 //!
 //! `use super::*` pulls in pipeline.rs's own items and its imports (traits,
 //! proto types like `CommandBook`/`EventBook`/`MergeStrategy`, `Status`, `Uuid`,
@@ -14,8 +23,8 @@
 
 use super::*;
 use crate::proto::{
-    command_page, event_page, AngzarrDeferredSequence, BusinessResponse, CommandPage, Cover,
-    EventPage, PageHeader, Projection, Uuid as ProtoUuid,
+    business_response, command_page, event_page, AngzarrDeferredSequence, BusinessResponse,
+    CommandPage, Cover, EventPage, PageHeader, Projection, Uuid as ProtoUuid,
 };
 use crate::storage::SourceInfo;
 use prost_types::Any;
@@ -128,12 +137,88 @@ impl ClientLogic for NoReplay {
     // replay() uses the trait default → Unimplemented.
 }
 
-/// Configurable `AggregateContext` exposing only what the helpers call.
+/// A `ClientLogic` whose `replay()` returns a canned `test.StatefulState` keyed
+/// by the number of pages in the replayed `EventBook`. This lets the
+/// deferred-MANUAL / commutative field-overlap gate observe real, controllable
+/// field diffs: `check_commutative_overlap` replays three books — events up to
+/// `expected` (0 pages for a deferred command, `expected == 0`), all prior
+/// (`prior.pages.len()`), and prior+received — and diffs the resulting states
+/// via `diff_state_fields`'s `test.StatefulState` handler. Indexing by page
+/// count gives each of those three replays a distinct state.
+struct StubReplay {
+    /// State JSON for a replayed book, indexed by its page count.
+    states_by_page_count: Vec<&'static str>,
+}
+
+#[async_trait]
+impl ClientLogic for StubReplay {
+    async fn invoke(&self, _cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
+        Err(Status::unimplemented("invoke not used in helper tests"))
+    }
+
+    async fn invoke_fact(&self, _ctx: FactContext) -> Result<EventBook, Status> {
+        Err(Status::unimplemented(
+            "invoke_fact not used in helper tests",
+        ))
+    }
+
+    async fn replay(&self, events: &EventBook) -> Result<prost_types::Any, Status> {
+        let state = self
+            .states_by_page_count
+            .get(events.pages.len())
+            .copied()
+            .unwrap_or("{}");
+        Ok(Any {
+            type_url: "test.StatefulState".to_string(),
+            value: state.as_bytes().to_vec(),
+        })
+    }
+}
+
+/// A `ClientLogic` for driving `execute_mode` end-to-end (D-7 wiring tests):
+/// `invoke` returns a canned events book (the command's "received" events) and
+/// `replay` delegates to `StubReplay` so the deferred-MANUAL field-overlap
+/// gate observes controllable state diffs on the REAL pipeline path.
+struct WiredLogic {
+    replay: StubReplay,
+    /// EventBook returned by `invoke` as `BusinessResponse::Events`.
+    respond_events: EventBook,
+}
+
+#[async_trait]
+impl ClientLogic for WiredLogic {
+    async fn invoke(&self, _cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
+        Ok(BusinessResponse {
+            result: Some(business_response::Result::Events(
+                self.respond_events.clone(),
+            )),
+        })
+    }
+
+    async fn invoke_fact(&self, _ctx: FactContext) -> Result<EventBook, Status> {
+        Err(Status::unimplemented(
+            "invoke_fact not used in wiring tests",
+        ))
+    }
+
+    async fn replay(&self, events: &EventBook) -> Result<prost_types::Any, Status> {
+        self.replay.replay(events).await
+    }
+}
+
+/// Configurable `AggregateContext` exposing what the helpers — and, for the
+/// D-7 wiring tests, the whole `execute_mode` pipeline — call.
 #[derive(Default)]
 struct TestCtx {
     cascade: Option<String>,
     /// Value returned by `check_deferred_idempotency`.
     deferred_cached: Option<EventBook>,
+    /// Prior events returned by `load_prior_events_with_divergence`
+    /// (wiring tests; None → empty book, preserving helper-test behavior).
+    prior_events: Option<EventBook>,
+    /// Outcome returned by `persist_events` (wiring tests; None →
+    /// Unimplemented, preserving helper-test behavior).
+    persist_outcome: Option<PersistOutcome>,
     /// Value returned by `post_persist`.
     post_persist_return: Vec<Projection>,
     post_persist_calls: Arc<AtomicUsize>,
@@ -154,8 +239,7 @@ impl AggregateContext for TestCtx {
         _temporal: &TemporalQuery,
         _explicit_divergence: Option<u32>,
     ) -> Result<EventBook, Status> {
-        // Not exercised by the helpers under test.
-        Ok(EventBook::default())
+        Ok(self.prior_events.clone().unwrap_or_default())
     }
 
     async fn persist_events(
@@ -169,10 +253,9 @@ impl AggregateContext for TestCtx {
         _external_id: Option<&str>,
         _source_info: Option<&SourceInfo>,
     ) -> Result<PersistOutcome, Status> {
-        // Not exercised by the helpers under test.
-        Err(Status::unimplemented(
-            "persist_events not used in helper tests",
-        ))
+        self.persist_outcome
+            .clone()
+            .ok_or_else(|| Status::unimplemented("persist_events not configured for this test"))
     }
 
     async fn post_persist(&self, _events: &EventBook) -> Result<Vec<Projection>, Status> {
@@ -690,6 +773,39 @@ async fn test_enforce_manual_sends_to_dlq_and_aborts() {
     assert_eq!(dlq.load(Ordering::SeqCst), 1, "MANUAL must send to DLQ");
 }
 
+/// D-7: a deferred (saga-produced) MANUAL command must NOT be DLQ'd at the
+/// upfront sequence gate. Deferred commands carry a placeholder `expected == 0`,
+/// so `expected != actual` fires for every deferred command landing on a
+/// non-empty aggregate — which is not a real conflict. The upfront gate must
+/// let it through (Ok, no DLQ); the genuine-conflict decision is made later by
+/// `enforce_deferred_manual_gate`. Pins the `!is_deferred` guard on the MANUAL
+/// arm — without it, every deferred MANUAL command to a non-empty aggregate is
+/// wrongly dead-lettered.
+#[tokio::test]
+async fn test_enforce_manual_deferred_skips_upfront_dlq() {
+    let dlq = Arc::new(AtomicUsize::new(0));
+    let ctx = TestCtx {
+        dlq_calls: dlq.clone(),
+        ..Default::default()
+    };
+    enforce_merge_strategy(
+        &ctx,
+        &deferred_command(Some(cover("orders", "")), 1),
+        MergeStrategy::MergeManual,
+        0, // deferred placeholder expected
+        2, // non-empty destination
+        "dest",
+        true, // is_deferred
+    )
+    .await
+    .expect("deferred MANUAL must pass the upfront gate (overlap decided post-exec)");
+    assert_eq!(
+        dlq.load(Ordering::SeqCst),
+        0,
+        "deferred MANUAL must not DLQ at the upfront sequence gate"
+    );
+}
+
 /// AGGREGATE_HANDLES does no coordinator-level validation.
 #[tokio::test]
 async fn test_enforce_aggregate_handles_is_ok() {
@@ -750,6 +866,360 @@ async fn test_commutative_gate_replay_unimplemented_degrades_to_strict() {
             .starts_with(crate::orchestration::errmsg::SEQUENCE_MISMATCH),
         "degraded path uses the plain mismatch message, got: {}",
         err.message()
+    );
+}
+
+// ============================================================================
+// enforce_deferred_manual_gate (D-7)
+//
+// The deferred-MANUAL over-DLQ fix: a deferred (saga-produced) MANUAL command
+// carries expected == 0, so the raw sequence gate would DLQ it against ANY
+// non-empty aggregate. This gate instead DLQs only on a genuine post-execution
+// field conflict. `StubReplay` supplies the three states that
+// `check_commutative_overlap` diffs (keyed by replayed page count):
+//   index 0 → state at `expected` (0 pages, deferred expected == 0)
+//   index 1 → state at `actual`   (prior events, 1 page here)
+//   index 2 → state after command (prior + received, 2 pages here)
+// ============================================================================
+
+/// One committed prior event → the destination is non-empty (`actual == 1`),
+/// while the deferred command's `expected == 0`. Shared by the gate tests.
+fn non_empty_prior_and_command() -> (EventBook, EventBook) {
+    let mut prior = book_with_domain("orders", "c1");
+    prior.pages = vec![make_event_page(0, false, None)];
+    let mut received = book_with_domain("orders", "c1");
+    received.pages = vec![make_event_page(1, false, None)];
+    (prior, received)
+}
+
+/// (a) Deferred MANUAL, non-empty destination, but the command's fields are
+/// DISJOINT from the fields intervening events changed → the gate proceeds
+/// (Ok) and does NOT DLQ. This is the core of D-7: a saga command landing on a
+/// non-empty aggregate with no real conflict must merge, not be dead-lettered.
+#[tokio::test]
+async fn test_deferred_manual_gate_disjoint_proceeds_no_dlq() {
+    let dlq = Arc::new(AtomicUsize::new(0));
+    let ctx = TestCtx {
+        dlq_calls: dlq.clone(),
+        ..Default::default()
+    };
+    // intervening changed field_a (0→1); command changed field_b (0→1): disjoint.
+    let business = StubReplay {
+        states_by_page_count: vec![
+            r#"{"field_a":"0","field_b":"0"}"#,
+            r#"{"field_a":"1","field_b":"0"}"#,
+            r#"{"field_a":"1","field_b":"1"}"#,
+        ],
+    };
+    let (prior, received) = non_empty_prior_and_command();
+
+    enforce_deferred_manual_gate(
+        &ctx,
+        &business,
+        &plain_command(),
+        &prior,
+        &received,
+        SeqWindow {
+            expected: 0,
+            actual: 1,
+        },
+        "dest",
+    )
+    .await
+    .expect("disjoint fields → no genuine conflict → proceed with the merge");
+    assert_eq!(
+        dlq.load(Ordering::SeqCst),
+        0,
+        "no field conflict must NOT dead-letter a deferred command"
+    );
+}
+
+/// (b) Deferred MANUAL, non-empty destination, and the command touches a field
+/// an intervening event ALSO changed → genuine conflict → the gate DLQs and
+/// aborts (non-retryable). Pins the Overlap arm.
+#[tokio::test]
+async fn test_deferred_manual_gate_overlap_dlqs_and_aborts() {
+    let dlq = Arc::new(AtomicUsize::new(0));
+    let ctx = TestCtx {
+        dlq_calls: dlq.clone(),
+        ..Default::default()
+    };
+    // intervening changed field_a (0→1); command ALSO changed field_a (1→2): overlap.
+    let business = StubReplay {
+        states_by_page_count: vec![
+            r#"{"field_a":"0","field_b":"0"}"#,
+            r#"{"field_a":"1","field_b":"0"}"#,
+            r#"{"field_a":"2","field_b":"0"}"#,
+        ],
+    };
+    let (prior, received) = non_empty_prior_and_command();
+
+    let err = enforce_deferred_manual_gate(
+        &ctx,
+        &business,
+        &plain_command(),
+        &prior,
+        &received,
+        SeqWindow {
+            expected: 0,
+            actual: 1,
+        },
+        "dest",
+    )
+    .await
+    .expect_err("field overlap → genuine conflict → abort");
+    assert_eq!(
+        err.code(),
+        tonic::Code::Aborted,
+        "overlap must be non-retryable"
+    );
+    assert_eq!(
+        dlq.load(Ordering::SeqCst),
+        1,
+        "a genuine field conflict must route the command to the DLQ"
+    );
+}
+
+/// Degradation: when the aggregate can't `replay` (Unimplemented), overlap is
+/// undetermined. The gate conservatively DLQs + aborts, preserving MANUAL's
+/// "human decides" contract rather than silently merging. Pins the `Err` arm.
+#[tokio::test]
+async fn test_deferred_manual_gate_replay_unavailable_dlqs() {
+    let dlq = Arc::new(AtomicUsize::new(0));
+    let ctx = TestCtx {
+        dlq_calls: dlq.clone(),
+        ..Default::default()
+    };
+    let business = NoReplay; // replay() → Unimplemented
+    let (prior, received) = non_empty_prior_and_command();
+
+    let err = enforce_deferred_manual_gate(
+        &ctx,
+        &business,
+        &plain_command(),
+        &prior,
+        &received,
+        SeqWindow {
+            expected: 0,
+            actual: 1,
+        },
+        "dest",
+    )
+    .await
+    .expect_err("replay unavailable → conservatively abort for review");
+    assert_eq!(err.code(), tonic::Code::Aborted);
+    assert_eq!(
+        dlq.load(Ordering::SeqCst),
+        1,
+        "undetermined overlap must conservatively route to the DLQ"
+    );
+}
+
+// ============================================================================
+// execute_mode wiring — deferred-MANUAL gate (D-7)
+//
+// The helper tests above pin `enforce_deferred_manual_gate` in isolation, but
+// they cannot catch WIRING mutants: delete the gate call in `execute_mode`,
+// force `needs_deferred_manual_check` to false, or drop its conjuncts, and
+// every helper test stays green while a deferred MANUAL command with a genuine
+// field conflict silently merges with no DLQ. These tests drive the private
+// `execute_mode` end-to-end (parse → idempotency → load → 2PC → sequence gate
+// → invoke → D-7 gate → persist → publish) so those mutants die.
+//
+// Shape of every run: prior book has ONE committed page at seq 0 and
+// `next_sequence` (the raw field the pipeline reads for `actual`) set to 1;
+// the command is deferred (AngzarrDeferred header → `expected == 0`) with the
+// merge strategy under test (MANUAL for the gate itself, STRICT to pin that
+// the gate is scoped to MANUAL), so `expected != actual` fires exactly as it
+// does for every saga command landing on a non-empty aggregate. `StubReplay`
+// states are keyed by replayed page count: 0 → state at expected, 1 → state
+// at actual, 2 → state after the command (prior + received).
+// ============================================================================
+
+/// A deferred (saga-produced) command whose page carries the given merge
+/// strategy. The wiring tests need MANUAL (the D-7 gate applies) and STRICT
+/// (the gate must NOT apply) variants.
+fn deferred_command_with_strategy(strategy: MergeStrategy) -> CommandBook {
+    let mut cmd = deferred_command(Some(cover("orders", "")), 1);
+    cmd.pages[0].merge_strategy = strategy as i32;
+    cmd
+}
+
+/// Outcome of one end-to-end deferred `execute_mode` run.
+struct DeferredManualRun {
+    result: Result<CommandResponse, Status>,
+    /// `send_to_dlq` call count.
+    dlq: usize,
+    /// `post_persist` call count (proves the pipeline reached publish).
+    published: usize,
+}
+
+/// Drive `execute_mode` end-to-end for a deferred command (of the given merge
+/// strategy) against a non-empty aggregate, with replay states controlling the
+/// field-overlap verdict. Persist is configured to SUCCEED so that, under a
+/// wiring mutant that skips the D-7 gate, the conflicting command would fully
+/// merge and the overlap test's Err/DLQ assertions fail loudly.
+async fn run_deferred_manual_pipeline(
+    strategy: MergeStrategy,
+    states_by_page_count: Vec<&'static str>,
+) -> DeferredManualRun {
+    let mut prior = book_with_domain("dest", "");
+    prior.pages = vec![make_event_page(0, false, None)];
+    prior.next_sequence = 1; // `actual` — read from the field, not recomputed
+
+    let mut received = book_with_domain("dest", "");
+    received.pages = vec![make_event_page(1, false, None)];
+
+    let dlq = Arc::new(AtomicUsize::new(0));
+    let published = Arc::new(AtomicUsize::new(0));
+    let ctx = TestCtx {
+        prior_events: Some(prior),
+        persist_outcome: Some(PersistOutcome::Persisted(received.clone())),
+        post_persist_calls: published.clone(),
+        post_persist_return: vec![Projection::default()],
+        dlq_calls: dlq.clone(),
+        ..Default::default()
+    };
+    let business = WiredLogic {
+        replay: StubReplay {
+            states_by_page_count,
+        },
+        respond_events: received,
+    };
+
+    let result = execute_mode(&ctx, &business, deferred_command_with_strategy(strategy)).await;
+    DeferredManualRun {
+        result,
+        dlq: dlq.load(Ordering::SeqCst),
+        published: published.load(Ordering::SeqCst),
+    }
+}
+
+/// D-7 wiring, conflict side: deferred MANUAL + genuine field overlap
+/// (intervening events and the command both changed `field_a`) → the REAL
+/// `execute_mode` path must abort (non-retryable) and route the command to the
+/// DLQ, never reaching persist/publish.
+///
+/// Kills the wiring mutants the helper tests cannot see: (a) the
+/// `enforce_deferred_manual_gate` call in `execute_mode` deleted and (b)
+/// `needs_deferred_manual_check` forced false — under either, this conflicting
+/// command persists and publishes successfully (persist is configured to
+/// succeed), so the Aborted/DLQ==1/published==0 assertions all fail.
+#[tokio::test]
+async fn test_execute_mode_deferred_manual_overlap_wired_to_dlq() {
+    let run = run_deferred_manual_pipeline(
+        MergeStrategy::MergeManual,
+        vec![
+            r#"{"field_a":"0","field_b":"0"}"#, // state at expected (0 pages)
+            r#"{"field_a":"1","field_b":"0"}"#, // state at actual: field_a changed
+            r#"{"field_a":"2","field_b":"0"}"#, // after command: field_a AGAIN → overlap
+        ],
+    )
+    .await;
+
+    let err = run
+        .result
+        .expect_err("genuine field conflict must abort through the wired pipeline");
+    assert_eq!(
+        err.code(),
+        tonic::Code::Aborted,
+        "conflict must surface as non-retryable ABORTED"
+    );
+    assert_eq!(
+        run.dlq, 1,
+        "the conflicting deferred command must be routed to the DLQ"
+    );
+    assert_eq!(
+        run.published, 0,
+        "a DLQ'd command must never reach persist/publish"
+    );
+}
+
+/// D-7 wiring, merge side: deferred MANUAL + NO field overlap (intervening
+/// events changed `field_a`, the command changed `field_b`) → the REAL
+/// `execute_mode` path must proceed through persist AND publish with no DLQ.
+///
+/// This is the over-DLQ regression itself at wiring level: before D-7 this
+/// exact run (deferred command, non-empty destination, zero conflict) was
+/// unconditionally dead-lettered. Also pins the complementary wiring
+/// direction: a mutant that inverts the gate condition or hard-wires the gate
+/// to DLQ would fail the Ok/DLQ==0/published==1 assertions here while the
+/// overlap test above stays green.
+#[tokio::test]
+async fn test_execute_mode_deferred_manual_disjoint_merges() {
+    let run = run_deferred_manual_pipeline(
+        MergeStrategy::MergeManual,
+        vec![
+            r#"{"field_a":"0","field_b":"0"}"#, // state at expected (0 pages)
+            r#"{"field_a":"1","field_b":"0"}"#, // state at actual: field_a changed
+            r#"{"field_a":"1","field_b":"1"}"#, // after command: only field_b → disjoint
+        ],
+    )
+    .await;
+
+    let response = run
+        .result
+        .expect("no genuine conflict → the deferred command must merge, not dead-letter");
+    assert_eq!(
+        run.dlq, 0,
+        "no conflict must mean no DLQ (the D-7 over-DLQ bug)"
+    );
+    assert_eq!(
+        run.published, 1,
+        "the merged command must be persisted and published exactly once"
+    );
+    let events = response
+        .events
+        .expect("persisted events returned to caller");
+    assert_eq!(events.pages.len(), 1, "the persisted book flows back out");
+    assert_eq!(
+        response.projections.len(),
+        1,
+        "projections from post_persist flow back out (pipeline completed)"
+    );
+}
+
+/// D-7 wiring, strategy-scoping side: a deferred STRICT command must NOT be
+/// routed through the MANUAL gate — even when its fields genuinely overlap
+/// with intervening changes (same conflicting replay states as the overlap
+/// test above).
+///
+/// WHY: deferred commands bypass the upfront sequence gate by design — they
+/// never claim a destination sequence (`expected` is a placeholder 0; the
+/// pipeline stamps `actual` onto their pages after load), so for STRICT the
+/// optimistic-concurrency check is meaningless and is explicitly skipped
+/// (H-18). MANUAL's DLQ semantics are a per-command *opt-in* by the aggregate
+/// owner; a saga command that didn't opt in must not inherit them via the D-7
+/// gate. The pipeline must persist and publish it, DLQ untouched.
+///
+/// Kills the observable `&&`→`||` mutant on the `needs_deferred_manual_check`
+/// conjunct (`(mismatch && MANUAL) || is_deferred`): under that mutant this
+/// deferred STRICT run enters the MANUAL gate, sees the field overlap, and
+/// wrongly dead-letters — failing the Ok/DLQ==0/published==1 assertions.
+/// (Invisible to the MANUAL-only tests, where the flag is true either way.)
+#[tokio::test]
+async fn test_execute_mode_deferred_strict_overlap_not_manual_gated() {
+    let run = run_deferred_manual_pipeline(
+        MergeStrategy::MergeStrict,
+        vec![
+            r#"{"field_a":"0","field_b":"0"}"#, // state at expected (0 pages)
+            r#"{"field_a":"1","field_b":"0"}"#, // state at actual: field_a changed
+            r#"{"field_a":"2","field_b":"0"}"#, // after command: field_a AGAIN → overlap
+        ],
+    )
+    .await;
+
+    run.result.expect(
+        "deferred STRICT must merge: the sequence gate is skipped by design \
+         (expected=0 stamping) and MANUAL's DLQ semantics were not opted into",
+    );
+    assert_eq!(
+        run.dlq, 0,
+        "a deferred STRICT command must never be routed through the MANUAL DLQ gate"
+    );
+    assert_eq!(
+        run.published, 1,
+        "the deferred STRICT command must persist and publish exactly once"
     );
 }
 

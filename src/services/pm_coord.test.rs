@@ -103,16 +103,16 @@ struct MockDestinationFetcher;
 
 #[async_trait::async_trait]
 impl crate::orchestration::destination::DestinationFetcher for MockDestinationFetcher {
-    async fn fetch(&self, _cover: &Cover) -> Option<EventBook> {
-        Some(EventBook::default())
+    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(Some(EventBook::default()))
     }
 
     async fn fetch_by_correlation(
         &self,
         _domain: &str,
         _correlation_id: &str,
-    ) -> Option<EventBook> {
-        None
+    ) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(None)
     }
 
     async fn fetch_by_root(
@@ -120,8 +120,8 @@ impl crate::orchestration::destination::DestinationFetcher for MockDestinationFe
         _domain: &str,
         _root: &crate::proto::Uuid,
         _edition: &str,
-    ) -> Option<EventBook> {
-        None
+    ) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(None)
     }
 }
 

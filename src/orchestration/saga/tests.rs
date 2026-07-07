@@ -1297,19 +1297,19 @@ async fn test_saga_fetches_destination_sequences_for_output_domains() {
 
     #[async_trait]
     impl crate::orchestration::destination::DestinationFetcher for SequenceFetcher {
-        async fn fetch(&self, _cover: &Cover) -> Option<EventBook> {
-            None
+        async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+            Ok(None)
         }
         async fn fetch_by_correlation(
             &self,
             domain: &str,
             _correlation_id: &str,
-        ) -> Option<EventBook> {
+        ) -> Result<Option<EventBook>, tonic::Status> {
             assert_eq!(domain, "inventory");
-            Some(EventBook {
+            Ok(Some(EventBook {
                 next_sequence: 5,
                 ..Default::default()
-            })
+            }))
         }
     }
 
@@ -1341,4 +1341,565 @@ async fn test_saga_fetches_destination_sequences_for_output_domains() {
         Some(HashMap::from([("inventory".to_string(), 5)])),
         "handle() must receive the fetched destination sequence for every output domain"
     );
+}
+
+// ============================================================================
+// O9: destination-sequence fetch ERRORS fail saga orchestration
+// ============================================================================
+//
+// Pre-fix the Phase-1 fetch collapsed transport errors to "destination not
+// found → sequence 0". With D-5 honoring handler-stamped explicit sequences,
+// a fabricated 0 travels to the destination and is rejected (or worse,
+// accepted against a fresh timeline). A fetch ERROR must instead fail the
+// orchestration attempt so bus redelivery retries the saga.
+
+/// Saga context that declares one output domain and records whether
+/// handle() ran — shared by the O9 Phase-1 fetch tests.
+struct OutputDomainSaga {
+    domains: Vec<String>,
+    seen: Arc<std::sync::Mutex<Option<HashMap<String, u32>>>>,
+}
+
+#[async_trait]
+impl SagaRetryContext for OutputDomainSaga {
+    async fn handle(
+        &self,
+        destination_sequences: HashMap<String, u32>,
+        _sync_mode: SyncMode,
+    ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
+        *self.seen.lock().unwrap() = Some(destination_sequences);
+        Ok(SagaResponse::default())
+    }
+    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
+    fn source_cover(&self) -> Option<&Cover> {
+        None
+    }
+    fn source_max_sequence(&self) -> u32 {
+        0
+    }
+    fn output_domains(&self) -> &[String] {
+        &self.domains
+    }
+}
+
+/// Fetcher whose correlation lookups fail — a transient gRPC blip, not an
+/// absent destination.
+struct FailingSequenceFetcher;
+
+#[async_trait]
+impl crate::orchestration::destination::DestinationFetcher for FailingSequenceFetcher {
+    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+        Err(tonic::Status::unavailable("event query connection refused"))
+    }
+    async fn fetch_by_correlation(
+        &self,
+        _domain: &str,
+        _correlation_id: &str,
+    ) -> Result<Option<EventBook>, tonic::Status> {
+        Err(tonic::Status::unavailable("event query connection refused"))
+    }
+}
+
+/// O9 (the defect, saga side): a destination-sequence fetch ERROR must fail
+/// saga orchestration BEFORE the saga handler runs — proceeding would hand
+/// the handler a silently-defaulted sequence 0 for a destination that
+/// exists, producing wrong-sequence commands.
+#[tokio::test]
+async fn test_saga_destination_fetch_error_fails_orchestration() {
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let ctx = OutputDomainSaga {
+        domains: vec!["inventory".to_string()],
+        seen: seen.clone(),
+    };
+    let executor = CapturingExecutor::new();
+
+    let result = orchestrate_saga(
+        &ctx,
+        &executor,
+        None,
+        Some(&FailingSequenceFetcher),
+        None,
+        "saga-orders-inventory",
+        "corr-1",
+        None,
+        SyncMode::Simple,
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a failed destination-sequence fetch must fail saga orchestration \
+         (O9), not proceed with fabricated sequences. Got Ok."
+    );
+    assert!(
+        seen.lock().unwrap().is_none(),
+        "the saga handler must NOT run when destination sequences could not \
+         be fetched — it would translate against a fabricated sequence 0"
+    );
+    assert!(
+        executor.seen.lock().await.is_empty(),
+        "no commands may be delivered for a failed orchestration attempt"
+    );
+}
+
+/// O9 regression guard: Ok(None) still means "destination doesn't exist yet
+/// for this correlation" and defaults the sequence to 0 — a genuinely new
+/// destination timeline must keep working after error propagation.
+#[tokio::test]
+async fn test_saga_destination_fetch_none_still_defaults_sequence_zero() {
+    /// Fetcher that reaches the source of truth and finds nothing.
+    struct AbsentDestinationFetcher;
+
+    #[async_trait]
+    impl crate::orchestration::destination::DestinationFetcher for AbsentDestinationFetcher {
+        async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+            Ok(None)
+        }
+        async fn fetch_by_correlation(
+            &self,
+            _domain: &str,
+            _correlation_id: &str,
+        ) -> Result<Option<EventBook>, tonic::Status> {
+            Ok(None)
+        }
+    }
+
+    let seen = Arc::new(std::sync::Mutex::new(None));
+    let ctx = OutputDomainSaga {
+        domains: vec!["inventory".to_string()],
+        seen: seen.clone(),
+    };
+    let executor = CapturingExecutor::new();
+
+    let result = orchestrate_saga(
+        &ctx,
+        &executor,
+        None,
+        Some(&AbsentDestinationFetcher),
+        None,
+        "saga-orders-inventory",
+        "corr-1",
+        None,
+        SyncMode::Simple,
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Ok(None) is a valid new destination: {result:?}"
+    );
+    let captured = seen.lock().unwrap().clone();
+    assert_eq!(
+        captured,
+        Some(HashMap::from([("inventory".to_string(), 0)])),
+        "an absent destination (Ok(None)) still defaults its sequence to 0"
+    );
+}
+
+// ============================================================================
+// O10: injected facts inherit the workflow correlation_id (saga side)
+// ============================================================================
+//
+// Commands emitted by a saga get the correlation_id backfilled in
+// `SagaOperation::try_execute`, but injected FACTS did not. Downstream PMs
+// skip events with an empty correlation_id, so a fact injected without the
+// workflow correlation silently fails to advance any correlated PM. The fix
+// backfills the correlation onto facts before injection, on the same rule.
+
+/// FactExecutor that captures injected facts so a test can inspect the
+/// correlation_id the coordinator stamped on them.
+struct CapturingFactExecutor {
+    injected: AsyncMutex<Vec<EventBook>>,
+}
+
+impl CapturingFactExecutor {
+    fn new() -> Self {
+        Self {
+            injected: AsyncMutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl FactExecutor for CapturingFactExecutor {
+    async fn inject(
+        &self,
+        fact: EventBook,
+    ) -> Result<(), crate::orchestration::FactInjectionError> {
+        self.injected.lock().await.push(fact);
+        Ok(())
+    }
+}
+
+/// Saga that emits one fact whose cover carries `fact_correlation`, so a test
+/// can drive both the empty (backfill) and explicit (preserve) cases.
+struct SagaEmittingFact {
+    fact_correlation: String,
+}
+
+#[async_trait]
+impl SagaRetryContext for SagaEmittingFact {
+    async fn handle(
+        &self,
+        _destination_sequences: HashMap<String, u32>,
+        _sync_mode: SyncMode,
+    ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(SagaResponse {
+            commands: vec![],
+            events: vec![EventBook {
+                cover: Some(Cover {
+                    domain: "inventory".to_string(),
+                    correlation_id: self.fact_correlation.clone(),
+                    ..Default::default()
+                }),
+                pages: vec![],
+                snapshot: None,
+                ..Default::default()
+            }],
+        })
+    }
+    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
+    fn source_cover(&self) -> Option<&Cover> {
+        None
+    }
+    fn source_max_sequence(&self) -> u32 {
+        0
+    }
+}
+
+/// O10 (saga side): a fact emitted with an empty correlation_id is backfilled
+/// with the workflow correlation_id before injection so downstream PMs can
+/// correlate it. Pre-fix the fact was injected with an empty correlation and
+/// silently skipped.
+#[tokio::test]
+async fn test_orchestrate_saga_backfills_correlation_id_on_facts() {
+    let ctx = SagaEmittingFact {
+        fact_correlation: String::new(),
+    };
+    let executor = SuccessExecutor;
+    let fact_exec = CapturingFactExecutor::new();
+
+    let result = orchestrate_saga(
+        &ctx,
+        &executor,
+        None,
+        None,
+        Some(&fact_exec),
+        "saga-orders-inventory",
+        "corr-77",
+        None,
+        SyncMode::Async,
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(result.is_ok(), "orchestrate_saga should succeed");
+    let injected = fact_exec.injected.lock().await;
+    assert_eq!(injected.len(), 1, "the fact must be injected");
+    assert_eq!(
+        injected[0].cover.as_ref().unwrap().correlation_id,
+        "corr-77",
+        "an empty fact correlation_id must be backfilled with the workflow \
+         correlation_id (O10) so downstream PMs don't skip it"
+    );
+}
+
+/// O10 (saga side): a fact that already carries an explicit correlation_id is
+/// preserved — a saga may deliberately route a fact into a different workflow.
+#[tokio::test]
+async fn test_orchestrate_saga_preserves_explicit_fact_correlation_id() {
+    let ctx = SagaEmittingFact {
+        fact_correlation: "explicit-other".to_string(),
+    };
+    let executor = SuccessExecutor;
+    let fact_exec = CapturingFactExecutor::new();
+
+    let result = orchestrate_saga(
+        &ctx,
+        &executor,
+        None,
+        None,
+        Some(&fact_exec),
+        "saga-orders-inventory",
+        "corr-77",
+        None,
+        SyncMode::Async,
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(result.is_ok());
+    let injected = fact_exec.injected.lock().await;
+    assert_eq!(
+        injected[0].cover.as_ref().unwrap().correlation_id,
+        "explicit-other",
+        "an explicitly-set fact correlation_id must be preserved (O10)"
+    );
+}
+
+// ============================================================================
+// O11: saga retry must not re-execute already-succeeded commands
+// ============================================================================
+//
+// `SagaOperation::try_execute` re-iterated the FULL command set on every retry
+// attempt, so a command that already succeeded on attempt N re-executed on
+// every subsequent attempt — republishing its destination events (duplicate
+// event storms; cyclic topologies self-sustain). The fix trims the retry set
+// in `prepare_for_retry` to only the COMMANDS (by index, F4 — not by domain)
+// that returned Retryable on the last attempt.
+
+/// A command targeting a single domain, so the retry-trim can be observed by
+/// per-domain execution counts.
+fn cmd_for_domain(domain: &str) -> CommandBook {
+    CommandBook {
+        cover: Some(Cover {
+            domain: domain.to_string(),
+            correlation_id: "corr-1".to_string(),
+            ..Default::default()
+        }),
+        pages: vec![],
+    }
+}
+
+/// Executor that records how many times each domain was executed and fails a
+/// configured domain a bounded number of times before succeeding.
+struct PerDomainExecutor {
+    exec_counts: AsyncMutex<HashMap<String, u32>>,
+    fail_remaining: AsyncMutex<HashMap<String, u32>>,
+}
+
+#[async_trait]
+impl CommandExecutor for PerDomainExecutor {
+    async fn execute(&self, command: CommandBook, _sync_mode: SyncMode) -> CommandOutcome {
+        let domain = command.domain().to_string();
+        *self
+            .exec_counts
+            .lock()
+            .await
+            .entry(domain.clone())
+            .or_insert(0) += 1;
+        let mut fail = self.fail_remaining.lock().await;
+        let remaining = fail.entry(domain).or_insert(0);
+        if *remaining > 0 {
+            *remaining -= 1;
+            CommandOutcome::Retryable {
+                reason: "Sequence conflict".to_string(),
+                current_state: None,
+            }
+        } else {
+            CommandOutcome::Success(CommandResponse::default())
+        }
+    }
+}
+
+/// O11: a command that succeeds on the first attempt must NOT be re-executed
+/// on later retries — only the still-failing domain retries. Pre-fix, the
+/// succeeded command re-executed every attempt (count would be 3, not 1),
+/// republishing its destination events.
+#[tokio::test]
+async fn test_saga_retry_excludes_succeeded_commands() {
+    let ctx = AlwaysSucceeds;
+    let executor = PerDomainExecutor {
+        exec_counts: AsyncMutex::new(HashMap::new()),
+        fail_remaining: AsyncMutex::new(HashMap::from([("keeps-failing".to_string(), 2u32)])),
+    };
+    let commands = vec![
+        cmd_for_domain("succeeds-first"),
+        cmd_for_domain("keeps-failing"),
+    ];
+
+    SagaRetryBuilder::new(&ctx, &executor, "saga-o11", "corr-1", SyncMode::Simple)
+        .commands(commands)
+        .backoff(fast_backoff())
+        .execute()
+        .await;
+
+    let counts = executor.exec_counts.lock().await;
+    assert_eq!(
+        counts.get("succeeds-first").copied(),
+        Some(1),
+        "a command that succeeded on the first attempt must NOT be re-executed \
+         on retries (O11) — re-execution republishes destination events. \
+         Got counts: {:?}",
+        *counts
+    );
+    assert_eq!(
+        counts.get("keeps-failing").copied(),
+        Some(3),
+        "the failing domain retries: 2 conflicts + 1 success. Got counts: {:?}",
+        *counts
+    );
+}
+
+/// A command targeting `domain` and carrying a distinct `key` in its cover's
+/// correlation_id (non-empty, so the backfill preserves it) — lets a
+/// per-command executor tell apart two commands sharing the SAME domain.
+fn cmd_with_key(domain: &str, key: &str) -> CommandBook {
+    CommandBook {
+        cover: Some(Cover {
+            domain: domain.to_string(),
+            correlation_id: key.to_string(),
+            ..Default::default()
+        }),
+        pages: vec![],
+    }
+}
+
+/// Executor that records execution counts per command KEY (the cover's
+/// correlation_id) and fails a configured key a bounded number of times
+/// before succeeding. Unlike `PerDomainExecutor`, this distinguishes two
+/// commands that share one domain.
+struct PerCommandExecutor {
+    exec_counts: AsyncMutex<HashMap<String, u32>>,
+    fail_remaining: AsyncMutex<HashMap<String, u32>>,
+}
+
+#[async_trait]
+impl CommandExecutor for PerCommandExecutor {
+    async fn execute(&self, command: CommandBook, _sync_mode: SyncMode) -> CommandOutcome {
+        let key = command
+            .cover
+            .as_ref()
+            .map(|c| c.correlation_id.clone())
+            .unwrap_or_default();
+        *self
+            .exec_counts
+            .lock()
+            .await
+            .entry(key.clone())
+            .or_insert(0) += 1;
+        let mut fail = self.fail_remaining.lock().await;
+        let remaining = fail.entry(key).or_insert(0);
+        if *remaining > 0 {
+            *remaining -= 1;
+            CommandOutcome::Retryable {
+                reason: "Sequence conflict".to_string(),
+                current_state: None,
+            }
+        } else {
+            CommandOutcome::Success(CommandResponse::default())
+        }
+    }
+}
+
+/// O11/F4: the retry trim must be per-COMMAND (index), not per-domain. One
+/// invocation may emit multiple commands to the same domain (that is why
+/// `command_index` provenance exists — see the O1 stamping comments). With a
+/// domain-keyed retry set, a command that SUCCEEDED re-executes on every
+/// retry merely because a sibling command in its domain failed — republishing
+/// its destination events. Here both commands target "inventory"; the first
+/// succeeds immediately, the second conflicts twice. The succeeded command
+/// must execute exactly once across all attempts.
+#[tokio::test]
+async fn test_saga_retry_excludes_succeeded_command_sharing_failed_domain() {
+    let ctx = AlwaysSucceeds;
+    let executor = PerCommandExecutor {
+        exec_counts: AsyncMutex::new(HashMap::new()),
+        fail_remaining: AsyncMutex::new(HashMap::from([("cmd-fails".to_string(), 2u32)])),
+    };
+    let commands = vec![
+        cmd_with_key("inventory", "cmd-succeeds"),
+        cmd_with_key("inventory", "cmd-fails"),
+    ];
+
+    SagaRetryBuilder::new(&ctx, &executor, "saga-f4", "corr-1", SyncMode::Simple)
+        .commands(commands)
+        .backoff(fast_backoff())
+        .execute()
+        .await;
+
+    let counts = executor.exec_counts.lock().await;
+    assert_eq!(
+        counts.get("cmd-succeeds").copied(),
+        Some(1),
+        "a succeeded command must NOT re-execute on retry just because a \
+         sibling command in the SAME domain failed (F4: retain by index, \
+         not domain). Got counts: {:?}",
+        *counts
+    );
+    assert_eq!(
+        counts.get("cmd-fails").copied(),
+        Some(3),
+        "the failing command retries: 2 conflicts + 1 success. Got counts: {:?}",
+        *counts
+    );
+}
+
+// ============================================================================
+// O8: async bus publish failure must DLQ the remainder, not silently drop it
+// ============================================================================
+//
+// In async mode, a bus publish failure part-way through the command list
+// returned Fatal immediately. Fatal never populates the retry-exhaustion
+// tracker, so `publish_retry_exhausted_dlq` DLQ'd nothing AND `execute()`
+// returns () so `orchestrate_saga` still returned Ok — the failing command and
+// every un-attempted command after it were silently lost. The fix records
+// `self.commands[idx..]` (failing + remainder) into the tracker so the DLQ
+// path captures them, while preserving Fatal semantics.
+
+/// CommandBus whose publish always fails — simulates a broker/infra outage
+/// mid-dispatch.
+struct FailingCommandBus;
+
+#[async_trait]
+impl crate::bus::CommandBus for FailingCommandBus {
+    async fn publish(&self, _command: Arc<CommandBook>) -> crate::bus::Result<()> {
+        Err(BusError::Connection("bus down".to_string()))
+    }
+    async fn subscribe(
+        &self,
+        _domain: &str,
+        _handler: Box<dyn crate::bus::CommandHandler>,
+    ) -> crate::bus::Result<()> {
+        Ok(())
+    }
+}
+
+/// O8: when the FIRST async publish fails, the failing command AND the two
+/// un-attempted commands after it must all land in the DLQ — nothing silently
+/// dropped. Pre-fix the tracker stayed empty and zero DLQ entries were emitted.
+#[tokio::test]
+async fn saga_async_publish_failure_dlqs_failing_command_and_remainder() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = DlqAwareContext::new(publisher.clone());
+    let executor = SuccessExecutor; // unused in async+bus path
+    let bus = FailingCommandBus;
+    let bus_dyn: &dyn crate::bus::CommandBus = &bus;
+
+    let commands = vec![
+        cmd_for_domain("alpha"),
+        cmd_for_domain("bravo"),
+        cmd_for_domain("charlie"),
+    ];
+
+    SagaRetryBuilder::new(&ctx, &executor, "saga-o8", "corr-1", SyncMode::Async)
+        .command_bus(Some(bus_dyn))
+        .commands(commands)
+        .backoff(fast_backoff())
+        .execute()
+        .await;
+
+    let captured = publisher.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        3,
+        "async publish failure must DLQ the failing command AND the \
+         un-attempted remainder (O8) — nothing silently dropped. Got {} entries",
+        captured.len()
+    );
+    for dl in captured.iter() {
+        assert_eq!(dl.source_component, "saga-test");
+        match &dl.rejection_details {
+            Some(RejectionDetails::EventProcessingFailed(details)) => {
+                assert!(
+                    details.error.contains("bus publish failed"),
+                    "each DLQ entry must record the publish-failure reason, got: {}",
+                    details.error
+                );
+            }
+            other => panic!("expected EventProcessingFailed, got {other:?}"),
+        }
+    }
 }

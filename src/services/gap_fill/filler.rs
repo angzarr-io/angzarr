@@ -31,9 +31,25 @@ pub trait HandlerPositionStore: Send + Sync {
 /// Source for fetching event ranges.
 ///
 /// Abstracts over local (EventBookRepository) and remote (gRPC) event fetching.
+///
+/// # Two-phase visibility contract (F3)
+///
+/// Gap fill exists because `post_persist` suppresses `no_commit` pages from
+/// bus publishes (O2) — the resulting sequence holes are exactly what
+/// consumers come here to fill. An implementation MUST therefore return the
+/// resolved committed view, never raw unresolved `no_commit` pages:
+/// otherwise gap fill re-delivers the very phantom (revoked or
+/// still-pending) events the front door suppressed. Both implementations
+/// satisfy this via `EventBookRepository::get_from_to`, which applies the
+/// two-phase transform: `LocalEventSource` calls it directly;
+/// `RemoteEventSource` reaches it through the EventQuery service's range
+/// selection. Do not add an implementation that bypasses that seam (e.g.
+/// reading the `EventStore` or `get_from_to_raw` directly).
 #[async_trait::async_trait]
 pub trait EventSource: Send + Sync {
     /// Fetch events in the range [from, to) for the given domain/edition/root.
+    /// Withheld provisional pages arrive as sequence-preserving NoOp
+    /// placeholders, so the filled book stays contiguous.
     async fn get_from_to(
         &self,
         domain: &str,

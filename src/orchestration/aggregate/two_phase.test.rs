@@ -416,6 +416,79 @@ fn bare_canonical_confirmation_is_recognized() {
     assert!(is_noop(&result.events.pages[1]));
 }
 
+// ============================================================================
+// O15: is_noop matches by FQN (prefix-agnostic), like is_framework_event
+// ============================================================================
+
+/// O15: `is_noop` must recognize a NoOp by its fully-qualified proto name
+/// regardless of the `type_url` resolver prefix, exactly as
+/// `is_framework_event`/`matches_kind` already do for
+/// Confirmation/Revocation/Compensate.
+///
+/// Pre-fix `is_noop` compared `any.type_url == type_url::NOOP` by EXACT string
+/// equality against the bare canonical `/io.angzarr.v1.NoOp`. A NoOp `Any`
+/// stamped with a different prefix — a cross-language producer's
+/// `type.googleapis.com/io.angzarr.v1.NoOp`, or a value round-tripped through
+/// prost's default `/...` form — failed that equality and was misread as a
+/// live business event. That is the same cross-prefix bug H-40 fixed for the
+/// other framework events; NoOp was left behind.
+#[test]
+fn is_noop_recognizes_noop_regardless_of_prefix() {
+    for prefix in ["/", "type.googleapis.com/", ""] {
+        let page = EventPage {
+            header: None,
+            created_at: None,
+            payload: Some(event_page::Payload::Event(prost_types::Any {
+                // is_noop inspects only the type_url; an empty value is fine.
+                type_url: format!("{prefix}io.angzarr.v1.NoOp"),
+                value: vec![],
+            })),
+            ..Default::default()
+        };
+        assert!(
+            is_noop(&page),
+            "NoOp Any with prefix {prefix:?} must be recognized as a NoOp"
+        );
+    }
+}
+
+/// O15 guard: `is_noop` must still REJECT non-NoOp payloads — a real business
+/// event, a different FQN that merely ends in `NoOp`, and a page with no Event
+/// payload. Without these, a mutant that makes `is_noop` always-true (or that
+/// matches a bare suffix instead of the full FQN) would survive.
+#[test]
+fn is_noop_rejects_non_noop_payloads() {
+    // Real business event.
+    assert!(
+        !is_noop(&make_event_page(1, false, "")),
+        "a business event must not be treated as a NoOp"
+    );
+
+    // Different FQN that ends with the same short name must NOT match — the
+    // check is on the full FQN, not a trailing-suffix match.
+    let lookalike = EventPage {
+        payload: Some(event_page::Payload::Event(prost_types::Any {
+            type_url: "io.other.v1.NoOp".to_string(),
+            value: vec![],
+        })),
+        ..Default::default()
+    };
+    assert!(
+        !is_noop(&lookalike),
+        "a different-FQN type ending in 'NoOp' must not be treated as a NoOp"
+    );
+
+    // No Event payload at all.
+    let empty = EventPage {
+        payload: None,
+        ..Default::default()
+    };
+    assert!(
+        !is_noop(&empty),
+        "a page with no Event payload must not be treated as a NoOp"
+    );
+}
+
 #[test]
 fn conflict_detection_sees_all_uncommitted() {
     let events = make_event_book(vec![

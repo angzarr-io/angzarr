@@ -20,8 +20,13 @@
 //! real in-memory SQLite event store + a tracking event bus, and
 //! verifies:
 //!
-//! - PM root from the event book's cover is extracted and used as
-//!   the storage key.
+//! - O7/D-11: the storage key is derived from the in-flight
+//!   `correlation_id` via `CorrelationRootExt::correlation_root`
+//!   (UUID pass-through; friendly id → UUIDv5) — NOT from the
+//!   handler book's `cover.root`. This keeps the persist-side root
+//!   identical to the command-stamping side in
+//!   `execute_pm_commands`, so rejection notifications route back
+//!   to the persisted PM aggregate.
 //! - PM events are persisted under the PM's `pm_domain` argument
 //!   (not whatever the trigger's domain was).
 //! - Edition propagates from the book's cover to the store column.
@@ -48,6 +53,7 @@ use uuid::Uuid;
 use angzarr::bus::{self, EventBus, EventHandler, PublishResult};
 use angzarr::orchestration::command::CommandOutcome;
 use angzarr::orchestration::process_manager::grpc::persist_pm_event_book;
+use angzarr::orchestration::shared::CorrelationRootExt;
 use angzarr::proto::{
     event_page, page_header, Cover, Edition, EventBook, EventPage, PageHeader, Uuid as ProtoUuid,
 };
@@ -165,16 +171,19 @@ fn event_sequence_num(page: &EventPage) -> u32 {
 // ============================================================================
 
 /// A PM event book persists to the SQLite store under the PM's
-/// `pm_domain` + the cover's root + default edition. The bus sees
-/// the re-read book published.
+/// `pm_domain` + the CORRELATION-DERIVED root (O7/D-11) + default
+/// edition. The handler's cover.root (a random v4 here) is NOT the
+/// storage key — the correlation id is the authoritative PM root, so
+/// the persist-side identity always matches the command-stamping
+/// side. The bus sees the emitted book published.
 #[tokio::test]
 async fn pm_persist_writes_event_book_to_store_and_bus() {
     let event_store = create_sqlite_event_store().await;
     let bus_recorder = RecordingEventBus::new();
     let event_bus: Arc<dyn EventBus> = bus_recorder.clone();
-    let pm_root = Uuid::new_v4();
+    let cover_root = Uuid::new_v4();
 
-    let book = pm_event_book("fulfillment-pm", pm_root, "corr-1", None, &[0]);
+    let book = pm_event_book("fulfillment-pm", cover_root, "corr-1", None, &[0]);
     let outcome = persist_pm_event_book(
         &(event_store.clone() as Arc<dyn EventStore>),
         &event_bus,
@@ -188,13 +197,31 @@ async fn pm_persist_writes_event_book_to_store_and_bus() {
         "persist outcome must be Success, got {outcome:?}"
     );
 
-    // Stored under (pm_domain, default_edition, pm_root).
+    // Stored under (pm_domain, default_edition, correlation_root("corr-1")).
+    let derived_root = "corr-1".correlation_root();
     let persisted = event_store
-        .get("fulfillment-pm", "", pm_root)
+        .get("fulfillment-pm", "", derived_root)
         .await
         .expect("event_store.get");
-    assert_eq!(persisted.len(), 1, "expected 1 persisted PM event");
+    assert_eq!(
+        persisted.len(),
+        1,
+        "expected 1 PM event under the correlation-derived root (D-11)"
+    );
     assert_eq!(event_sequence_num(&persisted[0]), 0);
+
+    // The handler's cover.root is NOT a storage identity — pre-D-11 it
+    // was, and pinning that here would resurrect the split-identity bug.
+    let under_cover_root = event_store
+        .get("fulfillment-pm", "", cover_root)
+        .await
+        .expect("event_store.get");
+    assert_eq!(
+        under_cover_root.len(),
+        0,
+        "nothing may be stored under the handler's cover.root (O7/D-11: \
+         the correlation id is the authoritative PM root)"
+    );
 
     // The bus saw exactly one publish carrying the page the
     // handler just emitted.
@@ -216,9 +243,9 @@ async fn pm_persist_increments_sequence_across_two_calls() {
     let event_store = create_sqlite_event_store().await;
     let bus_recorder = RecordingEventBus::new();
     let event_bus: Arc<dyn EventBus> = bus_recorder.clone();
-    let pm_root = Uuid::new_v4();
+    let cover_root = Uuid::new_v4();
 
-    let book0 = pm_event_book("pm-domain", pm_root, "corr-1", None, &[0]);
+    let book0 = pm_event_book("pm-domain", cover_root, "corr-1", None, &[0]);
     let outcome0 = persist_pm_event_book(
         &(event_store.clone() as Arc<dyn EventStore>),
         &event_bus,
@@ -229,7 +256,7 @@ async fn pm_persist_increments_sequence_across_two_calls() {
     .await;
     assert!(matches!(outcome0, CommandOutcome::Success(_)));
 
-    let book1 = pm_event_book("pm-domain", pm_root, "corr-1", None, &[1]);
+    let book1 = pm_event_book("pm-domain", cover_root, "corr-1", None, &[1]);
     let outcome1 = persist_pm_event_book(
         &(event_store.clone() as Arc<dyn EventStore>),
         &event_bus,
@@ -240,8 +267,10 @@ async fn pm_persist_increments_sequence_across_two_calls() {
     .await;
     assert!(matches!(outcome1, CommandOutcome::Success(_)));
 
+    // O7/D-11: both persists share correlation "corr-1", so both land
+    // under the same correlation-derived root.
     let persisted = event_store
-        .get("pm-domain", "", pm_root)
+        .get("pm-domain", "", "corr-1".correlation_root())
         .await
         .expect("event_store.get");
     assert_eq!(persisted.len(), 2);
@@ -278,12 +307,16 @@ async fn pm_persist_publishes_only_new_events_not_history() {
     let event_store = create_sqlite_event_store().await;
     let bus_recorder = RecordingEventBus::new();
     let event_bus: Arc<dyn EventBus> = bus_recorder.clone();
-    let pm_root = Uuid::new_v4();
+    let cover_root = Uuid::new_v4();
+    // O7/D-11: the production persist keys storage by the
+    // correlation-derived root, so the seeded history must live under
+    // that same root for the persist to append to it.
+    let pm_root = "flow-corr".correlation_root();
 
     // Seed 3 prior PM events at sequences 0, 1, 2 by calling
     // event_store.add directly so the bus recorder stays empty --
     // we only want to observe what the post-load persist publishes.
-    let seed_pages = pm_event_book("pm-domain", pm_root, "old-corr", None, &[0, 1, 2]).pages;
+    let seed_pages = pm_event_book("pm-domain", cover_root, "flow-corr", None, &[0, 1, 2]).pages;
     event_store
         .add(
             "pm-domain",
@@ -291,7 +324,7 @@ async fn pm_persist_publishes_only_new_events_not_history() {
             pm_root,
             seed_pages,
             &AddMeta {
-                correlation_id: "old-corr",
+                correlation_id: "flow-corr",
                 external_id: None,
                 source_info: None,
                 ext: None,
@@ -307,13 +340,13 @@ async fn pm_persist_publishes_only_new_events_not_history() {
 
     // Now persist 2 NEW events at sequences 3, 4 through the
     // production path.
-    let new_book = pm_event_book("pm-domain", pm_root, "new-corr", None, &[3, 4]);
+    let new_book = pm_event_book("pm-domain", cover_root, "flow-corr", None, &[3, 4]);
     let outcome = persist_pm_event_book(
         &(event_store.clone() as Arc<dyn EventStore>),
         &event_bus,
         "pm-domain",
         &new_book,
-        "new-corr",
+        "flow-corr",
     )
     .await;
     assert!(matches!(outcome, CommandOutcome::Success(_)));
@@ -356,13 +389,13 @@ async fn pm_persist_publishes_book_with_stamped_correlation_id() {
     let event_store = create_sqlite_event_store().await;
     let bus_recorder = RecordingEventBus::new();
     let event_bus: Arc<dyn EventBus> = bus_recorder.clone();
-    let pm_root = Uuid::new_v4();
+    let cover_root = Uuid::new_v4();
 
     // Simulate the PM service returning a cover with NO correlation_id
     // set (or whatever happened to be on the handler-built book).
     // The coordinator passes the in-flight correlation_id separately
     // and the publish step must stamp it onto the outgoing cover.
-    let book_with_blank_corr = pm_event_book("pm-domain", pm_root, "", None, &[0]);
+    let book_with_blank_corr = pm_event_book("pm-domain", cover_root, "", None, &[0]);
     let outcome = persist_pm_event_book(
         &(event_store.clone() as Arc<dyn EventStore>),
         &event_bus,
@@ -395,9 +428,11 @@ async fn pm_persist_publishes_book_with_stamped_correlation_id() {
 async fn pm_persist_propagates_edition_to_store() {
     let event_store = create_sqlite_event_store().await;
     let event_bus: Arc<dyn EventBus> = RecordingEventBus::new();
-    let pm_root = Uuid::new_v4();
+    let cover_root = Uuid::new_v4();
+    // O7/D-11: storage is keyed by the correlation-derived root.
+    let pm_root = "corr-1".correlation_root();
 
-    let book = pm_event_book("pm-domain", pm_root, "corr-1", Some("branch-x"), &[0]);
+    let book = pm_event_book("pm-domain", cover_root, "corr-1", Some("branch-x"), &[0]);
     let outcome = persist_pm_event_book(
         &(event_store.clone() as Arc<dyn EventStore>),
         &event_bus,
@@ -440,10 +475,10 @@ async fn pm_persist_propagates_edition_to_store() {
 async fn pm_persist_sequence_conflict_returns_retryable() {
     let event_store = create_sqlite_event_store().await;
     let event_bus: Arc<dyn EventBus> = RecordingEventBus::new();
-    let pm_root = Uuid::new_v4();
+    let cover_root = Uuid::new_v4();
 
     // First persist at sequence 0 -- succeeds.
-    let book = pm_event_book("pm-domain", pm_root, "corr-1", None, &[0]);
+    let book = pm_event_book("pm-domain", cover_root, "corr-1", None, &[0]);
     let first = persist_pm_event_book(
         &(event_store.clone() as Arc<dyn EventStore>),
         &event_bus,
@@ -476,9 +511,9 @@ async fn pm_persist_sequence_conflict_returns_retryable() {
         ),
     }
 
-    // No second event written.
+    // No second event written (under the correlation-derived root, D-11).
     let persisted = event_store
-        .get("pm-domain", "", pm_root)
+        .get("pm-domain", "", "corr-1".correlation_root())
         .await
         .expect("event_store.get");
     assert_eq!(
