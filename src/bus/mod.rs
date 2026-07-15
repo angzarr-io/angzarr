@@ -24,6 +24,14 @@ pub mod amqp;
 pub mod dispatch;
 #[cfg(feature = "kafka")]
 pub mod kafka;
+// C02: MockEventBus is a test double only. It is never registered with the
+// self-registering `BusBackend` factory (see `factory.rs`), so gating it
+// behind `test`/`test-utils` also removes the only way production code
+// could reach for it directly (the two sidecar binaries used to
+// hand-import it as a silent fallback for unrecognized messaging types —
+// removed in this change; see `src/bin/angzarr_aggregate.rs` and
+// `src/bin/angzarr_process_manager.rs`).
+#[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
 pub mod offloading;
 #[cfg(feature = "pubsub")]
@@ -50,6 +58,7 @@ pub use traits::{
 pub use amqp::{AmqpConfig, AmqpEventBus};
 #[cfg(feature = "kafka")]
 pub use kafka::{KafkaEventBus, KafkaEventBusConfig};
+#[cfg(any(test, feature = "test-utils"))]
 pub use mock::MockEventBus;
 pub use offloading::{OffloadingConfig, OffloadingEventBus};
 #[cfg(feature = "pubsub")]
