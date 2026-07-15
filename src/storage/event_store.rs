@@ -193,9 +193,17 @@ pub trait EventStore: Send + Sync {
     /// - `explicit_divergence = None`: Uses implicit divergence (first edition event).
     ///   This is the default behavior of `get()`.
     ///
-    /// This method is required for creating NEW branches that don't yet have
-    /// edition events. Without explicit divergence, a new branch would get NO
-    /// events (since implicit divergence requires existing edition events).
+    /// # Eventless-edition contract (finding #12 — inherit main timeline)
+    ///
+    /// A named edition with NO events of its own AND no explicit divergence
+    /// is "not diverged yet": it **inherits the entire main timeline** until
+    /// it explicitly diverges (by writing its first event, or by a
+    /// `Some(N)` divergence here). This is uniform across every backend —
+    /// SQLite, PostgreSQL, ImmuDB, and the mock. (Postgres previously
+    /// returned zero rows in this case via a stored-procedure
+    /// `divergence = 0 → sequence < 0` bug; that path now runs through the
+    /// shared divergence logic in `storage::sql::event_store`, which
+    /// resolves the eventless case to "no cap".)
     ///
     /// # Example: Branch at sequence 3
     /// ```text

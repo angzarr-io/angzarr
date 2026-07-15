@@ -4,6 +4,7 @@
 //! (PostgreSQL, SQLite). The implementations are parameterized by database type
 //! using the `SqlDatabase` trait.
 
+pub(crate) mod event_store;
 mod position_store;
 mod query;
 mod snapshot_store;
