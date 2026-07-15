@@ -76,3 +76,7 @@ pub fn wrap_with_offloading<S: crate::payload_store::PayloadStore + 'static>(
         None => bus,
     }
 }
+
+#[cfg(test)]
+#[path = "factory.test.rs"]
+mod tests;

@@ -430,6 +430,18 @@ required-features = ["test-utils"]
 name = "projector_publish_event_bus"
 required-features = ["test-utils"]
 
+# --- C02: non-AMQP messaging.type reaches a real bus via init_event_bus ---
+# The aggregate/PM sidecar binaries used to hand-roll a match that fell
+# back to MockEventBus for every non-AMQP messaging type (silent total
+# event loss). Both now call init_event_bus directly; this test drives the
+# real AggregateService pipeline with a bus built via
+# init_event_bus(&MessagingConfig{messaging_type: "kafka", ..}, ..) against
+# a real Redpanda container and asserts an independent Kafka consumer
+# (also built via init_event_bus) observes the published event.
+[[test]]
+name = "aggregate_pipeline_kafka_bus"
+required-features = ["kafka", "test-utils"]
+
 # === Build Profiles ===
 
 # Dev profile - optimized for size to keep disk usage sane
