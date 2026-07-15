@@ -47,6 +47,32 @@ mod event_store_contract {
     crate::generate_event_store_tests!(fixture);
 }
 
+// C10 (finding #26): the pre-fix `get_until_timestamp(until: &str)` compared
+// a caller-formatted string lexically against SQLite's TEXT `created_at`
+// column. Reproduced against the pre-fix signature: writing an event at
+// instant T plus one strictly-later event (T + 1us), then querying "until
+// T" spelled as `"...Z"` vs `"...+00:00"` — the two returned DIFFERENT
+// result counts (2 vs 1) because `Z` (0x5A) sorts above the stored `.`
+// fractional-second marker (0x2E) while `+` (0x2B) sorts below it, so a
+// `Z`-suffixed boundary leaked the strictly-later event into a "state as
+// of T" read. Confirmed red with `cargo test --test storage_sqlite
+// test_c10_repro` on the pre-fix tree (2 != 1); not preserved here because
+// the typed `until: &prost_types::Timestamp` signature this file now
+// implements makes the scenario impossible to construct — there is no
+// second string spelling of the same instant for a caller to pick. The
+// permanent regression this fix earns — nanosecond-precision boundary
+// correctness through the new typed→canonical-string boundary — is
+// `test_get_until_timestamp_nanosecond_boundary_precision` below (shared
+// with Postgres; not run against ImmuDB, whose TIMESTAMP column only
+// round-trips whole-second precision — see that fn's doc comment).
+#[tokio::test]
+async fn test_sqlite_get_until_timestamp_nanosecond_boundary_precision() {
+    use storage::event_store_tests::test_get_until_timestamp_nanosecond_boundary_precision;
+
+    let store = SqliteEventStore::new(create_pool().await);
+    test_get_until_timestamp_nanosecond_boundary_precision(&store).await;
+}
+
 // T11: the standalone C-18 round-trip runner was deleted — it existed only
 // because a then-unfixed C-15 test blocked the main suite mid-run. The C-15
 // SQLite fix landed, the main `run_event_store_tests!` suite passes end to

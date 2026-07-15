@@ -187,7 +187,7 @@ impl EventStore for MockEventStore {
         _domain: &str,
         _edition: &str,
         _root: Uuid,
-        _until: &str,
+        _until: &prost_types::Timestamp,
     ) -> StorageResult<Vec<EventPage>> {
         unimplemented!("Not needed for gap-fill tests")
     }

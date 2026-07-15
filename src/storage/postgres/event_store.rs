@@ -401,9 +401,13 @@ impl EventStore for PostgresEventStore {
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> Result<Vec<EventPage>> {
         let root_str = root.to_string();
+
+        // C10: same single-boundary canonicalization as SQLite — see the
+        // comment on `SqliteEventStore::get_until_timestamp`.
+        let until_str = crate::storage::helpers::timestamp_to_rfc3339(until)?;
 
         let query = Query::select()
             .column(Events::EventData)
@@ -411,7 +415,7 @@ impl EventStore for PostgresEventStore {
             .and_where(edition_predicate(Events::Edition, edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(&root_str))
-            .and_where(Expr::col(Events::CreatedAt).lte(until))
+            .and_where(Expr::col(Events::CreatedAt).lte(until_str))
             .order_by(Events::Sequence, Order::Asc)
             .to_string(PostgresQueryBuilder);
 

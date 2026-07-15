@@ -580,9 +580,19 @@ impl EventStore for SqliteEventStore {
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> Result<Vec<EventPage>> {
         let root_str = root.to_string();
+
+        // C10: `created_at` is stored as TEXT, compared lexically. The typed
+        // `until` is canonicalized through the SAME function
+        // (`timestamp_to_rfc3339`) that produces the stored `created_at`
+        // value on write (`storage::helpers::parse_timestamp` delegates to
+        // it) — one shared boundary, so the two can never drift on
+        // suffix/precision and the lexical comparison below stays
+        // equivalent to chronological order (see the property tests on
+        // `timestamp_to_rfc3339` in `storage/helpers/tests.rs`).
+        let until_str = crate::storage::helpers::timestamp_to_rfc3339(until)?;
 
         let query = Query::select()
             .column(Events::EventData)
@@ -590,7 +600,7 @@ impl EventStore for SqliteEventStore {
             .and_where(edition_predicate(Events::Edition, edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(&root_str))
-            .and_where(Expr::col(Events::CreatedAt).lte(until))
+            .and_where(Expr::col(Events::CreatedAt).lte(until_str))
             .order_by(Events::Sequence, Order::Asc)
             .to_string(SqliteQueryBuilder);
 

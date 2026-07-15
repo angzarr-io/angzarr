@@ -104,10 +104,9 @@ pub(crate) async fn dispatch_selection(
         }
         Some(Selection::Temporal(tq)) => match tq.point_in_time {
             Some(PointInTime::AsOfTime(ref ts)) => {
-                let rfc3339 = crate::storage::helpers::timestamp_to_rfc3339(ts)
-                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                repo.get_temporal_by_time(domain, edition, root, &rfc3339)
-                    .await
+                // C10: forward the typed timestamp; normalization happens
+                // once at the repository/storage boundary, not here.
+                repo.get_temporal_by_time(domain, edition, root, ts).await
             }
             Some(PointInTime::AsOfSequence(seq)) => {
                 repo.get_temporal_by_sequence(domain, edition, root, seq)

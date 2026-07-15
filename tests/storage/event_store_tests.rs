@@ -2113,9 +2113,12 @@ pub async fn test_get_until_timestamp_filters<S: EventStore>(store: &S) {
         .expect("add should succeed");
 
     // Query with timestamp between old and new
-    let until = "2024-01-01T00:00:00Z"; // After old, before new
+    let until = Timestamp {
+        seconds: 1704067200, // 2024-01-01T00:00:00Z — after old, before new
+        nanos: 0,
+    };
     let filtered = store
-        .get_until_timestamp(domain, "test", root, until)
+        .get_until_timestamp(domain, "test", root, &until)
         .await
         .expect("get_until_timestamp should succeed");
 
@@ -2164,13 +2167,112 @@ pub async fn test_get_until_timestamp_returns_all_when_recent<S: EventStore>(sto
         .expect("add should succeed");
 
     // Query with timestamp far in the future
-    let until = "2030-01-01T00:00:00Z";
+    let until = Timestamp {
+        seconds: 1893456000, // 2030-01-01T00:00:00Z
+        nanos: 0,
+    };
     let all = store
-        .get_until_timestamp(domain, "test", root, until)
+        .get_until_timestamp(domain, "test", root, &until)
         .await
         .expect("get_until_timestamp should succeed");
 
     assert_eq!(all.len(), 1, "should return all events");
+}
+
+/// C10 (finding #26) regression: the pre-fix `get_until_timestamp(until:
+/// &str)` compared a caller-formatted string lexically against the SQL
+/// backends' TEXT `created_at` column. A caller-chosen `Z` suffix instead
+/// of the producer's uniform `+00:00` corrupted the comparison — the
+/// stored fractional-second marker `.` (0x2E) sorts BELOW `Z` (0x5A) but
+/// ABOVE `+` (0x2B), so a `Z`-suffixed boundary leaked a strictly-later
+/// event into a "state as of T" read (confirmed red against the pre-fix
+/// SQLite backend: 2 events returned via `Z`, 1 via `+00:00`, for the
+/// identical instant).
+///
+/// The typed `until: &prost_types::Timestamp` signature removes the
+/// possibility structurally — there is no second string spelling of the
+/// same instant for a caller to pick, and every backend derives its own
+/// comparable form from the SAME typed value through exactly one function
+/// (`storage::helpers::timestamp_to_rfc3339` for TEXT-column SQL
+/// backends). This test pins the resulting nanosecond-precision boundary
+/// behavior: an event exactly AT `until` is included (inclusive `<=`); an
+/// event one nanosecond-granularity tick AFTER `until` is excluded.
+///
+/// NOT part of `generate_event_store_core_tests!` — ImmuDB's `created_at`
+/// is a real `TIMESTAMP` column that only round-trips whole-second
+/// precision (see `immudb_timestamp_literal`), a pre-existing, documented
+/// floor unrelated to C10. Wiring this into the core list would fail
+/// there on that known precision limit, not a regression. SQLite and
+/// Postgres (full sub-second TEXT precision) call it directly.
+pub async fn test_get_until_timestamp_nanosecond_boundary_precision<S: EventStore>(store: &S) {
+    use prost_types::Timestamp;
+
+    let domain = "test_ts_boundary";
+    let root = Uuid::new_v4();
+
+    let boundary = Timestamp {
+        seconds: 1704153600, // 2024-01-02T00:00:00Z
+        nanos: 0,
+    };
+    let one_micro_after = Timestamp {
+        seconds: 1704153600,
+        nanos: 1_000, // +1 microsecond — strictly after the boundary
+    };
+
+    let event_at_boundary = EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(SequenceType::Sequence(0)),
+        }),
+        created_at: Some(boundary),
+        payload: Some(event_page::Payload::Event(Any {
+            type_url: "type.example/AtBoundary".to_string(),
+            value: vec![1],
+        })),
+        ..Default::default()
+    };
+    let event_after_boundary = EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(SequenceType::Sequence(1)),
+        }),
+        created_at: Some(one_micro_after),
+        payload: Some(event_page::Payload::Event(Any {
+            type_url: "type.example/AfterBoundary".to_string(),
+            value: vec![2],
+        })),
+        ..Default::default()
+    };
+
+    store
+        .add(
+            domain,
+            "test",
+            root,
+            vec![event_at_boundary, event_after_boundary],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
+        .await
+        .expect("add should succeed");
+
+    let filtered = store
+        .get_until_timestamp(domain, "test", root, &boundary)
+        .await
+        .expect("get_until_timestamp should succeed");
+
+    assert_eq!(
+        filtered.len(),
+        1,
+        "boundary query must include the at-boundary event and exclude the \
+         strictly-later (+1us) event — a regression here means the typed \
+         boundary reopened the C10 lexical-comparison footgun"
+    );
+    assert_eq!(filtered[0].sequence_num(), 0);
 }
 
 pub async fn test_timestamp_preservation<S: EventStore>(store: &S) {

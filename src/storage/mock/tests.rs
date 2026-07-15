@@ -225,28 +225,60 @@ async fn test_get_until_timestamp_filters_by_created_at() {
 
     // Query as-of Jan 2 — should return events 0 and 1
     let result = store
-        .get_until_timestamp("orders", "test", root, "2024-01-02T00:00:00Z")
+        .get_until_timestamp(
+            "orders",
+            "test",
+            root,
+            &prost_types::Timestamp {
+                seconds: 1704153600, // 2024-01-02T00:00:00Z
+                nanos: 0,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(result.len(), 2);
 
     // Query as-of Jan 1 — should return event 0 only
     let result = store
-        .get_until_timestamp("orders", "test", root, "2024-01-01T00:00:00Z")
+        .get_until_timestamp(
+            "orders",
+            "test",
+            root,
+            &prost_types::Timestamp {
+                seconds: 1704067200, // 2024-01-01T00:00:00Z
+                nanos: 0,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(result.len(), 1);
 
     // Query before any events — should return empty
     let result = store
-        .get_until_timestamp("orders", "test", root, "2023-12-31T00:00:00Z")
+        .get_until_timestamp(
+            "orders",
+            "test",
+            root,
+            &prost_types::Timestamp {
+                seconds: 1703980800, // 2023-12-31T00:00:00Z
+                nanos: 0,
+            },
+        )
         .await
         .unwrap();
     assert!(result.is_empty());
 
     // Query after all events — should return all
     let result = store
-        .get_until_timestamp("orders", "test", root, "2024-01-04T00:00:00Z")
+        .get_until_timestamp(
+            "orders",
+            "test",
+            root,
+            &prost_types::Timestamp {
+                seconds: 1704326400, // 2024-01-04T00:00:00Z
+                nanos: 0,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(result.len(), 3);
@@ -291,25 +323,48 @@ async fn test_get_until_timestamp_excludes_events_without_timestamp() {
         .unwrap();
 
     let result = store
-        .get_until_timestamp("orders", "test", root, "2024-01-02T00:00:00Z")
+        .get_until_timestamp(
+            "orders",
+            "test",
+            root,
+            &prost_types::Timestamp {
+                seconds: 1704153600, // 2024-01-02T00:00:00Z
+                nanos: 0,
+            },
+        )
         .await
         .unwrap();
     assert!(result.is_empty());
 }
 
-/// Invalid timestamp format returns error, not empty results.
+/// A structurally out-of-range timestamp returns an error, not empty results.
 ///
-/// User typos should fail loudly rather than returning misleading
-/// empty result sets.
+/// C10: the typed `until: &prost_types::Timestamp` API makes a malformed
+/// *string* unrepresentable — there is no "not-a-timestamp" to pass. What
+/// remains representable is a numerically out-of-range instant (seconds/nanos
+/// outside `chrono`'s convertible domain). That must still fail loudly rather
+/// than silently yielding misleading empty results, so the normalization at
+/// this boundary maps it to `StorageError::InvalidTimestamp`.
 #[tokio::test]
-async fn test_get_until_timestamp_invalid_format() {
+async fn test_get_until_timestamp_out_of_range() {
     let store = MockEventStore::new();
     let root = Uuid::new_v4();
 
     let result = store
-        .get_until_timestamp("orders", "test", root, "not-a-timestamp")
+        .get_until_timestamp(
+            "orders",
+            "test",
+            root,
+            &prost_types::Timestamp {
+                seconds: i64::MAX,
+                nanos: i32::MAX,
+            },
+        )
         .await;
-    assert!(result.is_err());
+    assert!(matches!(
+        result,
+        Err(crate::storage::StorageError::InvalidTimestamp { .. })
+    ));
 }
 
 // ============================================================================

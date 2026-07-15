@@ -22,6 +22,26 @@ use crate::storage::helpers::{assemble_event_books, is_main_timeline, BookParts}
 use crate::storage::schema::Events;
 use crate::storage::{AddMeta, AddOutcome, EventStore, Result, SourceInfo, StorageError};
 
+/// Format a typed timestamp as immudb's `TIMESTAMP` literal.
+///
+/// immudb's `created_at` column is a real `TIMESTAMP` (not TEXT like
+/// SQLite/Postgres), and only whole-second UTC precision round-trips
+/// through it — sub-second precision and any offset marker are dropped.
+/// Both the write path (`add`, via `CAST('...' AS TIMESTAMP)`) and the
+/// read boundary (`get_until_timestamp`) format through this ONE function
+/// so they can never drift on the truncation rule — the same class of
+/// footgun a caller-supplied `until: &str` could previously trigger (C10,
+/// finding #26).
+fn immudb_timestamp_literal(ts: &prost_types::Timestamp) -> Result<String> {
+    let dt = chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32).ok_or(
+        StorageError::InvalidTimestamp {
+            seconds: ts.seconds,
+            nanos: ts.nanos,
+        },
+    )?;
+    Ok(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
 /// Decode a BLOB column from immudb.
 ///
 /// immudb returns BLOBs as hex-encoded ASCII strings through the pgsql wire
@@ -404,7 +424,6 @@ impl EventStore for ImmudbEventStore {
         for event in events {
             let event_data = event.encode_to_vec();
             let sequence = crate::storage::helpers::resolve_sequence(&event, base_sequence)?;
-            let created_at = crate::storage::helpers::parse_timestamp(&event)?;
 
             if first_sequence.is_none() {
                 first_sequence = Some(sequence);
@@ -414,17 +433,19 @@ impl EventStore for ImmudbEventStore {
             // Format event_data as hex for immudb BLOB type (x'...' format)
             let event_data_hex = format!("x'{}'", hex::encode(&event_data));
 
-            // Convert RFC3339 timestamp to simple format for immudb
-            // immudb expects format: YYYY-MM-DD HH:MM:SS (no nanoseconds)
-            let timestamp_simple = created_at
-                .replace('T', " ")
-                .split('+')
-                .next()
-                .unwrap_or(&created_at)
-                .split('.')
-                .next()
-                .unwrap_or(&created_at)
-                .to_string();
+            // C10: format directly from the typed `created_at`, through the
+            // SAME function `get_until_timestamp` reads through
+            // (`immudb_timestamp_literal`) — no RFC3339-string round trip,
+            // no ad hoc split/truncate. Falls back to "now" when the event
+            // carries no timestamp, mirroring `storage::helpers::parse_timestamp`.
+            let created_ts = event.created_at.clone().unwrap_or_else(|| {
+                let now = chrono::Utc::now();
+                prost_types::Timestamp {
+                    seconds: now.timestamp(),
+                    nanos: now.timestamp_subsec_nanos() as i32,
+                }
+            });
+            let timestamp_simple = immudb_timestamp_literal(&created_ts)?;
 
             // Build INSERT manually since sea-query doesn't handle immudb BLOB format
             // Note: immudb requires CAST for string timestamps
@@ -596,9 +617,32 @@ impl EventStore for ImmudbEventStore {
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> Result<Vec<EventPage>> {
         let root_str = root.to_string();
+
+        // C10: canonicalize the typed `until` through the SAME truncation
+        // function the write path uses (`immudb_timestamp_literal`), so a
+        // TIMESTAMP-column comparison can't drift between what was written
+        // and what's queried.
+        //
+        // The RHS must be CAST to TIMESTAMP, exactly like the write path's
+        // `CAST('...' AS TIMESTAMP)`. `created_at` is a real immudb
+        // TIMESTAMP column; comparing it against a bare VARCHAR literal
+        // (`created_at <= '...'`) raises immudb's "values are not
+        // comparable" error — a pre-existing bug this method carried before
+        // C10 (the old `until: &str` path fed a raw RFC3339 string straight
+        // into `.lte()` and failed the same way). Casting both sides to
+        // TIMESTAMP makes the comparison chronological, not lexical, so the
+        // Z-vs-+00:00 footgun cannot exist on this backend either.
+        // Inline the literal (not a bind param): the whole immudb query is
+        // rendered to a string and run via `sqlx::raw_sql`, which does NOT
+        // bind `$N` placeholders. `immudb_timestamp_literal` emits a strictly
+        // numeric `YYYY-MM-DD HH:MM:SS` form, so there is no quote to escape
+        // and no injection surface — identical to the write path's
+        // `format!("CAST('{}' AS TIMESTAMP)", ...)`.
+        let until_str = immudb_timestamp_literal(until)?;
+        let until_ts_expr = Expr::cust(format!("CAST('{until_str}' AS TIMESTAMP)"));
 
         // Use created_at filter for timestamp queries
         // Note: immudb's BEFORE TX syntax isn't available through standard SQL
@@ -612,7 +656,7 @@ impl EventStore for ImmudbEventStore {
             }))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(&root_str))
-            .and_where(Expr::col(Events::CreatedAt).lte(until))
+            .and_where(Expr::col(Events::CreatedAt).lte(until_ts_expr))
             .order_by(Events::Sequence, Order::Asc)
             .to_string(PostgresQueryBuilder);
 

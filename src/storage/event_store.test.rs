@@ -233,7 +233,7 @@ impl EventStore for DefaultImplStub {
         _domain: &str,
         _edition: &str,
         _root: Uuid,
-        _until: &str,
+        _until: &prost_types::Timestamp,
     ) -> Result<Vec<EventPage>> {
         unimplemented!()
     }
