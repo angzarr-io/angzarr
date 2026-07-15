@@ -23,6 +23,7 @@ use crate::proto::{CommandResponse, EventBook, ProcessManagerHandleRequest, Uuid
 use crate::proto_ext::{correlated_request, CoverExt};
 use crate::storage::EventStore;
 
+use super::outbox::{CommandOutbox, InMemoryCommandOutbox};
 use super::{PMContextFactory, PmHandleResponse, ProcessManagerContext};
 
 /// Persist a PM event book to the event store and publish the
@@ -157,10 +158,15 @@ pub struct GrpcPMContext {
     pm_domain: String,
     dlq_publisher: Arc<dyn DeadLetterPublisher>,
     component_name: String,
+    /// Outbox for at-least-once redelivery of transiently-failed post-persist
+    /// commands (C04). Shared across every context the factory produces, and
+    /// drained by the PM binary's background drain loop.
+    command_outbox: Arc<dyn CommandOutbox>,
 }
 
 impl GrpcPMContext {
     /// Create with gRPC client, event store, event bus, and PM domain.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: Arc<Mutex<ProcessManagerServiceClient<tonic::transport::Channel>>>,
         event_store: Arc<dyn EventStore>,
@@ -168,6 +174,7 @@ impl GrpcPMContext {
         pm_domain: String,
         dlq_publisher: Arc<dyn DeadLetterPublisher>,
         component_name: String,
+        command_outbox: Arc<dyn CommandOutbox>,
     ) -> Self {
         Self {
             client,
@@ -176,6 +183,7 @@ impl GrpcPMContext {
             pm_domain,
             dlq_publisher,
             component_name,
+            command_outbox,
         }
     }
 }
@@ -256,6 +264,11 @@ impl ProcessManagerContext for GrpcPMContext {
     fn component_name(&self) -> &str {
         &self.component_name
     }
+
+    #[crate::trivial_delegation]
+    fn command_outbox(&self) -> Option<&Arc<dyn CommandOutbox>> {
+        Some(&self.command_outbox)
+    }
 }
 
 /// Factory that produces `GrpcPMContext` instances for distributed mode.
@@ -269,10 +282,19 @@ pub struct GrpcPMContextFactory {
     name: String,
     pm_domain: String,
     dlq_publisher: Arc<dyn DeadLetterPublisher>,
+    /// Shared command outbox handed to every context (C04). Defaults to an
+    /// in-memory outbox; the binary injects a shared instance via
+    /// [`with_command_outbox`](Self::with_command_outbox) so its drain loop and
+    /// the contexts operate on the same queue.
+    command_outbox: Arc<dyn CommandOutbox>,
 }
 
 impl GrpcPMContextFactory {
     /// Create a new factory with gRPC client, event store, event bus, and PM domain.
+    ///
+    /// The command outbox defaults to a fresh [`InMemoryCommandOutbox`]. Call
+    /// [`with_command_outbox`](Self::with_command_outbox) to share one instance
+    /// with the binary's drain loop.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: Arc<Mutex<ProcessManagerServiceClient<tonic::transport::Channel>>>,
@@ -289,7 +311,20 @@ impl GrpcPMContextFactory {
             name,
             pm_domain,
             dlq_publisher,
+            command_outbox: Arc::new(InMemoryCommandOutbox::new()),
         }
+    }
+
+    /// Inject a shared command outbox so contexts enqueue into the same queue
+    /// the binary's drain loop redelivers from.
+    pub fn with_command_outbox(mut self, outbox: Arc<dyn CommandOutbox>) -> Self {
+        self.command_outbox = outbox;
+        self
+    }
+
+    /// Handle to the shared command outbox (for wiring the drain loop).
+    pub fn command_outbox(&self) -> Arc<dyn CommandOutbox> {
+        self.command_outbox.clone()
     }
 }
 
@@ -302,6 +337,7 @@ impl PMContextFactory for GrpcPMContextFactory {
             self.pm_domain.clone(),
             self.dlq_publisher.clone(),
             self.name.clone(),
+            self.command_outbox.clone(),
         ))
     }
 
