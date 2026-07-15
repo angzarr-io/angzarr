@@ -15,8 +15,11 @@ use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
 
 use crate::bus::EventBus;
-use crate::proto::{Cover, EventBook, EventPage, PageHeader, Revocation, Uuid as ProtoUuid};
+use crate::proto::{
+    Cover, Edition, EventBook, EventPage, PageHeader, Revocation, Uuid as ProtoUuid,
+};
 use crate::proto_ext::type_url;
+use crate::repository::SnapshotRepository;
 use crate::storage::{CascadeParticipant, EventStore};
 
 /// Background task for cleaning up stale (timed out) cascades.
@@ -36,6 +39,14 @@ pub struct CascadeReaper<S: EventStore> {
     /// that a provisional commit was undone, mirroring the aggregate path
     /// (`GrpcAggregateContext::post_persist`).
     event_bus: Option<Arc<dyn EventBus>>,
+    /// Snapshot repository for revoke-time cleanup (C01 #2).
+    ///
+    /// Optional: when unset, a snapshot that slipped through covering a
+    /// now-revoked sequence is NOT cleaned up (best-effort backstop only —
+    /// the primary fix is `GrpcAggregateContext::persist_events` refusing
+    /// to persist a snapshot while a cascade is in flight). Production
+    /// should wire this via [`Self::with_snapshot_repo`].
+    snapshot_repo: Option<Arc<SnapshotRepository>>,
 }
 
 impl<S: EventStore + 'static> CascadeReaper<S> {
@@ -50,6 +61,7 @@ impl<S: EventStore + 'static> CascadeReaper<S> {
             timeout,
             interval: Duration::from_secs(60), // Default: check every minute
             event_bus: None,
+            snapshot_repo: None,
         }
     }
 
@@ -66,6 +78,13 @@ impl<S: EventStore + 'static> CascadeReaper<S> {
     /// downstream never learns a provisional commit was undone.
     pub fn with_event_bus(mut self, event_bus: Arc<dyn EventBus>) -> Self {
         self.event_bus = Some(event_bus);
+        self
+    }
+
+    /// Provide a snapshot repository so revocation clears any snapshot
+    /// that covers a now-revoked sequence (C01 #2).
+    pub fn with_snapshot_repo(mut self, snapshot_repo: Arc<SnapshotRepository>) -> Self {
+        self.snapshot_repo = Some(snapshot_repo);
         self
     }
 
@@ -295,7 +314,17 @@ impl<S: EventStore + 'static> CascadeReaper<S> {
                         value: participant.root.as_bytes().to_vec(),
                     }),
                     correlation_id: String::new(),
-                    edition: None,
+                    // C01 #22: `fill_if_needed` (gap-fill) requires
+                    // `cover.edition` to be present (`GapFillError::MissingEdition`
+                    // otherwise) — a consumer that gap-fills off THIS bus
+                    // message (e.g. it arrived with a sequence gap relative to
+                    // the consumer's checkpoint) would error out instead of
+                    // repairing the gap. The reaper already has the
+                    // participant's edition; stamp it.
+                    edition: Some(Edition {
+                        name: participant.edition.clone(),
+                        divergences: vec![],
+                    }),
                     ext: None,
                 }),
                 pages: vec![bus_page],
@@ -310,6 +339,52 @@ impl<S: EventStore + 'static> CascadeReaper<S> {
                     "Failed to publish reaper Revocation to bus (the Revocation \
                      IS persisted; downstream just was not notified)"
                 );
+            }
+        }
+
+        // C01 #2 (backstop): if a snapshot exists that covers a now-revoked
+        // sequence, delete it. The PRIMARY fix is
+        // `GrpcAggregateContext::persist_events` refusing to persist a
+        // snapshot while a cascade is in flight (so this should rarely
+        // fire) — this is defense in depth for any snapshot that slipped
+        // through before that fix, or via a future write path that
+        // doesn't go through the aggregate's persist_events. Best-effort:
+        // a failure here does not fail the revocation (the Revocation is
+        // ALREADY durably persisted and is the source of truth for 2PC
+        // visibility; a stale snapshot is a rehydration-performance
+        // concern, not a correctness one, since a full replay always
+        // resolves correctly).
+        if let Some(snapshot_repo) = &self.snapshot_repo {
+            if let Some(min_revoked) = participant.sequences.iter().min().copied() {
+                match snapshot_repo
+                    .get(&participant.domain, &participant.edition, participant.root)
+                    .await
+                {
+                    Ok(Some(snapshot)) if snapshot.sequence >= min_revoked => {
+                        if let Err(e) = snapshot_repo
+                            .delete(&participant.domain, &participant.edition, participant.root)
+                            .await
+                        {
+                            warn!(
+                                cascade_id = %cascade_id,
+                                domain = %participant.domain,
+                                error = %e,
+                                "Failed to delete snapshot covering revoked sequence \
+                                 (Revocation IS persisted; snapshot is stale but a full \
+                                 replay still resolves correctly)"
+                            );
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        warn!(
+                            cascade_id = %cascade_id,
+                            domain = %participant.domain,
+                            error = %e,
+                            "Failed to read snapshot for revoke-time cleanup check"
+                        );
+                    }
+                }
             }
         }
 

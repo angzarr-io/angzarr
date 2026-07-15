@@ -929,3 +929,417 @@ async fn send_to_dlq_on_context_delegates_to_free_fn() {
     assert_eq!(entries[0].source_component, "aggregate-orders");
     assert_eq!(entries[0].source_component_type, "aggregate");
 }
+
+// ============================================================================
+// C01 #2: snapshot persistence must defer while a cascade is in flight
+// ============================================================================
+
+/// While `cascade_id` is set, `persist_events` must NOT persist a snapshot
+/// even when the received book carries one — it would bake in state a
+/// later Revocation could undo (there is only one snapshot slot per
+/// aggregate; a revoke has no way to "un-snapshot" it).
+#[tokio::test]
+async fn persist_events_defers_snapshot_when_cascade_in_flight() {
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store.clone()));
+    let ctx = GrpcAggregateContext::new(
+        event_store.clone(),
+        snapshot_repo,
+        Arc::new(StaticServiceDiscovery::new()),
+        Arc::new(MockEventBus::new()),
+    )
+    .with_cascade_id("cascade-defer");
+    let root = Uuid::new_v4();
+
+    let prior = EventBook::default();
+    let received = book_with_snapshot_state(vec![make_event_page(0)]);
+
+    let outcome = ctx
+        .persist_events(
+            &prior,
+            &received,
+            "orders",
+            "",
+            root,
+            "corr-defer",
+            None,
+            None,
+        )
+        .await
+        .expect("persist must succeed even though the snapshot is deferred");
+
+    match outcome {
+        PersistOutcome::Persisted(book) => {
+            assert_eq!(book.pages.len(), 1);
+            assert!(
+                book.pages[0].no_commit,
+                "cascade pages must be stamped provisional"
+            );
+        }
+        other => panic!("expected Persisted, got {other:?}"),
+    }
+
+    let snapshot = snapshot_store.get("orders", "", root).await.unwrap();
+    assert!(
+        snapshot.is_none(),
+        "C01 #2: snapshot must not be persisted while a cascade is in flight"
+    );
+}
+
+/// Regression guard / companion: OUTSIDE a cascade (no `cascade_id` set),
+/// snapshot persistence proceeds exactly as before — the deferral is
+/// specific to cascades in flight, not a general regression.
+#[tokio::test]
+async fn persist_events_persists_snapshot_when_no_cascade_in_flight() {
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store.clone()));
+    let ctx = GrpcAggregateContext::new(
+        event_store.clone(),
+        snapshot_repo,
+        Arc::new(StaticServiceDiscovery::new()),
+        Arc::new(MockEventBus::new()),
+    );
+    let root = Uuid::new_v4();
+
+    let prior = EventBook::default();
+    let received = book_with_snapshot_state(vec![make_event_page(0)]);
+
+    ctx.persist_events(
+        &prior,
+        &received,
+        "orders",
+        "",
+        root,
+        "corr-nocascade",
+        None,
+        None,
+    )
+    .await
+    .expect("persist must succeed");
+
+    let snapshot = snapshot_store.get("orders", "", root).await.unwrap();
+    assert!(
+        snapshot.is_some(),
+        "outside a cascade, snapshot persistence must proceed as before"
+    );
+}
+
+// ============================================================================
+// C01 #9: bus-published books must never carry a snapshot
+// ============================================================================
+
+/// `committed_only_book` strips the snapshot from the bus-published view —
+/// a snapshot on a bus book makes `GapFiller::fill_if_needed` treat it as
+/// "already complete" and skip gap repair entirely, unrelated to whether a
+/// gap actually exists.
+#[test]
+fn committed_only_book_strips_snapshot() {
+    let events = EventBook {
+        cover: Some(Cover {
+            domain: "orders".to_string(),
+            root: None,
+            correlation_id: String::new(),
+            edition: None,
+            ext: None,
+        }),
+        pages: vec![make_event_page(0)],
+        snapshot: Some(Snapshot {
+            sequence: 0,
+            state: Some(prost_types::Any {
+                type_url: "test.State".to_string(),
+                value: vec![1, 2, 3],
+            }),
+            retention: crate::proto::SnapshotRetention::RetentionDefault as i32,
+            created_at: None,
+        }),
+        next_sequence: 1,
+    };
+
+    let result = committed_only_book(&events).expect("committed pages exist");
+    assert!(
+        result.snapshot.is_none(),
+        "C01 #9: bus-published book must never carry a snapshot"
+    );
+}
+
+// ============================================================================
+// C01 #1: confirmation-point republish
+// ============================================================================
+//
+// The cascade design suppresses provisional (`no_commit=true`) pages from
+// the bus (O2) on the promise that a Confirmation marker's arrival
+// republishes them. These tests exercise that promise directly against
+// `post_persist`.
+
+fn build_ctx_with_bus_and_store() -> (GrpcAggregateContext, Arc<MockEventBus>, Arc<MockEventStore>)
+{
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store: Arc<MockSnapshotStore> = Arc::new(MockSnapshotStore::default());
+    let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store));
+    let bus = Arc::new(MockEventBus::new());
+    let ctx = GrpcAggregateContext::new(
+        event_store.clone(),
+        snapshot_repo,
+        Arc::new(StaticServiceDiscovery::new()),
+        bus.clone(),
+    );
+    (ctx, bus, event_store)
+}
+
+/// Build a committed Confirmation marker `EventPage` at `seq`.
+fn confirmation_marker_page(seq: u32, cascade_id: &str, confirmed: Vec<u32>) -> EventPage {
+    use crate::proto::Confirmation;
+    use prost::Message;
+    let conf = Confirmation {
+        target: None,
+        sequences: confirmed,
+        cascade_id: cascade_id.to_string(),
+    };
+    EventPage {
+        header: Some(crate::proto::PageHeader {
+            sync_mode: None,
+            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(seq)),
+        }),
+        payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
+            type_url: crate::proto_ext::type_url::CONFIRMATION.to_string(),
+            value: conf.encode_to_vec(),
+        })),
+        ..Default::default()
+    }
+}
+
+/// Build a committed Revocation marker `EventPage` at `seq`.
+fn revocation_marker_page(seq: u32, cascade_id: &str, revoked: Vec<u32>) -> EventPage {
+    use crate::proto::Revocation;
+    use prost::Message;
+    let rev = Revocation {
+        target: None,
+        sequences: revoked,
+        cascade_id: cascade_id.to_string(),
+        reason: "test".to_string(),
+    };
+    EventPage {
+        header: Some(crate::proto::PageHeader {
+            sync_mode: None,
+            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(seq)),
+        }),
+        payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
+            type_url: crate::proto_ext::type_url::REVOCATION.to_string(),
+            value: rev.encode_to_vec(),
+        })),
+        ..Default::default()
+    }
+}
+
+fn book_with_root(root: Uuid, pages: Vec<EventPage>) -> EventBook {
+    EventBook {
+        cover: Some(Cover {
+            domain: "orders".to_string(),
+            root: Some(crate::proto::Uuid {
+                value: root.as_bytes().to_vec(),
+            }),
+            correlation_id: String::new(),
+            edition: None,
+            ext: None,
+        }),
+        pages,
+        snapshot: None,
+        next_sequence: 0,
+    }
+}
+
+/// The acceptance case: a provisional event was suppressed from the bus at
+/// its own persist time (simulated directly here via `event_store.add`,
+/// mirroring what `persist_events` does under a cascade_id); a LATER call
+/// persists a Confirmation marker for it. `post_persist` for that later
+/// call must republish the previously-suppressed event — this is the
+/// consumer-facing half of the 2PC design that C01 completes.
+#[tokio::test]
+async fn post_persist_republishes_confirmed_events_on_confirmation_marker() {
+    use crate::orchestration::aggregate::traits::AggregateContext;
+    let (ctx, bus, event_store) = build_ctx_with_bus_and_store();
+    let root = Uuid::new_v4();
+
+    // Seed storage: the provisional event, suppressed from the bus when it
+    // was originally persisted (simulated by direct storage write, exactly
+    // as `persist_events` would have produced under `cascade_id`).
+    event_store
+        .add(
+            "orders",
+            "",
+            root,
+            vec![make_uncommitted_event_page(0, "cascade-c1")],
+            &AddMeta::default(),
+        )
+        .await
+        .unwrap();
+
+    let marker = confirmation_marker_page(1, "cascade-c1", vec![0]);
+    // The marker is already durable by the time post_persist runs (persist
+    // happens before post_persist in the real pipeline) — seed it too.
+    event_store
+        .add(
+            "orders",
+            "",
+            root,
+            vec![marker.clone()],
+            &AddMeta::default(),
+        )
+        .await
+        .unwrap();
+
+    let events = book_with_root(root, vec![marker]);
+    ctx.post_persist(&events)
+        .await
+        .expect("post_persist must succeed");
+
+    let published = bus.take_published().await;
+    assert_eq!(
+        published.len(),
+        2,
+        "expected the republished confirmed-events book (first, per the \
+         documented ordering) plus the marker's own ordinary committed publish"
+    );
+    assert_eq!(
+        published[0].pages.len(),
+        1,
+        "republished book carries exactly the confirmed sequence"
+    );
+    assert_eq!(published[0].pages[0].sequence_num(), 0);
+    assert_eq!(
+        published[0].pages[0].type_url(),
+        Some("test.Event0"),
+        "the republished page must carry the ORIGINAL suppressed payload"
+    );
+    assert_eq!(
+        published[1].pages[0].type_url(),
+        Some(crate::proto_ext::type_url::CONFIRMATION),
+        "second publish is the marker's own ordinary committed publish"
+    );
+}
+
+/// No double-publish: a sequence the Confirmation names that was ALREADY
+/// committed at its own persist time (no_commit=false in storage) must not
+/// republish — it already reached the bus once.
+#[tokio::test]
+async fn post_persist_confirmation_does_not_republish_already_committed_sequence() {
+    use crate::orchestration::aggregate::traits::AggregateContext;
+    let (ctx, bus, event_store) = build_ctx_with_bus_and_store();
+    let root = Uuid::new_v4();
+
+    // Sequence 0 was already committed (no_commit=false) — e.g. a stale or
+    // redundant Confirmation naming a sequence that was never provisional.
+    event_store
+        .add(
+            "orders",
+            "",
+            root,
+            vec![make_event_page(0)],
+            &AddMeta::default(),
+        )
+        .await
+        .unwrap();
+    let marker = confirmation_marker_page(1, "cascade-c2", vec![0]);
+    event_store
+        .add(
+            "orders",
+            "",
+            root,
+            vec![marker.clone()],
+            &AddMeta::default(),
+        )
+        .await
+        .unwrap();
+
+    let events = book_with_root(root, vec![marker]);
+    ctx.post_persist(&events).await.unwrap();
+
+    let published = bus.take_published().await;
+    assert_eq!(
+        published.len(),
+        1,
+        "only the marker's own ordinary committed publish — sequence 0 was \
+         already committed and must not republish"
+    );
+}
+
+/// C01 #21: confirm-after-revoke guard. If a Revocation for the SAME
+/// cascade_id already exists, `transform_for_two_phase` documents "revoked
+/// wins" — the confirmed sequences resolve to nothing. Pre-fix this would
+/// silently no-op; the fix surfaces it (error log + DLQ) instead.
+#[tokio::test]
+async fn post_persist_confirm_after_revoke_does_not_republish_and_dlqs() {
+    use crate::orchestration::aggregate::traits::AggregateContext;
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store: Arc<MockSnapshotStore> = Arc::new(MockSnapshotStore::default());
+    let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store));
+    let bus = Arc::new(MockEventBus::new());
+    let dlq = Arc::new(CapturingDlqPublisher::default());
+    let ctx = GrpcAggregateContext::new(
+        event_store.clone(),
+        snapshot_repo,
+        Arc::new(StaticServiceDiscovery::new()),
+        bus.clone(),
+    )
+    .with_dlq_publisher(dlq.clone());
+    let root = Uuid::new_v4();
+
+    event_store
+        .add(
+            "orders",
+            "",
+            root,
+            vec![make_uncommitted_event_page(0, "cascade-r1")],
+            &AddMeta::default(),
+        )
+        .await
+        .unwrap();
+    // A Revocation for this cascade already landed (e.g. the reaper timed
+    // it out) BEFORE the confirming call's persist reached storage.
+    event_store
+        .add(
+            "orders",
+            "",
+            root,
+            vec![revocation_marker_page(1, "cascade-r1", vec![0])],
+            &AddMeta::default(),
+        )
+        .await
+        .unwrap();
+
+    // The confirming call still landed racily (TOCTOU) and its Confirmation
+    // marker is now ALSO durably persisted.
+    let marker = confirmation_marker_page(2, "cascade-r1", vec![0]);
+    event_store
+        .add(
+            "orders",
+            "",
+            root,
+            vec![marker.clone()],
+            &AddMeta::default(),
+        )
+        .await
+        .unwrap();
+
+    let events = book_with_root(root, vec![marker]);
+    ctx.post_persist(&events)
+        .await
+        .expect("post_persist must not error — the conflict is handled, not propagated");
+
+    let published = bus.take_published().await;
+    assert_eq!(
+        published.len(),
+        1,
+        "only the marker's own ordinary committed publish — the confirmed \
+         sequence must NOT republish when a conflicting Revocation exists"
+    );
+
+    let dlq_calls = dlq.publish_calls.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        dlq_calls, 1,
+        "confirm-after-revoke conflict must be surfaced to the DLQ/operator, \
+         not silently swallowed"
+    );
+}

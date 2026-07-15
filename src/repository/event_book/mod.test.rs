@@ -338,6 +338,23 @@ mod two_phase_visibility {
         assert_eq!(payload_type_url(&book.pages[1]), "test.Event4");
         assert_noop_placeholder(&book.pages[2], 5, "uncommitted");
         assert_noop_placeholder(&book.pages[3], 6, "uncommitted");
+
+        // The returned book must carry a cover with the queried domain and
+        // edition: downstream gap-fill (`GapFiller::fill_if_needed`) reads
+        // `cover.edition` and errors (`MissingEdition`) without it. C01 #6
+        // builds this cover on the full-stream fetch path; pin it so a
+        // dropped-cover regression there is caught. (Mutation: "delete
+        // field cover from struct EventBook" in get_from_to.)
+        let cover = book
+            .cover
+            .as_ref()
+            .expect("get_from_to must return a cover");
+        assert_eq!(cover.domain, "orders");
+        assert_eq!(
+            cover.edition.as_ref().map(|e| e.name.as_str()),
+            Some("test"),
+            "cover must carry the queried edition for downstream gap-fill"
+        );
     }
 
     /// F3 exact failure mode: reaper revoked 5-6 via a marker at 7. A
@@ -546,18 +563,22 @@ mod two_phase_visibility {
     }
 
     /// The contiguous fast path is detected by `max - min + 1 == len` and
-    /// delegates to the WINDOWED range read `get_from_to(min, max+1)`,
-    /// whose marker visibility is bounded by that window. This test pins
-    /// the arithmetic (and thus which path runs) for a min > 0 request —
-    /// where `max + min + 1` would misclassify a contiguous request as
-    /// sparse: the Confirmation marker at 7 sits OUTSIDE the requested
-    /// window [4,7), so the range read fails safe and withholds 5-6 as
-    /// "uncommitted" placeholders (their payloads arrive via the bus on
-    /// confirmation). The sparse path resolves against the FULL stream and
-    /// would deliver the confirmed payloads early — silently changing the
-    /// documented range-read contract and paying an O(all events) fetch.
+    /// delegates to the WINDOWED range read `get_from_to(min, max+1)`. This
+    /// test pins the arithmetic (and thus which path runs) for a min > 0
+    /// request — where `max + min + 1` would misclassify a contiguous
+    /// request as sparse.
+    ///
+    /// C01 #6: `get_from_to` now resolves against the FULL stream (fetch
+    /// `from` through the stream head, resolve, THEN truncate to
+    /// `[from, to)`) — mirroring `get_sequences`' own sparse path. A
+    /// Confirmation marker OUTSIDE the requested window (here, at seq 7,
+    /// outside `[4,7)`) still resolves the provisional pages INSIDE the
+    /// window: 5 and 6 arrive with their real payloads, not "uncommitted"
+    /// placeholders. Pre-fix, the range path bounded marker visibility to
+    /// the window and would incorrectly withhold 5-6 forever if nothing
+    /// else ever touched sequences >= 7 for this root.
     #[tokio::test]
-    async fn test_get_sequences_contiguous_window_bounds_marker_visibility() {
+    async fn test_get_sequences_contiguous_window_resolves_marker_outside_window() {
         let (repo, event_store) = setup();
         let root = Uuid::new_v4();
         seed(
@@ -571,8 +592,9 @@ mod two_phase_visibility {
         )
         .await;
 
-        // {4, 5, 6}: contiguous with min > 0 → must take the range path
-        // and see only the [4, 7) window (marker at 7 excluded).
+        // {4, 5, 6}: contiguous with min > 0 → takes the range path
+        // (get_from_to(4, 7)); the marker at 7 sits outside [4,7) but must
+        // still resolve 5 and 6 (full-stream resolution, C01 #6).
         let book = repo
             .get_sequences("orders", "test", root, &[4, 5, 6])
             .await
@@ -580,8 +602,8 @@ mod two_phase_visibility {
 
         assert_eq!(book.pages.len(), 3);
         assert_eq!(payload_type_url(&book.pages[0]), "test.Event4");
-        assert_noop_placeholder(&book.pages[1], 5, "uncommitted");
-        assert_noop_placeholder(&book.pages[2], 6, "uncommitted");
+        assert_eq!(payload_type_url(&book.pages[1]), "test.Event5");
+        assert_eq!(payload_type_url(&book.pages[2]), "test.Event6");
     }
 
     /// Contiguous `get_sequences` delegates to the resolved range read, so
