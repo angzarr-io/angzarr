@@ -8,6 +8,16 @@ Prototype codebase. If you encounter broken things, note the issue, check with m
 ### In-process vs Distributed
 Keep the in-process and distributed code paths as similar as possible—differ only where necessary (process count, bus transports, storage).
 
+**No in-process bus transport (C14):** A `ChannelEventBus` existed once and was removed, but its
+default `messaging.type: channel` and scattered doc references survived, so an unconfigured
+deployment silently pointed at a nonexistent backend. C14 deleted the phantom default rather than
+rebuild an in-process transport — `messaging.type` is now unset by default and `init_event_bus`
+hard-fails with an actionable error until an operator sets it to `amqp`, `kafka`, `pubsub`, or
+`sns-sqs`. This is a conscious, temporary concession of the parity thesis above: there is currently
+no in-process/embedded bus, so in-process deployments and tests must go through a real transport
+(or a test double like `MockEventBus`) rather than a lightweight channel-backed one. Rebuilding a
+genuine in-process transport is future work, not blocked by anything in this change.
+
 ### Priorities
 1. Understanding — minimize cognitive load, avoid foot-guns
 2. Architectural correctness — reduce churn, enable change

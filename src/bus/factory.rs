@@ -37,11 +37,21 @@ inventory::collect!(BusBackend);
 ///
 /// # Errors
 ///
-/// Returns `BusError::UnknownType` if no backend matches the configured type.
+/// Returns `BusError::MissingType` if `messaging_type` is unset (the
+/// no-in-process-default sentinel — see `MessagingConfig`'s docs), or
+/// `BusError::UnknownType` if it's set but no backend matches.
 pub async fn init_event_bus(
     config: &MessagingConfig,
     mode: EventBusMode,
 ) -> std::result::Result<Arc<dyn EventBus>, Box<dyn std::error::Error + Send + Sync>> {
+    // C14: "channel" used to be the default messaging_type, but no backend
+    // has implemented it since ChannelEventBus was removed. Rather than let
+    // that resolve to a confusing UnknownType("channel"), an absent type
+    // fails fast with a message that tells the operator what to set.
+    if config.messaging_type.is_empty() {
+        return Err(BusError::MissingType.into());
+    }
+
     for backend in inventory::iter::<BusBackend> {
         if let Some(result) = (backend.try_create)(config, mode.clone()).await {
             return result.map_err(|e| e.into());

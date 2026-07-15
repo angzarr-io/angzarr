@@ -35,10 +35,15 @@ fn make_event_book(domain: &str, event_types: &[&str]) -> EventBook {
     }
 }
 
+/// C14: there is no in-process transport, so `MessagingConfig::default()`
+/// must not resolve to a phantom `"channel"` backend. Leaving
+/// `messaging_type` empty makes `init_event_bus` fail fast with an
+/// actionable error (see `factory::init_event_bus_missing_type_is_actionable`)
+/// instead of a confusing `UnknownType("channel")`.
 #[test]
-fn test_messaging_config_default() {
+fn test_messaging_config_default_has_no_messaging_type() {
     let config = MessagingConfig::default();
-    assert_eq!(config.messaging_type, "channel");
+    assert_eq!(config.messaging_type, "");
     assert_eq!(config.amqp.url, "amqp://localhost:5672");
 }
 

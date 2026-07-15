@@ -15,6 +15,8 @@ pub mod errmsg {
     pub const GRPC_ERROR: &str = "gRPC error: ";
     pub const SUBSCRIBE_NOT_SUPPORTED: &str = "Subscribe not supported for this bus type";
     pub const UNKNOWN_TYPE: &str = "Unknown messaging type: ";
+    pub const MISSING_TYPE: &str =
+        "No messaging transport configured; set messaging.type to one of: amqp, kafka, pubsub, sns-sqs";
 }
 
 /// Errors that can occur during bus operations.
@@ -43,4 +45,11 @@ pub enum BusError {
 
     #[error("{}{}", errmsg::UNKNOWN_TYPE, .0)]
     UnknownType(String),
+
+    /// `messaging.type` was left unset (C14: there is no in-process
+    /// default transport to fall back to). Distinct from `UnknownType` so
+    /// operators immediately see "you forgot to configure this" rather
+    /// than a message naming a phantom `"channel"` backend.
+    #[error("{}", errmsg::MISSING_TYPE)]
+    MissingType,
 }

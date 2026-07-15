@@ -7,7 +7,18 @@ use serde::Deserialize;
 /// The `messaging_type` field is a string that identifies which backend to use.
 /// Each backend module checks if the type matches and handles creation.
 ///
-/// Known types: "amqp", "kafka", "channel", "pubsub", "sns-sqs"
+/// Known types: "amqp", "kafka", "pubsub", "sns-sqs"
+///
+/// # No in-process default (C14)
+///
+/// There is no in-process/embedded transport. A `ChannelEventBus` existed
+/// once and was removed, but this field's default value ("channel") and
+/// scattered doc references to it were left behind, so an unconfigured
+/// deployment silently pointed at a nonexistent backend. `messaging_type`
+/// now defaults to an empty string, which `init_event_bus` (see
+/// `src/bus/factory.rs`) rejects with an actionable error naming the
+/// supported types — an operator who forgets to set `messaging.type` gets a
+/// clear startup failure instead of a confusing `UnknownType("channel")`.
 ///
 /// # DLQ schema (R2-15)
 ///
@@ -26,10 +37,14 @@ use serde::Deserialize;
 /// // R2-15 removed this field; touching it must not compile.
 /// let _ = cfg.dlq;
 /// ```
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct MessagingConfig {
-    /// Messaging type identifier (e.g., "amqp", "kafka", "channel").
+    /// Messaging type identifier (e.g., "amqp", "kafka", "pubsub", "sns-sqs").
+    ///
+    /// No default transport — an empty value is rejected by
+    /// `init_event_bus` with an actionable error instead of resolving to a
+    /// nonexistent in-process bus. See "No in-process default (C14)" above.
     #[serde(rename = "type")]
     pub messaging_type: String,
     /// AMQP-specific configuration.
@@ -40,18 +55,6 @@ pub struct MessagingConfig {
     pub pubsub: PubSubBusConfig,
     /// AWS SNS/SQS-specific configuration.
     pub sns_sqs: SnsSqsBusConfig,
-}
-
-impl Default for MessagingConfig {
-    fn default() -> Self {
-        Self {
-            messaging_type: "channel".to_string(),
-            amqp: AmqpBusConfig::default(),
-            kafka: KafkaConfig::default(),
-            pubsub: PubSubBusConfig::default(),
-            sns_sqs: SnsSqsBusConfig::default(),
-        }
-    }
 }
 
 /// Mode for event bus initialization.

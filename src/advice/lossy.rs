@@ -8,10 +8,10 @@
 //!
 //! ```ignore
 //! use angzarr::advice::{LossyBus, LossyConfig};
-//! use angzarr::bus::ChannelEventBus;
+//! use angzarr::bus::AmqpEventBus;
 //!
 //! // Create a bus that drops 10% of messages
-//! let inner = ChannelEventBus::publisher();
+//! let inner = AmqpEventBus::new(config).await?;
 //! let lossy = LossyBus::new(inner, LossyConfig::with_drop_rate(0.1));
 //!
 //! // Or create a non-lossy wrapper (pass-through)

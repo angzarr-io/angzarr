@@ -75,7 +75,9 @@ async fn test_mock_event_bus_fail_on_publish() {
 /// Subscribe returns error — mock bus is publish-only.
 ///
 /// Subscribe requires consumer infrastructure. Tests that need subscription
-/// behavior should use ChannelEventBus instead.
+/// behavior should use a real transport (e.g. `AmqpEventBus`, `KafkaEventBus`)
+/// via contract tests in `tests/bus_*.rs` — there is no in-process bus
+/// (C14 removed the `channel` default; see `CLAUDE.md`'s parity note).
 #[tokio::test]
 async fn test_mock_event_bus_subscribe_not_supported() {
     let bus = MockEventBus::new();
