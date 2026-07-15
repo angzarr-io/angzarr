@@ -815,6 +815,133 @@ async fn cascade_revoke_snapshot_never_reflects_revoked_state() {
     assert_eq!(noop.original_sequence, 0);
 }
 
+/// (b2) C17: the reaper's production wiring — event bus AND snapshot repo
+/// both attached, exactly as `angzarr_aggregate.rs`'s bootstrap now
+/// constructs it — actually PUBLISHES the Revocation (not just persists
+/// it), the published book's `cover.edition` is present so a downstream
+/// gap-fill consumer can resolve off it directly, and the snapshot
+/// backstop still clears a snapshot covering the revoked sequence.
+///
+/// Before C17, nothing in any `src/bin/*` constructed or spawned a
+/// `CascadeReaper` at all (`rg -n 'CascadeReaper' src/bin` matched
+/// nothing) — C01's `with_event_bus`/`with_snapshot_repo` backstops
+/// existed but had no production caller. This test exercises the reaper
+/// wired exactly like the aggregate bootstrap does, then walks the
+/// downstream consequence (gap-fill) end to end, so a regression that
+/// silently drops the bus or edition wiring fails here even though the
+/// existing unit tests (`cascade/reaper.test.rs`) construct the reaper
+/// directly with mocks and would not catch a bootstrap wiring regression.
+#[tokio::test]
+async fn cascade_reaper_revocation_published_and_gap_fillable() {
+    let store = create_sqlite_event_store().await;
+    let snapshot_repo = create_sqlite_snapshot_repo().await;
+    let bus = Arc::new(MockEventBus::new());
+    let root = Uuid::new_v4();
+
+    // Simulate a crashed 2PC cascade: a provisional (no_commit=true) event
+    // under a cascade_id that never received a Confirmation or Revocation
+    // — exactly what happens if the aggregate process dies mid-cascade.
+    let mut provisional = event_page(0);
+    provisional.no_commit = true;
+    provisional.cascade_id = Some("cascade-c17".to_string());
+    store
+        .add("orders", "", root, vec![provisional], &AddMeta::default())
+        .await
+        .unwrap();
+
+    // A snapshot that slipped through (e.g. via a write path that predates
+    // or bypasses C01's persist-time deferral fix) covering the
+    // not-yet-resolved sequence. The reaper's revoke-time backstop (#2)
+    // must delete it once it revokes sequence 0.
+    snapshot_repo
+        .put(
+            "orders",
+            "",
+            root,
+            Snapshot {
+                sequence: 0,
+                state: Some(Any {
+                    type_url: "test.State".to_string(),
+                    value: vec![9, 9, 9],
+                }),
+                retention: SnapshotRetention::RetentionDefault as i32,
+                created_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+    // Production wiring (C17): both bus and snapshot repo attached, zero
+    // timeout so the 20ms-old provisional event above is immediately stale.
+    let reaper = CascadeReaper::new(store.clone(), std::time::Duration::from_secs(0))
+        .with_event_bus(bus.clone())
+        .with_snapshot_repo(snapshot_repo.clone());
+    let revoked = reaper.run_once().await.expect("reaper run_once");
+    assert_eq!(revoked, 1, "reaper must revoke the stale provisional event");
+
+    // 1. The Revocation was PUBLISHED to the bus, not merely persisted —
+    // without `with_event_bus` wired (the pre-C17 state), downstream
+    // consumers subscribed to the bus never learn the cascade was undone.
+    let published = bus.take_published().await;
+    assert_eq!(
+        published.len(),
+        1,
+        "reaper must publish the Revocation to the bus when a bus is wired"
+    );
+    let book = published[0].clone();
+    let published_cover = book
+        .cover
+        .as_ref()
+        .expect("published book must carry a cover");
+    assert_eq!(published_cover.domain, "orders");
+    let edition = published_cover.edition.as_ref().expect(
+        "C01 #22: published book's cover.edition must be present, or a \
+         downstream consumer gap-filling off this exact bus message errors \
+         with MissingEdition instead of repairing the gap",
+    );
+    assert_eq!(edition.name, "");
+
+    // 2. Downstream gap-fill: a fresh handler (no checkpoint) receiving
+    // this published book directly must resolve it via `fill_if_needed`
+    // without erroring, and the filled book must reflect sequence 0 as
+    // revoked (NoOp) — proving the edition stamped above is what
+    // `GapFiller` actually consumes, not just present-but-unused.
+    let repo = Arc::new(EventBookRepository::new(
+        store.clone(),
+        snapshot_repo.clone(),
+    ));
+    let gap_filler = angzarr::services::gap_fill::GapFiller::new(
+        angzarr::services::gap_fill::NoOpPositionStore,
+        angzarr::services::gap_fill::LocalEventSource::new(repo),
+    );
+    let filled = gap_filler
+        .fill_if_needed(book)
+        .await
+        .expect("gap-fill must resolve the reaper's published Revocation book");
+    assert_eq!(
+        filled.pages.len(),
+        2,
+        "gap-filled book must carry the resolved sequence-0 view plus the \
+         Revocation marker at sequence 1"
+    );
+    let noop: NoOp = filled.pages[0]
+        .decode_typed()
+        .expect("gap-filled sequence 0 must resolve as a NoOp placeholder (revoked)");
+    assert_eq!(noop.reason, "revoked");
+    assert_eq!(noop.original_sequence, 0);
+
+    // 3. Snapshot no longer reflects the revoked state (C01 #2 backstop),
+    // even though it was seeded directly (bypassing the persist-time
+    // deferral fix) to exercise the reaper's independent cleanup path.
+    let snapshot_after = snapshot_repo.get("orders", "", root).await.unwrap();
+    assert!(
+        snapshot_after.is_none(),
+        "reaper must delete a snapshot covering a now-revoked sequence"
+    );
+}
+
 /// (c) gap-fill over a range whose Confirmation is OUTSIDE the range
 /// delivers the confirmed events (C01 #6).
 ///

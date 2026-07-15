@@ -73,6 +73,7 @@ pub const OTEL_SERVICE_NAME_ENV_VAR: &str = "OTEL_SERVICE_NAME";
 use serde::Deserialize;
 
 use crate::bus::MessagingConfig;
+use crate::cascade::CascadeReaperConfig;
 use crate::dlq::DlqConfig;
 use crate::payload_store::PayloadOffloadConfig;
 use crate::services::UpcasterConfig;
@@ -111,6 +112,8 @@ pub struct Config {
     pub payload_offload: PayloadOffloadConfig,
     /// Dead letter queue configuration.
     pub dlq: DlqConfig,
+    /// Cascade (2PC) reaper configuration (C17).
+    pub cascade_reaper: CascadeReaperConfig,
 }
 
 impl Config {

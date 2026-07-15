@@ -26,7 +26,7 @@ use crate::storage::{CascadeParticipant, EventStore};
 ///
 /// Runs periodically and revokes cascades that have uncommitted events
 /// older than the configured timeout without a Confirmation or Revocation.
-pub struct CascadeReaper<S: EventStore> {
+pub struct CascadeReaper<S: EventStore + ?Sized> {
     store: Arc<S>,
     timeout: Duration,
     interval: Duration,
@@ -49,7 +49,7 @@ pub struct CascadeReaper<S: EventStore> {
     snapshot_repo: Option<Arc<SnapshotRepository>>,
 }
 
-impl<S: EventStore + 'static> CascadeReaper<S> {
+impl<S: EventStore + ?Sized + 'static> CascadeReaper<S> {
     /// Create a new cascade reaper.
     ///
     /// # Arguments
