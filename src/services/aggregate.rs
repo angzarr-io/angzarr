@@ -222,7 +222,14 @@ impl CommandHandlerCoordinatorService for AggregateService {
                     (Some(seq), None)
                 }
                 Some(crate::proto::temporal_query::PointInTime::AsOfTime(ts)) => {
-                    let ts_str = format!("{}.{}", ts.seconds, ts.nanos);
+                    // C03: `format!("{seconds}.{nanos}")` is not RFC3339 and
+                    // never parses in `EventBookRepository::get_temporal_by_time`
+                    // (`chrono::DateTime::parse_from_rfc3339`), so every
+                    // `AsOfTime` speculative query failed. Use the same
+                    // helper `event_query::mod.rs` already uses for the
+                    // equivalent conversion.
+                    let ts_str = crate::storage::helpers::timestamp_to_rfc3339(&ts)
+                        .map_err(|e| Status::invalid_argument(e.to_string()))?;
                     (None, Some(ts_str))
                 }
                 None => (None, None),
