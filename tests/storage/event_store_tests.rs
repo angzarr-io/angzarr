@@ -1637,6 +1637,187 @@ pub async fn test_edition_divergence_get_from<S: EventStore>(store: &S) {
     assert_eq!(from_events[1].sequence_num(), 4);
 }
 
+/// Finding #10: `get_from_to` on a diverged edition must include the
+/// pre-divergence main-timeline prefix, exactly as `get`/`get_from` do.
+///
+/// Pre-fix, the SQL backends built `get_from_to` as a single query filtered
+/// only on `edition_predicate(edition)` — it never merged in the main
+/// timeline. So a ranged read on a diverged edition returned ONLY the
+/// edition-tagged rows in range, dropping every main-timeline event before
+/// the divergence point. This is the range-read half of #10 (the temporal
+/// read is `test_edition_get_until_timestamp_includes_main_prefix`).
+pub async fn test_edition_get_from_to_includes_main_prefix<S: EventStore>(store: &S) {
+    let domain = "test_range_prefix";
+    let root = Uuid::new_v4();
+
+    // Main timeline: 0, 1, 2, 3, 4.
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 5),
+            &AddMeta::default(),
+        )
+        .await
+        .expect("add to main should succeed");
+
+    // Branch diverges at seq 3 (branch owns 3, 4; inherits main 0,1,2).
+    store
+        .add(
+            domain,
+            "range-branch",
+            root,
+            make_events(3, 2),
+            &AddMeta::default(),
+        )
+        .await
+        .expect("add to branch should succeed");
+
+    // get_from_to(1, 4) over the branch spans the divergence: it must
+    // return main[1], main[2] (pre-divergence prefix) + branch[3].
+    let ranged = store
+        .get_from_to(domain, "range-branch", root, 1, 4)
+        .await
+        .expect("get_from_to should succeed");
+
+    let seqs: Vec<u32> = ranged.iter().map(|e| e.sequence_num()).collect();
+    assert_eq!(
+        seqs,
+        vec![1, 2, 3],
+        "get_from_to on a diverged edition must include the pre-divergence \
+         main-timeline prefix (seqs 1,2) alongside the branch event (seq 3); \
+         got {:?} — dropping the prefix is finding #10",
+        seqs
+    );
+}
+
+/// Finding #10: `get_until_timestamp` on a diverged edition must include the
+/// pre-divergence main-timeline prefix.
+///
+/// This is the path `EventBookRepository::get_temporal_by_sequence` takes
+/// on its full-replay branch: a "state as of T" read that, pre-fix, filtered
+/// only on `edition_predicate(edition)` and so reconstructed corrupt state
+/// from post-divergence rows only. Whole-second timestamps keep the test
+/// valid on ImmuDB (whose TIMESTAMP column floors sub-second precision).
+pub async fn test_edition_get_until_timestamp_includes_main_prefix<S: EventStore>(store: &S) {
+    use prost_types::Timestamp;
+
+    let domain = "test_temporal_prefix";
+    let root = Uuid::new_v4();
+
+    // Main timeline events 0,1,2 at t0<t1<t2 (whole seconds).
+    let base = 1_700_000_000i64;
+    let main: Vec<EventPage> = (0..3)
+        .map(|i| {
+            let mut e = make_event(i, &format!("Main{i}"));
+            e.created_at = Some(Timestamp {
+                seconds: base + i as i64,
+                nanos: 0,
+            });
+            e
+        })
+        .collect();
+    store
+        .add(domain, "angzarr", root, main, &AddMeta::default())
+        .await
+        .expect("add to main should succeed");
+
+    // Branch diverges at seq 3; branch events 3,4 at strictly later instants.
+    let branch: Vec<EventPage> = (3..5)
+        .map(|i| {
+            let mut e = make_event(i, &format!("Branch{i}"));
+            e.created_at = Some(Timestamp {
+                seconds: base + i as i64,
+                nanos: 0,
+            });
+            e
+        })
+        .collect();
+    store
+        .add(domain, "temporal-branch", root, branch, &AddMeta::default())
+        .await
+        .expect("add to branch should succeed");
+
+    // "State as of t3": inclusive of main[0,1,2] (t0,t1,t2 <= t3) and
+    // branch[3] (t3 <= t3), excluding branch[4] (t4 > t3).
+    let until = Timestamp {
+        seconds: base + 3,
+        nanos: 0,
+    };
+    let as_of = store
+        .get_until_timestamp(domain, "temporal-branch", root, &until)
+        .await
+        .expect("get_until_timestamp should succeed");
+
+    let seqs: Vec<u32> = as_of.iter().map(|e| e.sequence_num()).collect();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3],
+        "get_until_timestamp on a diverged edition must include the \
+         pre-divergence main-timeline prefix (seqs 0,1,2); got {:?} — \
+         dropping it corrupts temporal reconstruction (finding #10)",
+        seqs
+    );
+}
+
+/// Finding #12 (LOCKED: inherit main timeline): a named edition with NO
+/// events of its own and no explicit divergence must read as its base — the
+/// entire main timeline — until it explicitly diverges.
+///
+/// SQLite, ImmuDB, and the mock already behave this way. Postgres did NOT:
+/// its composite stored procedure computed the divergence point as
+/// `COALESCE(explicit, MIN(edition.seq), 0)`, so with no edition rows the
+/// point was the literal `0`, the main-timeline filter `sequence < 0` was
+/// never true, and the read returned ZERO rows. This contract test pins the
+/// uniform behavior across all SQL backends (RED on pre-fix Postgres).
+pub async fn test_eventless_edition_inherits_main_timeline<S: EventStore>(store: &S) {
+    let domain = "test_eventless_inherit";
+    let root = Uuid::new_v4();
+
+    // Main timeline: 0, 1, 2. The named edition below writes nothing.
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 3),
+            &AddMeta::default(),
+        )
+        .await
+        .expect("add to main should succeed");
+
+    // Read an eventless named edition — must inherit the whole main timeline.
+    let inherited = store
+        .get(domain, "ghost-edition", root)
+        .await
+        .expect("get on eventless edition should succeed");
+
+    let seqs: Vec<u32> = inherited.iter().map(|e| e.sequence_num()).collect();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2],
+        "an eventless named edition must inherit the full main timeline \
+         (LOCKED #12 contract); got {:?}. Zero rows here is the pre-fix \
+         Postgres 'divergence=0 → sequence<0' bug",
+        seqs
+    );
+
+    // The same must hold for get_from from the middle of the inherited range.
+    let from_mid = store
+        .get_from(domain, "ghost-edition", root, 1)
+        .await
+        .expect("get_from on eventless edition should succeed");
+    let from_seqs: Vec<u32> = from_mid.iter().map(|e| e.sequence_num()).collect();
+    assert_eq!(
+        from_seqs,
+        vec![1, 2],
+        "get_from on an eventless edition must inherit the main-timeline \
+         tail from the requested sequence; got {:?}",
+        from_seqs
+    );
+}
+
 /// Test explicit divergence for NEW edition branches (no prior edition events).
 ///
 /// This tests the case where we create a brand new branch with an explicit
@@ -2113,9 +2294,12 @@ pub async fn test_get_until_timestamp_filters<S: EventStore>(store: &S) {
         .expect("add should succeed");
 
     // Query with timestamp between old and new
-    let until = "2024-01-01T00:00:00Z"; // After old, before new
+    let until = Timestamp {
+        seconds: 1704067200, // 2024-01-01T00:00:00Z — after old, before new
+        nanos: 0,
+    };
     let filtered = store
-        .get_until_timestamp(domain, "test", root, until)
+        .get_until_timestamp(domain, "test", root, &until)
         .await
         .expect("get_until_timestamp should succeed");
 
@@ -2164,13 +2348,112 @@ pub async fn test_get_until_timestamp_returns_all_when_recent<S: EventStore>(sto
         .expect("add should succeed");
 
     // Query with timestamp far in the future
-    let until = "2030-01-01T00:00:00Z";
+    let until = Timestamp {
+        seconds: 1893456000, // 2030-01-01T00:00:00Z
+        nanos: 0,
+    };
     let all = store
-        .get_until_timestamp(domain, "test", root, until)
+        .get_until_timestamp(domain, "test", root, &until)
         .await
         .expect("get_until_timestamp should succeed");
 
     assert_eq!(all.len(), 1, "should return all events");
+}
+
+/// C10 (finding #26) regression: the pre-fix `get_until_timestamp(until:
+/// &str)` compared a caller-formatted string lexically against the SQL
+/// backends' TEXT `created_at` column. A caller-chosen `Z` suffix instead
+/// of the producer's uniform `+00:00` corrupted the comparison — the
+/// stored fractional-second marker `.` (0x2E) sorts BELOW `Z` (0x5A) but
+/// ABOVE `+` (0x2B), so a `Z`-suffixed boundary leaked a strictly-later
+/// event into a "state as of T" read (confirmed red against the pre-fix
+/// SQLite backend: 2 events returned via `Z`, 1 via `+00:00`, for the
+/// identical instant).
+///
+/// The typed `until: &prost_types::Timestamp` signature removes the
+/// possibility structurally — there is no second string spelling of the
+/// same instant for a caller to pick, and every backend derives its own
+/// comparable form from the SAME typed value through exactly one function
+/// (`storage::helpers::timestamp_to_rfc3339` for TEXT-column SQL
+/// backends). This test pins the resulting nanosecond-precision boundary
+/// behavior: an event exactly AT `until` is included (inclusive `<=`); an
+/// event one nanosecond-granularity tick AFTER `until` is excluded.
+///
+/// NOT part of `generate_event_store_core_tests!` — ImmuDB's `created_at`
+/// is a real `TIMESTAMP` column that only round-trips whole-second
+/// precision (see `immudb_timestamp_literal`), a pre-existing, documented
+/// floor unrelated to C10. Wiring this into the core list would fail
+/// there on that known precision limit, not a regression. SQLite and
+/// Postgres (full sub-second TEXT precision) call it directly.
+pub async fn test_get_until_timestamp_nanosecond_boundary_precision<S: EventStore>(store: &S) {
+    use prost_types::Timestamp;
+
+    let domain = "test_ts_boundary";
+    let root = Uuid::new_v4();
+
+    let boundary = Timestamp {
+        seconds: 1704153600, // 2024-01-02T00:00:00Z
+        nanos: 0,
+    };
+    let one_micro_after = Timestamp {
+        seconds: 1704153600,
+        nanos: 1_000, // +1 microsecond — strictly after the boundary
+    };
+
+    let event_at_boundary = EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(SequenceType::Sequence(0)),
+        }),
+        created_at: Some(boundary),
+        payload: Some(event_page::Payload::Event(Any {
+            type_url: "type.example/AtBoundary".to_string(),
+            value: vec![1],
+        })),
+        ..Default::default()
+    };
+    let event_after_boundary = EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(SequenceType::Sequence(1)),
+        }),
+        created_at: Some(one_micro_after),
+        payload: Some(event_page::Payload::Event(Any {
+            type_url: "type.example/AfterBoundary".to_string(),
+            value: vec![2],
+        })),
+        ..Default::default()
+    };
+
+    store
+        .add(
+            domain,
+            "test",
+            root,
+            vec![event_at_boundary, event_after_boundary],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
+        .await
+        .expect("add should succeed");
+
+    let filtered = store
+        .get_until_timestamp(domain, "test", root, &boundary)
+        .await
+        .expect("get_until_timestamp should succeed");
+
+    assert_eq!(
+        filtered.len(),
+        1,
+        "boundary query must include the at-boundary event and exclude the \
+         strictly-later (+1us) event — a regression here means the typed \
+         boundary reopened the C10 lexical-comparison footgun"
+    );
+    assert_eq!(filtered[0].sequence_num(), 0);
 }
 
 pub async fn test_timestamp_preservation<S: EventStore>(store: &S) {
@@ -3397,6 +3680,9 @@ macro_rules! generate_event_store_core_tests {
             test_edition_divergence_read,
             test_edition_divergence_from_middle,
             test_edition_divergence_get_from,
+            test_edition_get_from_to_includes_main_prefix,
+            test_edition_get_until_timestamp_includes_main_prefix,
+            test_eventless_edition_inherits_main_timeline,
             test_edition_filtered_roots,
             test_edition_explicit_divergence_new_branch,
             // main-timeline sentinel polarity tests (C-15)

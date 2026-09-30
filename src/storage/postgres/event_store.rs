@@ -1,66 +1,45 @@
 //! PostgreSQL EventStore implementation.
 //!
-//! Uses stored procedures for composite edition reads. The `get_edition_events`
-//! stored procedure handles implicit divergence (deriving divergence point from
-//! the first edition event).
+//! Composite edition reads (main-timeline prefix + edition events) run
+//! through the SHARED divergence/merge logic in
+//! `crate::storage::sql::event_store` (finding #28) — the same code SQLite
+//! and immudb use — rather than a Postgres-only stored procedure. This
+//! removes the second, drift-prone copy of the divergence math the stored
+//! procedure held (which computed the eventless-edition divergence point as
+//! the literal `0`, silently returning zero rows — finding #12). The read
+//! stored procedures remain defined by migrations for backward
+//! compatibility but are no longer on the read path; `delete_edition_events`
+//! still uses its proc for the DB-side main-timeline guard.
 
 use async_trait::async_trait;
 use prost::Message;
-use sea_query::{Expr, Iden, Order, PostgresQueryBuilder, Query, SimpleExpr};
+use sea_query::{Expr, Order, PostgresQueryBuilder, Query};
 use sqlx::{Acquire, PgPool, Row};
 use uuid::Uuid;
 
 use crate::proto::EventPage;
-use crate::storage::helpers::{assemble_event_books, is_main_timeline, BookParts};
+use crate::storage::helpers::{assemble_event_books, event_sequence, is_main_timeline, BookParts};
 use crate::storage::schema::Events;
+use crate::storage::sql::event_store::{
+    edition_from_db, edition_predicate_expr as edition_predicate, implicit_divergence,
+    map_write_conflict, merge_composite_events, resolve_divergence,
+};
 use crate::storage::{
     AddMeta, AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo, StorageError,
 };
 
-/// Build a WHERE predicate on an edition column that translates EITHER
-/// main-timeline sentinel (`""` or `"angzarr"`) to SQL `IS NULL`.
-///
-/// C-15: both sentinels must round-trip to the same SQL NULL row. Migration
-/// 0007 normalized pre-existing literal rows to NULL; new writes go through
-/// `edition_to_db`. Reads MUST use this predicate (not a bare `Edition.eq`)
-/// so a caller passing either form finds the row, and never accidentally
-/// matches a literal `"angzarr"` left in the table by a legacy writer.
-fn edition_predicate<T: Iden + 'static>(col: T, edition: &str) -> SimpleExpr {
-    if is_main_timeline(edition) {
-        Expr::col(col).is_null()
-    } else {
-        Expr::col(col).eq(edition)
-    }
-}
-
-/// Convert the API-layer edition to the storage-layer value (`None` = SQL NULL).
-///
-/// C-15: BOTH `""` and `"angzarr"` are main-timeline sentinels per the
-/// trait/`is_main_timeline` contract. Both MUST normalize to `None` so that
-/// the SQL column holds a single canonical representation (NULL) for the
-/// main timeline. Pre-fix this helper only handled `""` → None, which let
-/// `"angzarr"` land as a literal table row that `edition_predicate` then
-/// failed to match (it looks for `IS NULL`). Result: a write under one
-/// sentinel was silently invisible to a read under the other.
+/// Convert the API-layer edition to the storage-layer `Option<String>`
+/// (`None` = SQL NULL). Thin wrapper over the shared
+/// [`edition_to_db_value`] so the Postgres write path — which binds
+/// `Option<String>` for the source-edition columns and needs the value
+/// twice — keeps a convenient owned form. Both main-timeline sentinels
+/// (`""`, `"angzarr"`) normalize to `None` (C-15).
 fn edition_to_db(edition: &str) -> Option<String> {
     if is_main_timeline(edition) {
         None
     } else {
         Some(edition.to_string())
     }
-}
-
-/// Convert a storage-layer edition column value back to the API-layer
-/// representation.
-///
-/// Migration 0007 made the `edition` column genuinely nullable and normalized
-/// pre-existing main-timeline sentinels (`''`, `'angzarr'`) to SQL `NULL`. The
-/// API surface uses the empty string as the canonical main-timeline sentinel,
-/// so a `NULL` read must round-trip to `""`. Use this helper at every read site
-/// — a bare `row.get::<String, _>("edition")` panics with `UnexpectedNullError`
-/// on any post-migration main-timeline row (bug C-16).
-fn edition_from_db(value: Option<String>) -> String {
-    value.unwrap_or_default()
 }
 
 /// PostgreSQL implementation of EventStore.
@@ -74,69 +53,19 @@ impl PostgresEventStore {
         Self { pool }
     }
 
-    /// Query events using the composite edition stored procedure.
-    ///
-    /// Calls `get_edition_events_from(domain, edition, root, from, explicit_divergence)`
-    /// which handles implicit divergence (from first edition event) and main timeline
-    /// merging.
-    async fn composite_read(
+    /// Query the events of a single edition (`edition` matched via the
+    /// C-15 NULL-polarity predicate), from `from` onward.
+    async fn query_edition_events(
         &self,
         domain: &str,
         edition: &str,
-        root: &str,
-        from: u32,
-    ) -> Result<Vec<EventPage>> {
-        self.composite_read_with_divergence(domain, edition, root, from, None)
-            .await
-    }
-
-    /// Query events with optional explicit divergence point.
-    ///
-    /// The explicit_divergence parameter specifies where the edition branches
-    /// from the main timeline. When None, uses implicit divergence (first edition event).
-    async fn composite_read_with_divergence(
-        &self,
-        domain: &str,
-        edition: &str,
-        root: &str,
-        from: u32,
-        explicit_divergence: Option<u32>,
-    ) -> Result<Vec<EventPage>> {
-        // Use stored procedure for composite read
-        // The procedure handles: main timeline query if edition is 'angzarr',
-        // or composite query (main + edition) with optional explicit divergence
-        let query = "SELECT event_data FROM get_edition_events_from($1, $2, $3, $4, $5)";
-
-        let rows = sqlx::query(query)
-            .bind(domain)
-            .bind(edition)
-            .bind(root)
-            .bind(from as i32)
-            .bind(explicit_divergence.map(|d| d as i32))
-            .fetch_all(&self.pool)
-            .await?;
-
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            let event_data: Vec<u8> = row.get("event_data");
-            let event = EventPage::decode(event_data.as_slice())?;
-            events.push(event);
-        }
-
-        Ok(events)
-    }
-
-    /// Simple query for main timeline events (no composite logic needed).
-    async fn query_main_timeline(
-        &self,
-        domain: &str,
         root: &str,
         from: u32,
     ) -> Result<Vec<EventPage>> {
         let query = Query::select()
             .column(Events::EventData)
             .from(Events::Table)
-            .and_where(edition_predicate(Events::Edition, ""))
+            .and_where(edition_predicate(Events::Edition, edition))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(root))
             .and_where(Expr::col(Events::Sequence).gte(from))
@@ -153,6 +82,100 @@ impl PostgresEventStore {
         }
 
         Ok(events)
+    }
+
+    /// Main-timeline events up to (exclusive) `until_seq`, or the entire
+    /// main timeline when `until_seq` is `None` (the #12 eventless-edition
+    /// "no cap — inherit whole main timeline" case).
+    async fn query_main_events_until(
+        &self,
+        domain: &str,
+        root: &str,
+        until_seq: Option<u32>,
+    ) -> Result<Vec<EventPage>> {
+        let mut stmt = Query::select()
+            .column(Events::EventData)
+            .from(Events::Table)
+            .and_where(edition_predicate(Events::Edition, ""))
+            .and_where(Expr::col(Events::Domain).eq(domain))
+            .and_where(Expr::col(Events::Root).eq(root))
+            .order_by(Events::Sequence, Order::Asc)
+            .to_owned();
+        if let Some(seq) = until_seq {
+            stmt.and_where(Expr::col(Events::Sequence).lt(seq));
+        }
+        let query = stmt.to_string(PostgresQueryBuilder);
+
+        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let event_data: Vec<u8> = row.get("event_data");
+            let event = EventPage::decode(event_data.as_slice())?;
+            events.push(event);
+        }
+
+        Ok(events)
+    }
+
+    /// Fetch the raw halves of a composite read (main-timeline prefix +
+    /// edition events) for a NAMED edition, using the shared divergence
+    /// resolution. Callers merge with their own `keep` predicate via
+    /// [`merge_composite_events`] — see the shared module for why one merge
+    /// point per backend closes findings #10/#12.
+    async fn composite_parts(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: &str,
+        explicit_divergence: Option<u32>,
+    ) -> Result<(Vec<EventPage>, Vec<EventPage>)> {
+        let edition_events = self.query_edition_events(domain, edition, root, 0).await?;
+        let divergence =
+            resolve_divergence(explicit_divergence, implicit_divergence(&edition_events));
+        let main_events = self
+            .query_main_events_until(domain, root, divergence)
+            .await?;
+        Ok((main_events, edition_events))
+    }
+
+    /// Composite read from `from` onward (implicit divergence).
+    async fn composite_read(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: &str,
+        from: u32,
+    ) -> Result<Vec<EventPage>> {
+        self.composite_read_with_divergence(domain, edition, root, from, None)
+            .await
+    }
+
+    /// Composite read with an optional explicit divergence point.
+    async fn composite_read_with_divergence(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: &str,
+        from: u32,
+        explicit_divergence: Option<u32>,
+    ) -> Result<Vec<EventPage>> {
+        let (main_events, edition_events) = self
+            .composite_parts(domain, edition, root, explicit_divergence)
+            .await?;
+        Ok(merge_composite_events(main_events, edition_events, |e| {
+            event_sequence(e) >= from
+        }))
+    }
+
+    /// Simple query for main timeline events (no composite logic needed).
+    async fn query_main_timeline(
+        &self,
+        domain: &str,
+        root: &str,
+        from: u32,
+    ) -> Result<Vec<EventPage>> {
+        self.query_edition_events(domain, "", root, from).await
     }
 }
 
@@ -310,7 +333,20 @@ impl EventStore for PostgresEventStore {
                 ])
                 .to_string(PostgresQueryBuilder);
 
-            sqlx::query(&query).execute(&mut *tx).await?;
+            // #20: `add` is read-max-then-insert under READ COMMITTED with no
+            // row lock, so two writers can compute the same `base_sequence`
+            // and the loser's INSERT trips the `(domain, edition, root,
+            // sequence)` PRIMARY KEY (SQLSTATE 23505). Classify it as a
+            // `SequenceConflict` (→ retryable `failed_precondition`) via the
+            // shared classifier instead of letting it propagate through the
+            // blanket `From<sqlx::Error>` as `Database` (→ non-retryable
+            // `internal`), which turned a routine optimistic-concurrency loss
+            // into an operator-visible internal error and broke the pipeline's
+            // retry. The `tx` rolls back on this early return.
+            sqlx::query(&query)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| map_write_conflict(e, base_sequence, sequence))?;
         }
 
         // Commit the transaction
@@ -373,27 +409,42 @@ impl EventStore for PostgresEventStore {
     ) -> Result<Vec<EventPage>> {
         let root_str = root.to_string();
 
-        let query = Query::select()
-            .column(Events::EventData)
-            .from(Events::Table)
-            .and_where(edition_predicate(Events::Edition, edition))
-            .and_where(Expr::col(Events::Domain).eq(domain))
-            .and_where(Expr::col(Events::Root).eq(&root_str))
-            .and_where(Expr::col(Events::Sequence).gte(from))
-            .and_where(Expr::col(Events::Sequence).lt(to))
-            .order_by(Events::Sequence, Order::Asc)
-            .to_string(PostgresQueryBuilder);
+        // Main timeline: a single edition-scoped range query is exact.
+        if is_main_timeline(edition) {
+            let query = Query::select()
+                .column(Events::EventData)
+                .from(Events::Table)
+                .and_where(edition_predicate(Events::Edition, edition))
+                .and_where(Expr::col(Events::Domain).eq(domain))
+                .and_where(Expr::col(Events::Root).eq(&root_str))
+                .and_where(Expr::col(Events::Sequence).gte(from))
+                .and_where(Expr::col(Events::Sequence).lt(to))
+                .order_by(Events::Sequence, Order::Asc)
+                .to_string(PostgresQueryBuilder);
 
-        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+            let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
 
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            let event_data: Vec<u8> = row.get("event_data");
-            let event = EventPage::decode(event_data.as_slice())?;
-            events.push(event);
+            let mut events = Vec::with_capacity(rows.len());
+            for row in rows {
+                let event_data: Vec<u8> = row.get("event_data");
+                let event = EventPage::decode(event_data.as_slice())?;
+                events.push(event);
+            }
+
+            return Ok(events);
         }
 
-        Ok(events)
+        // Named edition: route through the SAME composite (main-prefix +
+        // edition) logic as `get`/`get_from` (finding #10). The pre-fix
+        // query filtered only on `edition_predicate`, dropping the
+        // pre-divergence main-timeline prefix in the range.
+        let (main_events, edition_events) = self
+            .composite_parts(domain, edition, &root_str, None)
+            .await?;
+        Ok(merge_composite_events(main_events, edition_events, |e| {
+            let seq = event_sequence(e);
+            seq >= from && seq < to
+        }))
     }
 
     async fn get_until_timestamp(
@@ -401,30 +452,64 @@ impl EventStore for PostgresEventStore {
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> Result<Vec<EventPage>> {
         let root_str = root.to_string();
 
-        let query = Query::select()
-            .column(Events::EventData)
-            .from(Events::Table)
-            .and_where(edition_predicate(Events::Edition, edition))
-            .and_where(Expr::col(Events::Domain).eq(domain))
-            .and_where(Expr::col(Events::Root).eq(&root_str))
-            .and_where(Expr::col(Events::CreatedAt).lte(until))
-            .order_by(Events::Sequence, Order::Asc)
-            .to_string(PostgresQueryBuilder);
+        // Main timeline: filter the single timeline at the SQL layer.
+        //
+        // C10: same single-boundary canonicalization as SQLite — see the
+        // comment on `SqliteEventStore::get_until_timestamp`.
+        if is_main_timeline(edition) {
+            let until_str = crate::storage::helpers::timestamp_to_rfc3339(until)?;
 
-        let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+            let query = Query::select()
+                .column(Events::EventData)
+                .from(Events::Table)
+                .and_where(edition_predicate(Events::Edition, edition))
+                .and_where(Expr::col(Events::Domain).eq(domain))
+                .and_where(Expr::col(Events::Root).eq(&root_str))
+                .and_where(Expr::col(Events::CreatedAt).lte(until_str))
+                .order_by(Events::Sequence, Order::Asc)
+                .to_string(PostgresQueryBuilder);
 
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            let event_data: Vec<u8> = row.get("event_data");
-            let event = EventPage::decode(event_data.as_slice())?;
-            events.push(event);
+            let rows = sqlx::query(&query).fetch_all(&self.pool).await?;
+
+            let mut events = Vec::with_capacity(rows.len());
+            for row in rows {
+                let event_data: Vec<u8> = row.get("event_data");
+                let event = EventPage::decode(event_data.as_slice())?;
+                events.push(event);
+            }
+
+            return Ok(events);
         }
 
-        Ok(events)
+        // Named edition: composite (main-prefix + edition) read, then apply
+        // the temporal cut to BOTH halves (finding #10) — the corrupt
+        // temporal-reconstruction path. Cut is in-memory against the typed
+        // `created_at` (nanosecond-exact chrono compare, matching SQLite and
+        // the mock); no string form is involved, so the C10 lexical footgun
+        // cannot reopen.
+        let until_dt = chrono::DateTime::from_timestamp(until.seconds, until.nanos as u32).ok_or(
+            StorageError::InvalidTimestamp {
+                seconds: until.seconds,
+                nanos: until.nanos,
+            },
+        )?;
+        let (main_events, edition_events) = self
+            .composite_parts(domain, edition, &root_str, None)
+            .await?;
+        Ok(merge_composite_events(
+            main_events,
+            edition_events,
+            |e| match &e.created_at {
+                Some(ts) => chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
+                    .map(|dt| dt <= until_dt)
+                    .unwrap_or(false),
+                None => false,
+            },
+        ))
     }
 
     async fn list_roots(&self, domain: &str, edition: &str) -> Result<Vec<Uuid>> {

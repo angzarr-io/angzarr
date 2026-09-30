@@ -193,9 +193,17 @@ pub trait EventStore: Send + Sync {
     /// - `explicit_divergence = None`: Uses implicit divergence (first edition event).
     ///   This is the default behavior of `get()`.
     ///
-    /// This method is required for creating NEW branches that don't yet have
-    /// edition events. Without explicit divergence, a new branch would get NO
-    /// events (since implicit divergence requires existing edition events).
+    /// # Eventless-edition contract (finding #12 — inherit main timeline)
+    ///
+    /// A named edition with NO events of its own AND no explicit divergence
+    /// is "not diverged yet": it **inherits the entire main timeline** until
+    /// it explicitly diverges (by writing its first event, or by a
+    /// `Some(N)` divergence here). This is uniform across every backend —
+    /// SQLite, PostgreSQL, ImmuDB, and the mock. (Postgres previously
+    /// returned zero rows in this case via a stored-procedure
+    /// `divergence = 0 → sequence < 0` bug; that path now runs through the
+    /// shared divergence logic in `storage::sql::event_store`, which
+    /// resolves the eventless case to "no cap".)
     ///
     /// # Example: Branch at sequence 3
     /// ```text
@@ -257,12 +265,27 @@ pub trait EventStore: Send + Sync {
     ///
     /// Returns events ordered by sequence ASC where created_at <= until.
     /// Used for temporal queries to reconstruct historical state.
+    ///
+    /// # Typed boundary (C10)
+    ///
+    /// `until` is a typed `prost_types::Timestamp`, not a caller-formatted
+    /// string. Prior to C10 this took `until: &str`, and every SQL backend
+    /// compared it lexically against a TEXT `created_at` column — a caller
+    /// that built the string with a `Z` suffix instead of the producer's
+    /// uniform `+00:00` corrupted the comparison (`'Z' > '+'` in ASCII),
+    /// silently returning the wrong event set. Accepting the typed value
+    /// here removes the possibility entirely: every backend derives its own
+    /// comparable form from `until` at exactly one point
+    /// (`storage::helpers::timestamp_to_rfc3339` for the TEXT-column SQL
+    /// backends; a direct `chrono::DateTime::from_timestamp` for the
+    /// semantic backends), so no caller-supplied string ever reaches the
+    /// comparison.
     async fn get_until_timestamp(
         &self,
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> Result<Vec<EventPage>>;
 
     /// Retrieve all events with a given correlation ID across all domains.

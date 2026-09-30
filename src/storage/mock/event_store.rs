@@ -286,11 +286,18 @@ impl EventStore for MockEventStore {
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> Result<Vec<EventPage>> {
         let events = self.get(domain, edition, root).await?;
-        let until_dt = chrono::DateTime::parse_from_rfc3339(until)
-            .map_err(|e| StorageError::InvalidTimestampFormat(e.to_string()))?;
+        // C10: `until` is typed, so the comparison is a direct chrono
+        // instant compare — no string parsing (and no Z-vs-+00:00 footgun)
+        // is possible at this boundary anymore.
+        let until_dt = chrono::DateTime::from_timestamp(until.seconds, until.nanos as u32).ok_or(
+            StorageError::InvalidTimestamp {
+                seconds: until.seconds,
+                nanos: until.nanos,
+            },
+        )?;
         Ok(events
             .into_iter()
             .filter(|e| {

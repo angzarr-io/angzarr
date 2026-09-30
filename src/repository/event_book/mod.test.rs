@@ -1024,7 +1024,15 @@ mod mock_integration {
             .unwrap();
 
         let book = repo
-            .get_temporal_by_time(domain, "test", root, "2024-01-01T00:00:03+00:00")
+            .get_temporal_by_time(
+                domain,
+                "test",
+                root,
+                &prost_types::Timestamp {
+                    seconds: 1704067203, // 2024-01-01T00:00:03Z
+                    nanos: 0,
+                },
+            )
             .await
             .unwrap();
 
@@ -1089,7 +1097,15 @@ mod mock_integration {
             .unwrap();
 
         let book = repo
-            .get_temporal_by_time(domain, "test", root, "2024-01-01T00:00:01+00:00")
+            .get_temporal_by_time(
+                domain,
+                "test",
+                root,
+                &prost_types::Timestamp {
+                    seconds: 1704067201, // 2024-01-01T00:00:01Z
+                    nanos: 0,
+                },
+            )
             .await
             .unwrap();
 
@@ -1146,7 +1162,15 @@ mod mock_integration {
 
         // Query as-of 2 seconds after epoch (should return events 0, 1, 2)
         let book = repo
-            .get_temporal_by_time(domain, "test", root, "2024-01-01T00:00:02+00:00")
+            .get_temporal_by_time(
+                domain,
+                "test",
+                root,
+                &prost_types::Timestamp {
+                    seconds: 1704067202, // 2024-01-01T00:00:02Z
+                    nanos: 0,
+                },
+            )
             .await
             .unwrap();
 

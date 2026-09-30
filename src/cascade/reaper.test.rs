@@ -661,7 +661,7 @@ impl EventStore for FailingAddStore {
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> crate::storage::Result<Vec<crate::proto::EventPage>> {
         self.inner
             .get_until_timestamp(domain, edition, root, until)
@@ -1219,7 +1219,7 @@ impl EventStore for ReaperProxyStore {
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> crate::storage::Result<Vec<crate::proto::EventPage>> {
         self.inner
             .get_until_timestamp(domain, edition, root, until)

@@ -133,6 +133,18 @@ mod event_store_contract {
     crate::generate_event_store_tests!(fixture);
 }
 
+/// C10 (finding #26): see the identical call in `storage_sqlite.rs` for the
+/// full history. Postgres's `created_at` is TEXT with full sub-second
+/// precision (same as SQLite), so the nanosecond-boundary regression
+/// applies here too; not run against ImmuDB (whole-second TIMESTAMP floor).
+#[tokio::test]
+async fn test_postgres_get_until_timestamp_nanosecond_boundary_precision() {
+    use storage::event_store_tests::test_get_until_timestamp_nanosecond_boundary_precision;
+
+    let store = PostgresEventStore::new(shared_pool().await);
+    test_get_until_timestamp_nanosecond_boundary_precision(&store).await;
+}
+
 // =============================================================================
 // EventStore Concurrent-Write Tests (C-19)
 // =============================================================================

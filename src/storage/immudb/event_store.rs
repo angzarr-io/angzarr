@@ -18,9 +18,32 @@ use uuid::Uuid;
 
 use crate::orchestration::aggregate::DEFAULT_EDITION;
 use crate::proto::EventPage;
-use crate::storage::helpers::{assemble_event_books, is_main_timeline, BookParts};
+use crate::storage::helpers::{assemble_event_books, event_sequence, is_main_timeline, BookParts};
 use crate::storage::schema::Events;
+use crate::storage::sql::event_store::{
+    implicit_divergence, map_write_conflict, merge_composite_events, resolve_divergence,
+};
 use crate::storage::{AddMeta, AddOutcome, EventStore, Result, SourceInfo, StorageError};
+
+/// Format a typed timestamp as immudb's `TIMESTAMP` literal.
+///
+/// immudb's `created_at` column is a real `TIMESTAMP` (not TEXT like
+/// SQLite/Postgres), and only whole-second UTC precision round-trips
+/// through it — sub-second precision and any offset marker are dropped.
+/// Both the write path (`add`, via `CAST('...' AS TIMESTAMP)`) and the
+/// read boundary (`get_until_timestamp`) format through this ONE function
+/// so they can never drift on the truncation rule — the same class of
+/// footgun a caller-supplied `until: &str` could previously trigger (C10,
+/// finding #26).
+fn immudb_timestamp_literal(ts: &prost_types::Timestamp) -> Result<String> {
+    let dt = chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32).ok_or(
+        StorageError::InvalidTimestamp {
+            seconds: ts.seconds,
+            nanos: ts.nanos,
+        },
+    )?;
+    Ok(dt.format("%Y-%m-%d %H:%M:%S").to_string())
+}
 
 /// Decode a BLOB column from immudb.
 ///
@@ -139,49 +162,28 @@ impl ImmudbEventStore {
         Ok(events)
     }
 
-    /// Get minimum sequence from edition events (implicit divergence point).
-    /// Uses raw_sql for immudb simple query mode compatibility.
-    async fn get_edition_min_sequence(
-        &self,
-        domain: &str,
-        edition: &str,
-        root_str: &str,
-    ) -> Result<Option<u32>> {
-        let query = Query::select()
-            .expr(Expr::col(Events::Sequence).min())
-            .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(edition))
-            .and_where(Expr::col(Events::Domain).eq(domain))
-            .and_where(Expr::col(Events::Root).eq(root_str))
-            .to_string(PostgresQueryBuilder);
-
-        let rows = sqlx::raw_sql(&query).fetch_all(&self.pool).await?;
-
-        if rows.is_empty() {
-            return Ok(None);
-        }
-
-        let min_seq: Option<i64> = rows[0].get(0);
-        Ok(min_seq.map(|s| s as u32))
-    }
-
-    /// Query main timeline events up to (but not including) a sequence.
+    /// Query main timeline events up to (but not including) `until_seq`, or
+    /// the ENTIRE main timeline when `until_seq` is `None` (the #12
+    /// eventless-edition "inherit whole main timeline" case).
     /// Uses raw_sql for immudb simple query mode compatibility.
     async fn query_main_events_until(
         &self,
         domain: &str,
         root_str: &str,
-        until_seq: u32,
+        until_seq: Option<u32>,
     ) -> Result<Vec<EventPage>> {
-        let query = Query::select()
+        let mut stmt = Query::select()
             .column(Events::EventData)
             .from(Events::Table)
             .and_where(Expr::col(Events::Edition).eq(DEFAULT_EDITION))
             .and_where(Expr::col(Events::Domain).eq(domain))
             .and_where(Expr::col(Events::Root).eq(root_str))
-            .and_where(Expr::col(Events::Sequence).lt(until_seq))
             .order_by(Events::Sequence, Order::Asc)
-            .to_string(PostgresQueryBuilder);
+            .to_owned();
+        if let Some(seq) = until_seq {
+            stmt.and_where(Expr::col(Events::Sequence).lt(seq));
+        }
+        let query = stmt.to_string(PostgresQueryBuilder);
 
         let rows = sqlx::raw_sql(&query).fetch_all(&self.pool).await?;
 
@@ -196,7 +198,29 @@ impl ImmudbEventStore {
         Ok(events)
     }
 
-    /// Composite read for editions: main timeline (before divergence) + edition events.
+    /// Fetch the raw halves of a composite read (main-timeline prefix +
+    /// edition events) for a NAMED edition, using the SHARED divergence
+    /// resolution (`crate::storage::sql::event_store`, finding #28) so
+    /// immudb resolves divergence identically to SQLite/Postgres. Callers
+    /// merge with their own `keep` predicate via [`merge_composite_events`].
+    async fn composite_parts(
+        &self,
+        domain: &str,
+        edition: &str,
+        root_str: &str,
+    ) -> Result<(Vec<EventPage>, Vec<EventPage>)> {
+        let edition_events = self
+            .query_edition_events(domain, edition, root_str, 0)
+            .await?;
+        let divergence = resolve_divergence(None, implicit_divergence(&edition_events));
+        let main_events = self
+            .query_main_events_until(domain, root_str, divergence)
+            .await?;
+        Ok((main_events, edition_events))
+    }
+
+    /// Composite read for editions: main timeline (before divergence) +
+    /// edition events, from `from` onward.
     async fn composite_read(
         &self,
         domain: &str,
@@ -204,47 +228,10 @@ impl ImmudbEventStore {
         root_str: &str,
         from: u32,
     ) -> Result<Vec<EventPage>> {
-        // Query edition events first to find divergence point
-        let edition_events = self
-            .query_edition_events(domain, edition, root_str, 0)
-            .await?;
-
-        if edition_events.is_empty() {
-            // No edition events - just return main timeline
-            return self
-                .query_edition_events(domain, DEFAULT_EDITION, root_str, from)
-                .await;
-        }
-
-        // Get divergence point (first edition event's sequence)
-        let divergence = self
-            .get_edition_min_sequence(domain, edition, root_str)
-            .await?
-            .unwrap_or(0);
-
-        // Query main timeline up to divergence
-        let main_events = self
-            .query_main_events_until(domain, root_str, divergence)
-            .await?;
-
-        // Merge: main events (>= from, < divergence) + edition events (>= from)
-        let mut result = Vec::new();
-
-        for event in main_events {
-            let seq = crate::storage::helpers::event_sequence(&event);
-            if seq >= from {
-                result.push(event);
-            }
-        }
-
-        for event in edition_events {
-            let seq = crate::storage::helpers::event_sequence(&event);
-            if seq >= from {
-                result.push(event);
-            }
-        }
-
-        Ok(result)
+        let (main_events, edition_events) = self.composite_parts(domain, edition, root_str).await?;
+        Ok(merge_composite_events(main_events, edition_events, |e| {
+            event_sequence(e) >= from
+        }))
     }
 
     /// C-18 helper: scan for an existing external_id claim on this aggregate.
@@ -404,7 +391,6 @@ impl EventStore for ImmudbEventStore {
         for event in events {
             let event_data = event.encode_to_vec();
             let sequence = crate::storage::helpers::resolve_sequence(&event, base_sequence)?;
-            let created_at = crate::storage::helpers::parse_timestamp(&event)?;
 
             if first_sequence.is_none() {
                 first_sequence = Some(sequence);
@@ -414,17 +400,19 @@ impl EventStore for ImmudbEventStore {
             // Format event_data as hex for immudb BLOB type (x'...' format)
             let event_data_hex = format!("x'{}'", hex::encode(&event_data));
 
-            // Convert RFC3339 timestamp to simple format for immudb
-            // immudb expects format: YYYY-MM-DD HH:MM:SS (no nanoseconds)
-            let timestamp_simple = created_at
-                .replace('T', " ")
-                .split('+')
-                .next()
-                .unwrap_or(&created_at)
-                .split('.')
-                .next()
-                .unwrap_or(&created_at)
-                .to_string();
+            // C10: format directly from the typed `created_at`, through the
+            // SAME function `get_until_timestamp` reads through
+            // (`immudb_timestamp_literal`) — no RFC3339-string round trip,
+            // no ad hoc split/truncate. Falls back to "now" when the event
+            // carries no timestamp, mirroring `storage::helpers::parse_timestamp`.
+            let created_ts = event.created_at.clone().unwrap_or_else(|| {
+                let now = chrono::Utc::now();
+                prost_types::Timestamp {
+                    seconds: now.timestamp(),
+                    nanos: now.timestamp_subsec_nanos() as i32,
+                }
+            });
+            let timestamp_simple = immudb_timestamp_literal(&created_ts)?;
 
             // Build INSERT manually since sea-query doesn't handle immudb BLOB format
             // Note: immudb requires CAST for string timestamps
@@ -503,23 +491,15 @@ impl EventStore for ImmudbEventStore {
                     // Roll back the entire batch before propagating.
                     let conn_ref: &mut sqlx::PgConnection = &mut conn;
                     let _ = conn_ref.execute(sqlx::raw_sql("ROLLBACK")).await;
-                    // Detect PRIMARY-KEY duplicate-key violation across
-                    // immudb's pgsql-wire error messages. immudb returns
-                    // generic SQL errors without sqlstate codes, so match
-                    // on substrings that consistently appear in
-                    // duplicate-key responses (case-insensitive).
-                    let msg = format!("{}", err).to_lowercase();
-                    let is_pk_violation = msg.contains("primary key")
-                        || msg.contains("duplicate")
-                        || msg.contains("unique")
-                        || msg.contains("already exists");
-                    if is_pk_violation {
-                        return Err(StorageError::SequenceConflict {
-                            expected: base_sequence,
-                            actual: sequence,
-                        });
-                    }
-                    return Err(err.into());
+                    // #20/#28: classify a PRIMARY-KEY duplicate-key violation
+                    // through the SHARED classifier instead of a bespoke
+                    // substring match. immudb returns generic SQL errors
+                    // without a SQLSTATE, so `map_write_conflict` falls back
+                    // to matching the error Display (see
+                    // `sql::event_store::is_unique_violation`) — the same
+                    // "primary key"/"duplicate"/"unique"/"already exists" set
+                    // this site used before, now owned in one place.
+                    return Err(map_write_conflict(err, base_sequence, sequence));
                 }
             }
         }
@@ -564,31 +544,41 @@ impl EventStore for ImmudbEventStore {
     ) -> Result<Vec<EventPage>> {
         let root_str = root.to_string();
 
-        let query = Query::select()
-            .column(Events::EventData)
-            .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(if is_main_timeline(edition) {
-                DEFAULT_EDITION
-            } else {
-                edition
-            }))
-            .and_where(Expr::col(Events::Domain).eq(domain))
-            .and_where(Expr::col(Events::Root).eq(&root_str))
-            .and_where(Expr::col(Events::Sequence).gte(from))
-            .and_where(Expr::col(Events::Sequence).lt(to)) // exclusive end [from, to)
-            .order_by(Events::Sequence, Order::Asc)
-            .to_string(PostgresQueryBuilder);
+        // Main timeline: a single edition-scoped range query is exact.
+        if is_main_timeline(edition) {
+            let query = Query::select()
+                .column(Events::EventData)
+                .from(Events::Table)
+                .and_where(Expr::col(Events::Edition).eq(DEFAULT_EDITION))
+                .and_where(Expr::col(Events::Domain).eq(domain))
+                .and_where(Expr::col(Events::Root).eq(&root_str))
+                .and_where(Expr::col(Events::Sequence).gte(from))
+                .and_where(Expr::col(Events::Sequence).lt(to)) // exclusive end [from, to)
+                .order_by(Events::Sequence, Order::Asc)
+                .to_string(PostgresQueryBuilder);
 
-        let rows = sqlx::raw_sql(&query).fetch_all(&self.pool).await?;
+            let rows = sqlx::raw_sql(&query).fetch_all(&self.pool).await?;
 
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            let event_data = decode_blob_column(&row, 0)?; // Use index for raw_sql compatibility
-            let event = EventPage::decode(event_data.as_slice())?;
-            events.push(event);
+            let mut events = Vec::with_capacity(rows.len());
+            for row in rows {
+                let event_data = decode_blob_column(&row, 0)?; // Use index for raw_sql compatibility
+                let event = EventPage::decode(event_data.as_slice())?;
+                events.push(event);
+            }
+
+            return Ok(events);
         }
 
-        Ok(events)
+        // Named edition: route through the SAME composite (main-prefix +
+        // edition) logic as `get`/`get_from` (finding #10). The pre-fix
+        // query filtered only on the literal edition column, dropping the
+        // pre-divergence main-timeline prefix in the range.
+        let (main_events, edition_events) =
+            self.composite_parts(domain, edition, &root_str).await?;
+        Ok(merge_composite_events(main_events, edition_events, |e| {
+            let seq = event_sequence(e);
+            seq >= from && seq < to
+        }))
     }
 
     async fn get_until_timestamp(
@@ -596,36 +586,79 @@ impl EventStore for ImmudbEventStore {
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> Result<Vec<EventPage>> {
         let root_str = root.to_string();
 
-        // Use created_at filter for timestamp queries
-        // Note: immudb's BEFORE TX syntax isn't available through standard SQL
-        let query = Query::select()
-            .column(Events::EventData)
-            .from(Events::Table)
-            .and_where(Expr::col(Events::Edition).eq(if is_main_timeline(edition) {
-                DEFAULT_EDITION
-            } else {
-                edition
-            }))
-            .and_where(Expr::col(Events::Domain).eq(domain))
-            .and_where(Expr::col(Events::Root).eq(&root_str))
-            .and_where(Expr::col(Events::CreatedAt).lte(until))
-            .order_by(Events::Sequence, Order::Asc)
-            .to_string(PostgresQueryBuilder);
+        // Main timeline: filter the single timeline at the immudb layer.
+        //
+        // C10: canonicalize the typed `until` through the SAME truncation
+        // function the write path uses (`immudb_timestamp_literal`), so a
+        // TIMESTAMP-column comparison can't drift between what was written
+        // and what's queried.
+        //
+        // The RHS must be CAST to TIMESTAMP, exactly like the write path's
+        // `CAST('...' AS TIMESTAMP)`. `created_at` is a real immudb
+        // TIMESTAMP column; comparing it against a bare VARCHAR literal
+        // (`created_at <= '...'`) raises immudb's "values are not
+        // comparable" error — a pre-existing bug this method carried before
+        // C10 (the old `until: &str` path fed a raw RFC3339 string straight
+        // into `.lte()` and failed the same way). Casting both sides to
+        // TIMESTAMP makes the comparison chronological, not lexical, so the
+        // Z-vs-+00:00 footgun cannot exist on this backend either.
+        // Inline the literal (not a bind param): the whole immudb query is
+        // rendered to a string and run via `sqlx::raw_sql`, which does NOT
+        // bind `$N` placeholders. `immudb_timestamp_literal` emits a strictly
+        // numeric `YYYY-MM-DD HH:MM:SS` form, so there is no quote to escape
+        // and no injection surface — identical to the write path's
+        // `format!("CAST('{}' AS TIMESTAMP)", ...)`.
+        if is_main_timeline(edition) {
+            let until_str = immudb_timestamp_literal(until)?;
+            let until_ts_expr = Expr::cust(format!("CAST('{until_str}' AS TIMESTAMP)"));
 
-        let rows = sqlx::raw_sql(&query).fetch_all(&self.pool).await?;
+            let query = Query::select()
+                .column(Events::EventData)
+                .from(Events::Table)
+                .and_where(Expr::col(Events::Edition).eq(DEFAULT_EDITION))
+                .and_where(Expr::col(Events::Domain).eq(domain))
+                .and_where(Expr::col(Events::Root).eq(&root_str))
+                .and_where(Expr::col(Events::CreatedAt).lte(until_ts_expr))
+                .order_by(Events::Sequence, Order::Asc)
+                .to_string(PostgresQueryBuilder);
 
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            let event_data = decode_blob_column(&row, 0)?; // Use index for raw_sql compatibility
-            let event = EventPage::decode(event_data.as_slice())?;
-            events.push(event);
+            let rows = sqlx::raw_sql(&query).fetch_all(&self.pool).await?;
+
+            let mut events = Vec::with_capacity(rows.len());
+            for row in rows {
+                let event_data = decode_blob_column(&row, 0)?; // Use index for raw_sql compatibility
+                let event = EventPage::decode(event_data.as_slice())?;
+                events.push(event);
+            }
+
+            return Ok(events);
         }
 
-        Ok(events)
+        // Named edition: composite (main-prefix + edition) read, then apply
+        // the temporal cut to BOTH halves (finding #10). Cut is in-memory
+        // against the typed `created_at`, canonicalized through
+        // `immudb_timestamp_literal` on BOTH the stored value and `until`
+        // so the whole-second TIMESTAMP truncation this backend imposes is
+        // applied identically to each side — matching what the main-timeline
+        // SQL `CAST(... AS TIMESTAMP)` comparison above does, just performed
+        // in Rust over the already-fetched composite set.
+        let until_trunc = immudb_timestamp_literal(until)?;
+        let (main_events, edition_events) =
+            self.composite_parts(domain, edition, &root_str).await?;
+        Ok(merge_composite_events(
+            main_events,
+            edition_events,
+            |e| match &e.created_at {
+                Some(ts) => immudb_timestamp_literal(ts)
+                    .map(|stored| stored <= until_trunc)
+                    .unwrap_or(false),
+                None => false,
+            },
+        ))
     }
 
     async fn get_by_correlation(

@@ -702,10 +702,15 @@ impl EventStore for DynamoEventStore {
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> Result<Vec<EventPage>> {
-        let until_dt = chrono::DateTime::parse_from_rfc3339(until)
-            .map_err(|e| StorageError::InvalidTimestampFormat(e.to_string()))?;
+        // C10: typed `until` — direct chrono compare, no string parsing.
+        let until_dt = chrono::DateTime::from_timestamp(until.seconds, until.nanos as u32).ok_or(
+            StorageError::InvalidTimestamp {
+                seconds: until.seconds,
+                nanos: until.nanos,
+            },
+        )?;
 
         let all_events = self.get(domain, edition, root).await?;
 

@@ -222,8 +222,12 @@ impl CommandHandlerCoordinatorService for AggregateService {
                     (Some(seq), None)
                 }
                 Some(crate::proto::temporal_query::PointInTime::AsOfTime(ts)) => {
-                    let ts_str = format!("{}.{}", ts.seconds, ts.nanos);
-                    (None, Some(ts_str))
+                    // C10 (supersedes C03 at this boundary): forward the
+                    // typed `prost_types::Timestamp` straight through the
+                    // pipeline. No `format!`/`timestamp_to_rfc3339` string
+                    // round-trip — the only normalization happens once, at
+                    // the repository/storage boundary.
+                    (None, Some(ts))
                 }
                 None => (None, None),
             },

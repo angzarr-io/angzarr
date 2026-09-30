@@ -300,7 +300,7 @@ impl<T: EventStore> EventStore for Instrumented<T> {
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> Result<Vec<EventPage>> {
         #[cfg(feature = "otel")]
         let start = std::time::Instant::now();

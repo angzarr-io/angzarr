@@ -337,15 +337,30 @@ impl EventBookRepository {
     /// leak to external consumers. Tracked as a deferred F3 follow-up —
     /// resolving here requires deciding what "state as of T" means for
     /// pages whose markers land after T.
+    ///
+    /// # Typed boundary (C10)
+    ///
+    /// `until` is a typed `prost_types::Timestamp` — see
+    /// `EventStore::get_until_timestamp`'s doc comment for why a
+    /// caller-formatted `&str` was a footgun here (lexical `Z` vs `+00:00`
+    /// divergence against TEXT-column SQL backends). This is the ONE
+    /// normalization point: `until_dt` is derived directly from the typed
+    /// value below, and the SAME typed value is forwarded to
+    /// `event_store.get_until_timestamp` — no string round-trip at this
+    /// boundary at all.
     pub async fn get_temporal_by_time(
         &self,
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> Result<EventBook> {
-        let until_dt = chrono::DateTime::parse_from_rfc3339(until)
-            .map_err(|e| StorageError::InvalidTimestampFormat(e.to_string()))?;
+        let until_dt = chrono::DateTime::from_timestamp(until.seconds, until.nanos as u32).ok_or(
+            StorageError::InvalidTimestamp {
+                seconds: until.seconds,
+                nanos: until.nanos,
+            },
+        )?;
 
         let snapshot_to_carry = self
             .snapshot_repo
