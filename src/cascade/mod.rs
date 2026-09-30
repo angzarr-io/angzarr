@@ -25,6 +25,10 @@
 //! let handle = reaper.spawn();
 //! ```
 
+mod config;
 mod reaper;
 
+pub use config::{
+    CascadeReaperConfig, DEFAULT_CASCADE_REAPER_INTERVAL_SECS, DEFAULT_CASCADE_TIMEOUT_SECS,
+};
 pub use reaper::CascadeReaper;

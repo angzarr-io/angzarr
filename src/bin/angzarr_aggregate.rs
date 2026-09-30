@@ -56,9 +56,8 @@ use tonic::transport::Server;
 use tonic_health::server::health_reporter;
 use tracing::{error, info, warn};
 
-#[cfg(feature = "amqp")]
-use angzarr::bus::AmqpEventBus;
-use angzarr::bus::{EventBus, MockEventBus};
+use angzarr::bus::{init_event_bus, EventBus, EventBusMode};
+use angzarr::cascade::CascadeReaper;
 use angzarr::config::{Config, DISCOVERY_ENV_VAR, DISCOVERY_STATIC};
 #[cfg(feature = "k8s")]
 use angzarr::discovery::K8sServiceDiscovery;
@@ -154,21 +153,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let event_bus: Arc<dyn EventBus> = match &config.messaging {
-        #[cfg(feature = "amqp")]
-        Some(messaging) if messaging.messaging_type == "amqp" => {
-            info!(
-                "Connecting to AMQP for event publishing: {}",
-                messaging.amqp.url
-            );
-            let amqp_bus_config = angzarr::bus::AmqpConfig::publisher(&messaging.amqp.url);
-            Arc::new(AmqpEventBus::new(amqp_bus_config).await?)
-        }
-        _ => {
-            warn!("No messaging configured, using mock event bus (events not published)");
-            Arc::new(MockEventBus::new())
-        }
-    };
+    // C02: route through the self-registering bus factory instead of
+    // hand-rolling a match here. The previous inline match fell back to
+    // `MockEventBus` (which always returns `Ok` from `publish`) for every
+    // non-AMQP messaging type, including "unconfigured" -- so a kafka,
+    // pubsub, sns-sqs, or simply missing `messaging:` config silently
+    // discarded every published event with nothing but a `warn!` log line.
+    // `init_event_bus` fails the type it doesn't recognize instead of
+    // masking it, matching the saga/projector/PM sidecars.
+    let messaging = config
+        .messaging
+        .as_ref()
+        .ok_or("Aggregate sidecar requires 'messaging' configuration")?;
+    info!(messaging_type = %messaging.messaging_type, "Using messaging backend");
+    let event_bus: Arc<dyn EventBus> = init_event_bus(messaging, EventBusMode::Publisher)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
 
     // Load service discovery for sync processing
     // With DISCOVERY_ENV_VAR=static we skip K8s entirely
@@ -211,6 +211,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot_repo = Arc::new(angzarr::repository::SnapshotRepository::new(
         snapshot_store.clone(),
     ));
+
+    // C17: spawn the cascade reaper so C01's revoke-time backstops (#2
+    // revoked-sequence snapshot cleanup, #22 bus-book edition stamping)
+    // actually execute. `CascadeReaper` has existed since C01 but nothing
+    // constructed or spawned it — a process that crashes mid-2PC left its
+    // `no_commit=true` events stranded forever (no Revocation is ever
+    // written, so gap-fill/downstream consumers never learn the cascade
+    // was abandoned). Wire the SAME event bus/snapshot repo the aggregate
+    // uses so the reaper's Revocations are visible on the identical path.
+    if config.cascade_reaper.enabled {
+        let reaper = CascadeReaper::new(event_store.clone(), config.cascade_reaper.timeout())
+            .with_interval(config.cascade_reaper.interval())
+            .with_event_bus(event_bus.clone())
+            .with_snapshot_repo(snapshot_repo.clone());
+        reaper.spawn();
+        info!(
+            timeout_secs = config.cascade_reaper.timeout_secs,
+            interval_secs = config.cascade_reaper.interval_secs,
+            "CascadeReaper spawned"
+        );
+    } else {
+        warn!(
+            "CascadeReaper disabled (cascade_reaper.enabled=false): stale 2PC \
+             cascades will never be revoked; C01's snapshot/edition backstops \
+             will not run"
+        );
+    }
+
     let mut aggregate_service = AggregateService::new(
         event_store.clone(),
         snapshot_repo,

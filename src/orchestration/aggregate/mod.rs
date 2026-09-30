@@ -72,7 +72,7 @@ pub use parsing::{extract_command_sequence, parse_command_cover, parse_event_cov
 pub use pipeline::{execute_command_pipeline, execute_command_with_retry, execute_fact_pipeline};
 
 // Re-exports: two_phase
-pub use two_phase::{transform_for_two_phase, TwoPhaseContext, TwoPhaseResult};
+pub use two_phase::{is_noop, transform_for_two_phase, TwoPhaseContext, TwoPhaseResult};
 
 // Re-export default edition constant
 pub use crate::proto_ext::constants::DEFAULT_EDITION;

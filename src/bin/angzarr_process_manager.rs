@@ -41,9 +41,7 @@ use tonic::transport::Server;
 use tonic_health::server::health_reporter;
 use tracing::{error, info, warn};
 
-#[cfg(feature = "amqp")]
-use angzarr::bus::{AmqpConfig, AmqpEventBus};
-use angzarr::bus::{EventBus, EventBusMode, MockEventBus};
+use angzarr::bus::{init_event_bus, EventBus, EventBusMode};
 use angzarr::config::STATIC_ENDPOINTS_ENV_VAR;
 use angzarr::descriptor::parse_subscriptions;
 use angzarr::dlq::init_dlq_publisher;
@@ -109,18 +107,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot_store = init_snapshot_store(&bootstrap.config.storage).await?;
     info!("PM storage initialized for direct state persistence");
 
-    // Initialize event bus (publisher) for PM state events
-    let event_bus: Arc<dyn EventBus> = match messaging.messaging_type.as_str() {
-        #[cfg(feature = "amqp")]
-        "amqp" => {
-            let amqp_config = AmqpConfig::publisher(&messaging.amqp.url);
-            Arc::new(AmqpEventBus::new(amqp_config).await?)
-        }
-        _ => {
-            warn!("No messaging configured for PM event publishing, using mock");
-            Arc::new(MockEventBus::new())
-        }
-    };
+    // Initialize event bus (publisher) for PM state events.
+    //
+    // C02: previously hand-rolled `match messaging_type { "amqp" => ..., _ =>
+    // MockEventBus }` here. Because `MockEventBus::publish` always returns
+    // `Ok`, any non-AMQP messaging type (kafka, pubsub, sns-sqs, or a typo)
+    // silently discarded every PM state event with nothing but a `warn!`.
+    // Routed through the same self-registering factory the subscriber below
+    // already uses, so unresolved types hard-fail at startup instead.
+    let event_bus: Arc<dyn EventBus> = init_event_bus(messaging, EventBusMode::Publisher)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
 
     // Connect to process manager service
     let pm_addr = bootstrap.address.clone();

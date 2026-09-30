@@ -3,6 +3,7 @@
 //! Uses EventBookRepository for storage and K8s service discovery for projectors.
 //! client logic invocation is handled by the pipeline via gRPC client.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -16,9 +17,9 @@ use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher, NoopDeadLetterPublisher
 use crate::proto::process_manager_coordinator_service_client::ProcessManagerCoordinatorServiceClient;
 use crate::proto::saga_coordinator_service_client::SagaCoordinatorServiceClient;
 use crate::proto::{
-    AngzarrDeferredSequence, CascadeErrorMode, CommandBook, Cover, Edition, EventBook, EventPage,
-    EventRequest, MergeStrategy, ProcessManagerCoordinatorRequest, Projection, SagaHandleRequest,
-    Snapshot, Uuid as ProtoUuid,
+    AngzarrDeferredSequence, CascadeErrorMode, CommandBook, Confirmation, Cover, Edition,
+    EventBook, EventPage, EventRequest, MergeStrategy, ProcessManagerCoordinatorRequest,
+    Projection, Revocation, SagaHandleRequest, Snapshot, Uuid as ProtoUuid,
 };
 use crate::proto_ext::{correlated_request, CoverExt, EventPageExt};
 use crate::repository::EventBookRepository;
@@ -31,7 +32,8 @@ use crate::storage::AddOutcome;
 
 use super::sync_policy::{should_call_sync_projectors, should_skip_post_persist};
 use super::{
-    AggregateContext, AggregateContextFactory, ClientLogic, PersistOutcome, TemporalQuery,
+    is_noop, transform_for_two_phase, AggregateContext, AggregateContextFactory, ClientLogic,
+    PersistOutcome, TemporalQuery, TwoPhaseContext,
 };
 
 /// Translate an `AngzarrDeferredSequence` into a `SourceInfo` for the
@@ -121,6 +123,15 @@ fn calculate_set_next_seq(book: &mut EventBook) {
 /// same skip-entirely semantics. Deliberately NOT applied to the saga/PM
 /// cascade fan-out, which must see provisional pages (forward propagation).
 /// Single helper so the bus filter and the projector filter cannot drift.
+///
+/// C01 #9: the returned book NEVER carries a snapshot. Snapshots are an
+/// aggregate-rehydration optimization; event consumers (projectors, sagas,
+/// PMs, gap-fill) have no use for one, and its presence is actively
+/// harmful — `GapFiller::fill_if_needed` treats `book.snapshot.is_some()`
+/// as "already complete" and skips gap repair entirely
+/// (`src/services/gap_fill/filler.rs`). A bus book carrying a snapshot
+/// would silently suppress gap-fill for any hole (2PC-suppressed or
+/// otherwise) that a consumer needed filled.
 fn committed_only_book(events: &EventBook) -> Option<EventBook> {
     let committed_pages: Vec<EventPage> = events
         .pages
@@ -134,7 +145,7 @@ fn committed_only_book(events: &EventBook) -> Option<EventBook> {
     Some(EventBook {
         cover: events.cover.clone(),
         pages: committed_pages,
-        snapshot: events.snapshot.clone(),
+        snapshot: None,
         next_sequence: events.next_sequence,
     })
 }
@@ -388,6 +399,144 @@ impl GrpcAggregateContext {
 
         Ok(projections)
     }
+
+    /// C01 #1 — republish the events a Confirmation marker just resolved.
+    ///
+    /// `events` (the book passed to `post_persist`) carries the just-persisted
+    /// Confirmation page for `confirmation.cascade_id`. The sequences it
+    /// confirms were written earlier (by a DIFFERENT call, under
+    /// `no_commit=true`) and were suppressed from the bus at THAT time (O2).
+    /// Nothing else makes them visible on the bus — this is that missing
+    /// consumer-facing half of the design.
+    ///
+    /// # Why a full raw stream read
+    ///
+    /// `persist_events` already committed the Confirmation page to storage
+    /// before `post_persist` runs, so a fresh RAW read of the whole stream
+    /// sees it (no need to splice the just-persisted page back in by hand),
+    /// and ALSO sees any Revocation that might already exist for the same
+    /// `cascade_id` — needed for the #21 guard below. `get_from_to_raw` is
+    /// the deliberately-RAW seam (`EventBookRepository` module doc); this is
+    /// 2PC machinery, not a business-event consumer.
+    #[tracing::instrument(name = "aggregate.republish_confirmed", skip_all, fields(cascade_id = %confirmation.cascade_id))]
+    async fn republish_confirmed(
+        &self,
+        events: &EventBook,
+        confirmation: &Confirmation,
+    ) -> Result<(), Status> {
+        if confirmation.sequences.is_empty() {
+            return Ok(());
+        }
+        let Some(cover) = events.cover.as_ref() else {
+            return Ok(());
+        };
+        let Some(root_proto) = cover.root.as_ref() else {
+            return Ok(());
+        };
+        let domain = cover.domain.clone();
+        let edition = cover.edition().unwrap_or_default().to_string();
+        let root = Uuid::from_slice(&root_proto.value).map_err(|e| {
+            Status::internal(format!(
+                "Confirmation's own stream has invalid root UUID: {e}"
+            ))
+        })?;
+
+        let raw = self
+            .event_book_repo
+            .get_from_to_raw(&domain, &edition, root, 0, u32::MAX)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to load confirmed range: {e}")))?;
+
+        // C01 #21 (confirm-after-revoke guard): O14 already guards the
+        // REVOKE direction — the reaper rechecks for an existing commit
+        // before writing a Revocation (`cascade/reaper.rs`,
+        // `write_revocation`'s O14 recheck). Nothing guarded the reverse
+        // until now. `transform_for_two_phase` documents "revoked always
+        // wins (even if also confirmed - defensive)" — so if a Revocation
+        // for this SAME cascade_id also exists, the confirmed sequences
+        // below will resolve to NOTHING and this call would otherwise
+        // return silently, looking like a routine no-op. Surface it loudly
+        // instead: this is a split-brain cascade resolution and needs
+        // operator attention.
+        let conflicting_revocation = raw.pages.iter().find_map(|p| {
+            p.decode_typed::<Revocation>()
+                .filter(|r| r.cascade_id == confirmation.cascade_id)
+        });
+        if let Some(revocation) = conflicting_revocation {
+            tracing::error!(
+                cascade_id = %confirmation.cascade_id,
+                %domain,
+                %root,
+                confirmed_sequences = ?confirmation.sequences,
+                revoked_sequences = ?revocation.sequences,
+                "confirm-after-revoke conflict: a Revocation already exists for this \
+                 cascade_id; the confirmed sequences resolve as revoked (revoked wins) \
+                 — NOT republishing. This is a split-brain cascade resolution; \
+                 investigate the reaper/confirmer race for this cascade_id."
+            );
+            self.dead_letter_unpublished(
+                events,
+                &format!(
+                    "confirm-after-revoke conflict for cascade_id={}",
+                    confirmation.cascade_id
+                ),
+            )
+            .await;
+            return Ok(());
+        }
+
+        let resolved = transform_for_two_phase(&raw, &TwoPhaseContext::standard()).events;
+
+        // Only sequences THIS Confirmation names, that were actually
+        // provisional in storage (no double-publish of a sequence that
+        // was already committed and published at its own persist time),
+        // and that actually resolved (defensive — should always be true
+        // once the conflict check above passes).
+        let seq_set: HashSet<u32> = confirmation.sequences.iter().copied().collect();
+        let to_publish: Vec<EventPage> = resolved
+            .pages
+            .into_iter()
+            .zip(raw.pages.iter())
+            .filter(|(resolved_page, original)| {
+                seq_set.contains(&resolved_page.sequence_num())
+                    && original.no_commit
+                    && !is_noop(resolved_page)
+            })
+            .map(|(resolved_page, _)| resolved_page)
+            .collect();
+
+        if to_publish.is_empty() {
+            return Ok(());
+        }
+
+        let mut book = EventBook {
+            cover: Some(Cover {
+                domain: domain.clone(),
+                root: Some(ProtoUuid {
+                    value: root.as_bytes().to_vec(),
+                }),
+                // Matches the EventBookRepository read-path convention:
+                // correlation_id is never reconstructed from storage on a
+                // raw/range read (see `get_from_to_raw`, `get`).
+                correlation_id: String::new(),
+                edition: Some(Edition {
+                    name: edition.clone(),
+                    divergences: vec![],
+                }),
+                ext: None,
+            }),
+            pages: to_publish,
+            snapshot: None,
+            next_sequence: 0,
+        };
+        calculate_set_next_seq(&mut book);
+
+        self.event_bus
+            .publish(Arc::new(book))
+            .await
+            .map_err(|e| Status::unavailable(format!("Failed to publish confirmed events: {e}")))?;
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -574,7 +723,22 @@ impl AggregateContext for GrpcAggregateContext {
         // inside snapshot_repo (single source of truth); the
         // snapshot_changed gate avoids re-writing identical bytes when
         // the handler returns the same snapshot object across calls.
-        if snapshot_changed {
+        //
+        // C01 #2: when `self.cascade_id` is set, `new_pages` above were just
+        // stamped `no_commit=true` — they are PROVISIONAL, and a Revocation
+        // may still undo them. Persisting a snapshot here would bake that
+        // unconfirmed state in permanently: a later revoke has no way to
+        // "un-snapshot" it (there is only ONE snapshot slot per aggregate;
+        // `SnapshotRepository::put` replaces it), so rehydration would
+        // silently replay events that never actually committed. Defer:
+        // skip the write here; the CONFIRMING call (which has no
+        // `cascade_id` — see `GrpcAggregateContext::with_cascade_id`) runs
+        // this same snapshot block normally and persists whatever
+        // `received.snapshot` ITS OWN business-logic response supplies,
+        // anchored at ITS OWN sequence. The reaper's revoke path
+        // (`crate::cascade::reaper::write_revocation`) deletes any snapshot
+        // that DID slip through covering a revoked sequence, as a backstop.
+        if snapshot_changed && self.cascade_id.is_none() {
             // Choose the sequence the snapshot represents: prefer the
             // last NEW event's seq (this snapshot reflects state through
             // it). When the handler emits a snapshot-only update with
@@ -613,6 +777,15 @@ impl AggregateContext for GrpcAggregateContext {
                      rewritten on the next state change"
                 );
             }
+        } else if snapshot_changed {
+            tracing::debug!(
+                %domain,
+                %edition,
+                %root,
+                cascade_id = %self.cascade_id.as_deref().unwrap_or(""),
+                "deferring snapshot persistence: cascade in flight (C01 #2); \
+                 will persist at the confirming call instead"
+            );
         }
 
         // Return with only new pages - ensure cover is set
@@ -642,6 +815,48 @@ impl AggregateContext for GrpcAggregateContext {
             return Ok(vec![]);
         }
 
+        // C01 #1 (confirmation-point republish) — MUST run before the
+        // ordinary committed-book publish below.
+        //
+        // `events` may itself carry a Confirmation marker: some earlier
+        // command wrote provisional (`no_commit=true`) pages to THIS
+        // aggregate's stream, they were suppressed from the bus (O2,
+        // below), and this call is the one resolving them. Confirmed
+        // sequences are always LOWER than the marker's own sequence (the
+        // marker is written after the events it confirms), and the marker
+        // itself is part of `events` and flows out through the ordinary
+        // committed publish a few lines down. Republishing the confirmed
+        // (formerly-suppressed) pages FIRST keeps bus delivery in
+        // ascending-sequence order for any live (non-gap-filling)
+        // subscriber.
+        //
+        // This is a hygiene/least-surprise choice, not a correctness
+        // requirement — gap-fill (`GapFiller::fill_if_needed`) tolerates
+        // any delivery order or interleaving. Reviewer sign-off requested
+        // on this ordering specifically (see plan decision gate): the
+        // alternative (publish committed book first, confirmed second)
+        // is equally safe but delivers the marker before the events it
+        // confirms.
+        //
+        // Retry/DLQ: this call is NOT separately wrapped — it lives
+        // inside `post_persist`, which `publish_unless_noop` (pipeline.rs)
+        // already retries up to `POST_PERSIST_ATTEMPTS` and DLQs on
+        // exhaustion. A failure here fails the whole `post_persist` call,
+        // so the ordinary committed publish below is retried too (safe:
+        // downstream dedup already assumes at-least-once redelivery of
+        // the committed leg). One residual gap: DLQ capture on exhaustion
+        // preserves `events` (the Confirmation marker), not the derived
+        // confirmed-events book computed here — the confirmed events
+        // remain correctly resolved in STORAGE regardless (2PC transform,
+        // `EventBookRepository`), so a stuck republish only delays the
+        // proactive bus notification; a later event on this stream (or an
+        // operator replay) still recovers it via gap-fill.
+        for page in &events.pages {
+            if let Some(confirmation) = page.decode_typed::<Confirmation>() {
+                self.republish_confirmed(events, &confirmation).await?;
+            }
+        }
+
         // Publish FIRST — ensures events reach the bus even if sync calls below fail.
         // Without this ordering, a sync projector/saga/PM failure would leave events
         // persisted in PostgreSQL but never published to the bus.
@@ -652,8 +867,8 @@ impl AggregateContext for GrpcAggregateContext {
         // Publishing them to the bus would let downstream consumers (async
         // projectors/sagas) observe a "commit" that may never become real — a
         // phantom commit. Publish only the COMMITTED pages here; provisional
-        // pages are published later, at the confirmation point, once the cascade
-        // actually commits.
+        // pages are published later, at the confirmation point (just above),
+        // once the cascade actually commits.
         //
         // The saga/PM fan-out BELOW still receives the full `events` book:
         // inside CASCADE mode those calls ARE the cascade's forward propagation

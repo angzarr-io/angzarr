@@ -1436,3 +1436,201 @@ async fn reaper_skips_participant_confirmed_after_query() {
          confirmed commit); the recheck must prevent it"
     );
 }
+
+// ============================================================================
+// C01 #22: reaper's published Revocation book must carry the participant's
+// edition, or `GapFiller::fill_if_needed` errors with MissingEdition
+// ============================================================================
+
+/// `fill_if_needed` requires `cover.edition` to be `Some` — a consumer that
+/// gap-fills off this bus message (because it arrived with a sequence gap
+/// relative to the consumer's checkpoint) would hit
+/// `GapFillError::MissingEdition` instead of repairing the gap. Pre-fix the
+/// reaper always stamped `edition: None`; it has the participant's edition
+/// on hand (`CascadeParticipant::edition`) and must use it.
+#[tokio::test]
+async fn reaper_published_revocation_carries_participant_edition() {
+    let store = Arc::new(MockEventStore::new());
+    let bus = Arc::new(MockEventBus::new());
+    let root = Uuid::new_v4();
+    let cascade_id = "cascade-edition";
+
+    let old_time = Utc::now() - chrono::Duration::hours(2);
+    store
+        .add(
+            "test",
+            "angzarr",
+            root,
+            vec![make_test_event(0, true, Some(cascade_id), old_time)],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let reaper = CascadeReaper::new(Arc::clone(&store), Duration::from_secs(3600))
+        .with_event_bus(bus.clone());
+    let revoked = reaper.run_once().await.unwrap();
+    assert_eq!(revoked, 1);
+
+    let published = bus.take_published().await;
+    assert_eq!(published.len(), 1);
+    let cover = published[0]
+        .cover
+        .as_ref()
+        .expect("published book must carry a cover");
+    let edition = cover
+        .edition
+        .as_ref()
+        .expect("C01 #22: cover.edition must be Some, or gap-fill errors with MissingEdition");
+    assert_eq!(
+        edition.name, "angzarr",
+        "edition must match the participant's edition, not be hardcoded/blank"
+    );
+}
+
+// ============================================================================
+// C01 #2 (backstop): revoke-time snapshot cleanup
+// ============================================================================
+//
+// The PRIMARY fix lives in `GrpcAggregateContext::persist_events` (skips the
+// snapshot write entirely while a cascade is in flight), so in normal
+// operation a snapshot covering a revoked sequence should never exist. These
+// tests exercise the reaper's independent backstop directly — constructing
+// the "snapshot slipped through" scenario by hand (bypassing the aggregate
+// persist path) since that's the only way to observe the cleanup logic in
+// isolation.
+
+use crate::proto::{Snapshot, SnapshotRetention};
+use crate::repository::SnapshotRepository;
+use crate::storage::mock::MockSnapshotStore;
+use crate::storage::SnapshotStore;
+
+/// A snapshot whose `sequence` covers (is >=) the minimum revoked sequence
+/// must be deleted when the reaper revokes that cascade — otherwise
+/// rehydration via the snapshot would silently include state derived from
+/// events that were never actually committed.
+#[tokio::test]
+async fn reaper_deletes_snapshot_covering_revoked_sequence() {
+    let store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let root = Uuid::new_v4();
+    let cascade_id = "cascade-snap-del";
+
+    let old_time = Utc::now() - chrono::Duration::hours(2);
+    store
+        .add(
+            "test",
+            "angzarr",
+            root,
+            vec![make_test_event(0, true, Some(cascade_id), old_time)],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Simulate "a snapshot slipped through" covering the provisional event
+    // (sequence 0) — exactly the state finding #2 warned about.
+    snapshot_store
+        .put(
+            "test",
+            "angzarr",
+            root,
+            Snapshot {
+                sequence: 0,
+                state: Some(Any {
+                    type_url: "test.State".to_string(),
+                    value: vec![9, 9, 9],
+                }),
+                retention: SnapshotRetention::RetentionDefault as i32,
+                created_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store.clone()));
+    let reaper = CascadeReaper::new(Arc::clone(&store), Duration::from_secs(3600))
+        .with_snapshot_repo(snapshot_repo);
+    let revoked = reaper.run_once().await.unwrap();
+    assert_eq!(revoked, 1);
+
+    let remaining = snapshot_store.get("test", "angzarr", root).await.unwrap();
+    assert!(
+        remaining.is_none(),
+        "C01 #2: a snapshot covering a revoked sequence must be deleted on revoke"
+    );
+}
+
+/// Companion: a snapshot that does NOT cover the revoked sequence (it's
+/// anchored at an EARLIER, still-valid sequence) must be left alone —
+/// the cleanup is targeted, not "wipe every snapshot on any revoke".
+#[tokio::test]
+async fn reaper_leaves_snapshot_alone_when_it_predates_revoked_sequence() {
+    let store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let root = Uuid::new_v4();
+    let cascade_id = "cascade-snap-keep";
+
+    let old_time = Utc::now() - chrono::Duration::hours(2);
+    store
+        .add(
+            "test",
+            "angzarr",
+            root,
+            vec![
+                make_test_event(0, false, None, old_time),
+                make_test_event(1, true, Some(cascade_id), old_time),
+            ],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // Snapshot anchored at the COMMITTED sequence 0, well before the
+    // provisional (and about-to-be-revoked) sequence 1.
+    snapshot_store
+        .put(
+            "test",
+            "angzarr",
+            root,
+            Snapshot {
+                sequence: 0,
+                state: Some(Any {
+                    type_url: "test.State".to_string(),
+                    value: vec![1],
+                }),
+                retention: SnapshotRetention::RetentionDefault as i32,
+                created_at: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store.clone()));
+    let reaper = CascadeReaper::new(Arc::clone(&store), Duration::from_secs(3600))
+        .with_snapshot_repo(snapshot_repo);
+    let revoked = reaper.run_once().await.unwrap();
+    assert_eq!(revoked, 1);
+
+    let remaining = snapshot_store.get("test", "angzarr", root).await.unwrap();
+    assert!(
+        remaining.is_some(),
+        "a snapshot predating the revoked sequence is still valid and must survive"
+    );
+    assert_eq!(remaining.unwrap().sequence, 0);
+}

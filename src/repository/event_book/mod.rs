@@ -192,6 +192,31 @@ impl EventBookRepository {
     ///
     /// 2PC machinery that must inspect markers or provisional pages uses
     /// [`Self::get_from_to_raw`] deliberately.
+    ///
+    /// # Full-stream resolution (C01 #6)
+    ///
+    /// Fetches raw pages from `from` through the STREAM HEAD (not stopping
+    /// at `to`) so a Confirmation/Revocation marker that lands AFTER `to`
+    /// still resolves provisional pages INSIDE `[from, to)`. A marker
+    /// virtually always sits at a HIGHER sequence than the provisional
+    /// pages it resolves (it's written once the cascade concludes), so a
+    /// gap-fill request for exactly the hole `[from, to)` would, pre-fix,
+    /// never see the marker and always withhold the pages as unresolved —
+    /// even after they were genuinely confirmed. Mirrors the sparse path's
+    /// shape in [`Self::get_sequences`] (resolve over the full stream,
+    /// THEN filter down to what was asked for).
+    ///
+    /// # Performance
+    ///
+    /// This reads the ENTIRE remainder of the stream from `from` on every
+    /// call, not just `[from, to)` — deliberate (see above), but genuinely
+    /// more expensive for long-lived aggregates with many events past
+    /// `to`, and `get_from_to` is on the hot gap-fill path (called for
+    /// every delivered event that isn't perfectly contiguous with a
+    /// consumer's checkpoint). Not silently capped per the remediation
+    /// plan's decision gate — flagged here for a follow-up if it proves to
+    /// be a bottleneck (e.g. an index of marker sequences to bound the
+    /// fetch, or a snapshot-aware short-circuit).
     pub async fn get_from_to(
         &self,
         domain: &str,
@@ -200,10 +225,44 @@ impl EventBookRepository {
         from: u32,
         to: u32,
     ) -> Result<EventBook> {
-        let raw = self
-            .get_from_to_raw(domain, edition, root, from, to)
+        let events = self
+            .event_store
+            .get_from(domain, edition, root, from)
             .await?;
-        Ok(Self::resolve_two_phase(raw))
+        let raw = EventBook {
+            cover: Some(Cover {
+                domain: domain.to_string(),
+                root: Some(ProtoUuid {
+                    value: root.as_bytes().to_vec(),
+                }),
+                correlation_id: String::new(),
+                edition: Some(Edition {
+                    name: edition.to_string(),
+                    divergences: vec![],
+                }),
+                ext: None,
+            }),
+            pages: events,
+            ..Default::default()
+        };
+        let resolved = Self::resolve_two_phase(raw);
+
+        let truncated_pages: Vec<_> = resolved
+            .pages
+            .into_iter()
+            .filter(|p| {
+                let seq = p.sequence_num();
+                seq >= from && seq < to
+            })
+            .collect();
+
+        let mut book = EventBook {
+            cover: resolved.cover,
+            pages: truncated_pages,
+            ..Default::default()
+        };
+        calculate_set_next_seq(&mut book);
+        Ok(book)
     }
 
     /// Load an EventBook with events in a specific range, RAW.
