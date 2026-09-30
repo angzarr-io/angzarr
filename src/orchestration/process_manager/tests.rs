@@ -962,6 +962,73 @@ impl ProcessManagerContext for DlqCommandPm {
     }
 }
 
+/// PM context identical to `DlqCommandPm` but ALSO wires a command outbox, so
+/// the C04 else arm takes the outbox (redelivery) branch rather than the DLQ
+/// fallback.
+struct OutboxCommandPm {
+    dlq_publisher: Arc<dyn DeadLetterPublisher>,
+    outbox: Arc<dyn crate::orchestration::process_manager::outbox::CommandOutbox>,
+}
+
+#[async_trait]
+impl ProcessManagerContext for OutboxCommandPm {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        _pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::{
+            command_page::Payload as CmdPayload, page_header::SequenceType, CommandPage,
+            MergeStrategy, PageHeader,
+        };
+        let header = PageHeader {
+            sequence_type: Some(SequenceType::Sequence(0)),
+            sync_mode: None,
+        };
+        let page = CommandPage {
+            header: Some(header),
+            merge_strategy: MergeStrategy::MergeCommutative as i32,
+            payload: Some(CmdPayload::Command(prost_types::Any {
+                type_url: "test.PmCommand".to_string(),
+                value: vec![],
+            })),
+        };
+        let cover = Cover {
+            domain: "fulfillment".to_string(),
+            root: None,
+            correlation_id: "corr-1".to_string(),
+            edition: None,
+            ext: None,
+        };
+        Ok(PmHandleResponse {
+            commands: vec![CommandBook {
+                cover: Some(cover),
+                pages: vec![page],
+            }],
+            process_events: vec![],
+            facts: vec![],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        _process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        CommandOutcome::Success(CommandResponse::default())
+    }
+    fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
+        Some(&self.dlq_publisher)
+    }
+    fn command_outbox(
+        &self,
+    ) -> Option<&Arc<dyn crate::orchestration::process_manager::outbox::CommandOutbox>> {
+        Some(&self.outbox)
+    }
+    fn component_name(&self) -> &str {
+        "pm-test"
+    }
+}
+
 /// Executor that returns a parameterized Rejected outcome.
 struct CodeRejectingExecutor {
     code: tonic::Code,
@@ -1205,6 +1272,156 @@ async fn pm_2xx_success_does_not_publish() {
         "success path must not publish dead letters, got {} entries",
         captured.len()
     );
+}
+
+// ============================================================================
+// C04: non-Decision transient command failure after PM persist boundary
+// ============================================================================
+//
+// `execute_pm_commands` runs strictly AFTER the PM event book is persisted
+// (the module doc calls this "the point of no return"). Before this fix, a
+// `CommandOutcome::Retryable` on a *non*-Decision command (Simple/Cascade —
+// the overwhelmingly common case) fell into a bare `else { warn!(...) } `
+// arm: the log claimed the command "will be retried" but nothing in the
+// codebase ever retries it — no redelivery, no DLQ entry, no operator
+// signal. The workflow stalls forever with the PM believing its command was
+// dispatched.
+//
+// `CommandOutcome::Retryable` is constructed once, at the gRPC executor
+// boundary (`command/grpc/mod.rs`), by collapsing every
+// `is_retryable_status` code (`Unavailable`, `DeadlineExceeded`,
+// `ResourceExhausted`, `Internal`, `Unknown`, `DataLoss`, `Cancelled`, plus
+// the sequence-conflict `FailedPrecondition` case) into one `reason: String`
+// — the original `tonic::Code` is not preserved. So from the PM dispatch
+// loop's perspective there is exactly one shape to handle; re-deriving
+// per-code coverage here would just re-test `is_retryable_status`, which
+// already has its own exhaustive table in `utils/retry.test.rs`.
+//
+// Fix (reviewer decision: OUTBOX, not plain DLQ): route the else arm to the
+// PM's command outbox for at-least-once redelivery by the drain loop. If no
+// outbox is wired, fall back to DLQ *capture* (operator-visible, transient,
+// no redelivery) so nothing is ever silently dropped. No in-place retry is
+// attempted here — re-running the PM handler would duplicate the
+// already-persisted PM events (see the module persist-boundary doc); the
+// outbox owns redelivery, decoupled from the persist transaction.
+//
+// The two tests below pin both branches: outbox present -> enqueue (no DLQ);
+// outbox absent -> DLQ capture. The full drain/redelivery state machine is
+// covered in `outbox.test.rs`.
+
+/// C04 outbox path: a non-Decision command that fails transiently after the
+/// persist boundary is enqueued to the command outbox for redelivery — NOT
+/// dropped, and NOT sent straight to the DLQ (the drain loop still has a
+/// budget to spend).
+#[tokio::test]
+async fn pm_transient_command_after_persist_enqueues_to_outbox() {
+    use crate::orchestration::process_manager::outbox::{CommandOutbox, InMemoryCommandOutbox};
+
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let outbox: Arc<dyn CommandOutbox> = Arc::new(InMemoryCommandOutbox::new());
+    let ctx = OutboxCommandPm {
+        dlq_publisher: publisher.clone(),
+        outbox: outbox.clone(),
+    };
+    let executor = AlwaysRetryableExecutor;
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger,
+        "pm-test",
+        "pm-test",
+        "corr-1",
+        SyncMode::Simple,
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "a fire-and-forget command failure must not fail orchestrate_pm"
+    );
+
+    let pending = outbox.pending().await.unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "the transient command must be captured in the outbox for redelivery"
+    );
+    assert_eq!(pending[0].attempts, 0, "no redelivery attempted yet at enqueue");
+    assert!(pending[0].last_error.contains("transport conflict"));
+
+    let captured = publisher.captured.lock().await;
+    assert!(
+        captured.is_empty(),
+        "with an outbox wired the DLQ is NOT used yet (redelivery budget remains), \
+         got {} entries",
+        captured.len()
+    );
+}
+
+/// C04 fallback path (also the original reproduction): with NO outbox wired, a
+/// non-Decision command that fails transiently after the persist boundary is
+/// captured to the DLQ (`is_transient=true`, `retry_count=0`) rather than
+/// silently dropped. Before the fix this assertion failed — the else arm only
+/// logged and `captured` was empty.
+#[tokio::test]
+async fn pm_transient_command_failure_after_persist_publishes_dead_letter() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    // DlqCommandPm wires a DLQ but NO outbox -> exercises the fallback.
+    let ctx = DlqCommandPm::new(publisher.clone(), false);
+    let executor = AlwaysRetryableExecutor;
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger,
+        "pm-test",
+        "pm-test",
+        "corr-1",
+        SyncMode::Simple,
+        fast_backoff(),
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "a fire-and-forget (non-Decision) command failure must not fail \
+         orchestrate_pm — PM events are already persisted; the workflow \
+         proceeds and the operator resolves the DLQ entry out of band"
+    );
+
+    let captured = publisher.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "expected one transient-command DLQ entry, got {}: {:?}",
+        captured.len(),
+        *captured
+    );
+    let dl = &captured[0];
+    assert_eq!(dl.source_component_type, "process_manager");
+    assert_eq!(dl.source_component, "pm-test");
+    match &dl.rejection_details {
+        Some(RejectionDetails::EventProcessingFailed(details)) => {
+            assert_eq!(
+                details.retry_count, 0,
+                "no in-place retry is attempted post-persist"
+            );
+            assert!(
+                details.is_transient,
+                "a Retryable outcome is transient by construction"
+            );
+            assert!(details.error.contains("transport conflict"));
+        }
+        other => panic!("expected EventProcessingFailed, got {other:?}"),
+    }
 }
 
 /// H-15 (PM side): emitting facts with no `FactExecutor` wired must fail

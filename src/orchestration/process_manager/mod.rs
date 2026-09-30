@@ -38,6 +38,7 @@
 //! - `grpc/`: remote gRPC PM client calls (distributed mode)
 
 pub mod grpc;
+pub mod outbox;
 
 mod edition_propagation;
 
@@ -60,6 +61,7 @@ use crate::proto_ext::CoverExt;
 use super::command::{CommandExecutor, CommandOutcome};
 use super::destination::DestinationFetcher;
 use super::FactExecutor;
+use outbox::{CommandOutbox, OutboxEntry};
 
 /// Stable fingerprint for a PM event book, used to deduplicate persistence
 /// across outer-loop iterations (H-13).
@@ -243,6 +245,18 @@ pub trait ProcessManagerContext: Send + Sync {
     fn component_name(&self) -> &str {
         "process_manager"
     }
+
+    /// Outbox for at-least-once redelivery of commands that fail transiently
+    /// after the PM persist boundary (C04).
+    ///
+    /// When `Some(_)`, a non-Decision `Retryable` outcome in
+    /// `execute_pm_commands` is captured to the outbox and redelivered by the
+    /// PM's drain loop instead of being dropped. When `None`, the same failure
+    /// falls back to DLQ *capture* (operator-visible, but no auto-redelivery) —
+    /// never a silent drop. Production impls SHOULD return `Some(_)`.
+    fn command_outbox(&self) -> Option<&Arc<dyn CommandOutbox>> {
+        None
+    }
 }
 
 /// Factory for creating per-invocation PM contexts.
@@ -303,11 +317,17 @@ async fn publish_pm_persist_dlq(
 /// impossible today, but the gate guards against future drift. The
 /// H-14 path passes `false` since it doesn't carry a `tonic::Code` and
 /// is unconditionally a permanent failure from the PM's perspective.
+///
+/// `is_transient` flags the dead letter for operators: `true` for the C04
+/// no-outbox transient-capture fallback (a transport blip that no drain loop
+/// will redeliver), `false` for permanent failures (Rejected, H-14 contract
+/// loss).
 async fn publish_pm_command_dlq(
     ctx: &dyn ProcessManagerContext,
     command: &CommandBook,
     code: Option<tonic::Code>,
     message: &str,
+    is_transient: bool,
 ) {
     if let Some(c) = code {
         if !matches!(c.classify_for_dlq(), DlqTrigger::Immediate(_)) {
@@ -321,7 +341,7 @@ async fn publish_pm_command_dlq(
         command,
         message,
         0,
-        false,
+        is_transient,
         ctx.component_name(),
     );
     let domain = command.domain();
@@ -831,17 +851,56 @@ async fn execute_pm_commands(
                     // perspective (contract loss); DLQ unconditionally.
                     // No tonic::Code is available here — the original
                     // Retryable carried only a reason string — so pass
-                    // None to skip the classify gate.
-                    publish_pm_command_dlq(ctx, &command_book, None, &degraded).await;
+                    // None to skip the classify gate. is_transient=false:
+                    // the contract loss, not the transport, is the failure.
+                    publish_pm_command_dlq(ctx, &command_book, None, &degraded, false).await;
                     if decision_retryable_failure.is_none() {
                         decision_retryable_failure = Some(degraded);
                     }
                 } else {
-                    warn!(
-                        domain = %cmd_domain,
-                        error = %reason,
-                        "PM command sequence conflict (will be retried)"
-                    );
+                    // C04: a non-Decision (fire-and-forget) command failed
+                    // transiently AFTER the PM persist boundary. It cannot be
+                    // retried in place — re-running the handler would duplicate
+                    // the already-persisted PM events — and it MUST NOT be
+                    // silently dropped (the pre-fix warn-only bug that stalled
+                    // workflows with no operator signal).
+                    //
+                    // Capture it to the command outbox for at-least-once
+                    // redelivery by the PM's drain loop. If no outbox is wired,
+                    // fall back to DLQ *capture* so the failure is at minimum
+                    // operator-visible (transient, no redelivery attempted).
+                    match ctx.command_outbox() {
+                        Some(ob) => {
+                            let entry = OutboxEntry::for_redelivery(&command_book, &reason);
+                            let key = entry.dedup_key.clone();
+                            if let Err(e) = ob.enqueue(entry).await {
+                                error!(
+                                    domain = %cmd_domain,
+                                    error = %e,
+                                    "failed to enqueue PM command to outbox; \
+                                     falling back to DLQ capture"
+                                );
+                                publish_pm_command_dlq(ctx, &command_book, None, &reason, true).await;
+                            } else {
+                                warn!(
+                                    domain = %cmd_domain,
+                                    dedup_key = %key,
+                                    error = %reason,
+                                    "PM command failed transiently post-persist; \
+                                     enqueued to outbox for at-least-once redelivery"
+                                );
+                            }
+                        }
+                        None => {
+                            error!(
+                                domain = %cmd_domain,
+                                error = %reason,
+                                "PM command failed transiently post-persist and no \
+                                 outbox is wired; capturing to DLQ (no redelivery)"
+                            );
+                            publish_pm_command_dlq(ctx, &command_book, None, &reason, true).await;
+                        }
+                    }
                 }
             }
             CommandOutcome::Rejected { code, message } => {
@@ -857,7 +916,9 @@ async fn execute_pm_commands(
                 // classify_for_dlq for drift-protection (the alignment
                 // invariant says Rejected codes are Immediate, but the
                 // gate makes that explicit rather than implicit).
-                publish_pm_command_dlq(ctx, &command_book, Some(code), &message).await;
+                // is_transient=false: a Rejected outcome is a permanent
+                // rejection, not a transient transport failure.
+                publish_pm_command_dlq(ctx, &command_book, Some(code), &message, false).await;
             }
         }
     }
