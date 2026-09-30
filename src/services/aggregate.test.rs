@@ -388,6 +388,92 @@ async fn test_handle_sync_speculative_with_as_of_sequence() {
     assert!(response.is_ok());
 }
 
+/// C03 (finding #4): `AsOfTime` speculative queries must succeed.
+///
+/// Regression test: `handle_sync_speculative` used to build the temporal
+/// cutoff with `format!("{}.{}", ts.seconds, ts.nanos)`, e.g. `"5.0"`,
+/// which is not RFC3339. `EventBookRepository::get_temporal_by_time` calls
+/// `chrono::DateTime::parse_from_rfc3339` on that string, so every
+/// `AsOfTime` speculative request failed with `Status::invalid_argument`
+/// ("Failed to load temporal events: Invalid timestamp format: ...")
+/// even though the caller supplied a perfectly valid `Timestamp`. The fix
+/// routes through `storage::helpers::timestamp_to_rfc3339` (the same
+/// helper `event_query::mod.rs` already uses), which emits a real RFC3339
+/// string the repository can parse.
+#[tokio::test]
+async fn test_handle_sync_speculative_with_as_of_time_succeeds() {
+    let (service, business) = create_test_service().await;
+
+    let root = Uuid::new_v4();
+    let command_book = make_command_book("orders", root, 0);
+    let events = make_event_book("orders", root, vec![make_event_page(0)]);
+    business.enqueue_events(events).await;
+
+    let request = Request::new(SpeculateCommandHandlerRequest {
+        command: Some(command_book),
+        point_in_time: Some(crate::proto::TemporalQuery {
+            point_in_time: Some(crate::proto::temporal_query::PointInTime::AsOfTime(
+                prost_types::Timestamp {
+                    seconds: 1_700_000_000,
+                    nanos: 500_000_000,
+                },
+            )),
+        }),
+    });
+
+    let response = service.handle_sync_speculative(request).await;
+    assert!(
+        response.is_ok(),
+        "AsOfTime speculative query should succeed with a well-formed RFC3339 cutoff, got: {:?}",
+        response.err()
+    );
+}
+
+/// The producer emits well-formed RFC3339, not the old `secs.nanos` format.
+///
+/// Exercises the conversion directly (the same helper the fix calls) to
+/// pin the exact shape expected downstream — this is the assertion the
+/// remediation plan calls for independent of the full pipeline round trip.
+#[test]
+fn test_as_of_time_conversion_emits_rfc3339_format() {
+    let rfc3339_re = regex_lite_is_rfc3339;
+
+    let ts = prost_types::Timestamp {
+        seconds: 1_700_000_000,
+        nanos: 500_000_000,
+    };
+    let result = crate::storage::helpers::timestamp_to_rfc3339(&ts).expect("valid timestamp");
+
+    assert!(
+        rfc3339_re(&result),
+        "expected RFC3339 (e.g. 2023-11-14T22:13:20.5+00:00), got: {result}"
+    );
+    // Also confirm it actually round-trips through the parser the
+    // repository uses -- the real regression was "does this parse", not
+    // just "does this look right".
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&result).is_ok(),
+        "conversion output must parse as RFC3339: {result}"
+    );
+}
+
+/// Minimal RFC3339 shape check without pulling in a regex crate dependency:
+/// `YYYY-MM-DDTHH:MM:SS` followed by an optional fractional second and a
+/// UTC offset (`Z` or `+HH:MM`/`-HH:MM`).
+fn regex_lite_is_rfc3339(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    if bytes.len() < 20 {
+        return false;
+    }
+    let date_time_ok = s.as_bytes()[4] == b'-'
+        && s.as_bytes()[7] == b'-'
+        && (s.as_bytes()[10] == b'T' || s.as_bytes()[10] == b't')
+        && s.as_bytes()[13] == b':'
+        && s.as_bytes()[16] == b':';
+    let has_offset = s.contains('Z') || s.contains('z') || s[19..].contains(['+', '-']);
+    date_time_ok && has_offset
+}
+
 // ============================================================================
 // handle_compensation Tests
 // ============================================================================
