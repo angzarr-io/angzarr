@@ -4,7 +4,7 @@
 //! - `EventBus` trait: Event delivery to projectors/sagas
 //! - `EventHandler` trait: For processing events
 //! - Bus configuration types
-//! - Implementations: AMQP (RabbitMQ), Kafka, Channel, Pub/Sub, SNS/SQS
+//! - Implementations: AMQP (RabbitMQ), Kafka, Pub/Sub, SNS/SQS
 
 use std::sync::Arc;
 

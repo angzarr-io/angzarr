@@ -26,8 +26,8 @@ use super::metrics::{
 /// # Example
 ///
 /// ```ignore
-/// let bus = ChannelEventBus::new(config);
-/// let bus = InstrumentedBus::new(bus, "channel");
+/// let bus = AmqpEventBus::new(config).await?;
+/// let bus = InstrumentedBus::new(bus, "amqp");
 /// // All publish calls now emit metrics
 /// ```
 pub struct InstrumentedBus<T> {
@@ -40,7 +40,7 @@ impl<T> InstrumentedBus<T> {
     ///
     /// # Arguments
     /// * `inner` - The event bus implementation to wrap
-    /// * `bus_type` - Label for metrics (e.g., "channel", "amqp", "kafka")
+    /// * `bus_type` - Label for metrics (e.g., "amqp", "kafka", "pubsub", "sns-sqs")
     pub fn new(inner: T, bus_type: &'static str) -> Self {
         Self { inner, bus_type }
     }

@@ -66,6 +66,9 @@ server:
 # =============================================================================
 # Messaging Configuration
 # =============================================================================
+# `messaging.type` has no default — it must be set explicitly to one of
+# amqp, kafka, pubsub, sns-sqs. There is no in-process/standalone transport;
+# an unset or unrecognized type fails startup with an actionable error.
 # messaging:
 #   type: amqp
 #   amqp:
@@ -84,9 +87,6 @@ server:
 #   #   domains:
 #   #     - customers
 #   #     - orders
-#
-#   # In-memory channel (standalone mode):
-#   # type: channel
 
 # =============================================================================
 # Service Discovery & Endpoints

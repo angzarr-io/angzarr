@@ -9,10 +9,10 @@
 //! binaries now call `init_event_bus` directly (see
 //! `src/bin/angzarr_aggregate.rs` and `src/bin/angzarr_process_manager.rs`),
 //! so this is the one place left that decides whether an unresolvable
-//! messaging type is a hard failure. These tests pin that: no backend
-//! module is registered here for "channel" (`MessagingConfig`'s default
-//! type) or for any made-up type, so both must surface as a startup error
-//! instead of resolving to something that quietly discards events.
+//! messaging type is a hard failure. These tests pin that: an absent
+//! `messaging_type` (`MessagingConfig`'s default) or any made-up type must
+//! both surface as a startup error instead of resolving to something that
+//! quietly discards events.
 //!
 //! These tests intentionally use messaging types with NO registered
 //! backend (rather than "amqp"/"kafka"/etc.) so they are deterministic and
@@ -21,18 +21,19 @@
 
 use super::*;
 
-/// `MessagingConfig::default()` sets `messaging_type` to "channel" (see
-/// `src/bus/config.rs`), but no backend module in `src/bus/*` registers a
-/// `BusBackend` for "channel" -- there is no channel/in-memory bus
-/// implementation left in production code. An unconfigured deployment
-/// must therefore hard-fail at startup rather than resolve to a
-/// silently-succeeding fallback.
+/// `MessagingConfig::default()` leaves `messaging_type` empty (see
+/// `src/bus/config.rs` — C14 removed the phantom `"channel"` default,
+/// since no backend module has implemented a channel/in-memory bus since
+/// `ChannelEventBus` was deleted). An unconfigured deployment must
+/// therefore hard-fail at startup with an actionable message rather than
+/// resolve to a silently-succeeding fallback or a confusing
+/// `UnknownType("channel")`.
 #[tokio::test]
-async fn init_event_bus_rejects_default_channel_type() {
+async fn init_event_bus_missing_type_is_actionable() {
     let config = MessagingConfig::default();
     assert_eq!(
-        config.messaging_type, "channel",
-        "test assumes MessagingConfig::default() is still \"channel\"; if this \
+        config.messaging_type, "",
+        "test assumes MessagingConfig::default() leaves messaging_type empty; if this \
          assumption changes, re-point the test at whatever the new default is"
     );
 
@@ -42,16 +43,28 @@ async fn init_event_bus_rejects_default_channel_type() {
     // requires `T: Debug`) doesn't type-check here; match explicitly.
     let err = match result {
         Ok(_) => panic!(
-            "no backend is registered for \"channel\" -- init_event_bus must return \
-             Err(UnknownType), not a fallback bus that silently swallows publishes"
+            "an unset messaging_type must return Err(MissingType), not a fallback bus \
+             that silently swallows publishes"
         ),
         Err(e) => e,
     };
+
+    // init_event_bus erases to Box<dyn Error + Send + Sync>; downcast back
+    // to BusError to assert the concrete variant, not just message text —
+    // guards against this regressing to the generic UnknownType("") which
+    // reads as "unknown type: <empty>", not an actionable instruction.
+    let bus_err = err
+        .downcast_ref::<BusError>()
+        .expect("error must be a BusError, not some other error type");
+    assert!(
+        matches!(bus_err, BusError::MissingType),
+        "expected BusError::MissingType, got: {bus_err:?}"
+    );
     let message = err.to_string();
     assert!(
-        message.contains("channel"),
-        "error must name the unresolved messaging type so operators can diagnose \
-         a misconfiguration; got: {message}"
+        message.contains("messaging.type") && message.contains("amqp"),
+        "error must tell the operator what to configure, not just that something's \
+         wrong; got: {message}"
     );
 }
 

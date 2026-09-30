@@ -100,17 +100,23 @@ pub async fn publish_and_build_response(
 ///
 /// # Arguments
 /// * `event_book` - The events (wrapped in Arc)
-/// * `publish_result` - The result from publishing to the event bus
+/// * `_publish_result` - The result from publishing to the event bus. Kept
+///   in the signature so callers still thread the bus's return value
+///   through (in case a future transport reports something via
+///   `PublishResult`), but currently carries no data — see `PublishResult`'s
+///   docs in `bus::traits`. `projections` is always empty from this path;
+///   the real per-command sync projector output is computed directly in
+///   `orchestration::aggregate::grpc::call_sync_projectors`, not via the bus.
 ///
 /// # Returns
-/// A CommandResponse with the events and projections.
+/// A CommandResponse with the events and (always empty, from this path) projections.
 pub fn build_command_response(
     event_book: Arc<EventBook>,
-    publish_result: PublishResult,
+    _publish_result: PublishResult,
 ) -> CommandResponse {
     CommandResponse {
         events: Some(Arc::try_unwrap(event_book).unwrap_or_else(|arc| (*arc).clone())),
-        projections: publish_result.projections,
+        projections: Vec::new(),
     }
 }
 

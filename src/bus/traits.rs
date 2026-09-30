@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use futures::future::BoxFuture;
 
 use crate::descriptor::Target;
-use crate::proto::{CommandBook, EventBook, Projection};
+use crate::proto::{CommandBook, EventBook};
 use crate::proto_ext::CoverExt;
 
 use super::error::{BusError, Result};
@@ -56,11 +56,25 @@ pub trait CommandBus: Send + Sync {
 }
 
 /// Result of publishing events to the bus.
+///
+/// # C14: no consumer-ack / projection data (yet)
+///
+/// This used to carry a `projections: Vec<Projection>` field, but every
+/// transport (`amqp`, `kafka`, `pubsub`, `sns_sqs`, `mock`) always
+/// constructed it via `PublishResult::default()` — nothing ever populated
+/// it, and the one caller that read it (`response_builder::build_command_response`,
+/// itself unreachable from any production call site — the aggregate
+/// pipeline in `orchestration::aggregate::grpc` discards `EventBus::publish`'s
+/// return value and computes its own `Vec<Projection>` directly via
+/// synchronous projector RPCs) always saw an empty vec. The field was
+/// removed rather than left to imply semantics no transport delivers.
+///
+/// Currently a zero-field placeholder: kept as a distinct return type (not
+/// `()`) so a future transport that can genuinely report consumer
+/// acknowledgment or synchronous projector output has somewhere to put it
+/// without changing the `EventBus::publish` signature.
 #[derive(Debug, Default)]
-pub struct PublishResult {
-    /// Projections returned by synchronous projectors.
-    pub projections: Vec<Projection>,
-}
+pub struct PublishResult {}
 
 /// Interface for event delivery to projectors/sagas.
 ///
@@ -74,10 +88,11 @@ pub trait EventBus: Send + Sync {
     /// The EventBook is wrapped in Arc to enforce immutability during distribution.
     /// All consumers receive a zero-copy reference to the same immutable data.
     ///
-    /// For synchronous events, this blocks until all consumers acknowledge.
-    /// For async events, this returns immediately after queuing.
-    ///
-    /// Returns projections from synchronous projectors.
+    /// Every current transport (`amqp`, `kafka`, `pubsub`, `sns_sqs`) queues
+    /// the book and returns once the broker accepts it — none blocks until
+    /// downstream consumers acknowledge. Synchronous projector output is a
+    /// separate mechanism (`orchestration::aggregate::grpc::call_sync_projectors`),
+    /// not something this call returns. See `PublishResult`'s docs.
     async fn publish(&self, book: Arc<EventBook>) -> Result<PublishResult>;
 
     /// Subscribe to events (for projector/saga implementations).
@@ -110,7 +125,6 @@ pub trait EventBus: Send + Sync {
     ///
     /// Events published on this bus will be delivered to the returned subscriber.
     /// Each implementation creates a transport-appropriate subscriber:
-    /// - Channel: shares the broadcast channel with domain filtering
     /// - IPC: creates a named pipe subscriber
     /// - AMQP: creates a queue bound to the exchange
     /// - Kafka: creates a consumer group subscription
@@ -132,7 +146,7 @@ pub trait EventBus: Send + Sync {
     /// - Pub/Sub: 10 MB
     /// - Kafka: broker-configurable, typically 1 MB default
     /// - AMQP: broker-configurable, typically 128 MB default
-    /// - Channel/IPC: None (memory-bound only)
+    /// - IPC: None (memory-bound only)
     ///
     /// Returns `None` if the bus has no practical limit.
     fn max_message_size(&self) -> Option<usize> {

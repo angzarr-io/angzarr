@@ -308,7 +308,8 @@ impl EventBus for KafkaEventBus {
             "Published event book to Kafka"
         );
 
-        // Kafka is async-only, no synchronous projections
+        // Kafka is async-only; PublishResult carries no data for any
+        // transport (see `PublishResult`'s docs in `bus::traits`).
         Ok(PublishResult::default())
     }
 
