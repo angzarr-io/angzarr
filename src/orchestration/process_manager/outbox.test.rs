@@ -159,7 +159,10 @@ async fn dedup_key_uses_deferred_provenance_and_disambiguates_siblings() {
     let k0 = dedup_key_for(&cmd0);
     let k1 = dedup_key_for(&cmd1);
 
-    assert_ne!(k0, k1, "sibling commands (different index) must not collide");
+    assert_ne!(
+        k0, k1,
+        "sibling commands (different index) must not collide"
+    );
     assert_eq!(
         k0,
         dedup_key_for(&deferred_command("fulfillment", "corr-1", "pm-x", 0, 5)),
@@ -201,8 +204,15 @@ async fn in_memory_enqueue_is_idempotent_on_dedup_key() {
         .unwrap();
 
     let pending = outbox.pending().await.unwrap();
-    assert_eq!(pending.len(), 1, "duplicate enqueue must not add a second entry");
-    assert_eq!(pending[0].attempts, 1, "duplicate enqueue must not reset attempts");
+    assert_eq!(
+        pending.len(),
+        1,
+        "duplicate enqueue must not add a second entry"
+    );
+    assert_eq!(
+        pending[0].attempts, 1,
+        "duplicate enqueue must not reset attempts"
+    );
     assert_eq!(pending[0].last_error, "still down");
 }
 
@@ -242,7 +252,13 @@ async fn drain_success_removes_entry() {
         .await
         .unwrap();
 
-    assert_eq!(stats, DrainStats { delivered: 1, ..Default::default() });
+    assert_eq!(
+        stats,
+        DrainStats {
+            delivered: 1,
+            ..Default::default()
+        }
+    );
     assert!(
         outbox.pending().await.unwrap().is_empty(),
         "a delivered command must be removed from the outbox"
@@ -261,13 +277,30 @@ async fn drain_transient_within_budget_keeps_pending_and_counts_attempt() {
         .unwrap();
     let dlq: Arc<dyn DeadLetterPublisher> = Arc::new(CapturingDlq::new());
 
-    let stats = drain_once(&outbox, &AlwaysRetryable, Some(&dlq), "pm-x", 3, SyncMode::Simple)
-        .await
-        .unwrap();
+    let stats = drain_once(
+        &outbox,
+        &AlwaysRetryable,
+        Some(&dlq),
+        "pm-x",
+        3,
+        SyncMode::Simple,
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(stats, DrainStats { retried: 1, ..Default::default() });
+    assert_eq!(
+        stats,
+        DrainStats {
+            retried: 1,
+            ..Default::default()
+        }
+    );
     let pending = outbox.pending().await.unwrap();
-    assert_eq!(pending.len(), 1, "a within-budget transient failure stays pending");
+    assert_eq!(
+        pending.len(),
+        1,
+        "a within-budget transient failure stays pending"
+    );
     assert_eq!(pending[0].attempts, 1, "the failed attempt is recorded");
     assert_eq!(pending[0].last_error, "broker down");
 }
@@ -287,17 +320,34 @@ async fn drain_exhausted_budget_moves_to_dlq_transient() {
     let capturing = Arc::new(CapturingDlq::new());
     let dlq: Arc<dyn DeadLetterPublisher> = capturing.clone();
 
-    let stats = drain_once(&outbox, &AlwaysRetryable, Some(&dlq), "pm-x", 3, SyncMode::Simple)
-        .await
-        .unwrap();
+    let stats = drain_once(
+        &outbox,
+        &AlwaysRetryable,
+        Some(&dlq),
+        "pm-x",
+        3,
+        SyncMode::Simple,
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(stats, DrainStats { dead_lettered: 1, ..Default::default() });
+    assert_eq!(
+        stats,
+        DrainStats {
+            dead_lettered: 1,
+            ..Default::default()
+        }
+    );
     assert!(
         outbox.pending().await.unwrap().is_empty(),
         "an exhausted entry must be removed after DLQ"
     );
     let captured = capturing.captured.lock().await;
-    assert_eq!(captured.len(), 1, "exhaustion publishes exactly one DLQ entry");
+    assert_eq!(
+        captured.len(),
+        1,
+        "exhaustion publishes exactly one DLQ entry"
+    );
     match &captured[0].rejection_details {
         Some(RejectionDetails::EventProcessingFailed(d)) => {
             assert!(d.is_transient, "budget exhaustion is a transient failure");
@@ -324,11 +374,24 @@ async fn drain_permanent_rejection_moves_to_dlq_immediately() {
     let capturing = Arc::new(CapturingDlq::new());
     let dlq: Arc<dyn DeadLetterPublisher> = capturing.clone();
 
-    let stats = drain_once(&outbox, &AlwaysRejected, Some(&dlq), "pm-x", 5, SyncMode::Simple)
-        .await
-        .unwrap();
+    let stats = drain_once(
+        &outbox,
+        &AlwaysRejected,
+        Some(&dlq),
+        "pm-x",
+        5,
+        SyncMode::Simple,
+    )
+    .await
+    .unwrap();
 
-    assert_eq!(stats, DrainStats { dead_lettered: 1, ..Default::default() });
+    assert_eq!(
+        stats,
+        DrainStats {
+            dead_lettered: 1,
+            ..Default::default()
+        }
+    );
     assert!(outbox.pending().await.unwrap().is_empty());
     let captured = capturing.captured.lock().await;
     assert_eq!(captured.len(), 1);
@@ -356,7 +419,13 @@ async fn drain_exhausted_without_dlq_still_removes() {
         .await
         .unwrap();
 
-    assert_eq!(stats, DrainStats { dead_lettered: 1, ..Default::default() });
+    assert_eq!(
+        stats,
+        DrainStats {
+            dead_lettered: 1,
+            ..Default::default()
+        }
+    );
     assert!(outbox.pending().await.unwrap().is_empty());
 }
 

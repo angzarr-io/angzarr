@@ -242,8 +242,15 @@ pub async fn drain_once(
                         error = %reason,
                         "outbox command exhausted redelivery budget; moving to DLQ"
                     );
-                    publish_outbox_dlq(dlq, component, &entry.command, &reason, attempts_after, true)
-                        .await;
+                    publish_outbox_dlq(
+                        dlq,
+                        component,
+                        &entry.command,
+                        &reason,
+                        attempts_after,
+                        true,
+                    )
+                    .await;
                     outbox.remove(&entry.dedup_key).await?;
                     stats.dead_lettered += 1;
                 } else {
@@ -257,8 +264,15 @@ pub async fn drain_once(
                     error = %message,
                     "outbox command permanently rejected on redelivery; moving to DLQ"
                 );
-                publish_outbox_dlq(dlq, component, &entry.command, &message, entry.attempts, false)
-                    .await;
+                publish_outbox_dlq(
+                    dlq,
+                    component,
+                    &entry.command,
+                    &message,
+                    entry.attempts,
+                    false,
+                )
+                .await;
                 outbox.remove(&entry.dedup_key).await?;
                 stats.dead_lettered += 1;
             }
@@ -281,8 +295,13 @@ async fn publish_outbox_dlq(
     let Some(publisher) = dlq else {
         return;
     };
-    let dead_letter =
-        AngzarrDeadLetter::from_pm_command_rejection(command, error, retry_count, is_transient, component);
+    let dead_letter = AngzarrDeadLetter::from_pm_command_rejection(
+        command,
+        error,
+        retry_count,
+        is_transient,
+        component,
+    );
     let domain = command.domain().to_string();
     if let Err(e) = publisher.publish(dead_letter).await {
         error!(%domain, error = %e, "failed to publish outbox-exhaustion DLQ entry");

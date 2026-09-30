@@ -1351,7 +1351,10 @@ async fn pm_transient_command_after_persist_enqueues_to_outbox() {
         1,
         "the transient command must be captured in the outbox for redelivery"
     );
-    assert_eq!(pending[0].attempts, 0, "no redelivery attempted yet at enqueue");
+    assert_eq!(
+        pending[0].attempts, 0,
+        "no redelivery attempted yet at enqueue"
+    );
     assert!(pending[0].last_error.contains("transport conflict"));
 
     let captured = publisher.captured.lock().await;

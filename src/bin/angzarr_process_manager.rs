@@ -235,8 +235,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let drain_dlq = dlq_publisher.clone();
         let drain_component = bootstrap.domain.clone();
         tokio::spawn(async move {
-            let mut ticker =
-                tokio::time::interval(Duration::from_secs(OUTBOX_DRAIN_INTERVAL_SECS));
+            let mut ticker = tokio::time::interval(Duration::from_secs(OUTBOX_DRAIN_INTERVAL_SECS));
             loop {
                 ticker.tick().await;
                 match drain_once(

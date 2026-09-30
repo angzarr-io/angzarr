@@ -880,7 +880,8 @@ async fn execute_pm_commands(
                                     "failed to enqueue PM command to outbox; \
                                      falling back to DLQ capture"
                                 );
-                                publish_pm_command_dlq(ctx, &command_book, None, &reason, true).await;
+                                publish_pm_command_dlq(ctx, &command_book, None, &reason, true)
+                                    .await;
                             } else {
                                 warn!(
                                     domain = %cmd_domain,
