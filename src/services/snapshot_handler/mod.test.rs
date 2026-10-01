@@ -215,3 +215,26 @@ async fn test_persist_snapshot_only_uses_fallback_sequence() {
         "snapshot-only update must use fallback"
     );
 }
+
+/// The retention the handler sets on its snapshot is persisted unchanged
+/// (C-0454); unset persists as RETENTION_DEFAULT (C-0455). Forcing DEFAULT
+/// made every milestone snapshot prunable.
+#[tokio::test]
+async fn test_persist_keeps_handler_retention() {
+    for retention in [
+        SnapshotRetention::RetentionPersist,
+        SnapshotRetention::RetentionTransient,
+        SnapshotRetention::RetentionDefault,
+    ] {
+        let store = Arc::new(MockSnapshotStore::new());
+        let repo = SnapshotRepository::new(store.clone());
+        let mut event_book = make_event_book_with_snapshot(vec![make_event_page(0)], true);
+        event_book.snapshot.as_mut().unwrap().retention = retention as i32;
+        let root = Uuid::new_v4();
+        persist_snapshot_if_present(&repo, &event_book, "test", "test", root, None)
+            .await
+            .unwrap();
+        let stored = store.get_stored("test", "test", root).await.unwrap();
+        assert_eq!(stored.retention, retention as i32, "{retention:?}");
+    }
+}

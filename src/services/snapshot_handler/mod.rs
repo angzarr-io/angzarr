@@ -8,7 +8,7 @@ use tonic::Status;
 use tracing::instrument;
 use uuid::Uuid;
 
-use crate::proto::{EventBook, Snapshot, SnapshotRetention};
+use crate::proto::{EventBook, Snapshot};
 use crate::proto_ext::EventPageExt;
 use crate::repository::SnapshotRepository;
 
@@ -63,7 +63,10 @@ pub async fn persist_snapshot_if_present(
             let persisted_snapshot = Snapshot {
                 sequence: snapshot_sequence,
                 state: Some(state.clone()),
-                retention: SnapshotRetention::RetentionDefault as i32,
+                // The handler's retention is persisted unchanged; unset is
+                // RETENTION_DEFAULT (the zero value). Pruning by retention
+                // happens in the snapshot store.
+                retention: snapshot.retention,
                 // Wall-clock stamp at persist time. Required by
                 // temporal-by-time queries (R2-SNAP-7) to decide
                 // whether the snapshot's coverage predates the
