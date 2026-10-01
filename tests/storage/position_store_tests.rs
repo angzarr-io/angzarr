@@ -401,6 +401,8 @@ fn position_store_contract_inventory_is_fully_wired() {
             include_str!("../storage_immudb.rs"),
             include_str!("../storage_redis.rs"),
             include_str!("../storage_mock.rs"),
+            include_str!("../storage_dynamo.rs"),
+            include_str!("../storage_bigtable.rs"),
         ],
         &[],
     );

@@ -1,55 +1,31 @@
 //! Redis SnapshotStore implementation.
 //!
-//! ## Multi-snapshot model (H-23)
-//!
-//! Pre-fix this store kept a single snapshot per `(domain, edition, root)`,
-//! which silently violated the `SnapshotStore` trait contract: the docstring
-//! on `get_at_seq` promises "the snapshot with the highest sequence <= seq",
-//! but a single-slot store cannot return a HISTORICAL snapshot — every `put`
-//! overwrites whatever was there, so `get_at_seq(5)` after `put(seq=10)`
-//! returned `None` instead of the seq=5 snapshot the aggregate-pipeline's
-//! conflict-detection pass needs.
-//!
-//! Post-fix snapshots live in a Redis **Hash**, one hash per aggregate:
+//! Snapshots live in a Redis **Hash**, one hash per aggregate:
 //!
 //! ```text
 //! HSET angzarr:{domain}:{edition}:{root}:snapshots {sequence:010} <encoded Snapshot>
 //! ```
 //!
-//! The field name is the zero-padded `sequence` so a future migration to
-//! `ZRANGEBYSCORE` lexicographic comparison stays trivial; the value is the
-//! `prost`-encoded `Snapshot` (carries its own `sequence` and `retention`
-//! fields, so the field name is purely a lookup key — we never need to trust
-//! it).
+//! The main timeline's `{edition}` component is the canonical storage
+//! spelling (`storage::timeline::storage_edition`). The field name is the
+//! zero-padded `sequence`; the value is the `prost`-encoded `Snapshot`
+//! (carrying its own `sequence` and `retention`, so the field name is only
+//! a lookup key).
 //!
 //! Operations:
 //!
 //! * `get` → `HVALS` → decode all → pick max-sequence.
 //! * `get_at_seq(s)` → `HVALS` → decode all → pick max-sequence with
 //!   `sequence <= s`.
-//! * `put` → `HSET <padded-seq>` then cleanup: re-fetch all, `HDEL` every
-//!   snapshot with `retention = TRANSIENT` AND `sequence < put.sequence`.
-//!   PERSIST + DEFAULT retention rows survive the cleanup.
+//! * `put` → `HVALS` to find the snapshots the new one supersedes
+//!   (`storage::is_superseded`), then `MULTI { HSET new; HDEL superseded }`.
 //! * `delete` → `DEL` the hash entirely.
 //!
 //! ## Storage growth
 //!
-//! For DEFAULT retention the count grows with the number of `put` calls
-//! issued since the most recent transient cleanup. The pipeline issues a
-//! snapshot put roughly once per "snapshot interval" events (configurable
-//! per aggregate), so a long-lived aggregate accumulates O(events /
-//! interval) snapshots. PERSIST retention snapshots are NEVER pruned by
-//! this store — they're an explicit opt-in for replay points (audit, debug,
-//! seeded migrations). If accumulating PERSIST snapshots becomes a memory
-//! pressure problem operators should:
-//!   1. Audit which sites pass `RetentionPersist` and downgrade to
-//!      `RetentionDefault` where the keep-forever guarantee isn't needed.
-//!   2. Run a periodic offline scan and `HDEL` historical PERSIST
-//!      snapshots they no longer need.
-//!
-//! This is the same growth profile as the Postgres/SQLite stores
-//! (`src/storage/sql/snapshot_store.rs` PK is `(domain, edition, root,
-//! sequence)`); the trait surface is preserved unchanged.
+//! TRANSIENT snapshots are pruned by the next put; DEFAULT snapshots are
+//! kept at one per `storage::DEFAULT_RETENTION_WINDOW` sequences; PERSIST
+//! snapshots are never pruned by this store.
 
 use async_trait::async_trait;
 use prost::Message;
@@ -57,8 +33,8 @@ use redis::{aio::ConnectionManager, AsyncCommands, Client};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
-use crate::proto::{Snapshot, SnapshotRetention};
-use crate::storage::{Result, SnapshotStore};
+use crate::proto::Snapshot;
+use crate::storage::{is_superseded, Result, SnapshotStore};
 
 /// Redis snapshot store.
 ///
@@ -95,7 +71,10 @@ impl RedisSnapshotStore {
     fn snapshot_key(&self, domain: &str, edition: &str, root: Uuid) -> String {
         format!(
             "{}:{}:{}:{}:snapshots",
-            self.key_prefix, domain, edition, root
+            self.key_prefix,
+            domain,
+            crate::storage::timeline::storage_edition(edition),
+            root
         )
     }
 
@@ -182,41 +161,29 @@ impl SnapshotStore for RedisSnapshotStore {
         let new_field = Self::field_for_sequence(new_sequence);
         let new_bytes = snapshot.encode_to_vec();
 
-        let mut conn = self.conn.clone();
+        // Older snapshots this one supersedes (see `storage::is_superseded`).
+        let to_remove: Vec<String> = self
+            .fetch_all_snapshots(&key)
+            .await?
+            .into_iter()
+            .filter(|s| is_superseded(s.sequence, s.retention, new_sequence))
+            .map(|s| Self::field_for_sequence(s.sequence))
+            .collect();
 
-        // Step 1: insert/overwrite the row at `new_sequence`. `HSET` is
-        // atomic per-field; the cleanup step below is best-effort and
-        // can be retried without violating any invariant.
-        let _: () = conn.hset(&key, &new_field, &new_bytes).await?;
-
-        // Step 2: prune TRANSIENT snapshots with sequence < new_sequence.
-        // We fetch the full hash and compute the prune set in-app rather
-        // than using a Lua script — the working set is small (bounded by
-        // the snapshot interval) and the simplicity payoff outweighs the
-        // extra round-trip.
-        //
-        // PERSIST and DEFAULT retention rows survive cleanup. The
-        // contract docstring on `put` only guarantees TRANSIENT cleanup;
-        // DEFAULT is the "keep, no special promise" middle ground and
-        // PERSIST is the explicit opt-in for keep-forever.
-        let snapshots = self.fetch_all_snapshots(&key).await?;
-        let mut to_remove: Vec<String> = Vec::new();
-        for s in snapshots {
-            if s.sequence < new_sequence
-                && s.retention == SnapshotRetention::RetentionTransient as i32
-            {
-                to_remove.push(Self::field_for_sequence(s.sequence));
-            }
-        }
+        // The write and the prune are applied together (MULTI/EXEC).
+        let mut pipe = redis::pipe();
+        pipe.atomic().hset(&key, &new_field, &new_bytes).ignore();
         if !to_remove.is_empty() {
-            // Cast away `Vec` to slice for the variadic `hdel`.
-            let refs: Vec<&str> = to_remove.iter().map(|s| s.as_str()).collect();
-            let _: () = conn.hdel(&key, refs.as_slice()).await?;
+            pipe.hdel(&key, to_remove.as_slice()).ignore();
+        }
+        let mut conn = self.conn.clone();
+        let _: () = pipe.query_async(&mut conn).await?;
+        if !to_remove.is_empty() {
             debug!(
                 domain = %domain,
                 root = %root,
                 cleaned = to_remove.len(),
-                "Pruned TRANSIENT snapshots after Redis put"
+                "Pruned superseded snapshots after Redis put"
             );
         }
 

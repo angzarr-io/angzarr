@@ -61,7 +61,7 @@ async fn start_redis() -> (testcontainers::ContainerAsync<GenericImage>, String)
 fn test_prefix() -> String {
     format!(
         "test_{}",
-        uuid::Uuid::new_v4().to_string().replace('-', "")[..8].to_string()
+        &uuid::Uuid::new_v4().to_string().replace('-', "")[..8]
     )
 }
 

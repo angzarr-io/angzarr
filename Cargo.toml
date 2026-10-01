@@ -321,6 +321,18 @@ name = "storage_postgres"
 # work correctly with full SQL support including historical snapshot queries.
 required-features = ["postgres"]
 
+[[test]]
+name = "storage_bigtable"
+# Bigtable (via the Cloud Bigtable emulator). Runs the same contract macros as
+# the SQL backends: conditional row writes, prefix/range scans, cascade index.
+required-features = ["bigtable"]
+
+[[test]]
+name = "storage_dynamo"
+# DynamoDB (via DynamoDB Local). Runs the same contract macros as the SQL
+# backends: conditional/transactional writes, GSIs and result pagination.
+required-features = ["dynamo"]
+
 # --- Bus Contract Tests ---
 
 [[test]]

@@ -47,36 +47,75 @@ mod event_store_contract {
     crate::generate_event_store_tests!(fixture);
 }
 
-// C10 (finding #26): the pre-fix `get_until_timestamp(until: &str)` compared
-// a caller-formatted string lexically against SQLite's TEXT `created_at`
-// column. Reproduced against the pre-fix signature: writing an event at
-// instant T plus one strictly-later event (T + 1us), then querying "until
-// T" spelled as `"...Z"` vs `"...+00:00"` — the two returned DIFFERENT
-// result counts (2 vs 1) because `Z` (0x5A) sorts above the stored `.`
-// fractional-second marker (0x2E) while `+` (0x2B) sorts below it, so a
-// `Z`-suffixed boundary leaked the strictly-later event into a "state as
-// of T" read. Confirmed red with `cargo test --test storage_sqlite
-// test_c10_repro` on the pre-fix tree (2 != 1); not preserved here because
-// the typed `until: &prost_types::Timestamp` signature this file now
-// implements makes the scenario impossible to construct — there is no
-// second string spelling of the same instant for a caller to pick. The
-// permanent regression this fix earns — nanosecond-precision boundary
-// correctness through the new typed→canonical-string boundary — is
-// `test_get_until_timestamp_nanosecond_boundary_precision` below (shared
-// with Postgres; not run against ImmuDB, whose TIMESTAMP column only
-// round-trips whole-second precision — see that fn's doc comment).
-#[tokio::test]
-async fn test_sqlite_get_until_timestamp_nanosecond_boundary_precision() {
-    use storage::event_store_tests::test_get_until_timestamp_nanosecond_boundary_precision;
-
-    let store = SqliteEventStore::new(create_pool().await);
-    test_get_until_timestamp_nanosecond_boundary_precision(&store).await;
-}
-
 // T11: the standalone C-18 round-trip runner was deleted — it existed only
 // because a then-unfixed C-15 test blocked the main suite mid-run. The C-15
 // SQLite fix landed, the main `run_event_store_tests!` suite passes end to
 // end, and all four C-18 tests it duplicated are part of the core macro.
+
+/// A failure inside `add`'s write transaction must roll it back before the
+/// connection returns to the pool. With a one-connection pool, a leaked
+/// open `BEGIN IMMEDIATE` makes the next `add` fail with "cannot start a
+/// transaction within a transaction".
+#[tokio::test]
+async fn test_sqlite_add_failure_releases_transaction() {
+    use angzarr::storage::{AddMeta, EventStore};
+    use storage::event_store_tests::make_events;
+
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("Failed to create SQLite pool");
+    sqlx::migrate!("./migrations/sqlite")
+        .run(&pool)
+        .await
+        .expect("Failed to run migrations");
+    let store = SqliteEventStore::new(pool.clone());
+    let root = uuid::Uuid::new_v4();
+
+    // Break the external-id probe so `add` fails inside its transaction.
+    sqlx::query("ALTER TABLE events RENAME COLUMN external_id TO external_id_hidden")
+        .execute(&pool)
+        .await
+        .expect("rename external_id");
+    let failed = store
+        .add(
+            "tx_release",
+            "angzarr",
+            root,
+            make_events(0, 1),
+            &AddMeta {
+                external_id: Some("ext-1"),
+                ..Default::default()
+            },
+        )
+        .await;
+    assert!(failed.is_err(), "the broken probe must fail the add");
+
+    sqlx::query("ALTER TABLE events RENAME COLUMN external_id_hidden TO external_id")
+        .execute(&pool)
+        .await
+        .expect("restore external_id");
+    store
+        .add(
+            "tx_release",
+            "angzarr",
+            root,
+            make_events(0, 1),
+            &AddMeta::default(),
+        )
+        .await
+        .expect("the failed add must not leave its transaction open on the pooled connection");
+    assert_eq!(
+        store
+            .get("tx_release", "angzarr", root)
+            .await
+            .unwrap()
+            .len(),
+        1,
+        "the failed add must have written nothing"
+    );
+}
 
 /// Concurrent-write contract test (C-19).
 ///
@@ -105,84 +144,14 @@ async fn test_sqlite_event_store_concurrent_writes() {
 // SnapshotStore Tests
 // =============================================================================
 
-/// Run SnapshotStore tests that SQLite supports.
-///
-/// SQLite stores only the latest snapshot per aggregate (not historical snapshots),
-/// so we run the subset of tests that don't require `get_at_seq` to return
-/// historical snapshots at specific sequences.
 #[tokio::test]
 async fn test_sqlite_snapshot_store() {
-    use storage::snapshot_store_tests::*;
-
     println!("=== SQLite SnapshotStore Tests ===");
 
     let pool = create_pool().await;
     let store = SqliteSnapshotStore::new(pool);
 
-    // Core get tests
-    test_get_nonexistent(&store).await;
-    println!("  test_get_nonexistent: PASSED");
-
-    test_get_existing(&store).await;
-    println!("  test_get_existing: PASSED");
-
-    test_get_preserves_data(&store).await;
-    println!("  test_get_preserves_data: PASSED");
-
-    // put tests
-    test_put_new(&store).await;
-    println!("  test_put_new: PASSED");
-
-    test_put_update(&store).await;
-    println!("  test_put_update: PASSED");
-
-    test_put_multiple_updates(&store).await;
-    println!("  test_put_multiple_updates: PASSED");
-
-    // delete tests
-    test_delete_existing(&store).await;
-    println!("  test_delete_existing: PASSED");
-
-    test_delete_nonexistent(&store).await;
-    println!("  test_delete_nonexistent: PASSED");
-
-    test_delete_then_recreate(&store).await;
-    println!("  test_delete_then_recreate: PASSED");
-
-    // isolation tests
-    test_aggregate_isolation(&store).await;
-    println!("  test_aggregate_isolation: PASSED");
-
-    test_domain_isolation(&store).await;
-    println!("  test_domain_isolation: PASSED");
-
-    // retention tests (now supported with new multi-snapshot schema)
-    test_retention_transient_cleanup(&store).await;
-    println!("  test_retention_transient_cleanup: PASSED");
-
-    test_retention_persist(&store).await;
-    println!("  test_retention_persist: PASSED");
-
-    test_retention_default(&store).await;
-    println!("  test_retention_default: PASSED");
-
-    // edition tests (use get() not get_at_seq())
-    test_edition_isolation(&store).await;
-    println!("  test_edition_isolation: PASSED");
-
-    test_edition_delete_independence(&store).await;
-    println!("  test_edition_delete_independence: PASSED");
-
-    // main-timeline sentinel polarity tests (C-15)
-    test_main_timeline_sentinel_write_empty_read_both(&store).await;
-    println!("  test_main_timeline_sentinel_write_empty_read_both: PASSED");
-
-    test_main_timeline_sentinel_write_angzarr_read_both(&store).await;
-    println!("  test_main_timeline_sentinel_write_angzarr_read_both: PASSED");
-
-    // large state tests
-    test_large_state_100kb(&store).await;
-    println!("  test_large_state_100kb: PASSED");
+    run_snapshot_store_tests!(&store);
 
     println!("=== All SQLite SnapshotStore tests PASSED ===");
 }

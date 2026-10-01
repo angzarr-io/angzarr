@@ -448,7 +448,7 @@ async fn test_add_idempotency_returns_duplicate() {
     let event = EventPage {
         header: Some(PageHeader {
             sync_mode: None,
-            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(5)),
+            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
         }),
         payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
             type_url: "test.Event".to_string(),
@@ -497,8 +497,8 @@ async fn test_add_idempotency_returns_duplicate() {
             first_sequence,
             last_sequence,
         } => {
-            assert_eq!(first_sequence, 5);
-            assert_eq!(last_sequence, 5);
+            assert_eq!(first_sequence, 0);
+            assert_eq!(last_sequence, 0);
         }
         _ => panic!("Expected Duplicate outcome"),
     }

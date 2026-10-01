@@ -21,18 +21,6 @@ pub fn is_main_timeline(edition: &str) -> bool {
     edition.is_empty() || edition == DEFAULT_EDITION
 }
 
-/// Resolve target edition for fallback queries.
-///
-/// When a named edition has no events, queries fall back to the main timeline.
-/// Returns the edition to use for that fallback.
-pub fn fallback_edition(edition: &str) -> &str {
-    if is_main_timeline(edition) {
-        edition
-    } else {
-        DEFAULT_EDITION
-    }
-}
-
 /// Reconstruction inputs for a single EventBook.
 ///
 /// Groups the ordered pages of one aggregate write with its parent-routing
@@ -79,28 +67,6 @@ pub fn assemble_event_books(
             ..Default::default()
         })
         .collect()
-}
-
-/// Resolve the sequence number for an event.
-///
-/// Validates that the sequence is >= base_sequence.
-///
-/// H-21: an earlier signature took `auto_sequence: &mut u32` for an
-/// auto-assign dispatch path that was never implemented; the parameter
-/// was read by zero callers and ignored by this body. The framework's
-/// invariant is that the caller always provides an explicit sequence
-/// (the aggregate pipeline stamps it from `get_next_sequence`), so the
-/// parameter has been dropped rather than implementing a feature no
-/// caller asked for.
-pub fn resolve_sequence(event: &EventPage, base_sequence: u32) -> Result<u32> {
-    let seq = event.sequence_num();
-    if seq < base_sequence {
-        return Err(StorageError::SequenceConflict {
-            expected: base_sequence,
-            actual: seq,
-        });
-    }
-    Ok(seq)
 }
 
 /// Parse event timestamp to RFC3339 string, defaulting to now.

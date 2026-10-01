@@ -326,10 +326,12 @@ pub async fn test_retention_transient_cleanup<S: SnapshotStore>(store: &S) {
         .await
         .expect("put should succeed");
 
-    // Transient snapshot should be cleaned up
-    let _snap5_after = store.get_at_seq(domain, "test", root, 5).await.unwrap();
-    // Note: behavior may vary - some stores keep old snapshots, others clean up transient ones
-    // This test verifies the latest is available
+    // The transient snapshot is pruned by the newer one.
+    let snap5_after = store.get_at_seq(domain, "test", root, 5).await.unwrap();
+    assert!(
+        snap5_after.is_none(),
+        "transient snapshot at 5 must be pruned once a newer snapshot is stored"
+    );
     let latest = store.get(domain, "test", root).await.unwrap().unwrap();
     assert_eq!(latest.sequence, 10, "latest should be at seq 10");
 }
@@ -366,72 +368,106 @@ pub async fn test_retention_persist<S: SnapshotStore>(store: &S) {
     assert_eq!(persist.unwrap().sequence, 5);
 }
 
-/// H-23: `get_at_seq(N)` must return the historical snapshot with the
-/// highest sequence `<= N`, even when a newer snapshot has been stored.
+/// `get_at_seq(N)` must return the stored snapshot with the highest
+/// sequence `<= N`, even when a newer snapshot has been stored.
 ///
-/// This is the "snapshot at sequence N for conflict detection" use case
-/// from the SnapshotStore trait docstring. A single-snapshot store
-/// silently violates this: after storing seq=10, querying `get_at_seq(5)`
-/// returns None because the only snapshot's sequence is 10 (> 5), losing
-/// the historical state that earlier put() recorded at seq=5.
-///
-/// Distinct from `test_retention_persist`: this test uses DEFAULT
-/// retention to demonstrate the bug applies to ordinary writes, not just
-/// the PERSIST opt-in path.
+/// Uses DEFAULT retention (ordinary writes) at sequences in different
+/// retention windows, so neither supersedes the other.
 pub async fn test_get_at_seq_returns_historical_snapshot<S: SnapshotStore>(store: &S) {
     let domain = "test_snap_historical";
     let root = Uuid::new_v4();
 
-    // Store snapshot at seq 5 (default retention).
     store
-        .put(domain, "test", root, make_snapshot(5))
+        .put(domain, "test", root, make_snapshot(15))
         .await
-        .expect("put @ 5 should succeed");
-
-    // Store newer snapshot at seq 10 (default retention).
+        .expect("put @ 15 should succeed");
     store
-        .put(domain, "test", root, make_snapshot(10))
+        .put(domain, "test", root, make_snapshot(20))
         .await
-        .expect("put @ 10 should succeed");
+        .expect("put @ 20 should succeed");
 
-    // get_at_seq(5) must return the historical snapshot, NOT None.
-    let historical = store
-        .get_at_seq(domain, "test", root, 5)
-        .await
-        .expect("get_at_seq should succeed");
-    assert!(
-        historical.is_some(),
-        "snapshot at seq 5 must remain queryable for conflict detection \
-         even after newer snapshots are stored"
-    );
+    let at = |seq: u32| async move {
+        store
+            .get_at_seq(domain, "test", root, seq)
+            .await
+            .expect("get_at_seq should succeed")
+            .map(|s| s.sequence)
+    };
+    assert_eq!(at(15).await, Some(15), "exact historical sequence");
+    assert_eq!(at(17).await, Some(15), "highest sequence <= 17");
+    assert_eq!(at(20).await, Some(20), "exact latest sequence");
+    assert_eq!(at(1000).await, Some(20), "beyond latest returns latest");
+    assert_eq!(at(14).await, None, "nothing at or before 14");
+}
+
+/// DEFAULT retention keeps the newest snapshot of each 16-sequence window:
+/// a newer DEFAULT snapshot in the same window prunes the older one, while
+/// one in a later window leaves it in place. Storage stays bounded at one
+/// DEFAULT snapshot per window instead of one per put.
+pub async fn test_retention_default_keeps_newest_per_window<S: SnapshotStore>(store: &S) {
+    let domain = "test_snap_default_window";
+    let root = Uuid::new_v4();
+
+    for seq in [3, 9, 15, 16, 21, 30] {
+        store
+            .put(domain, "test", root, make_snapshot(seq))
+            .await
+            .expect("put should succeed");
+    }
+
+    let at = |seq: u32| async move {
+        store
+            .get_at_seq(domain, "test", root, seq)
+            .await
+            .expect("get_at_seq should succeed")
+            .map(|s| s.sequence)
+    };
+    assert_eq!(at(3).await, None, "3 was superseded by 9 in window 0..16");
+    assert_eq!(at(14).await, None, "9 was superseded by 15 in window 0..16");
     assert_eq!(
-        historical.unwrap().sequence,
-        5,
-        "get_at_seq(5) must return the snapshot at seq=5, not a newer one"
+        at(15).await,
+        Some(15),
+        "15 is window 0's newest and is kept"
     );
+    assert_eq!(at(29).await, Some(15), "16 and 21 were superseded by 30");
+    assert_eq!(at(30).await, Some(30));
+    assert_eq!(
+        store
+            .get(domain, "test", root)
+            .await
+            .unwrap()
+            .map(|s| s.sequence),
+        Some(30)
+    );
+}
 
-    // get_at_seq(7) returns the seq=5 snapshot (highest <= 7).
-    let bounded = store
-        .get_at_seq(domain, "test", root, 7)
-        .await
-        .expect("get_at_seq(7) should succeed");
-    assert!(bounded.is_some(), "should find seq=5 (highest <= 7)");
-    assert_eq!(bounded.unwrap().sequence, 5);
+/// A TRANSIENT snapshot is pruned as soon as a newer snapshot is stored.
+pub async fn test_retention_transient_pruned_by_newer<S: SnapshotStore>(store: &S) {
+    let domain = "test_snap_transient_pruned";
+    let root = Uuid::new_v4();
 
-    // get_at_seq(10) returns the seq=10 snapshot.
-    let exact = store
-        .get_at_seq(domain, "test", root, 10)
+    store
+        .put(
+            domain,
+            "test",
+            root,
+            make_snapshot_with_retention(15, SnapshotRetention::RetentionTransient),
+        )
         .await
-        .expect("get_at_seq(10) should succeed");
-    assert!(exact.is_some(), "should find seq=10");
-    assert_eq!(exact.unwrap().sequence, 10);
+        .expect("put should succeed");
+    store
+        .put(domain, "test", root, make_snapshot(40))
+        .await
+        .expect("put should succeed");
 
-    // get_at_seq(4) returns None (no snapshot <= 4 exists).
-    let too_early = store
-        .get_at_seq(domain, "test", root, 4)
-        .await
-        .expect("get_at_seq(4) should succeed");
-    assert!(too_early.is_none(), "no snapshot exists at or before seq 4");
+    assert_eq!(
+        store
+            .get_at_seq(domain, "test", root, 39)
+            .await
+            .expect("get_at_seq should succeed"),
+        None,
+        "the transient snapshot at 15 must be pruned"
+    );
 }
 
 pub async fn test_retention_default<S: SnapshotStore>(store: &S) {
@@ -668,6 +704,12 @@ macro_rules! run_snapshot_store_tests {
         test_get_at_seq_returns_historical_snapshot($store).await;
         println!("  test_get_at_seq_returns_historical_snapshot: PASSED");
 
+        test_retention_default_keeps_newest_per_window($store).await;
+        println!("  test_retention_default_keeps_newest_per_window: PASSED");
+
+        test_retention_transient_pruned_by_newer($store).await;
+        println!("  test_retention_transient_pruned_by_newer: PASSED");
+
         test_retention_default($store).await;
         println!("  test_retention_default: PASSED");
 
@@ -704,6 +746,8 @@ fn snapshot_store_contract_inventory_is_fully_wired() {
             include_str!("../storage_immudb.rs"),
             include_str!("../storage_redis.rs"),
             include_str!("../storage_mock.rs"),
+            include_str!("../storage_dynamo.rs"),
+            include_str!("../storage_bigtable.rs"),
         ],
         &[],
     );

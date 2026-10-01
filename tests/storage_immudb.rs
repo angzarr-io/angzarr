@@ -67,6 +67,9 @@ async fn start_immudb() -> (testcontainers::ContainerAsync<GenericImage>, String
     (container, connection_string)
 }
 
+/// Serializes schema DDL across the concurrently running tests.
+static SCHEMA_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Connect to immudb and initialize schema.
 ///
 /// Note: immudb only supports simple query mode (no prepared statements).
@@ -94,6 +97,9 @@ async fn connect_and_init(connection_string: &str) -> (sqlx::PgPool, ImmudbEvent
     // literal here silently drifted when the events table gained the
     // source_component/source_command_index columns (O1) and every add()
     // failed with "column does not exist".
+    // Concurrent tests share one database; serialize the DDL (immudb
+    // rejects concurrent CREATE TABLE with "tx read conflict").
+    let _ddl = SCHEMA_LOCK.lock().await;
     pool.execute(sqlx::raw_sql(
         angzarr::storage::immudb::schema::CREATE_EVENTS_TABLE,
     ))

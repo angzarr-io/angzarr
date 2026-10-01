@@ -33,6 +33,7 @@ use crate::storage::sql::event_store::{
     edition_to_db_value as edition_to_db, implicit_divergence, map_write_conflict,
     merge_composite_events, resolve_divergence,
 };
+use crate::storage::timeline::{validate_append, AppendWindow, MAIN_TIMELINE_STORAGE_EDITION};
 use crate::storage::{
     AddMeta, AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo, StorageError,
 };
@@ -200,28 +201,18 @@ impl SqliteEventStore {
         // Parent-routing cover, serialized once and replicated per row (mirrors
         // correlation_id). All pages of this write share the same value.
         let ext_bytes: Option<Vec<u8>> = ext.map(prost::Message::encode_to_vec);
-        let base_sequence = {
-            let query = Query::select()
-                .expr(Expr::col(Events::Sequence).max())
-                .from(Events::Table)
-                .and_where(edition_predicate(Events::Edition, edition))
-                .and_where(Expr::col(Events::Domain).eq(domain))
-                .and_where(Expr::col(Events::Root).eq(root_str))
-                .to_string(SqliteQueryBuilder);
-
-            let row = sqlx::query(&query).fetch_optional(&mut *conn).await?;
-
-            match row {
-                Some(row) => {
-                    let max_seq: Option<i32> = row.get(0);
-                    max_seq.map(|s| s as u32 + 1).unwrap_or(0)
-                }
-                None => 0,
-            }
+        let stream_next = Self::max_sequence(conn, domain, edition, root_str)
+            .await?
+            .map(|max| max + 1);
+        let main_next = if stream_next.is_none() && !is_main_timeline(edition) {
+            Self::max_sequence(conn, domain, MAIN_TIMELINE_STORAGE_EDITION, root_str)
+                .await?
+                .map_or(0, |max| max + 1)
+        } else {
+            stream_next.unwrap_or(0)
         };
-
-        let mut first_sequence = None;
-        let mut last_sequence = 0u32;
+        let window = AppendWindow::for_edition(edition, stream_next, main_next);
+        let (first_sequence, last_sequence) = validate_append(window, &events)?;
 
         // Prepare source info values (empty strings for None)
         let source_edition = source_info.map(|s| s.edition.as_str()).unwrap_or("");
@@ -233,17 +224,12 @@ impl SqliteEventStore {
 
         for event in events {
             let event_data = event.encode_to_vec();
-            let sequence = crate::storage::helpers::resolve_sequence(&event, base_sequence)?;
+            let sequence = event_sequence(&event);
             let created_at = crate::storage::helpers::parse_timestamp(&event)?;
 
             // Extract cascade tracking fields from EventPage
             let committed = !event.no_commit;
             let cascade_id = event.cascade_id.clone();
-
-            if first_sequence.is_none() {
-                first_sequence = Some(sequence);
-            }
-            last_sequence = sequence;
 
             // C-15: edition + source_edition normalize to SQL NULL when the
             // caller passes a main-timeline sentinel. Splitting storage
@@ -346,10 +332,31 @@ impl SqliteEventStore {
             sqlx::query(&query)
                 .execute(&mut *conn)
                 .await
-                .map_err(|e| map_write_conflict(e, base_sequence, sequence))?;
+                .map_err(|e| map_write_conflict(e, window.max_first, sequence))?;
         }
 
-        Ok((first_sequence.unwrap_or(0), last_sequence))
+        Ok((first_sequence, last_sequence))
+    }
+
+    /// Highest sequence stored for `edition` (`None` when it has no events),
+    /// read inside the caller's transaction.
+    async fn max_sequence(
+        conn: &mut SqliteConnection,
+        domain: &str,
+        edition: &str,
+        root_str: &str,
+    ) -> Result<Option<u32>> {
+        let query = Query::select()
+            .expr(Expr::col(Events::Sequence).max())
+            .from(Events::Table)
+            .and_where(edition_predicate(Events::Edition, edition))
+            .and_where(Expr::col(Events::Domain).eq(domain))
+            .and_where(Expr::col(Events::Root).eq(root_str))
+            .to_string(SqliteQueryBuilder);
+        let row = sqlx::query(&query).fetch_optional(&mut *conn).await?;
+        Ok(row
+            .and_then(|row| row.get::<Option<i32>, _>(0))
+            .map(|max| max as u32))
     }
 
     /// Check if events with the given external_id already exist.
@@ -410,17 +417,18 @@ impl EventStore for SqliteEventStore {
         let root_str = root.to_string();
         let external_id = external_id.unwrap_or("");
 
-        // BEGIN IMMEDIATE acquires the write lock upfront, preventing deadlocks
-        // when concurrent DEFERRED transactions race to upgrade from shared to exclusive.
-        let mut conn = self.pool.acquire().await?;
-        sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+        // BEGIN IMMEDIATE takes the write lock up front, so a concurrent
+        // writer reads the committed max and loses with SequenceConflict
+        // instead of racing a DEFERRED shared-to-exclusive upgrade. The
+        // transaction guard rolls back on every early return (including `?`)
+        // before the connection goes back to the pool.
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
 
-        // Check for idempotency if external_id is provided
         if !external_id.is_empty() {
             if let Some((first, last)) =
-                Self::check_idempotency(&mut conn, domain, edition, &root_str, external_id).await?
+                Self::check_idempotency(&mut tx, domain, edition, &root_str, external_id).await?
             {
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                tx.commit().await?;
                 return Ok(AddOutcome::Duplicate {
                     first_sequence: first,
                     last_sequence: last,
@@ -428,8 +436,8 @@ impl EventStore for SqliteEventStore {
             }
         }
 
-        let result = Self::insert_events(
-            &mut conn,
+        let (first, last) = Self::insert_events(
+            &mut tx,
             domain,
             edition,
             &root_str,
@@ -439,21 +447,13 @@ impl EventStore for SqliteEventStore {
             source_info,
             meta.ext,
         )
-        .await;
+        .await?;
+        tx.commit().await?;
 
-        match result {
-            Ok((first, last)) => {
-                sqlx::query("COMMIT").execute(&mut *conn).await?;
-                Ok(AddOutcome::Added {
-                    first_sequence: first,
-                    last_sequence: last,
-                })
-            }
-            Err(e) => {
-                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
-                Err(e)
-            }
-        }
+        Ok(AddOutcome::Added {
+            first_sequence: first,
+            last_sequence: last,
+        })
     }
 
     async fn get(&self, domain: &str, edition: &str, root: Uuid) -> Result<Vec<EventPage>> {
@@ -886,6 +886,9 @@ impl EventStore for SqliteEventStore {
     }
 
     async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {
+        // `created_at` is stored as canonical RFC 3339 text; render the
+        // threshold the same way so the text comparison orders by instant.
+        let threshold = crate::storage::timeline::canonical_rfc3339(threshold)?;
         // Per-participant resolution (C-02): a cascade is stale iff it has
         // at least one (cascade_id, domain, edition, root) participant that
         // is past the threshold AND has no committed cascade row on that
@@ -920,7 +923,7 @@ impl EventStore for SqliteEventStore {
                    AND c.root = s.root \
                )";
         let rows = sqlx::query(raw)
-            .bind(threshold)
+            .bind(&threshold)
             .fetch_all(&self.pool)
             .await?;
 

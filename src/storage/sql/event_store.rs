@@ -23,8 +23,6 @@
 
 use sqlx::error::ErrorKind;
 
-use crate::proto::EventPage;
-use crate::storage::helpers::event_sequence;
 use crate::storage::StorageError;
 
 // Reuse the edition NULL-polarity encode/decode helpers already extracted
@@ -33,6 +31,11 @@ use crate::storage::StorageError;
 // event, snapshot, and position storage identically; duplicating a fourth
 // copy here would reintroduce exactly the drift finding #28 flags.
 pub(crate) use super::snapshot_store::{edition_predicate_expr, edition_to_db_value};
+// The composite-read rules are backend-neutral (the key-addressed backends
+// use them too); re-exported here for the SQL stores' existing imports.
+pub(crate) use crate::storage::timeline::{
+    implicit_divergence, merge_composite_events, resolve_divergence,
+};
 
 /// Inverse of [`edition_to_db_value`]: SQL NULL surfaces as the empty-string
 /// sentinel at the API boundary. Event-store specific (unlike the encode
@@ -40,91 +43,6 @@ pub(crate) use super::snapshot_store::{edition_predicate_expr, edition_to_db_val
 /// lives here rather than in `snapshot_store`.
 pub(crate) fn edition_from_db(value: Option<String>) -> String {
     value.unwrap_or_default()
-}
-
-/// Resolve the divergence point for a composite (main-timeline + edition)
-/// read.
-///
-/// - `explicit` wins when given — the "new branch" case: the edition has no
-///   events of its own yet, so the caller (typically `get_with_divergence`)
-///   supplies where the branch starts.
-/// - Otherwise the edition's own implicit divergence (`edition_min_seq`, the
-///   sequence of its first event) applies.
-/// - Otherwise (`None`, `None`) — an eventless edition with no explicit
-///   divergence — returns `None`, meaning "no cap": the branch inherits the
-///   ENTIRE main timeline.
-///
-/// # Finding #12 — eventless-edition contract (LOCKED: inherit main timeline)
-///
-/// Returning `None` (not `Some(0)`) for the eventless case is the crux of
-/// the fix. Postgres's stored procedure previously computed this point as
-/// `COALESCE(p_explicit_divergence, MIN(edition.sequence), 0)`; with no
-/// edition rows, `MIN()` is NULL, so the result was the literal integer `0`.
-/// The main-timeline filter `sequence < 0` is then never true, so the read
-/// silently returned ZERO rows instead of the main timeline — a
-/// backend-specific divergence from SQLite/immudb/mock, which all treat
-/// "no edition events, no explicit divergence" as "not diverged yet",
-/// hence "inherit main timeline" (see the `EventStore::get_with_divergence`
-/// trait doc). Migration `0013_eventless_edition_inherit_main_timeline.sql`
-/// carries the equivalent fix into the stored procedure (`NULL` divergence,
-/// not `0`); callers that fetch main-timeline events via this Rust-side
-/// path (Postgres's `get_from_to`/`get_until_timestamp`, and SQLite/immudb
-/// throughout) pass this function's `None` straight to their
-/// "fetch main events up to divergence" query as "no upper bound".
-pub(crate) fn resolve_divergence(
-    explicit: Option<u32>,
-    edition_min_seq: Option<u32>,
-) -> Option<u32> {
-    explicit.or(edition_min_seq)
-}
-
-/// Compute the implicit divergence point (the minimum sequence) from a set
-/// of edition events already fetched. Pure — no I/O — so backends that
-/// fetch the full edition-event set locally (SQLite, Postgres's
-/// `get_from_to`/`get_until_timestamp`, immudb) can derive the same
-/// divergence point [`resolve_divergence`] expects without a second
-/// `MIN(sequence)` round trip.
-pub(crate) fn implicit_divergence(edition_events: &[EventPage]) -> Option<u32> {
-    edition_events.iter().map(event_sequence).min()
-}
-
-/// Merge a composite read: main-timeline events (already scoped to the
-/// divergence point by the caller's query — see [`resolve_divergence`])
-/// plus edition-branch events, keeping only the ones `keep` accepts.
-///
-/// # Finding #10 — composite reads in range/temporal queries
-///
-/// `keep` is the caller's read-shape predicate: a sequence lower bound for
-/// `get_from`, a sequence range for `get_from_to`, a `created_at` bound for
-/// `get_until_timestamp`. Before this extraction, `get_from_to` and
-/// `get_until_timestamp` on SQLite and Postgres filtered ONLY on the
-/// literal `edition` column — they never called anything resembling this
-/// merge — so a "state as of T" or ranged read on a diverged edition
-/// silently dropped every pre-divergence main-timeline event. Routing both
-/// methods through the same merge `get`/`get_from` already used closes that
-/// gap by construction: there is only one place the main+edition merge
-/// happens per backend now.
-///
-/// Order: main events first (chronologically earlier), then edition
-/// events — matches every backend's pre-extraction behavior and the
-/// ascending-sequence contract `EventStore` callers rely on.
-pub(crate) fn merge_composite_events(
-    main_events: Vec<EventPage>,
-    edition_events: Vec<EventPage>,
-    mut keep: impl FnMut(&EventPage) -> bool,
-) -> Vec<EventPage> {
-    let mut result = Vec::with_capacity(main_events.len() + edition_events.len());
-    for event in main_events {
-        if keep(&event) {
-            result.push(event);
-        }
-    }
-    for event in edition_events {
-        if keep(&event) {
-            result.push(event);
-        }
-    }
-    result
 }
 
 /// Classify a write-time SQL error as a sequence conflict (a

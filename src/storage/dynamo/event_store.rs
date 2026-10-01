@@ -1,10 +1,11 @@
 //! DynamoDB EventStore implementation.
 //!
 //! Table schema:
-//! - PK: `{domain}#{edition}#{root}` (String)
+//! - PK: `{domain}#{edition}#{root}` (String); the main timeline's edition
+//!   component is [`MAIN_TIMELINE_STORAGE_EDITION`]
 //! - SK: sequence number (Number)
 //! - event: serialized EventPage (Binary)
-//! - created_at: ISO 8601 timestamp (String)
+//! - created_at: RFC 3339 timestamp (String)
 //! - correlation_id: for cross-domain queries (String)
 //! - committed: cascade commit status (Boolean)
 //! - cascade_id: cascade identifier (String, sparse)
@@ -13,26 +14,44 @@
 //! - PK: correlation_id
 //! - SK: `{domain}#{edition}#{root}#{seq}`
 //!
-//! GSI `cascade-index`:
+//! GSI `cascade-index` (projection must include `pk`, `seq`, `committed`
+//! and `created_at`):
 //! - PK: cascade_id
 //! - SK: pk (main table partition key)
+//!
+//! Every Query and Scan follows `LastEvaluatedKey` to the end, so results
+//! are complete regardless of DynamoDB's 1 MB page limit.
 
 use std::collections::HashMap;
 
 use async_trait::async_trait;
-use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::operation::query::builders::QueryFluentBuilder;
+use aws_sdk_dynamodb::operation::scan::builders::ScanFluentBuilder;
+use aws_sdk_dynamodb::operation::transact_write_items::TransactWriteItemsError;
+use aws_sdk_dynamodb::types::{AttributeValue, Delete, Put, TransactWriteItem};
 use aws_sdk_dynamodb::Client;
 use prost::Message;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::orchestration::aggregate::DEFAULT_EDITION;
 use crate::proto::{Cover, Edition, EventBook, EventPage, Uuid as ProtoUuid};
 use crate::proto_ext::EventPageExt;
-use crate::storage::helpers::{is_main_timeline, BookParts};
+use crate::storage::batch_write::{write_all_or_undo, UnitWriter};
+use crate::storage::cascade_resolution::{stale_cascade_ids, unresolved_participants, CascadeRow};
+use crate::storage::helpers::{is_main_timeline, parse_timestamp, BookParts};
+use crate::storage::timeline::{
+    guard_edition_delete, merge_composite_events, parse_rfc3339_utc, resolve_divergence,
+    storage_edition, validate_append, AppendWindow, MAIN_TIMELINE_STORAGE_EDITION,
+};
 use crate::storage::{
     AddMeta, AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo, StorageError,
 };
+
+/// One DynamoDB item.
+pub(crate) type Item = HashMap<String, AttributeValue>;
+
+/// Most items DynamoDB accepts in one `TransactWriteItems` call.
+pub(crate) const MAX_TRANSACTION_ITEMS: usize = 100;
 
 /// DynamoDB implementation of EventStore.
 pub struct DynamoEventStore {
@@ -62,20 +81,28 @@ impl DynamoEventStore {
 
     /// Build the partition key for events.
     ///
-    /// H-26: `domain` and `edition` are percent-encoded so any `#` in
-    /// either component survives the round-trip through `parse_pk`.
+    /// `domain` and `edition` are percent-encoded so any `#` in either
+    /// component survives the round-trip through `parse_pk`; the edition is
+    /// stored in its canonical spelling ([`storage_edition`]).
     pub(crate) fn pk(domain: &str, edition: &str, root: Uuid) -> String {
         format!(
             "{}#{}#{}",
             crate::storage::helpers::pct_encode_component(domain),
-            crate::storage::helpers::pct_encode_component(edition),
+            crate::storage::helpers::pct_encode_component(storage_edition(edition)),
             root
         )
     }
 
+    /// Partition-key prefix shared by every aggregate of `domain`/`edition`.
+    pub(crate) fn pk_prefix(domain: &str, edition: &str) -> String {
+        format!(
+            "{}#{}#",
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(storage_edition(edition))
+        )
+    }
+
     /// Parse partition key into (domain, edition, root).
-    ///
-    /// H-26: percent-decode components so `#`-containing names recover.
     pub(crate) fn parse_pk(pk: &str) -> Option<(String, String, Uuid)> {
         let parts: Vec<&str> = pk.splitn(3, '#').collect();
         if parts.len() == 3 {
@@ -88,165 +115,386 @@ impl DynamoEventStore {
         }
     }
 
-    /// H-25 helper: compute the inclusive upper sequence for
-    /// `get_from_to(from, to)` over the half-open range `[from, to)`.
+    /// Inclusive upper sequence for the half-open range `[from, to)`.
     ///
-    /// DynamoDB's `BETWEEN :from AND :to` is inclusive on both ends, so
-    /// we need `to - 1` as the inclusive cap. For `to == 0` the range is
-    /// empty by definition; using `saturating_sub` avoids the underflow
-    /// panic that bit pre-fix code, and the inclusive cap of `0` paired
-    /// with `from >= 0` (and the caller's empty-range expectation) yields
-    /// either an empty match or a single seq=0 row depending on `from`.
-    /// Callers should still short-circuit `to == 0`; this helper is the
-    /// last line of defence.
+    /// DynamoDB's `BETWEEN` is inclusive on both ends. `to == 0` saturates
+    /// to `0`; callers short-circuit empty ranges before querying.
     pub(crate) fn to_inclusive(to: u32) -> u32 {
         to.saturating_sub(1)
     }
 
-    /// Get sequence from EventPage.
-    fn get_sequence(event: &EventPage) -> u32 {
-        event.sequence_num()
+    /// Correlation-index sort key for an event row.
+    pub(crate) fn gsi_sk(domain: &str, edition: &str, root: Uuid, seq: u32) -> String {
+        format!(
+            "{}#{}#{}#{}",
+            crate::storage::helpers::pct_encode_component(domain),
+            crate::storage::helpers::pct_encode_component(storage_edition(edition)),
+            root,
+            seq
+        )
     }
 
-    /// Query events for a specific edition.
-    async fn query_edition_events(
-        &self,
+    /// Build the item stored for one event.
+    pub(crate) fn build_event_item(
+        pk: &str,
         domain: &str,
         edition: &str,
         root: Uuid,
-        from: u32,
-    ) -> Result<Vec<EventPage>> {
-        let pk = Self::pk(domain, edition, root);
+        event: &EventPage,
+        meta: &AddMeta<'_>,
+    ) -> Result<Item> {
+        let seq = event.sequence_num();
+        let mut item: Item = HashMap::new();
+        item.insert("pk".to_string(), AttributeValue::S(pk.to_string()));
+        item.insert("seq".to_string(), AttributeValue::N(seq.to_string()));
+        item.insert(
+            "event".to_string(),
+            AttributeValue::B(event.encode_to_vec().into()),
+        );
+        item.insert(
+            "created_at".to_string(),
+            AttributeValue::S(parse_timestamp(event)?),
+        );
 
-        let result = self
-            .client
-            .query()
-            .table_name(&self.table_name)
-            .key_condition_expression("pk = :pk AND seq >= :from")
-            .expression_attribute_values(":pk", AttributeValue::S(pk))
-            .expression_attribute_values(":from", AttributeValue::N(from.to_string()))
-            .send()
-            .await
-            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
-
-        let mut events = Vec::new();
-        if let Some(items) = result.items {
-            for item in items {
-                if let Some(AttributeValue::B(blob)) = item.get("event") {
-                    let event =
-                        EventPage::decode(blob.as_ref()).map_err(StorageError::ProtobufDecode)?;
-                    events.push(event);
-                }
-            }
+        if !meta.correlation_id.is_empty() {
+            item.insert(
+                "correlation_id".to_string(),
+                AttributeValue::S(meta.correlation_id.to_string()),
+            );
+            item.insert(
+                "gsi_sk".to_string(),
+                AttributeValue::S(Self::gsi_sk(domain, edition, root, seq)),
+            );
         }
 
+        // External id and source info are persisted per row (like the SQL
+        // backends) and matched with a FilterExpression over the aggregate
+        // partition.
+        if let Some(external_id) = meta.external_id.filter(|e| !e.is_empty()) {
+            item.insert(
+                "external_id".to_string(),
+                AttributeValue::S(external_id.to_string()),
+            );
+        }
+        if let Some(info) = meta.source_info.filter(|s| !s.is_empty()) {
+            item.insert(
+                "source_edition".to_string(),
+                AttributeValue::S(storage_edition(&info.edition).to_string()),
+            );
+            item.insert(
+                "source_domain".to_string(),
+                AttributeValue::S(info.domain.clone()),
+            );
+            item.insert(
+                "source_root".to_string(),
+                AttributeValue::S(info.root.to_string()),
+            );
+            item.insert(
+                "source_seq".to_string(),
+                AttributeValue::N(info.seq.to_string()),
+            );
+            item.insert(
+                "source_component".to_string(),
+                AttributeValue::S(info.component.clone()),
+            );
+            item.insert(
+                "source_command_index".to_string(),
+                AttributeValue::N(info.command_index.to_string()),
+            );
+        }
+
+        item.insert(
+            "committed".to_string(),
+            AttributeValue::Bool(!event.no_commit),
+        );
+        if let Some(ref cid) = event.cascade_id {
+            item.insert("cascade_id".to_string(), AttributeValue::S(cid.clone()));
+        }
+
+        // Parent-routing cover (Cover.ext), replicated per row.
+        if let Some(any) = meta.ext {
+            item.insert(
+                "ext".to_string(),
+                AttributeValue::B(prost::Message::encode_to_vec(any).into()),
+            );
+        }
+
+        Ok(item)
+    }
+
+    /// Sequence number of an item (`seq` attribute).
+    pub(crate) fn item_seq(item: &Item) -> Option<u32> {
+        match item.get("seq") {
+            Some(AttributeValue::N(s)) => s.parse().ok(),
+            _ => None,
+        }
+    }
+
+    /// Decode the event pages of `items`, ascending by sequence.
+    pub(crate) fn decode_events(items: Vec<Item>) -> Result<Vec<EventPage>> {
+        let mut events = Vec::with_capacity(items.len());
+        for item in items {
+            if let Some(AttributeValue::B(blob)) = item.get("event") {
+                events
+                    .push(EventPage::decode(blob.as_ref()).map_err(StorageError::ProtobufDecode)?);
+            }
+        }
+        events.sort_by_key(|e| e.sequence_num());
         Ok(events)
     }
 
-    /// Get minimum sequence from edition events (divergence point).
-    async fn get_edition_min_sequence(
+    /// Build a cascade row from a `cascade-index` item.
+    pub(crate) fn cascade_row_from_item(item: &Item) -> Option<CascadeRow> {
+        let cascade_id = match item.get("cascade_id") {
+            Some(AttributeValue::S(cid)) => cid.clone(),
+            _ => return None,
+        };
+        let (domain, edition, root) = match item.get("pk") {
+            Some(AttributeValue::S(pk)) => Self::parse_pk(pk)?,
+            _ => return None,
+        };
+        let sequence = Self::item_seq(item)?;
+        let committed = matches!(item.get("committed"), Some(AttributeValue::Bool(true)));
+        let created_at = match item.get("created_at") {
+            Some(AttributeValue::S(ts)) => chrono::DateTime::parse_from_rfc3339(ts)
+                .ok()
+                .map(|dt| dt.with_timezone(&chrono::Utc)),
+            _ => None,
+        };
+        Some(CascadeRow {
+            cascade_id,
+            domain,
+            edition,
+            root,
+            sequence,
+            committed,
+            created_at,
+        })
+    }
+
+    /// Whether a cancelled transaction failed on a conflicting write (an
+    /// existing item at the sequence, or a concurrent transaction on it).
+    pub(crate) fn is_conflict_reason(code: Option<&str>) -> bool {
+        matches!(
+            code,
+            Some("ConditionalCheckFailed") | Some("TransactionConflict")
+        )
+    }
+
+    /// All items of a Query, following `LastEvaluatedKey`.
+    async fn query_all(&self, query: QueryFluentBuilder) -> Result<Vec<Item>> {
+        query
+            .into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await
+            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))
+    }
+
+    /// All items of a Scan, following `LastEvaluatedKey`.
+    async fn scan_all(&self, scan: ScanFluentBuilder) -> Result<Vec<Item>> {
+        scan.into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await
+            .map_err(|e| StorageError::Backend(format!("DynamoDB scan failed: {}", e)))
+    }
+
+    /// Events of one stream with `lo <= seq < hi` (`hi = None`: unbounded).
+    async fn query_stream(
         &self,
         domain: &str,
         edition: &str,
         root: Uuid,
-    ) -> Result<Option<u32>> {
+        lo: u32,
+        hi: Option<u32>,
+    ) -> Result<Vec<EventPage>> {
         let pk = Self::pk(domain, edition, root);
+        let query = self
+            .client
+            .query()
+            .table_name(&self.table_name)
+            .expression_attribute_values(":pk", AttributeValue::S(pk))
+            .expression_attribute_values(":lo", AttributeValue::N(lo.to_string()));
+        let query = match hi {
+            Some(hi) if hi <= lo => return Ok(Vec::new()),
+            Some(hi) => query
+                .key_condition_expression("pk = :pk AND seq BETWEEN :lo AND :hi")
+                .expression_attribute_values(
+                    ":hi",
+                    AttributeValue::N(Self::to_inclusive(hi).to_string()),
+                ),
+            None => query.key_condition_expression("pk = :pk AND seq >= :lo"),
+        };
+        Self::decode_events(self.query_all(query).await?)
+    }
 
+    /// Lowest (`ascending`) or highest sequence of a stream, or `None` when
+    /// the stream is empty.
+    async fn stream_bound(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        ascending: bool,
+    ) -> Result<Option<u32>> {
         let result = self
             .client
             .query()
             .table_name(&self.table_name)
             .key_condition_expression("pk = :pk")
-            .expression_attribute_values(":pk", AttributeValue::S(pk))
+            .expression_attribute_values(":pk", AttributeValue::S(Self::pk(domain, edition, root)))
+            .projection_expression("seq")
+            .scan_index_forward(ascending)
             .limit(1)
             .send()
             .await
             .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
-
-        if let Some(items) = result.items {
-            if let Some(item) = items.first() {
-                if let Some(AttributeValue::N(seq_str)) = item.get("seq") {
-                    return Ok(seq_str.parse().ok());
-                }
-            }
-        }
-
-        Ok(None)
+        Ok(result.items().first().and_then(Self::item_seq))
     }
 
-    /// Query main timeline events in range [from, until).
-    async fn query_main_events_range(
-        &self,
-        domain: &str,
-        root: Uuid,
-        from: u32,
-        until_seq: u32,
-    ) -> Result<Vec<EventPage>> {
-        if from >= until_seq {
-            return Ok(Vec::new());
-        }
-
-        let pk = Self::pk(domain, DEFAULT_EDITION, root);
-
-        let result = self
-            .client
-            .query()
-            .table_name(&self.table_name)
-            .key_condition_expression("pk = :pk AND seq BETWEEN :from AND :to")
-            .expression_attribute_values(":pk", AttributeValue::S(pk))
-            .expression_attribute_values(":from", AttributeValue::N(from.to_string()))
-            .expression_attribute_values(":to", AttributeValue::N((until_seq - 1).to_string()))
-            .send()
-            .await
-            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
-
-        let mut events = Vec::new();
-        if let Some(items) = result.items {
-            for item in items {
-                if let Some(AttributeValue::B(blob)) = item.get("event") {
-                    let event =
-                        EventPage::decode(blob.as_ref()).map_err(StorageError::ProtobufDecode)?;
-                    events.push(event);
-                }
-            }
-        }
-
-        Ok(events)
-    }
-
-    /// Composite read for editions (main timeline up to divergence + edition events).
-    async fn composite_read(
+    /// Composite read of `edition` over `[lo, hi)`: the main timeline below
+    /// the divergence point followed by the edition's own events.
+    async fn read_range(
         &self,
         domain: &str,
         edition: &str,
         root: Uuid,
-        from: u32,
+        lo: u32,
+        hi: Option<u32>,
+        explicit_divergence: Option<u32>,
     ) -> Result<Vec<EventPage>> {
-        let divergence = match self.get_edition_min_sequence(domain, edition, root).await? {
-            Some(d) => d,
-            None => {
-                return self
-                    .query_edition_events(domain, DEFAULT_EDITION, root, from)
-                    .await;
-            }
-        };
-
-        let mut result = Vec::new();
-
-        if from < divergence {
-            let main_events = self
-                .query_main_events_range(domain, root, from, divergence)
-                .await?;
-            result.extend(main_events);
+        if is_main_timeline(edition) {
+            return self
+                .query_stream(domain, MAIN_TIMELINE_STORAGE_EDITION, root, lo, hi)
+                .await;
         }
-
-        let edition_from = from.max(divergence);
-        let edition_events = self
-            .query_edition_events(domain, edition, root, edition_from)
+        let edition_min = match explicit_divergence {
+            Some(_) => None,
+            None => self.stream_bound(domain, edition, root, true).await?,
+        };
+        let main_hi = match (resolve_divergence(explicit_divergence, edition_min), hi) {
+            (Some(divergence), Some(hi)) => Some(divergence.min(hi)),
+            (Some(divergence), None) => Some(divergence),
+            (None, hi) => hi,
+        };
+        let main_events = self
+            .query_stream(domain, MAIN_TIMELINE_STORAGE_EDITION, root, lo, main_hi)
             .await?;
-        result.extend(edition_events);
+        let edition_events = self.query_stream(domain, edition, root, lo, hi).await?;
+        Ok(merge_composite_events(main_events, edition_events, |_| {
+            true
+        }))
+    }
 
-        Ok(result)
+    /// Items of the aggregate partition matching `filter`.
+    async fn query_partition_filtered(
+        &self,
+        pk: String,
+        filter: String,
+        values: Vec<(&str, AttributeValue)>,
+    ) -> Result<Vec<Item>> {
+        let mut query = self
+            .client
+            .query()
+            .table_name(&self.table_name)
+            .key_condition_expression("pk = :pk")
+            .filter_expression(filter)
+            .expression_attribute_values(":pk", AttributeValue::S(pk));
+        for (name, value) in values {
+            query = query.expression_attribute_values(name, value);
+        }
+        self.query_all(query).await
+    }
+
+    /// Items of the aggregate partition carrying `external_id`.
+    async fn external_id_items(&self, pk: String, external_id: &str) -> Result<Vec<Item>> {
+        self.query_partition_filtered(
+            pk,
+            "external_id = :eid".to_string(),
+            vec![(":eid", AttributeValue::S(external_id.to_string()))],
+        )
+        .await
+    }
+
+    /// Sorted, decoded events of `items`, or `None` when there are none.
+    fn events_or_none(items: Vec<Item>) -> Result<Option<Vec<EventPage>>> {
+        let events = Self::decode_events(items)?;
+        Ok((!events.is_empty()).then_some(events))
+    }
+}
+
+/// Writes one `add` batch as `TransactWriteItems` calls of at most
+/// [`MAX_TRANSACTION_ITEMS`] items, each conditioned on the sequence being
+/// free.
+struct TransactionWriter<'a> {
+    client: &'a Client,
+    table_name: &'a str,
+    expected: u32,
+}
+
+#[async_trait]
+impl UnitWriter for TransactionWriter<'_> {
+    type Unit = Vec<Item>;
+
+    async fn write(&self, items: &Vec<Item>) -> Result<()> {
+        let mut request = self.client.transact_write_items();
+        for item in items {
+            let put = Put::builder()
+                .table_name(self.table_name)
+                .set_item(Some(item.clone()))
+                .condition_expression("attribute_not_exists(pk)")
+                .build()
+                .map_err(|e| StorageError::Backend(format!("DynamoDB put build failed: {}", e)))?;
+            request = request.transact_items(TransactWriteItem::builder().put(put).build());
+        }
+        let Err(err) = request.send().await else {
+            return Ok(());
+        };
+        let conflicted = match err.as_service_error() {
+            Some(TransactWriteItemsError::TransactionCanceledException(cancelled)) => cancelled
+                .cancellation_reasons()
+                .iter()
+                .any(|reason| DynamoEventStore::is_conflict_reason(reason.code())),
+            _ => false,
+        };
+        if conflicted {
+            let actual = items
+                .first()
+                .and_then(DynamoEventStore::item_seq)
+                .unwrap_or(self.expected);
+            return Err(StorageError::SequenceConflict {
+                expected: self.expected,
+                actual,
+            });
+        }
+        Err(StorageError::Backend(format!(
+            "DynamoDB transact_write_items failed: {}",
+            err
+        )))
+    }
+
+    async fn undo(&self, items: &Vec<Item>) -> Result<()> {
+        let mut request = self.client.transact_write_items();
+        for item in items {
+            let key: Item = ["pk", "seq"]
+                .iter()
+                .filter_map(|k| item.get(*k).map(|v| (k.to_string(), v.clone())))
+                .collect();
+            let delete = Delete::builder()
+                .table_name(self.table_name)
+                .set_key(Some(key))
+                .build()
+                .map_err(|e| {
+                    StorageError::Backend(format!("DynamoDB delete build failed: {}", e))
+                })?;
+            request = request.transact_items(TransactWriteItem::builder().delete(delete).build());
+        }
+        request.send().await.map(|_| ()).map_err(|e| {
+            StorageError::Backend(format!("DynamoDB transact_write_items undo failed: {}", e))
+        })
     }
 }
 
@@ -260,9 +508,6 @@ impl EventStore for DynamoEventStore {
         events: Vec<EventPage>,
         meta: &AddMeta<'_>,
     ) -> Result<AddOutcome> {
-        let correlation_id = meta.correlation_id;
-        let external_id = meta.external_id;
-        let source_info = meta.source_info;
         if events.is_empty() {
             return Ok(AddOutcome::Added {
                 first_sequence: 0,
@@ -271,208 +516,51 @@ impl EventStore for DynamoEventStore {
         }
 
         let pk = Self::pk(domain, edition, root);
-        let external_id = external_id.unwrap_or("");
 
-        // C-18: external_id idempotency check (parity with SQLite/Postgres
-        // `check_idempotency`). When external_id is non-empty and a row
-        // already carries that external_id for this aggregate, return
-        // `Duplicate` instead of re-persisting. Scan the aggregate
-        // partition (pk-only Query is server-side filtered) for any item
-        // with the same external_id. The scan is bounded by the
-        // aggregate's history (single root, single edition) rather than
-        // the whole table.
-        if !external_id.is_empty() {
-            let dup_query = self
-                .client
-                .query()
-                .table_name(&self.table_name)
-                .key_condition_expression("pk = :pk")
-                .filter_expression("external_id = :eid")
-                .expression_attribute_values(":pk", AttributeValue::S(pk.clone()))
-                .expression_attribute_values(":eid", AttributeValue::S(external_id.to_string()))
-                .send()
-                .await
-                .map_err(|e| {
-                    StorageError::Backend(format!(
-                        "DynamoDB external_id idempotency query failed: {}",
-                        e
-                    ))
-                })?;
-            if let Some(items) = dup_query.items {
-                if !items.is_empty() {
-                    let mut seqs: Vec<u32> = items
-                        .iter()
-                        .filter_map(|it| match it.get("seq") {
-                            Some(AttributeValue::N(s)) => s.parse::<u32>().ok(),
-                            _ => None,
-                        })
-                        .collect();
-                    seqs.sort_unstable();
-                    if let (Some(&first), Some(&last)) = (seqs.first(), seqs.last()) {
-                        return Ok(AddOutcome::Duplicate {
-                            first_sequence: first,
-                            last_sequence: last,
-                        });
-                    }
-                }
+        if let Some(external_id) = meta.external_id.filter(|e| !e.is_empty()) {
+            let mut seqs: Vec<u32> = self
+                .external_id_items(pk.clone(), external_id)
+                .await?
+                .iter()
+                .filter_map(Self::item_seq)
+                .collect();
+            seqs.sort_unstable();
+            if let (Some(&first), Some(&last)) = (seqs.first(), seqs.last()) {
+                return Ok(AddOutcome::Duplicate {
+                    first_sequence: first,
+                    last_sequence: last,
+                });
             }
         }
 
-        // Validate sequence continuity
-        let expected_next = self.get_next_sequence(domain, edition, root).await?;
-        let first_seq = Self::get_sequence(&events[0]);
+        let stream_next = self
+            .stream_bound(domain, edition, root, false)
+            .await?
+            .map(|max| max + 1);
+        let main_next = if stream_next.is_none() && !is_main_timeline(edition) {
+            self.stream_bound(domain, MAIN_TIMELINE_STORAGE_EDITION, root, false)
+                .await?
+                .map_or(0, |max| max + 1)
+        } else {
+            stream_next.unwrap_or(0)
+        };
+        let window = AppendWindow::for_edition(edition, stream_next, main_next);
+        let (first_sequence, last_sequence) = validate_append(window, &events)?;
 
-        if first_seq != expected_next {
-            return Err(StorageError::SequenceConflict {
-                expected: expected_next,
-                actual: first_seq,
-            });
-        }
-
-        let last_seq = events.last().map(Self::get_sequence).unwrap_or(first_seq);
-
-        // Write events using batch write
-        for event in &events {
-            let seq = Self::get_sequence(event);
-            let event_bytes = event.encode_to_vec();
-
-            let mut item: HashMap<String, AttributeValue> = HashMap::new();
-            item.insert("pk".to_string(), AttributeValue::S(pk.clone()));
-            item.insert("seq".to_string(), AttributeValue::N(seq.to_string()));
-            item.insert("event".to_string(), AttributeValue::B(event_bytes.into()));
-
-            if let Some(ref ts) = event.created_at {
-                let dt = chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
-                    .map(|d| d.to_rfc3339())
-                    .unwrap_or_default();
-                item.insert("created_at".to_string(), AttributeValue::S(dt));
-            }
-
-            if !correlation_id.is_empty() {
-                item.insert(
-                    "correlation_id".to_string(),
-                    AttributeValue::S(correlation_id.to_string()),
-                );
-                // GSI sort key for correlation queries (H-26: percent-encode
-                // the component fields so `#` in any of them is unambiguous).
-                let gsi_sk = format!(
-                    "{}#{}#{}#{}",
-                    crate::storage::helpers::pct_encode_component(domain),
-                    crate::storage::helpers::pct_encode_component(edition),
-                    root,
-                    seq
-                );
-                item.insert("gsi_sk".to_string(), AttributeValue::S(gsi_sk));
-            }
-
-            // C-18: persist external_id + source_info attributes so the
-            // `find_by_external_id` and `find_by_source` trait contracts
-            // actually hold on DynamoDB. Storage is per-event because the
-            // SQL backends store these per-row; behavior parity is what
-            // the contract tests pin. Lookups (below) Query the aggregate
-            // partition and FilterExpression in-app — no GSI required.
-            //
-            // **Operator note**: large aggregates with many `find_by_*`
-            // calls per second will benefit from GSIs keyed on
-            // `external_id` and the composite source fields. The current
-            // implementation prefers no-infra-required correctness over
-            // index-required scale; provisioning GSIs is the operator's
-            // call when call volume justifies the write amplification.
-            if !external_id.is_empty() {
-                item.insert(
-                    "external_id".to_string(),
-                    AttributeValue::S(external_id.to_string()),
-                );
-            }
-            if let Some(info) = source_info.filter(|s| !s.is_empty()) {
-                item.insert(
-                    "source_edition".to_string(),
-                    AttributeValue::S(info.edition.clone()),
-                );
-                item.insert(
-                    "source_domain".to_string(),
-                    AttributeValue::S(info.domain.clone()),
-                );
-                item.insert(
-                    "source_root".to_string(),
-                    AttributeValue::S(info.root.to_string()),
-                );
-                item.insert(
-                    "source_seq".to_string(),
-                    AttributeValue::N(info.seq.to_string()),
-                );
-                item.insert(
-                    "source_component".to_string(),
-                    AttributeValue::S(info.component.clone()),
-                );
-                item.insert(
-                    "source_command_index".to_string(),
-                    AttributeValue::N(info.command_index.to_string()),
-                );
-            }
-
-            // Cascade tracking: extract from EventPage for GSI queries
-            item.insert(
-                "committed".to_string(),
-                AttributeValue::Bool(!event.no_commit),
-            );
-
-            if let Some(ref cid) = event.cascade_id {
-                item.insert("cascade_id".to_string(), AttributeValue::S(cid.clone()));
-            }
-
-            // Parent-routing cover (Cover.ext). Replicated per row to mirror
-            // correlation_id; omitted when the write carried none.
-            if let Some(any) = meta.ext {
-                item.insert(
-                    "ext".to_string(),
-                    AttributeValue::B(prost::Message::encode_to_vec(any).into()),
-                );
-            }
-
-            // C-19: ConditionExpression fences the read-then-write race.
-            // Without this, two writers that both observed
-            // `get_next_sequence() == N` would both succeed `put_item` at
-            // seq=N — the later one would silently overwrite the earlier.
-            // `attribute_not_exists(pk)` is DynamoDB's idiom for "fail if
-            // an item with this composite key already exists" (the
-            // expression is evaluated against the composite key, not the
-            // `pk` attribute alone). The loser surfaces as
-            // `ConditionalCheckFailedException` which we map to
-            // `StorageError::SequenceConflict` so the aggregate pipeline
-            // retries with a fresh sequence read.
-            let put_result = self
-                .client
-                .put_item()
-                .table_name(&self.table_name)
-                .set_item(Some(item))
-                .condition_expression("attribute_not_exists(pk)")
-                .send()
-                .await;
-
-            if let Err(err) = put_result {
-                // Detect ConditionalCheckFailedException via both the
-                // modeled `as_service_error()` path AND a string-match
-                // fallback so this fix survives SDK shape drift (the AWS
-                // SDK has moved this enum around across major versions).
-                let modeled = err
-                    .as_service_error()
-                    .map(|svc| svc.is_conditional_check_failed_exception())
-                    .unwrap_or(false);
-                let err_str = format!("{:?} {}", err, err);
-                let stringy = err_str.contains("ConditionalCheckFailed");
-                if modeled || stringy {
-                    return Err(StorageError::SequenceConflict {
-                        expected: expected_next,
-                        actual: seq,
-                    });
-                }
-                return Err(StorageError::Backend(format!(
-                    "DynamoDB put_item failed: {}",
-                    err
-                )));
-            }
-        }
+        let items = events
+            .iter()
+            .map(|event| Self::build_event_item(&pk, domain, edition, root, event, meta))
+            .collect::<Result<Vec<_>>>()?;
+        let units: Vec<Vec<Item>> = items
+            .chunks(MAX_TRANSACTION_ITEMS)
+            .map(<[Item]>::to_vec)
+            .collect();
+        let writer = TransactionWriter {
+            client: &self.client,
+            table_name: &self.table_name,
+            expected: window.max_first,
+        };
+        write_all_or_undo(&writer, &units).await?;
 
         debug!(
             domain = %domain,
@@ -482,36 +570,24 @@ impl EventStore for DynamoEventStore {
         );
 
         Ok(AddOutcome::Added {
-            first_sequence: first_seq,
-            last_sequence: last_seq,
+            first_sequence,
+            last_sequence,
         })
     }
 
     async fn get(&self, domain: &str, edition: &str, root: Uuid) -> Result<Vec<EventPage>> {
-        let pk = Self::pk(domain, edition, root);
+        self.read_range(domain, edition, root, 0, None, None).await
+    }
 
-        let result = self
-            .client
-            .query()
-            .table_name(&self.table_name)
-            .key_condition_expression("pk = :pk")
-            .expression_attribute_values(":pk", AttributeValue::S(pk))
-            .send()
+    async fn get_with_divergence(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        explicit_divergence: Option<u32>,
+    ) -> Result<Vec<EventPage>> {
+        self.read_range(domain, edition, root, 0, None, explicit_divergence)
             .await
-            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
-
-        let mut events = Vec::new();
-        if let Some(items) = result.items {
-            for item in items {
-                if let Some(AttributeValue::B(blob)) = item.get("event") {
-                    let event =
-                        EventPage::decode(blob.as_ref()).map_err(StorageError::ProtobufDecode)?;
-                    events.push(event);
-                }
-            }
-        }
-
-        Ok(events)
     }
 
     async fn get_from(
@@ -521,13 +597,8 @@ impl EventStore for DynamoEventStore {
         root: Uuid,
         from: u32,
     ) -> Result<Vec<EventPage>> {
-        if is_main_timeline(edition) {
-            return self
-                .query_edition_events(domain, DEFAULT_EDITION, root, from)
-                .await;
-        }
-
-        self.composite_read(domain, edition, root, from).await
+        self.read_range(domain, edition, root, from, None, None)
+            .await
     }
 
     async fn get_from_to(
@@ -538,163 +609,62 @@ impl EventStore for DynamoEventStore {
         from: u32,
         to: u32,
     ) -> Result<Vec<EventPage>> {
-        // H-25: half-open range `[from, to)`. `to == 0` (and `to <= from`)
-        // are empty by definition — short-circuit so we never (a) panic
-        // on `(to - 1)` underflow nor (b) issue a query that DynamoDB
-        // would reject as `from > to`. `Self::to_inclusive` is a
-        // defensive saturating helper; the early return keeps callers
-        // from observing any DynamoDB-side asymmetry.
-        if to <= from {
-            return Ok(Vec::new());
-        }
-        let pk = Self::pk(domain, edition, root);
-        let to_inclusive = Self::to_inclusive(to);
-
-        let result = self
-            .client
-            .query()
-            .table_name(&self.table_name)
-            .key_condition_expression("pk = :pk AND seq BETWEEN :from AND :to")
-            .expression_attribute_values(":pk", AttributeValue::S(pk))
-            .expression_attribute_values(":from", AttributeValue::N(from.to_string()))
-            .expression_attribute_values(":to", AttributeValue::N(to_inclusive.to_string()))
-            .send()
+        self.read_range(domain, edition, root, from, Some(to), None)
             .await
-            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
-
-        let mut events = Vec::new();
-        if let Some(items) = result.items {
-            for item in items {
-                if let Some(AttributeValue::B(blob)) = item.get("event") {
-                    let event =
-                        EventPage::decode(blob.as_ref()).map_err(StorageError::ProtobufDecode)?;
-                    events.push(event);
-                }
-            }
-        }
-
-        Ok(events)
     }
 
     async fn list_roots(&self, domain: &str, edition: &str) -> Result<Vec<Uuid>> {
-        // Scan with filter - not efficient but DynamoDB doesn't support DISTINCT
-        // H-26: percent-encode the prefix components to match `pk()` so a
-        // `#`-containing domain doesn't silently scan the wrong namespace.
-        let prefix = format!(
-            "{}#{}#",
-            crate::storage::helpers::pct_encode_component(domain),
-            crate::storage::helpers::pct_encode_component(edition)
-        );
-
-        let result = self
+        let scan = self
             .client
             .scan()
             .table_name(&self.table_name)
             .filter_expression("begins_with(pk, :prefix)")
-            .expression_attribute_values(":prefix", AttributeValue::S(prefix))
-            .projection_expression("pk")
-            .send()
-            .await
-            .map_err(|e| StorageError::Backend(format!("DynamoDB scan failed: {}", e)))?;
+            .expression_attribute_values(
+                ":prefix",
+                AttributeValue::S(Self::pk_prefix(domain, edition)),
+            )
+            .projection_expression("pk");
 
         let mut roots = std::collections::HashSet::new();
-        if let Some(items) = result.items {
-            for item in items {
-                if let Some(AttributeValue::S(pk)) = item.get("pk") {
-                    if let Some((_, _, root)) = Self::parse_pk(pk) {
-                        roots.insert(root);
-                    }
+        for item in self.scan_all(scan).await? {
+            if let Some(AttributeValue::S(pk)) = item.get("pk") {
+                if let Some((_, _, root)) = Self::parse_pk(pk) {
+                    roots.insert(root);
                 }
             }
         }
-
         Ok(roots.into_iter().collect())
     }
 
     async fn list_domains(&self) -> Result<Vec<String>> {
-        // Scan all items and extract unique domains
-        let result = self
+        let scan = self
             .client
             .scan()
             .table_name(&self.table_name)
-            .projection_expression("pk")
-            .send()
-            .await
-            .map_err(|e| StorageError::Backend(format!("DynamoDB scan failed: {}", e)))?;
+            .projection_expression("pk");
 
         let mut domains = std::collections::HashSet::new();
-        if let Some(items) = result.items {
-            for item in items {
-                if let Some(AttributeValue::S(pk)) = item.get("pk") {
-                    if let Some((domain, _, _)) = Self::parse_pk(pk) {
-                        domains.insert(domain);
-                    }
+        for item in self.scan_all(scan).await? {
+            if let Some(AttributeValue::S(pk)) = item.get("pk") {
+                if let Some((domain, _, _)) = Self::parse_pk(pk) {
+                    domains.insert(domain);
                 }
             }
         }
-
         Ok(domains.into_iter().collect())
     }
 
     async fn get_next_sequence(&self, domain: &str, edition: &str, root: Uuid) -> Result<u32> {
-        if !is_main_timeline(edition) {
-            let pk = Self::pk(domain, edition, root);
-
-            let result = self
-                .client
-                .query()
-                .table_name(&self.table_name)
-                .key_condition_expression("pk = :pk")
-                .expression_attribute_values(":pk", AttributeValue::S(pk))
-                .scan_index_forward(false)
-                .limit(1)
-                .send()
-                .await
-                .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
-
-            if let Some(items) = result.items {
-                if let Some(item) = items.first() {
-                    if let Some(AttributeValue::N(seq_str)) = item.get("seq") {
-                        if let Ok(seq) = seq_str.parse::<u32>() {
-                            return Ok(seq + 1);
-                        }
-                    }
-                }
-            }
+        if let Some(max) = self.stream_bound(domain, edition, root, false).await? {
+            return Ok(max + 1);
         }
-
-        // Query main timeline
-        let target_edition = if is_main_timeline(edition) {
-            edition
-        } else {
-            DEFAULT_EDITION
-        };
-
-        let pk = Self::pk(domain, target_edition, root);
-
-        let result = self
-            .client
-            .query()
-            .table_name(&self.table_name)
-            .key_condition_expression("pk = :pk")
-            .expression_attribute_values(":pk", AttributeValue::S(pk))
-            .scan_index_forward(false)
-            .limit(1)
-            .send()
-            .await
-            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
-
-        if let Some(items) = result.items {
-            if let Some(item) = items.first() {
-                if let Some(AttributeValue::N(seq_str)) = item.get("seq") {
-                    if let Ok(seq) = seq_str.parse::<u32>() {
-                        return Ok(seq + 1);
-                    }
-                }
-            }
+        if is_main_timeline(edition) {
+            return Ok(0);
         }
-
-        Ok(0)
+        Ok(self
+            .stream_bound(domain, MAIN_TIMELINE_STORAGE_EDITION, root, false)
+            .await?
+            .map_or(0, |max| max + 1))
     }
 
     async fn get_until_timestamp(
@@ -704,7 +674,6 @@ impl EventStore for DynamoEventStore {
         root: Uuid,
         until: &prost_types::Timestamp,
     ) -> Result<Vec<EventPage>> {
-        // C10: typed `until` — direct chrono compare, no string parsing.
         let until_dt = chrono::DateTime::from_timestamp(until.seconds, until.nanos as u32).ok_or(
             StorageError::InvalidTimestamp {
                 seconds: until.seconds,
@@ -712,18 +681,16 @@ impl EventStore for DynamoEventStore {
             },
         )?;
 
-        let all_events = self.get(domain, edition, root).await?;
-
-        Ok(all_events
+        let events = self
+            .read_range(domain, edition, root, 0, None, None)
+            .await?;
+        Ok(events
             .into_iter()
             .filter(|e| {
-                if let Some(ref ts) = e.created_at {
-                    if let Some(dt) = chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
-                    {
-                        return dt <= until_dt;
-                    }
-                }
-                false
+                e.created_at
+                    .as_ref()
+                    .and_then(|ts| chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32))
+                    .is_some_and(|dt| dt <= until_dt)
             })
             .collect())
     }
@@ -733,52 +700,41 @@ impl EventStore for DynamoEventStore {
             return Ok(vec![]);
         }
 
-        // Query the GSI
-        let result = self
+        let query = self
             .client
             .query()
             .table_name(&self.table_name)
             .index_name("correlation-index")
             .key_condition_expression("correlation_id = :cid")
-            .expression_attribute_values(":cid", AttributeValue::S(correlation_id.to_string()))
-            .send()
-            .await
-            .map_err(|e| StorageError::Backend(format!("DynamoDB GSI query failed: {}", e)))?;
+            .expression_attribute_values(":cid", AttributeValue::S(correlation_id.to_string()));
 
-        // Group events by (domain, edition, root)
         let mut events_by_root: HashMap<(String, String, Uuid), BookParts> = HashMap::new();
-
-        if let Some(items) = result.items {
-            for item in items {
-                if let (Some(AttributeValue::S(pk)), Some(AttributeValue::B(blob))) =
-                    (item.get("pk"), item.get("event"))
-                {
-                    if let Some((domain, edition, root)) = Self::parse_pk(pk) {
-                        let event = EventPage::decode(blob.as_ref())
-                            .map_err(StorageError::ProtobufDecode)?;
-                        let entry = events_by_root.entry((domain, edition, root)).or_default();
-                        entry.pages.push(event);
-                        if entry.ext.is_none() {
-                            if let Some(AttributeValue::B(ext_blob)) = item.get("ext") {
-                                entry.ext = Some(
-                                    prost_types::Any::decode(ext_blob.as_ref())
-                                        .map_err(StorageError::ProtobufDecode)?,
-                                );
-                            }
+        for item in self.query_all(query).await? {
+            if let (Some(AttributeValue::S(pk)), Some(AttributeValue::B(blob))) =
+                (item.get("pk"), item.get("event"))
+            {
+                if let Some((domain, edition, root)) = Self::parse_pk(pk) {
+                    let event =
+                        EventPage::decode(blob.as_ref()).map_err(StorageError::ProtobufDecode)?;
+                    let entry = events_by_root.entry((domain, edition, root)).or_default();
+                    entry.pages.push(event);
+                    if entry.ext.is_none() {
+                        if let Some(AttributeValue::B(ext_blob)) = item.get("ext") {
+                            entry.ext = Some(
+                                prost_types::Any::decode(ext_blob.as_ref())
+                                    .map_err(StorageError::ProtobufDecode)?,
+                            );
                         }
                     }
                 }
             }
         }
 
-        // Build EventBooks
         let mut books = Vec::new();
         for ((domain, edition, root), parts) in events_by_root {
             let mut pages = parts.pages;
-            pages.sort_by_key(Self::get_sequence);
-
-            // Calculate next_sequence from pages
-            let next_seq = pages.last().map(Self::get_sequence).unwrap_or(0) + 1;
+            pages.sort_by_key(|e| e.sequence_num());
+            let next_seq = pages.last().map(|e| e.sequence_num()).unwrap_or(0) + 1;
 
             books.push(EventBook {
                 cover: Some(Cover {
@@ -803,43 +759,33 @@ impl EventStore for DynamoEventStore {
     }
 
     async fn delete_edition_events(&self, domain: &str, edition: &str) -> Result<u32> {
-        // H-26: percent-encode prefix components to match `pk()`.
-        let prefix = format!(
-            "{}#{}#",
-            crate::storage::helpers::pct_encode_component(domain),
-            crate::storage::helpers::pct_encode_component(edition)
-        );
-        let mut deleted_count = 0u32;
+        guard_edition_delete(edition)?;
 
-        // Scan for matching items
-        let result = self
+        let scan = self
             .client
             .scan()
             .table_name(&self.table_name)
             .filter_expression("begins_with(pk, :prefix)")
-            .expression_attribute_values(":prefix", AttributeValue::S(prefix))
-            .projection_expression("pk, seq")
-            .send()
-            .await
-            .map_err(|e| StorageError::Backend(format!("DynamoDB scan failed: {}", e)))?;
+            .expression_attribute_values(
+                ":prefix",
+                AttributeValue::S(Self::pk_prefix(domain, edition)),
+            )
+            .projection_expression("pk, seq");
 
-        if let Some(items) = result.items {
-            for item in items {
-                if let (Some(pk), Some(seq)) = (item.get("pk"), item.get("seq")) {
-                    if let Err(e) = self
-                        .client
-                        .delete_item()
-                        .table_name(&self.table_name)
-                        .key("pk", pk.clone())
-                        .key("seq", seq.clone())
-                        .send()
-                        .await
-                    {
-                        warn!(error = %e, "Failed to delete event from DynamoDB");
-                    } else {
-                        deleted_count += 1;
-                    }
-                }
+        let mut deleted_count = 0u32;
+        for item in self.scan_all(scan).await? {
+            if let (Some(pk), Some(seq)) = (item.get("pk"), item.get("seq")) {
+                self.client
+                    .delete_item()
+                    .table_name(&self.table_name)
+                    .key("pk", pk.clone())
+                    .key("seq", seq.clone())
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        StorageError::Backend(format!("DynamoDB delete_item failed: {}", e))
+                    })?;
+                deleted_count += 1;
             }
         }
 
@@ -860,22 +806,13 @@ impl EventStore for DynamoEventStore {
         root: Uuid,
         source_info: &SourceInfo,
     ) -> Result<Option<Vec<EventPage>>> {
-        // C-18: Saga idempotency. Pre-fix this method returned `Ok(None)`
-        // unconditionally, silently violating the trait contract documented
-        // at `src/storage/event_store.rs:236-248`. Now we Query the
-        // aggregate partition (server-side restricted to a single
-        // domain/edition/root) and FilterExpression on the source
-        // attributes that `add()` persists. The empty-source short-circuit
-        // mirrors the SQLite/Postgres implementations.
         if source_info.is_empty() {
             return Ok(None);
         }
 
-        let pk = Self::pk(domain, edition, root);
-        // Component/index clauses: rows written before these attributes
-        // existed have no backfill (unlike the SQL backends' NOT NULL
-        // DEFAULT), so a lookup carrying the pre-upgrade defaults (""/0)
-        // must also accept attribute-absent rows.
+        // Rows written before the component/index attributes existed carry
+        // neither; a lookup with the pre-upgrade defaults (""/0) also
+        // accepts attribute-absent rows.
         let component_clause = if source_info.component.is_empty() {
             "(attribute_not_exists(source_component) OR source_component = :scomp)"
         } else {
@@ -891,54 +828,27 @@ impl EventStore for DynamoEventStore {
              AND source_root = :sro AND source_seq = :sseq \
              AND {component_clause} AND {index_clause}"
         );
-        let result = self
-            .client
-            .query()
-            .table_name(&self.table_name)
-            .key_condition_expression("pk = :pk")
-            .filter_expression(filter)
-            .expression_attribute_values(":pk", AttributeValue::S(pk))
-            .expression_attribute_values(":sed", AttributeValue::S(source_info.edition.clone()))
-            .expression_attribute_values(":sdo", AttributeValue::S(source_info.domain.clone()))
-            .expression_attribute_values(":sro", AttributeValue::S(source_info.root.to_string()))
-            .expression_attribute_values(":sseq", AttributeValue::N(source_info.seq.to_string()))
-            .expression_attribute_values(":scomp", AttributeValue::S(source_info.component.clone()))
-            .expression_attribute_values(
-                ":sidx",
-                AttributeValue::N(source_info.command_index.to_string()),
+        let items = self
+            .query_partition_filtered(
+                Self::pk(domain, edition, root),
+                filter,
+                vec![
+                    (
+                        ":sed",
+                        AttributeValue::S(storage_edition(&source_info.edition).to_string()),
+                    ),
+                    (":sdo", AttributeValue::S(source_info.domain.clone())),
+                    (":sro", AttributeValue::S(source_info.root.to_string())),
+                    (":sseq", AttributeValue::N(source_info.seq.to_string())),
+                    (":scomp", AttributeValue::S(source_info.component.clone())),
+                    (
+                        ":sidx",
+                        AttributeValue::N(source_info.command_index.to_string()),
+                    ),
+                ],
             )
-            .send()
-            .await
-            .map_err(|e| {
-                StorageError::Backend(format!("DynamoDB find_by_source query failed: {}", e))
-            })?;
-
-        let Some(items) = result.items else {
-            return Ok(None);
-        };
-        if items.is_empty() {
-            return Ok(None);
-        }
-
-        let mut events_with_seq: Vec<(u32, EventPage)> = Vec::with_capacity(items.len());
-        for item in items {
-            let Some(AttributeValue::B(blob)) = item.get("event") else {
-                continue;
-            };
-            let seq = match item.get("seq") {
-                Some(AttributeValue::N(s)) => s.parse::<u32>().unwrap_or(0),
-                _ => 0,
-            };
-            let event = EventPage::decode(blob.as_ref()).map_err(StorageError::ProtobufDecode)?;
-            events_with_seq.push((seq, event));
-        }
-        events_with_seq.sort_by_key(|(s, _)| *s);
-        let events: Vec<EventPage> = events_with_seq.into_iter().map(|(_, e)| e).collect();
-        if events.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(events))
-        }
+            .await?;
+        Self::events_or_none(items)
     }
 
     async fn find_by_external_id(
@@ -948,189 +858,51 @@ impl EventStore for DynamoEventStore {
         root: Uuid,
         external_id: &str,
     ) -> Result<Option<Vec<EventPage>>> {
-        // C-18: fact-injection idempotency. Pre-fix this method returned
-        // `Ok(None)` unconditionally, silently violating the trait
-        // contract documented at `src/storage/event_store.rs:250-267`. We
-        // Query the aggregate partition (server-side restricted) and
-        // FilterExpression on the `external_id` attribute that `add()`
-        // now persists. Empty external_id returns None per contract.
         if external_id.is_empty() {
             return Ok(None);
         }
-
-        let pk = Self::pk(domain, edition, root);
-        let result = self
-            .client
-            .query()
-            .table_name(&self.table_name)
-            .key_condition_expression("pk = :pk")
-            .filter_expression("external_id = :eid")
-            .expression_attribute_values(":pk", AttributeValue::S(pk))
-            .expression_attribute_values(":eid", AttributeValue::S(external_id.to_string()))
-            .send()
-            .await
-            .map_err(|e| {
-                StorageError::Backend(format!("DynamoDB find_by_external_id query failed: {}", e))
-            })?;
-
-        let Some(items) = result.items else {
-            return Ok(None);
-        };
-        if items.is_empty() {
-            return Ok(None);
-        }
-
-        let mut events_with_seq: Vec<(u32, EventPage)> = Vec::with_capacity(items.len());
-        for item in items {
-            let Some(AttributeValue::B(blob)) = item.get("event") else {
-                continue;
-            };
-            let seq = match item.get("seq") {
-                Some(AttributeValue::N(s)) => s.parse::<u32>().unwrap_or(0),
-                _ => 0,
-            };
-            let event = EventPage::decode(blob.as_ref()).map_err(StorageError::ProtobufDecode)?;
-            events_with_seq.push((seq, event));
-        }
-        events_with_seq.sort_by_key(|(s, _)| *s);
-        let events: Vec<EventPage> = events_with_seq.into_iter().map(|(_, e)| e).collect();
-        if events.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(events))
-        }
+        let items = self
+            .external_id_items(Self::pk(domain, edition, root), external_id)
+            .await?;
+        Self::events_or_none(items)
     }
 
     async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {
-        let threshold_dt = chrono::DateTime::parse_from_rfc3339(threshold)
-            .map_err(|e| StorageError::InvalidTimestampFormat(e.to_string()))?;
+        let threshold = parse_rfc3339_utc(threshold)?;
 
-        // Scan cascade-index to find all cascade_ids and their states
-        // Group by cascade_id, check if any event is committed or all are stale
-        let result = self
+        let scan = self
             .client
             .scan()
             .table_name(&self.table_name)
             .index_name("cascade-index")
-            .projection_expression("cascade_id, committed, created_at")
-            .send()
-            .await
-            .map_err(|e| {
-                StorageError::Backend(format!("DynamoDB cascade-index scan failed: {}", e))
-            })?;
-
-        // Track state per cascade_id
-        struct CascadeState {
-            has_committed: bool,
-            all_before_threshold: bool,
-        }
-        let mut cascade_states: HashMap<String, CascadeState> = HashMap::new();
-
-        if let Some(items) = result.items {
-            for item in items {
-                let cascade_id = match item.get("cascade_id") {
-                    Some(AttributeValue::S(cid)) => cid.clone(),
-                    _ => continue,
-                };
-
-                let committed = match item.get("committed") {
-                    Some(AttributeValue::Bool(b)) => *b,
-                    _ => false,
-                };
-
-                let is_stale = match item.get("created_at") {
-                    Some(AttributeValue::S(ts)) => chrono::DateTime::parse_from_rfc3339(ts)
-                        .map(|dt| dt < threshold_dt)
-                        .unwrap_or(false),
-                    _ => false,
-                };
-
-                let state = cascade_states.entry(cascade_id).or_insert(CascadeState {
-                    has_committed: false,
-                    all_before_threshold: true,
-                });
-
-                if committed {
-                    state.has_committed = true;
-                }
-                if !is_stale {
-                    state.all_before_threshold = false;
-                }
-            }
-        }
-
-        // Return cascade_ids that are stale (no committed events, all before threshold)
-        Ok(cascade_states
-            .into_iter()
-            .filter(|(_, state)| !state.has_committed && state.all_before_threshold)
-            .map(|(cid, _)| cid)
-            .collect())
+            .projection_expression("cascade_id, pk, seq, #committed, created_at")
+            .expression_attribute_names("#committed", "committed");
+        let rows: Vec<CascadeRow> = self
+            .scan_all(scan)
+            .await?
+            .iter()
+            .filter_map(Self::cascade_row_from_item)
+            .collect();
+        Ok(stale_cascade_ids(&rows, threshold))
     }
 
     async fn query_cascade_participants(
         &self,
         cascade_id: &str,
     ) -> Result<Vec<CascadeParticipant>> {
-        // Query cascade-index for all events with this cascade_id
-        let result = self
+        let query = self
             .client
             .query()
             .table_name(&self.table_name)
             .index_name("cascade-index")
             .key_condition_expression("cascade_id = :cid")
-            .expression_attribute_values(":cid", AttributeValue::S(cascade_id.to_string()))
-            .send()
-            .await
-            .map_err(|e| {
-                StorageError::Backend(format!("DynamoDB cascade-index query failed: {}", e))
-            })?;
-
-        // Group by (domain, edition, root), collect sequences for uncommitted events
-        let mut participants_map: HashMap<(String, String, Uuid), Vec<u32>> = HashMap::new();
-
-        if let Some(items) = result.items {
-            for item in items {
-                // Check if committed - skip committed events
-                let committed = match item.get("committed") {
-                    Some(AttributeValue::Bool(b)) => *b,
-                    _ => false,
-                };
-                if committed {
-                    continue;
-                }
-
-                // Parse pk to get domain, edition, root
-                let pk = match item.get("pk") {
-                    Some(AttributeValue::S(s)) => s,
-                    _ => continue,
-                };
-                let (domain, edition, root) = match Self::parse_pk(pk) {
-                    Some(parsed) => parsed,
-                    None => continue,
-                };
-
-                // Get sequence
-                let seq = match item.get("seq") {
-                    Some(AttributeValue::N(s)) => s.parse::<u32>().unwrap_or(0),
-                    _ => continue,
-                };
-
-                participants_map
-                    .entry((domain, edition, root))
-                    .or_default()
-                    .push(seq);
-            }
-        }
-
-        // Convert to CascadeParticipant list
-        Ok(participants_map
-            .into_iter()
-            .map(|((domain, edition, root), sequences)| CascadeParticipant {
-                domain,
-                edition,
-                root,
-                sequences,
-            })
-            .collect())
+            .expression_attribute_values(":cid", AttributeValue::S(cascade_id.to_string()));
+        let rows: Vec<CascadeRow> = self
+            .query_all(query)
+            .await?
+            .iter()
+            .filter_map(Self::cascade_row_from_item)
+            .collect();
+        Ok(unresolved_participants(&rows, cascade_id))
     }
 }

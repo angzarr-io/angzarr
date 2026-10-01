@@ -37,7 +37,7 @@ check-features FEATURES:
 # deleted helper" rot (review finding T1) — `cargo test` alone never
 # compiles feature-gated test targets that no recipe invokes.
 check-tests:
-    cargo check --tests --features "test-utils amqp kafka pubsub sns-sqs postgres redis immudb"
+    cargo check --tests --features "test-utils amqp kafka pubsub sns-sqs postgres redis immudb dynamo bigtable"
 
 # Check formatting (use fmt-fix to auto-format)
 fmt:
@@ -227,7 +227,7 @@ storage *ARGS:
     fi
 
 # Private: Run all storage backend tests
-_storage-all: _storage-sqlite _storage-postgres _storage-redis _storage-immudb
+_storage-all: _storage-sqlite _storage-mock _storage-postgres _storage-redis _storage-immudb _storage-dynamo _storage-bigtable
     @echo "All storage contract tests passed"
 
 # Private: SQLite storage tests (in-memory, no containers)
@@ -238,6 +238,13 @@ _storage-all: _storage-sqlite _storage-postgres _storage-redis _storage-immudb
 _storage-sqlite:
     @echo "=== Storage: SQLite (macro contract tests) ==="
     cargo test --test storage_sqlite --features test-utils -- --nocapture
+
+# Private: Mock storage tests (in-memory, no containers)
+# WHY: Unit tests across the crate use the Mock stores as stand-ins for the
+# production backends; the Mock must pass the same contract suites.
+_storage-mock:
+    @echo "=== Storage: Mock (macro contract tests) ==="
+    cargo test --test storage_mock --features test-utils -- --nocapture
 
 # Private: PostgreSQL storage tests (testcontainers)
 # WHY: Production-grade RDBMS. Tests verify SQL schema correctness,
@@ -267,6 +274,22 @@ _storage-redis:
 _storage-immudb:
     @echo "=== Storage: ImmuDB (direct contract tests) ==="
     cargo test --test storage_immudb --features immudb -- --nocapture
+
+# Private: DynamoDB storage tests (testcontainers, DynamoDB Local)
+# WHY: AWS deployments store events, snapshots and positions in DynamoDB. The
+# contract macros run against DynamoDB Local, which enforces the same
+# conditional-write, transaction and 1 MB page semantics as the service.
+_storage-dynamo:
+    @echo "=== Storage: DynamoDB (macro contract tests, DynamoDB Local) ==="
+    cargo test --test storage_dynamo --features "dynamo test-utils" -- --nocapture
+
+# Private: Bigtable storage tests (testcontainers, Cloud Bigtable emulator)
+# WHY: GCP deployments store events, snapshots and positions in Bigtable. The
+# contract macros run against the emulator, which implements the same
+# conditional-mutation and row-range semantics as the service.
+_storage-bigtable:
+    @echo "=== Storage: Bigtable (macro contract tests, emulator) ==="
+    cargo test --test storage_bigtable --features "bigtable test-utils" -- --nocapture
 
 # === Bus Contract Tests ===
 # =============================================================================
