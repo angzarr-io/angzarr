@@ -66,6 +66,7 @@ pub mod filter;
 mod publishers;
 pub mod reader;
 pub mod replay;
+pub mod replay_grpc;
 pub mod trigger;
 
 use std::collections::HashMap;
@@ -89,13 +90,14 @@ pub use audit::{NoopReplayAuditWriter, ReplayAuditRecord, ReplayAuditWriter, Rep
 pub use chained::ChainedDlqPublisher;
 pub use config::{DlqConfig, DlqTargetConfig};
 pub use error::{errmsg, DlqError};
-pub use factory::{init_dlq_publisher, init_dlq_reader, DlqBackend};
+pub use factory::{init_dlq_publisher, init_dlq_reader, init_replay_audit_writer, DlqBackend};
 pub use filter::parse_filter;
 pub use reader::{
     DeadLetterPage, DeadLetterReader, ListFilter, NoopDeadLetterReader, StoredDeadLetter,
     DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE,
 };
 pub use replay::{NoopReplayPublisher, ReplayMetadata, ReplayMode, ReplayPublisher};
+pub use replay_grpc::GrpcReplayPublisher;
 
 // Re-export publishers
 pub use publishers::ChannelDeadLetterPublisher;

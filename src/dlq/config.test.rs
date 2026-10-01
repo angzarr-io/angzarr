@@ -124,12 +124,15 @@ fn test_amqp_dlq_config_default() {
     assert_eq!(config.url, "amqp://localhost:5672");
 }
 
-/// Kafka config defaults to localhost with standard prefix.
+/// Kafka config defaults to localhost with the prefix every DLQ backend
+/// shares (`angzarr-dlq-{domain}` topics), matching the publisher's own
+/// default.
 #[test]
 fn test_kafka_dlq_config_default() {
     let config = KafkaDlqConfig::default();
     assert_eq!(config.bootstrap_servers, "localhost:9092");
-    assert_eq!(config.topic_prefix, "angzarr.dlq");
+    assert_eq!(config.topic_prefix, "angzarr-dlq");
+    assert_eq!(config.topic_prefix, PubSubDlqConfig::default().topic_prefix);
     assert!(config.sasl_username.is_none());
     assert!(config.sasl_password.is_none());
 }

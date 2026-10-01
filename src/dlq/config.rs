@@ -51,6 +51,9 @@ pub struct DlqConfig {
     /// R2-15 introduces this field; previously the status binary always
     /// used a noop reader regardless of config.
     pub audit: Option<DatabaseDlqConfig>,
+    /// Days dead letters are kept in the `audit` store; angzarr-status
+    /// deletes older entries daily. `None` keeps them forever.
+    pub retention_days: Option<u32>,
 }
 
 impl DlqConfig {
@@ -230,7 +233,7 @@ impl Default for KafkaDlqConfig {
     fn default() -> Self {
         Self {
             bootstrap_servers: "localhost:9092".to_string(),
-            topic_prefix: "angzarr.dlq".to_string(),
+            topic_prefix: "angzarr-dlq".to_string(),
             sasl_username: None,
             sasl_password: None,
             sasl_mechanism: None,

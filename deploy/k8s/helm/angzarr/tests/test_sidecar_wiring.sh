@@ -95,6 +95,8 @@ check(env(status).get("ANGZARR__TRANSPORT__TCP__HOST") == "0.0.0.0",
       "status binds all interfaces")
 check(env(status).get("ANGZARR_CONFIG") == "/etc/angzarr/config.yaml",
       "status reads the sidecar config file (dlq.audit)")
+check(env(status).get("ANGZARR_STATIC_ENDPOINTS") == "order=order-aggregate:1310,payment=payment-aggregate:1310",
+      "status can re-submit replayed commands to each domain's aggregate")
 
 # --- saga -----------------------------------------------------------------
 saga = container(find("Deployment", "order-payment-saga"), "angzarr")

@@ -338,11 +338,15 @@ config:
     #       postgres:
     #         uri: postgres://angzarr:...@angzarr-db-rw:5432/angzarr
     targets: []
-    # Store angzarr-status reads dead letters from (unset = empty console):
+    # Store angzarr-status reads dead letters from and records replays in
+    # (unset = empty console, replays unrecorded):
     #   audit:
     #     storage_type: postgres
     #     postgres:
     #       uri: postgres://...
+    # Days angzarr-status keeps dead letters in the audit store (unset =
+    # forever):
+    #   retention_days: 30
 
 # Messaging configuration
 messaging:

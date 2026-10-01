@@ -108,9 +108,8 @@ pub struct SqliteReplayAuditWriter {
 }
 
 impl SqliteReplayAuditWriter {
-    /// Open a pool against the SQLite URI. Caller should run
-    /// [`run_sqlite_migrations`] before recording, but `record`
-    /// surfaces a clear error if the table is missing.
+    /// Open a pool against the SQLite URI and apply the status
+    /// migrations (the `dlq_replay_audit` table).
     ///
     /// H-32: refuses to construct when `POD_REPLICAS>1` — see
     /// [`guard_sqlite_audit_against_replicas`].
@@ -119,7 +118,8 @@ impl SqliteReplayAuditWriter {
         let pool = sqlx::SqlitePool::connect(uri)
             .await
             .map_err(|e| DlqError::Connection(format!("Failed to connect to SQLite: {}", e)))?;
-        info!(uri = %uri, "SQLite replay-audit writer initialized");
+        run_sqlite_migrations(&pool).await?;
+        info!(uri = %crate::utils::redact::redact_uri(uri), "SQLite replay-audit writer initialized");
         Ok(Self { pool })
     }
 
@@ -241,11 +241,14 @@ pub struct PostgresReplayAuditWriter {
 
 #[cfg(feature = "postgres")]
 impl PostgresReplayAuditWriter {
+    /// Open a pool against the PostgreSQL URI and apply the status
+    /// migrations (the `dlq_replay_audit` table).
     pub async fn new(uri: &str) -> Result<Self, DlqError> {
         let pool = sqlx::PgPool::connect(uri)
             .await
             .map_err(|e| DlqError::Connection(format!("Failed to connect to PostgreSQL: {}", e)))?;
-        info!(uri = %uri, "Postgres replay-audit writer initialized");
+        run_postgres_migrations(&pool).await?;
+        info!(uri = %crate::utils::redact::redact_uri(uri), "Postgres replay-audit writer initialized");
         Ok(Self { pool })
     }
 

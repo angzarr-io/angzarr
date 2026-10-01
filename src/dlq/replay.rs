@@ -49,11 +49,13 @@ pub struct ReplayMetadata {
     /// The pre-replay `correlation_id`. Empty string when the source
     /// row's `correlation_id` was NULL.
     pub original_correlation_id: String,
+    /// How the publisher treats the command's sequence.
+    pub mode: ReplayMode,
 }
 
 /// The two replay shapes the operator chooses between. Mirrors the
 /// `ReplayMode` proto enum (`crate::proto::status::ReplayMode`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ReplayMode {
     /// Preserve the original command's sequence on the page header.
     /// Likely rejected as `FAILED_PRECONDITION` if state has moved;
@@ -61,7 +63,9 @@ pub enum ReplayMode {
     AsIs,
     /// Rewrite the sequence to the aggregate's current
     /// `next_sequence` before publishing. Best chance of success
-    /// but the payload may depend on stale state.
+    /// but the payload may depend on stale state. The default, as for
+    /// an unspecified wire value.
+    #[default]
     FreshSequence,
 }
 

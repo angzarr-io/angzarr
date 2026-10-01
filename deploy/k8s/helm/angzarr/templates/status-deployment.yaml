@@ -82,6 +82,9 @@ spec:
               value: {{ .Values.infrastructure.status.grpcPort | quote }}
             # dlq.audit (the DLQ reader) comes from the sidecar config file.
             {{- include "angzarr.sidecar-config-env" . | nindent 12 }}
+            # Replayed dead-letter commands go to their domain's aggregate.
+            - name: ANGZARR_STATIC_ENDPOINTS
+              value: "{{ include "angzarr.static-endpoints" (dict "root" . "port" .Values.service.aggregatePort) }}"
             # H-32: surface the deployment replica count to the binary so the
             # SQLite audit writer can refuse to start when configured for
             # multi-replica HA. SQLite is single-writer; two pods writing the

@@ -76,17 +76,12 @@ pub struct PostgresDlqPublisher {
     pool: sqlx::PgPool,
 }
 
+/// Create the PostgreSQL `dlq_entries` table and indexes if absent. Run by
+/// both the publisher and the reader, so either can open a fresh store.
 #[cfg(feature = "postgres")]
-impl PostgresDlqPublisher {
-    /// Create a new PostgreSQL DLQ publisher with its own connection pool.
-    pub async fn new(uri: &str) -> Result<Self, DlqError> {
-        let pool = sqlx::PgPool::connect(uri)
-            .await
-            .map_err(|e| DlqError::Connection(format!("Failed to connect to PostgreSQL: {}", e)))?;
-
-        // Run migrations for DLQ table
-        sqlx::query(
-            r#"
+pub(crate) async fn ensure_postgres_dlq_schema(pool: &sqlx::PgPool) -> Result<(), DlqError> {
+    sqlx::query(
+        r#"
             CREATE TABLE IF NOT EXISTS dlq_entries (
                 id BIGSERIAL PRIMARY KEY,
                 domain TEXT NOT NULL,
@@ -102,29 +97,43 @@ impl PostgresDlqPublisher {
                 created_at TEXT NOT NULL DEFAULT TO_CHAR(NOW(), 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
             )
             "#,
-        )
-        .execute(&pool)
-        .await
-        .map_err(|e| DlqError::Connection(format!("Failed to create DLQ table: {}", e)))?;
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| DlqError::Connection(format!("Failed to create DLQ table: {}", e)))?;
 
-        // Create indexes -- one statement per `sqlx::query` call.
-        // Postgres rejects multi-statement prepared queries with
-        // "cannot insert multiple commands into a prepared statement";
-        // sqlx prepares every `query(...).execute(...)` call by default.
-        // Caught by `tests/dlq_round_trip_postgres.rs`. SQLite's
-        // matching block (below) already does this correctly per
-        // statement.
-        for stmt in [
-            "CREATE INDEX IF NOT EXISTS idx_dlq_entries_domain ON dlq_entries(domain)",
-            "CREATE INDEX IF NOT EXISTS idx_dlq_entries_correlation_id ON dlq_entries(correlation_id)",
-            "CREATE INDEX IF NOT EXISTS idx_dlq_entries_occurred_at ON dlq_entries(occurred_at)",
-        ] {
-            sqlx::query(stmt).execute(&pool).await.map_err(|e| {
-                DlqError::Connection(format!("Failed to create DLQ indexes: {}", e))
-            })?;
-        }
+    // Create indexes -- one statement per `sqlx::query` call.
+    // Postgres rejects multi-statement prepared queries with
+    // "cannot insert multiple commands into a prepared statement";
+    // sqlx prepares every `query(...).execute(...)` call by default.
+    // Caught by `tests/dlq_round_trip_postgres.rs`. SQLite's
+    // matching block (below) already does this correctly per
+    // statement.
+    for stmt in [
+        "CREATE INDEX IF NOT EXISTS idx_dlq_entries_domain ON dlq_entries(domain)",
+        "CREATE INDEX IF NOT EXISTS idx_dlq_entries_correlation_id ON dlq_entries(correlation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_dlq_entries_occurred_at ON dlq_entries(occurred_at)",
+    ] {
+        sqlx::query(stmt)
+            .execute(pool)
+            .await
+            .map_err(|e| DlqError::Connection(format!("Failed to create DLQ indexes: {}", e)))?;
+    }
 
-        info!(uri = %uri, "PostgreSQL DLQ publisher initialized");
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+impl PostgresDlqPublisher {
+    /// Create a new PostgreSQL DLQ publisher with its own connection pool.
+    pub async fn new(uri: &str) -> Result<Self, DlqError> {
+        let pool = sqlx::PgPool::connect(uri)
+            .await
+            .map_err(|e| DlqError::Connection(format!("Failed to connect to PostgreSQL: {}", e)))?;
+
+        ensure_postgres_dlq_schema(&pool).await?;
+
+        info!(uri = %crate::utils::redact::redact_uri(uri), "PostgreSQL DLQ publisher initialized");
 
         Ok(Self { pool })
     }
@@ -225,16 +234,11 @@ pub struct SqliteDlqPublisher {
     pool: sqlx::SqlitePool,
 }
 
-impl SqliteDlqPublisher {
-    /// Create a new SQLite DLQ publisher with its own connection pool.
-    pub async fn new(uri: &str) -> Result<Self, DlqError> {
-        let pool = sqlx::SqlitePool::connect(uri)
-            .await
-            .map_err(|e| DlqError::Connection(format!("Failed to connect to SQLite: {}", e)))?;
-
-        // Run migrations for DLQ table
-        sqlx::query(
-            r#"
+/// Create the SQLite `dlq_entries` table and indexes if absent. Run by
+/// both the publisher and the reader, so either can open a fresh store.
+pub(crate) async fn ensure_sqlite_dlq_schema(pool: &sqlx::SqlitePool) -> Result<(), DlqError> {
+    sqlx::query(
+        r#"
             CREATE TABLE IF NOT EXISTS dlq_entries (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 domain TEXT NOT NULL,
@@ -250,31 +254,44 @@ impl SqliteDlqPublisher {
                 created_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
             "#,
-        )
-        .execute(&pool)
-        .await
-        .map_err(|e| DlqError::Connection(format!("Failed to create DLQ table: {}", e)))?;
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| DlqError::Connection(format!("Failed to create DLQ table: {}", e)))?;
 
-        // Create indexes
-        sqlx::query(
-            r#"
+    // Create indexes
+    sqlx::query(
+        r#"
             CREATE INDEX IF NOT EXISTS idx_dlq_entries_domain ON dlq_entries(domain)
             "#,
-        )
-        .execute(&pool)
-        .await
-        .map_err(|e| DlqError::Connection(format!("Failed to create DLQ indexes: {}", e)))?;
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| DlqError::Connection(format!("Failed to create DLQ indexes: {}", e)))?;
 
-        sqlx::query(
-            r#"
-            CREATE INDEX IF NOT EXISTS idx_dlq_entries_correlation_id ON dlq_entries(correlation_id)
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .map_err(|e| DlqError::Connection(format!("Failed to create DLQ indexes: {}", e)))?;
+    for stmt in [
+        "CREATE INDEX IF NOT EXISTS idx_dlq_entries_correlation_id ON dlq_entries(correlation_id)",
+        "CREATE INDEX IF NOT EXISTS idx_dlq_entries_occurred_at ON dlq_entries(occurred_at)",
+    ] {
+        sqlx::query(stmt)
+            .execute(pool)
+            .await
+            .map_err(|e| DlqError::Connection(format!("Failed to create DLQ indexes: {}", e)))?;
+    }
 
-        info!(uri = %uri, "SQLite DLQ publisher initialized");
+    Ok(())
+}
+
+impl SqliteDlqPublisher {
+    /// Create a new SQLite DLQ publisher with its own connection pool.
+    pub async fn new(uri: &str) -> Result<Self, DlqError> {
+        let pool = sqlx::SqlitePool::connect(uri)
+            .await
+            .map_err(|e| DlqError::Connection(format!("Failed to connect to SQLite: {}", e)))?;
+
+        ensure_sqlite_dlq_schema(&pool).await?;
+
+        info!(uri = %crate::utils::redact::redact_uri(uri), "SQLite DLQ publisher initialized");
 
         Ok(Self { pool })
     }

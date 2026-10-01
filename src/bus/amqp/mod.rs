@@ -224,7 +224,7 @@ impl AmqpEventBus {
 
         info!(
             exchange = %config.exchange,
-            url = %config.url,
+            url = %crate::utils::redact::redact_uri(&config.url),
             "Connected to AMQP"
         );
 

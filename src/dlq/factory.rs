@@ -8,6 +8,7 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use tracing::debug;
 
+use super::audit::{NoopReplayAuditWriter, ReplayAuditWriter};
 use super::chained::ChainedDlqPublisher;
 use super::config::{DatabaseDlqConfig, DlqConfig, DlqTargetConfig};
 use super::error::{errmsg, DlqError, Result};
@@ -139,6 +140,35 @@ pub async fn init_dlq_reader(
             let reader = PostgresDlqReader::new(&audit.postgres.uri).await?;
             Ok(Arc::new(reader) as Arc<dyn DeadLetterReader>)
         }
+        #[cfg(not(feature = "postgres"))]
+        "postgres" => Err(Box::new(DlqError::InvalidArgument(
+            "dlq.audit.storage_type='postgres' requires the postgres cargo feature".to_string(),
+        ))),
+        other => Err(Box::new(DlqError::UnknownType(format!(
+            "{}{}",
+            errmsg::UNKNOWN_TYPE,
+            other
+        )))),
+    }
+}
+
+/// Initialize the replay-audit writer for the status binary from the same
+/// `dlq.audit` store the reader uses, applying its migrations. `None` gives
+/// the no-op writer (replays are not fenced or recorded).
+pub async fn init_replay_audit_writer(
+    audit: Option<&DatabaseDlqConfig>,
+) -> std::result::Result<Arc<dyn ReplayAuditWriter>, Box<dyn std::error::Error>> {
+    let Some(audit) = audit else {
+        return Ok(Arc::new(NoopReplayAuditWriter));
+    };
+    match audit.storage_type.as_str() {
+        "sqlite" => Ok(Arc::new(
+            super::publishers::SqliteReplayAuditWriter::new(&audit.sqlite.uri()).await?,
+        )),
+        #[cfg(feature = "postgres")]
+        "postgres" => Ok(Arc::new(
+            super::publishers::PostgresReplayAuditWriter::new(&audit.postgres.uri).await?,
+        )),
         #[cfg(not(feature = "postgres"))]
         "postgres" => Err(Box::new(DlqError::InvalidArgument(
             "dlq.audit.storage_type='postgres' requires the postgres cargo feature".to_string(),
