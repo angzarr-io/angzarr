@@ -1354,6 +1354,8 @@ async fn post_persist_confirm_after_revoke_does_not_republish_and_dlqs() {
 #[derive(Clone, Default)]
 struct ScriptedSagaServer {
     fail: Option<tonic::Code>,
+    /// Reaction errors reported in the success response's metadata.
+    report: Vec<CascadeReactionError>,
     requests: Arc<Mutex<Vec<(SagaHandleRequest, tonic::metadata::MetadataMap)>>>,
 }
 
@@ -1370,7 +1372,14 @@ impl SagaCoordServiceTrait for ScriptedSagaServer {
             .push((request.into_inner(), metadata));
         match self.fail {
             Some(code) => Err(Status::new(code, "saga delivery rejected")),
-            None => Ok(tonic::Response::new(SagaResponse::default())),
+            None => {
+                let mut response = tonic::Response::new(SagaResponse::default());
+                crate::orchestration::shared::attach_reaction_errors(
+                    &mut response,
+                    self.report.clone(),
+                );
+                Ok(response)
+            }
         }
     }
 
@@ -1498,10 +1507,25 @@ async fn sync_fanout_continue_runs_all_and_succeeds() {
         Some(tonic::Code::FailedPrecondition),
     )
     .await;
-    rig.ctx.sync_fanout(&cascade_book()).await.unwrap();
+    let fanout = rig.ctx.sync_fanout(&cascade_book()).await.unwrap();
     assert_eq!(calls(&rig.first).await, 1);
     assert_eq!(calls(&rig.second).await, 1);
     assert_eq!(rig.dlq.publish_calls.load(Ordering::SeqCst), 0);
+    let mut components: Vec<_> = fanout
+        .reaction_errors
+        .iter()
+        .map(|e| e.component.as_str())
+        .collect();
+    components.sort();
+    assert_eq!(components, vec!["saga-a", "saga-b"]);
+    for error in &fanout.reaction_errors {
+        assert_eq!(error.code, tonic::Code::FailedPrecondition as i32);
+        assert_eq!(error.message, "saga delivery rejected");
+        assert!(
+            error.target.is_none(),
+            "a coordinator failure names no target"
+        );
+    }
 }
 
 /// DEAD_LETTER runs every saga, dead-letters each failure, and lets the
@@ -1601,7 +1625,10 @@ async fn sync_fanout_without_sync_mode_calls_nothing() {
         Arc::new(StaticServiceDiscovery::new()),
         Arc::new(MockEventBus::new()),
     );
-    assert!(ctx.sync_fanout(&cascade_book()).await.unwrap().is_empty());
+    assert_eq!(
+        ctx.sync_fanout(&cascade_book()).await.unwrap(),
+        SyncFanout::default()
+    );
     drop(rig);
 }
 
@@ -1670,8 +1697,9 @@ async fn sync_projectors_skip_unimplemented_endpoints() {
         .with_sync_mode(crate::proto::SyncMode::Simple);
         let result = ctx.sync_fanout(&cascade_book()).await;
         assert_eq!(result.is_ok(), ok, "{code:?}: {result:?}");
-        if let Ok(projections) = result {
-            assert!(projections.is_empty());
+        if let Ok(fanout) = result {
+            assert!(fanout.projections.is_empty());
+            assert!(fanout.reaction_errors.is_empty());
         }
     }
 }
@@ -1768,4 +1796,41 @@ async fn persist_events_refuses_business_cover_for_another_aggregate() {
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert!(store.get("orders", "", foreign).await.unwrap().is_empty());
     assert!(store.get("orders", "", root).await.unwrap().is_empty());
+}
+
+/// Reaction errors a CONTINUE-mode saga coordinator reports in its response
+/// reach the aggregate's fan-out result.
+#[tokio::test]
+async fn sync_fanout_continue_collects_reported_reaction_errors() {
+    let discovery = Arc::new(StaticServiceDiscovery::new());
+    let reported = CascadeReactionError {
+        component: "ChargeSaga".to_string(),
+        target: Some(Cover {
+            domain: "payment".to_string(),
+            ..Default::default()
+        }),
+        command_type: "examples.CapturePayment".to_string(),
+        code: tonic::Code::FailedPrecondition as i32,
+        message: "card declined".to_string(),
+    };
+    spawn_saga(
+        &discovery,
+        "ChargeSaga",
+        ScriptedSagaServer {
+            report: vec![reported.clone()],
+            ..Default::default()
+        },
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let ctx = GrpcAggregateContext::new(
+        Arc::new(MockEventStore::new()),
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        discovery,
+        Arc::new(MockEventBus::new()),
+    )
+    .with_sync_mode(crate::proto::SyncMode::Cascade)
+    .with_cascade_error_mode(CascadeErrorMode::CascadeErrorContinue);
+    let fanout = ctx.sync_fanout(&cascade_book()).await.unwrap();
+    assert_eq!(fanout.reaction_errors, vec![reported]);
 }

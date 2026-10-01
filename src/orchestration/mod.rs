@@ -67,6 +67,26 @@ pub enum FactInjectionError {
     Internal(String),
 }
 
+/// How an injected fact is processed by the target aggregate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FactDelivery {
+    /// Downstream mode at the target, inherited from the flow that produced
+    /// the fact (so a CASCADE stays synchronous through injected facts).
+    pub sync_mode: crate::proto::SyncMode,
+    /// Persist without invoking the target's fact handler (framework markers).
+    pub skip_handler: bool,
+}
+
+impl FactDelivery {
+    /// A fact routed through the target's fact handler under `sync_mode`.
+    pub fn handled(sync_mode: crate::proto::SyncMode) -> Self {
+        Self {
+            sync_mode,
+            skip_handler: false,
+        }
+    }
+}
+
 /// Executor for injecting facts (events) into target aggregates.
 ///
 /// Facts are events emitted by sagas or process managers that are injected
@@ -89,5 +109,9 @@ pub trait FactExecutor: Send + Sync {
     /// - Target aggregate is not found
     /// - Fact handler rejects the fact
     /// - Storage/transport failure
-    async fn inject(&self, fact: EventBook) -> Result<(), FactInjectionError>;
+    async fn inject(
+        &self,
+        fact: EventBook,
+        delivery: FactDelivery,
+    ) -> Result<(), FactInjectionError>;
 }

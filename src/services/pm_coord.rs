@@ -26,7 +26,7 @@ use crate::proto::{
     process_manager_coordinator_service_server::ProcessManagerCoordinatorService,
     ProcessManagerCoordinatorRequest, ProcessManagerHandleResponse, SpeculatePmRequest, SyncMode,
 };
-use crate::proto_ext::{CoverExt, SyncModeExt};
+use crate::proto_ext::{CascadeErrorModeExt, CoverExt, SyncModeExt};
 use crate::services::gap_fill::{GapFiller, NoOpPositionStore, RemoteEventSource};
 
 /// Process Manager coordinator service.
@@ -123,8 +123,7 @@ impl ProcessManagerCoordinatorService for PmCoord {
         })?;
         // Unknown ints resolve to the zero-value defaults (Async / FailFast).
         let sync_mode = SyncMode::or_default_async(req.sync_mode);
-        let cascade_error_mode = CascadeErrorMode::try_from(req.cascade_error_mode)
-            .unwrap_or(CascadeErrorMode::CascadeErrorFailFast);
+        let cascade_error_mode = CascadeErrorMode::or_default_fail_fast(req.cascade_error_mode);
 
         let correlation_id = trigger.correlation_id();
         if correlation_id.is_empty() {
@@ -150,7 +149,7 @@ impl ProcessManagerCoordinatorService for PmCoord {
         // Create context and orchestrate
         let ctx = self.factory.create();
 
-        orchestrate_pm(
+        let reaction_errors = orchestrate_pm(
             ctx.as_ref(),
             self.fetcher.as_ref(),
             self.executor.as_ref(),
@@ -166,15 +165,11 @@ impl ProcessManagerCoordinatorService for PmCoord {
         .await
         .map_err(|e| super::orchestration_status("PM", e))?;
 
-        // Return empty response - commands were delivered during orchestration
-        Ok(Response::new(ProcessManagerHandleResponse {
-            process_events: vec![],
-            commands: vec![],
-            facts: vec![],
-            // No escalation: this coordinator does not raise upstream
-            // escalation notifications.
-            notification: None,
-        }))
+        // Commands were delivered during orchestration; the response carries
+        // only CONTINUE-mode reaction errors, in its metadata.
+        let mut response = Response::new(ProcessManagerHandleResponse::default());
+        crate::orchestration::shared::attach_reaction_errors(&mut response, reaction_errors);
+        Ok(response)
     }
 
     /// Speculative execution - returns commands without side effects.

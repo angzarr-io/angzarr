@@ -10,10 +10,10 @@ use tokio::sync::Mutex;
 
 use crate::orchestration::FactInjectionError;
 use crate::proto::command_handler_coordinator_service_client::CommandHandlerCoordinatorServiceClient;
-use crate::proto::{EventBook, EventRequest, SyncMode};
+use crate::proto::{EventBook, EventRequest};
 use crate::proto_ext::{correlated_request, CoverExt};
 
-use crate::orchestration::FactExecutor;
+use crate::orchestration::{FactDelivery, FactExecutor};
 
 /// Error message constants for fact injection.
 pub mod errmsg {
@@ -48,7 +48,11 @@ impl GrpcFactExecutor {
 
 #[async_trait]
 impl FactExecutor for GrpcFactExecutor {
-    async fn inject(&self, fact: EventBook) -> Result<(), FactInjectionError> {
+    async fn inject(
+        &self,
+        fact: EventBook,
+        delivery: FactDelivery,
+    ) -> Result<(), FactInjectionError> {
         let domain = fact.domain().to_string();
         let correlation_id = fact.correlation_id().to_string();
 
@@ -62,10 +66,8 @@ impl FactExecutor for GrpcFactExecutor {
         let mut client = client.lock().await.clone();
         let event_request = EventRequest {
             events: Some(fact),
-            sync_mode: SyncMode::Async.into(),
-            // skip_handler omitted (proto3 default false): facts route
-            // through the aggregate's handle_fact — the safe default.
-            ..Default::default()
+            sync_mode: delivery.sync_mode.into(),
+            skip_handler: delivery.skip_handler,
         };
 
         client

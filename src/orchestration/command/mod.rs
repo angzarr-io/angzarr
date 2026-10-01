@@ -58,7 +58,8 @@ pub(crate) enum DeliveryPolicy {
     Background,
     /// Stop at the first failure and fail the orchestration.
     FailFast,
-    /// Compensate the failed command at its source, then stop and fail.
+    /// Stop at the first failure, write Compensate markers to the targets
+    /// of the commands already delivered, and fail.
     Compensate,
     /// Deliver every command; the orchestration succeeds with the commands
     /// that were delivered.
@@ -83,12 +84,11 @@ impl DeliveryPolicy {
         matches!(self, DeliveryPolicy::FailFast | DeliveryPolicy::Compensate)
     }
 
-    /// Whether a failed command is routed back to its source for compensation.
+    /// Whether a rejected command is routed back to its source for
+    /// compensation (the bus-driven rejection flow). COMPENSATE instead
+    /// writes Compensate markers for the commands already delivered.
     pub(crate) fn compensates(self) -> bool {
-        matches!(
-            self,
-            DeliveryPolicy::Background | DeliveryPolicy::Compensate
-        )
+        matches!(self, DeliveryPolicy::Background)
     }
 
     /// Whether failed commands are dead-lettered.
@@ -97,11 +97,6 @@ impl DeliveryPolicy {
             self,
             DeliveryPolicy::Background | DeliveryPolicy::DeadLetter
         )
-    }
-
-    /// Whether failures are reported to the caller as an error.
-    pub(crate) fn reports_failures(self) -> bool {
-        matches!(self, DeliveryPolicy::FailFast | DeliveryPolicy::Compensate)
     }
 }
 

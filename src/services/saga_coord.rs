@@ -25,7 +25,7 @@ use crate::proto::{
     saga_coordinator_service_server::SagaCoordinatorService, SagaHandleRequest, SagaResponse,
     SpeculateSagaRequest, SyncMode,
 };
-use crate::proto_ext::{CoverExt, SyncModeExt};
+use crate::proto_ext::{CascadeErrorModeExt, CoverExt, SyncModeExt};
 use crate::services::gap_fill::{GapFiller, NoOpPositionStore, RemoteEventSource};
 
 /// Saga coordinator service.
@@ -132,8 +132,7 @@ impl SagaCoordinatorService for SagaCoord {
             .ok_or_else(|| Status::invalid_argument("SagaHandleRequest requires source events"))?;
         // Unknown ints resolve to the zero-value defaults (Async / FailFast).
         let sync_mode = SyncMode::or_default_async(req.sync_mode);
-        let cascade_error_mode = CascadeErrorMode::try_from(req.cascade_error_mode)
-            .unwrap_or(CascadeErrorMode::CascadeErrorFailFast);
+        let cascade_error_mode = CascadeErrorMode::or_default_fail_fast(req.cascade_error_mode);
 
         let correlation_id = source.correlation_id().to_string();
         let saga_name = self.factory.name();
@@ -151,7 +150,7 @@ impl SagaCoordinatorService for SagaCoord {
         // Create context and orchestrate
         let ctx = self.factory.create(Arc::new(source));
 
-        orchestrate_saga(
+        let reaction_errors = orchestrate_saga(
             ctx.as_ref(),
             self.executor.as_ref(),
             self.command_bus.as_deref(),
@@ -167,12 +166,11 @@ impl SagaCoordinatorService for SagaCoord {
         .await
         .map_err(|e| super::orchestration_status("Saga", e))?;
 
-        // The saga response is built by the context during handle()
-        // For now, return empty response - commands were delivered during orchestration
-        Ok(Response::new(SagaResponse {
-            commands: vec![],
-            events: vec![],
-        }))
+        // Commands were delivered during orchestration; the response carries
+        // only CONTINUE-mode reaction errors, in its metadata.
+        let mut response = Response::new(SagaResponse::default());
+        crate::orchestration::shared::attach_reaction_errors(&mut response, reaction_errors);
+        Ok(response)
     }
 
     /// Speculative execution - returns commands without side effects.

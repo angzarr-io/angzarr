@@ -1538,6 +1538,7 @@ impl FactExecutor for CapturingFactExecutor {
     async fn inject(
         &self,
         fact: EventBook,
+        _delivery: crate::orchestration::FactDelivery,
     ) -> Result<(), crate::orchestration::FactInjectionError> {
         self.injected.lock().await.push(fact);
         Ok(())
@@ -2225,7 +2226,7 @@ impl CommandExecutor for FirstFailsExecutor {
 }
 
 struct PolicyRun {
-    result: Result<(), BusError>,
+    result: Result<Vec<crate::proto::CascadeReactionError>, BusError>,
     executions: u32,
     compensations: u32,
     dead_letters: usize,
@@ -2263,7 +2264,7 @@ async fn run_policy(mode: Option<CascadeErrorMode>, retryable: bool) -> PolicyRu
     }
 }
 
-fn aborted(result: &Result<(), BusError>) -> &tonic::Status {
+fn aborted(result: &Result<Vec<crate::proto::CascadeReactionError>, BusError>) -> &tonic::Status {
     match result {
         Err(BusError::Grpc(status)) => {
             assert_eq!(status.code(), tonic::Code::Aborted);
@@ -2296,14 +2297,14 @@ async fn test_fail_fast_rejection_stops_and_reports() {
     assert_eq!(run.dead_letters, 0);
 }
 
-/// COMPENSATE: the rejected command is compensated at its source, delivery
-/// stops, and the caller gets the failure.
+/// COMPENSATE: delivery stops at the rejection and the caller gets the
+/// failure (nothing was delivered before it, so no markers).
 #[tokio::test]
-async fn test_compensate_rejection_compensates_stops_and_reports() {
+async fn test_compensate_rejection_stops_and_reports() {
     let run = run_policy(Some(CascadeErrorMode::CascadeErrorCompensate), false).await;
     aborted(&run.result);
     assert_eq!(run.executions, 1);
-    assert_eq!(run.compensations, 1);
+    assert_eq!(run.compensations, 0);
     assert_eq!(run.dead_letters, 0);
 }
 
@@ -2339,13 +2340,117 @@ async fn test_fail_fast_retry_exhaustion_reports() {
     assert_eq!(run.compensations, 0);
 }
 
-/// COMPENSATE compensates a command that exhausted its retries.
+/// Records injected facts with how they were delivered.
+#[derive(Default)]
+struct MarkerCapture(AsyncMutex<Vec<(EventBook, crate::orchestration::FactDelivery)>>);
+
+#[async_trait]
+impl FactExecutor for MarkerCapture {
+    async fn inject(
+        &self,
+        fact: EventBook,
+        delivery: crate::orchestration::FactDelivery,
+    ) -> Result<(), crate::orchestration::FactInjectionError> {
+        self.0.lock().await.push((fact, delivery));
+        Ok(())
+    }
+}
+
+/// Accepts the command to root byte 1 (producing an event at sequence 4 on
+/// its target) and rejects the one to root byte 2.
+struct SecondRejectedExecutor;
+
+#[async_trait]
+impl CommandExecutor for SecondRejectedExecutor {
+    async fn execute(&self, command: CommandBook, _sync_mode: SyncMode) -> CommandOutcome {
+        let root = command.cover.as_ref().and_then(|c| c.root.clone()).unwrap();
+        if root.value[0] == 1 {
+            let page = crate::proto::EventPage {
+                header: Some(PageHeader {
+                    sync_mode: None,
+                    sequence_type: Some(SequenceType::Sequence(4)),
+                }),
+                ..Default::default()
+            };
+            CommandOutcome::Success(CommandResponse {
+                events: Some(EventBook {
+                    cover: command.cover.clone(),
+                    pages: vec![page],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            })
+        } else {
+            CommandOutcome::Rejected {
+                code: tonic::Code::FailedPrecondition,
+                message: "card declined".to_string(),
+            }
+        }
+    }
+}
+
+/// COMPENSATE: after the failure, the target of every command already
+/// delivered receives a Compensate marker for the events it produced —
+/// written without the target's fact handler — and the request fails. The
+/// failed command's source is not compensated.
 #[tokio::test]
-async fn test_compensate_retry_exhaustion_compensates() {
-    let run = run_policy(Some(CascadeErrorMode::CascadeErrorCompensate), true).await;
-    aborted(&run.result);
-    assert_eq!(run.compensations, 1);
-    assert_eq!(run.dead_letters, 0);
+async fn test_compensate_writes_markers_for_delivered_commands() {
+    use prost::Message;
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = TwoCommandSaga {
+        inner: DlqAwareContext::new(publisher.clone()),
+    };
+    let markers = MarkerCapture::default();
+    let result = orchestrate_saga(
+        &ctx,
+        &SecondRejectedExecutor,
+        None,
+        None,
+        Some(&markers),
+        "ChargeSaga",
+        "corr-1",
+        None,
+        SyncMode::Cascade,
+        fast_backoff(),
+        Some(CascadeErrorMode::CascadeErrorCompensate),
+    )
+    .await;
+    assert!(aborted(&result).message().contains("card declined"));
+    assert_eq!(ctx.inner.rejection_count.load(Ordering::SeqCst), 0);
+    assert!(publisher.captured.lock().await.is_empty());
+
+    let written = markers.0.lock().await;
+    assert_eq!(written.len(), 1, "one marker for the delivered command");
+    let (marker, delivery) = &written[0];
+    assert!(delivery.skip_handler);
+    let target = marker.cover.as_ref().unwrap();
+    assert_eq!(target.domain, "dest");
+    assert_eq!(target.root.as_ref().unwrap().value, vec![1; 16]);
+    let crate::proto::event_page::Payload::Event(any) = marker.pages[0].payload.as_ref().unwrap()
+    else {
+        panic!("marker payload");
+    };
+    assert_eq!(any.type_url, crate::proto_ext::type_url::COMPENSATE);
+    let compensate = crate::proto::Compensate::decode(any.value.as_slice()).unwrap();
+    assert_eq!(compensate.sequences, vec![4]);
+    assert!(compensate.reason.contains("card declined"));
+    assert!(matches!(
+        marker.pages[0].header.as_ref().unwrap().sequence_type,
+        Some(SequenceType::ExternalDeferred(_))
+    ));
+}
+
+/// CONTINUE returns one reaction error per undelivered command, naming the
+/// saga, the target and the command type.
+#[tokio::test]
+async fn test_continue_returns_reaction_errors() {
+    let run = run_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
+    let errors = run.result.unwrap();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].component, "saga-policy");
+    assert_eq!(errors[0].target.as_ref().unwrap().domain, "dest");
+    assert_eq!(errors[0].code, tonic::Code::FailedPrecondition as i32);
+    assert_eq!(errors[0].message, "insufficient funds");
 }
 
 /// Bus-driven retry exhaustion is dead-lettered, not compensated, and the

@@ -10,9 +10,18 @@ use tonic::Status;
 use uuid::Uuid;
 
 use crate::proto::{
-    AngzarrDeferredSequence, BusinessResponse, CommandBook, ContextualCommand, EventBook,
-    Projection,
+    AngzarrDeferredSequence, BusinessResponse, CascadeReactionError, CommandBook,
+    ContextualCommand, EventBook, Projection,
 };
+
+/// What the synchronous downstream fan-out produced.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SyncFanout {
+    /// Sync projector results.
+    pub projections: Vec<Projection>,
+    /// Reactions that failed under CASCADE_ERROR_CONTINUE.
+    pub reaction_errors: Vec<CascadeReactionError>,
+}
 
 use super::types::{FactContext, TemporalQuery};
 
@@ -107,12 +116,12 @@ pub trait AggregateContext: Send + Sync {
     async fn publish(&self, events: &EventBook) -> Result<(), Status>;
 
     /// Synchronous downstream fan-out: SIMPLE / CASCADE sync projectors, and
-    /// CASCADE sagas and PMs. Returns the sync projections.
+    /// CASCADE sagas and PMs.
     ///
     /// Runs once, after publish. Its errors reach the caller (subject to the
     /// request's `CascadeErrorMode`); the events stay persisted and published.
-    async fn sync_fanout(&self, _events: &EventBook) -> Result<Vec<Projection>, Status> {
-        Ok(vec![])
+    async fn sync_fanout(&self, _events: &EventBook) -> Result<SyncFanout, Status> {
+        Ok(SyncFanout::default())
     }
 
     /// Optional: pre-validate sequence before loading events (gRPC fast-path).

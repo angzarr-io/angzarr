@@ -309,11 +309,11 @@ async fn test_upcaster_from_channel() {
 // ============================================================================
 
 /// The upcaster may rewrite payloads only. A reply that drops, adds or
-/// renumbers pages, or changes their 2PC status, would corrupt the prior
+/// renumbers pages would corrupt the prior
 /// events the aggregate computes its next sequence and persist diff from.
 #[tokio::test]
 async fn test_upcaster_reply_that_changes_the_stream_is_rejected() {
-    let tampers: [fn(&mut Vec<EventPage>); 4] = [
+    let tampers: [fn(&mut Vec<EventPage>); 3] = [
         |pages| {
             pages.pop();
         },
@@ -324,7 +324,6 @@ async fn test_upcaster_reply_that_changes_the_stream_is_rejected() {
                 sequence_type: Some(page_header::SequenceType::Sequence(7)),
             })
         },
-        |pages| pages[0].no_commit = true,
     ];
     for tamper in tampers {
         let addr = start_mock_server(MockUpcasterService::tampering(tamper)).await;

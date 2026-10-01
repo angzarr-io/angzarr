@@ -919,6 +919,7 @@ async fn run_pm(
         None,
     )
     .await
+    .map(|_| ())
 }
 
 struct NoOpDestFetcher;

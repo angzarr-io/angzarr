@@ -16,12 +16,14 @@ use crate::bus::EventBus;
 use crate::discovery::{DiscoveredService, ServiceDiscovery};
 use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher, NoopDeadLetterPublisher};
 use crate::orchestration::channels::ChannelCache;
+use crate::orchestration::shared::read_reaction_errors;
 use crate::proto::process_manager_coordinator_service_client::ProcessManagerCoordinatorServiceClient;
 use crate::proto::saga_coordinator_service_client::SagaCoordinatorServiceClient;
 use crate::proto::{
-    AngzarrDeferredSequence, CascadeErrorMode, CommandBook, Confirmation, Cover, Edition,
-    EventBook, EventPage, EventRequest, MergeStrategy, ProcessManagerCoordinatorRequest,
-    Projection, Revocation, SagaHandleRequest, Snapshot, Uuid as ProtoUuid,
+    AngzarrDeferredSequence, CascadeErrorMode, CascadeReactionError, CommandBook, Confirmation,
+    Cover, Edition, EventBook, EventPage, EventRequest, MergeStrategy,
+    ProcessManagerCoordinatorRequest, Projection, Revocation, SagaHandleRequest, Snapshot,
+    Uuid as ProtoUuid,
 };
 use crate::proto_ext::{correlated_request, CoverExt, EventPageExt};
 use crate::repository::EventBookRepository;
@@ -35,7 +37,7 @@ use crate::storage::AddOutcome;
 use super::sync_policy::{should_call_sync_projectors, should_skip_post_persist};
 use super::{
     is_noop, transform_for_two_phase, AggregateContext, AggregateContextFactory, ClientLogic,
-    PersistOutcome, TemporalQuery, TwoPhaseContext,
+    PersistOutcome, SyncFanout, TemporalQuery, TwoPhaseContext,
 };
 
 /// Translate an `AngzarrDeferredSequence` into a `SourceInfo` for the
@@ -335,11 +337,13 @@ impl GrpcAggregateContext {
     }
 
     /// Call one saga coordinator synchronously (CASCADE).
+    ///
+    /// Returns the reaction errors a CONTINUE-mode coordinator reported.
     async fn call_saga(
         &self,
         endpoint: &DiscoveredService,
         events: &EventBook,
-    ) -> Result<(), Status> {
+    ) -> Result<Vec<CascadeReactionError>, Status> {
         let channel = self.channels.channel(&endpoint.grpc_url())?;
         let mut client = SagaCoordinatorServiceClient::new(channel);
         let request = self.downstream_request(
@@ -351,15 +355,18 @@ impl GrpcAggregateContext {
             },
             events.correlation_id(),
         );
-        client.execute(request).await.map(|_| ())
+        let response = client.execute(request).await?;
+        Ok(read_reaction_errors(response.metadata()))
     }
 
     /// Call one PM coordinator synchronously (CASCADE).
+    ///
+    /// Returns the reaction errors a CONTINUE-mode coordinator reported.
     async fn call_pm(
         &self,
         endpoint: &DiscoveredService,
         events: &EventBook,
-    ) -> Result<(), Status> {
+    ) -> Result<Vec<CascadeReactionError>, Status> {
         let channel = self.channels.channel(&endpoint.grpc_url())?;
         let mut client = ProcessManagerCoordinatorServiceClient::new(channel);
         let request = self.downstream_request(
@@ -370,7 +377,8 @@ impl GrpcAggregateContext {
             },
             events.correlation_id(),
         );
-        client.handle(request).await.map(|_| ())
+        let response = client.handle(request).await?;
+        Ok(read_reaction_errors(response.metadata()))
     }
 
     /// Call sagas, then PMs, subscribed to this domain (CASCADE).
@@ -378,7 +386,11 @@ impl GrpcAggregateContext {
     /// PMs need a correlation_id to locate their state, so books without one
     /// skip the PM leg. Failures follow [`Self::cascade_error_mode`].
     #[tracing::instrument(name = "aggregate.sync_cascade", skip_all)]
-    async fn call_sync_sagas_and_pms(&self, events: &EventBook) -> Result<(), Status> {
+    async fn call_sync_sagas_and_pms(
+        &self,
+        events: &EventBook,
+        reaction_errors: &mut Vec<CascadeReactionError>,
+    ) -> Result<(), Status> {
         let source_domain = events.domain();
 
         let sagas = self
@@ -386,9 +398,12 @@ impl GrpcAggregateContext {
             .get_saga_endpoints_for_domain(source_domain)
             .await;
         for endpoint in &sagas {
-            if let Err(status) = self.call_saga(endpoint, events).await {
-                self.record_fanout_failure(&endpoint.name, status, events)
-                    .await?;
+            match self.call_saga(endpoint, events).await {
+                Ok(reported) => reaction_errors.extend(reported),
+                Err(status) => {
+                    self.record_fanout_failure(&endpoint.name, status, events, reaction_errors)
+                        .await?
+                }
             }
         }
 
@@ -398,9 +413,12 @@ impl GrpcAggregateContext {
                 .get_pm_endpoints_for_domain(source_domain)
                 .await;
             for endpoint in &pms {
-                if let Err(status) = self.call_pm(endpoint, events).await {
-                    self.record_fanout_failure(&endpoint.name, status, events)
-                        .await?;
+                match self.call_pm(endpoint, events).await {
+                    Ok(reported) => reaction_errors.extend(reported),
+                    Err(status) => {
+                        self.record_fanout_failure(&endpoint.name, status, events, reaction_errors)
+                            .await?
+                    }
                 }
             }
         }
@@ -411,14 +429,15 @@ impl GrpcAggregateContext {
     /// Apply the cascade error mode to one failed fan-out target.
     ///
     /// FAIL_FAST and COMPENSATE stop at the first failure (`Err`). CONTINUE
-    /// logs it and keeps going; the request succeeds with the reactions that
-    /// succeeded. DEAD_LETTER dead-letters the book for that target and keeps
-    /// going.
+    /// records a reaction error and keeps going; the request succeeds with
+    /// the reactions that succeeded. DEAD_LETTER dead-letters the book for
+    /// that target and keeps going.
     async fn record_fanout_failure(
         &self,
         target: &str,
         status: Status,
         events: &EventBook,
+        reaction_errors: &mut Vec<CascadeReactionError>,
     ) -> Result<(), Status> {
         warn!(target = %target, error = %status, mode = ?self.cascade_error_mode, "Sync fan-out target failed");
         let failure = FanoutFailure {
@@ -429,7 +448,16 @@ impl GrpcAggregateContext {
             CascadeErrorMode::CascadeErrorFailFast | CascadeErrorMode::CascadeErrorCompensate => {
                 Err(failure.into_status())
             }
-            CascadeErrorMode::CascadeErrorContinue => Ok(()),
+            CascadeErrorMode::CascadeErrorContinue => {
+                reaction_errors.push(CascadeReactionError {
+                    component: failure.target,
+                    target: None,
+                    command_type: String::new(),
+                    code: failure.status.code() as i32,
+                    message: failure.status.message().to_string(),
+                });
+                Ok(())
+            }
             CascadeErrorMode::CascadeErrorDeadLetter => {
                 let dead_letter = AngzarrDeadLetter::from_event_processing_failure(
                     events,
@@ -458,6 +486,7 @@ impl GrpcAggregateContext {
         &self,
         events: &EventBook,
         sync_mode: crate::proto::SyncMode,
+        reaction_errors: &mut Vec<CascadeReactionError>,
     ) -> Result<Vec<Projection>, Status> {
         let clients = self.discovery.get_all_projectors().await.map_err(|e| {
             warn!(error = %e, "Failed to get projector coordinator clients");
@@ -482,7 +511,8 @@ impl GrpcAggregateContext {
                     warn!(error = %e, "Projector endpoint does not serve ProjectorCoordinatorService; skipped");
                 }
                 Err(e) => {
-                    self.record_fanout_failure("projector", e, events).await?;
+                    self.record_fanout_failure("projector", e, events, reaction_errors)
+                        .await?;
                 }
             }
         }
@@ -910,20 +940,26 @@ impl AggregateContext for GrpcAggregateContext {
     /// sagas and PMs with the full book: they propagate the cascade and must
     /// see provisional pages.
     #[tracing::instrument(name = "aggregate.sync_fanout", skip_all)]
-    async fn sync_fanout(&self, events: &EventBook) -> Result<Vec<Projection>, Status> {
+    async fn sync_fanout(&self, events: &EventBook) -> Result<SyncFanout, Status> {
         let Some(sync_mode) = self.sync_mode else {
-            return Ok(vec![]);
+            return Ok(SyncFanout::default());
         };
+        let mut reaction_errors = Vec::new();
         let projections = match committed_only_book(events) {
             Some(committed) if should_call_sync_projectors(Some(sync_mode)) => {
-                self.call_sync_projectors(&committed, sync_mode).await?
+                self.call_sync_projectors(&committed, sync_mode, &mut reaction_errors)
+                    .await?
             }
             _ => vec![],
         };
         if sync_mode == crate::proto::SyncMode::Cascade {
-            self.call_sync_sagas_and_pms(events).await?;
+            self.call_sync_sagas_and_pms(events, &mut reaction_errors)
+                .await?;
         }
-        Ok(projections)
+        Ok(SyncFanout {
+            projections,
+            reaction_errors,
+        })
     }
 
     #[tracing::instrument(name = "aggregate.pre_validate", skip_all, fields(%domain, %root, %expected))]

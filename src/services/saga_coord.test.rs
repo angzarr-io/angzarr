@@ -120,6 +120,7 @@ impl crate::orchestration::command::CommandExecutor for MockCommandExecutor {
         crate::orchestration::command::CommandOutcome::Success(crate::proto::CommandResponse {
             events: None,
             projections: vec![],
+            ..Default::default()
         })
     }
 }

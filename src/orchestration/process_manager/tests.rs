@@ -1867,6 +1867,7 @@ impl FactExecutor for CapturingFactExecutor {
     async fn inject(
         &self,
         fact: EventBook,
+        _delivery: crate::orchestration::FactDelivery,
     ) -> Result<(), crate::orchestration::FactInjectionError> {
         self.injected.lock().await.push(fact);
         Ok(())
@@ -2271,7 +2272,7 @@ impl CommandExecutor for FirstFailsExecutor {
 }
 
 struct PmPolicyRun {
-    result: Result<(), BusError>,
+    result: Result<Vec<crate::proto::CascadeReactionError>, BusError>,
     executions: u32,
     compensations: u32,
     dead_letters: usize,
@@ -2309,7 +2310,9 @@ async fn run_pm_policy(mode: Option<CascadeErrorMode>, retryable: bool) -> PmPol
     }
 }
 
-fn pm_aborted(result: &Result<(), BusError>) -> &tonic::Status {
+fn pm_aborted(
+    result: &Result<Vec<crate::proto::CascadeReactionError>, BusError>,
+) -> &tonic::Status {
     match result {
         Err(BusError::Grpc(status)) => {
             assert_eq!(status.code(), tonic::Code::Aborted);
@@ -2338,11 +2341,11 @@ async fn pm_fail_fast_rejection_stops_and_reports() {
 }
 
 #[tokio::test]
-async fn pm_compensate_rejection_compensates_stops_and_reports() {
+async fn pm_compensate_rejection_stops_and_reports() {
     let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorCompensate), false).await;
     pm_aborted(&run.result);
     assert_eq!(run.executions, 1);
-    assert_eq!(run.compensations, 1);
+    assert_eq!(run.compensations, 0);
     assert_eq!(run.dead_letters, 0);
 }
 
@@ -2374,11 +2377,26 @@ async fn pm_fail_fast_transient_failure_reports() {
     assert_eq!(run.dead_letters, 0);
 }
 
+/// COMPENSATE does not route the failed command back for compensation; it
+/// fails the request (markers are written for commands already delivered).
 #[tokio::test]
-async fn pm_compensate_transient_failure_compensates() {
+async fn pm_compensate_failure_does_not_compensate_source() {
     let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorCompensate), true).await;
     pm_aborted(&run.result);
-    assert_eq!(run.compensations, 1);
+    assert_eq!(run.compensations, 0);
+    assert_eq!(run.dead_letters, 0);
+}
+
+/// CONTINUE reports the undelivered command as a reaction error.
+#[tokio::test]
+async fn pm_continue_returns_reaction_errors() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
+    let errors = run.result.unwrap();
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].component, "pm-policy");
+    assert_eq!(errors[0].target.as_ref().unwrap().domain, "fulfillment");
+    assert_eq!(errors[0].command_type, "test.PmCommand");
+    assert_eq!(errors[0].message, "out of stock");
 }
 
 #[tokio::test]

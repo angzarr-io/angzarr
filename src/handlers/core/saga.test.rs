@@ -78,6 +78,7 @@ impl FactExecutor for MockFactExecutor {
     async fn inject(
         &self,
         _fact: EventBook,
+        _delivery: crate::orchestration::FactDelivery,
     ) -> Result<(), crate::orchestration::FactInjectionError> {
         unimplemented!("Not needed for constructor tests")
     }

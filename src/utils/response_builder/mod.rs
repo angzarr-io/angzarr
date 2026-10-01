@@ -116,7 +116,7 @@ pub fn build_command_response(
 ) -> CommandResponse {
     CommandResponse {
         events: Some(Arc::try_unwrap(event_book).unwrap_or_else(|arc| (*arc).clone())),
-        projections: Vec::new(),
+        ..Default::default()
     }
 }
 

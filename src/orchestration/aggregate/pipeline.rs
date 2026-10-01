@@ -184,10 +184,11 @@ async fn try_deferred_idempotency_replay(
     }
 
     ctx.publish(&existing_events).await?;
-    let projections = ctx.sync_fanout(&existing_events).await?;
+    let fanout = ctx.sync_fanout(&existing_events).await?;
     Ok(Some(CommandResponse {
         events: Some(existing_events),
-        projections,
+        projections: fanout.projections,
+        reaction_errors: fanout.reaction_errors,
     }))
 }
 
@@ -302,19 +303,18 @@ fn apply_two_phase_transform(
     }
 }
 
-/// Upfront merge-strategy gate, run only on `expected != actual`.
+/// Upfront merge-strategy gate, run only when a client command's `expected`
+/// differs from the head.
 ///
-/// STRICT rejects a non-deferred command immediately (a deferred command never
-/// claims a destination sequence, so a bare mismatch says nothing about it).
-/// COMMUTATIVE and MANUAL decide after execution, once the handler's events
-/// reveal which fields the command touched. AGGREGATE_HANDLES self-manages.
+/// STRICT rejects immediately. COMMUTATIVE and MANUAL decide after execution,
+/// once the handler's events reveal which fields the command touched.
+/// AGGREGATE_HANDLES self-manages.
 fn enforce_strict_gate(
     merge_strategy: MergeStrategy,
     window: SeqWindow,
-    is_deferred: bool,
     current: &EventBook,
 ) -> Result<(), Status> {
-    if merge_strategy == MergeStrategy::MergeStrict && !is_deferred {
+    if merge_strategy == MergeStrategy::MergeStrict {
         return Err(sequence_mismatch_status(
             crate::orchestration::errmsg::SEQUENCE_MISMATCH,
             window.expected,
@@ -652,13 +652,12 @@ async fn execute_mode(
 ///
 /// Saga-produced commands use `AngzarrDeferred` sequences:
 /// 1. Check idempotency using source provenance (return cached if duplicate)
-/// 2. Use the origin-stamped `basis_seq` as `expected` — the destination head
-///    the saga observed; 0 = whole-history window
-/// 3. Load prior events to get the actual head
-/// 4. Stamp the actual sequence onto command pages (erases the deferred
-///    header, which is why basis/provenance are extracted first)
-/// 5. STRICT does not gate a deferred command; COMMUTATIVE / MANUAL check
-///    field overlap over `basis..actual`
+/// 2. Load prior events to get the actual head
+/// 3. Stamp the actual sequence onto command pages (erases the deferred
+///    header, which is why provenance is extracted first)
+/// 4. No sequence or merge-strategy check runs: the command claims no
+///    sequence, so the idempotency key and the destination's invariants are
+///    its only guards
 #[tracing::instrument(
     name = "aggregate.execute",
     skip_all,
@@ -750,22 +749,21 @@ async fn execute_attempt(
         );
     }
 
-    // `expected` is the sequence the command was built against: the explicit
-    // claim, or a deferred command's origin-stamped `basis_seq`. A mismatch
-    // means writes landed after that observation:
-    // - STRICT (non-deferred) rejects here;
-    // - COMMUTATIVE and MANUAL run the field-overlap gate over
-    //   `expected..actual` after the handler shows which fields it touched;
-    // - `basis == actual` arms no gate (nothing landed since the observation);
-    // - basis 0 checks the whole history.
+    // `expected` is the sequence a client command was built against. A
+    // mismatch means writes landed after that observation: STRICT rejects
+    // here; COMMUTATIVE and MANUAL run the field-overlap gate over
+    // `expected..actual` once the handler shows which fields it touched.
+    // Deferred (saga/PM) commands claim no sequence and skip every check —
+    // their idempotency key dedupes redeliveries and the destination's own
+    // invariants are the only guard.
     let window = SeqWindow { expected, actual };
-    let sequence_mismatch = expected != actual;
+    let sequence_mismatch = !is_deferred && expected != actual;
     let needs_commutative_check =
         sequence_mismatch && merge_strategy == MergeStrategy::MergeCommutative;
     let needs_manual_check = sequence_mismatch && merge_strategy == MergeStrategy::MergeManual;
 
     if sequence_mismatch {
-        enforce_strict_gate(merge_strategy, window, is_deferred, &prior_events)?;
+        enforce_strict_gate(merge_strategy, window, &prior_events)?;
     }
 
     // The MANUAL gate dead-letters the command itself, so keep a copy before
@@ -832,8 +830,8 @@ async fn execute_attempt(
     calculate_set_next_seq(&mut persisted);
 
     publish_unless_noop(ctx, &persisted, is_noop).await;
-    let projections = if is_noop {
-        vec![]
+    let fanout = if is_noop {
+        super::SyncFanout::default()
     } else {
         ctx.sync_fanout(&persisted)
             .await
@@ -842,7 +840,8 @@ async fn execute_attempt(
 
     Ok(CommandResponse {
         events: Some(persisted),
-        projections,
+        projections: fanout.projections,
+        reaction_errors: fanout.reaction_errors,
     })
 }
 
@@ -888,7 +887,7 @@ async fn speculative_mode(
 
     Ok(CommandResponse {
         events: Some(speculative_events),
-        projections: vec![],
+        ..Default::default()
     })
 }
 
@@ -1018,10 +1017,10 @@ pub async fn execute_fact_pipeline(
                 }
             }
             publish_unless_noop(ctx, &cached, cached.pages.is_empty()).await;
-            let projections = ctx.sync_fanout(&cached).await?;
+            let fanout = ctx.sync_fanout(&cached).await?;
             return Ok(FactResponse {
                 events: cached,
-                projections,
+                projections: fanout.projections,
                 already_processed: true,
             });
         }
@@ -1143,7 +1142,7 @@ pub async fn execute_fact_pipeline(
     let projections = if is_noop {
         vec![]
     } else {
-        ctx.sync_fanout(&persisted).await?
+        ctx.sync_fanout(&persisted).await?.projections
     };
 
     Ok(FactResponse {

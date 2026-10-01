@@ -205,3 +205,127 @@ fn test_correlation_root_distinct_friendly_ids_get_distinct_roots() {
     assert_ne!(a, uuid::Uuid::nil());
     assert_ne!(b, uuid::Uuid::nil());
 }
+
+// ============================================================================
+// Reaction errors and Compensate markers
+// ============================================================================
+
+#[test]
+fn test_reaction_errors_round_trip_through_response_metadata() {
+    let errors = vec![crate::proto::CascadeReactionError {
+        component: "ChargeSaga".into(),
+        code: tonic::Code::FailedPrecondition as i32,
+        message: "card declined".into(),
+        ..Default::default()
+    }];
+    let mut response = tonic::Response::new(());
+    attach_reaction_errors(&mut response, errors.clone());
+    assert_eq!(read_reaction_errors(response.metadata()), errors);
+
+    let mut empty = tonic::Response::new(());
+    attach_reaction_errors(&mut empty, vec![]);
+    assert!(empty.metadata().get_bin(REACTION_ERRORS_METADATA).is_none());
+    assert!(read_reaction_errors(empty.metadata()).is_empty());
+}
+
+#[test]
+fn test_undelivered_command_reaction_error_names_target_and_type() {
+    use crate::proto::{command_page, CommandPage};
+    let command = CommandBook {
+        cover: Some(Cover {
+            domain: "payment".into(),
+            ..Default::default()
+        }),
+        pages: vec![CommandPage {
+            payload: Some(command_page::Payload::Command(prost_types::Any {
+                type_url: "type.googleapis.com/examples.CapturePayment".into(),
+                value: vec![],
+            })),
+            ..Default::default()
+        }],
+    };
+    let error = UndeliveredCommand {
+        command,
+        code: tonic::Code::FailedPrecondition,
+        reason: "card declined".into(),
+    }
+    .reaction_error("ChargeSaga");
+    assert_eq!(error.component, "ChargeSaga");
+    assert_eq!(error.target.unwrap().domain, "payment");
+    assert_eq!(error.command_type, "examples.CapturePayment");
+    assert_eq!(error.code, tonic::Code::FailedPrecondition as i32);
+    assert_eq!(error.message, "card declined");
+}
+
+fn produced(domain: &str, sequences: &[u32]) -> EventBook {
+    use crate::proto::{page_header::SequenceType, EventPage, PageHeader};
+    EventBook {
+        cover: Some(Cover {
+            domain: domain.into(),
+            root: Some(crate::proto::Uuid { value: vec![7; 16] }),
+            ..Default::default()
+        }),
+        pages: sequences
+            .iter()
+            .map(|seq| EventPage {
+                header: Some(PageHeader {
+                    sync_mode: None,
+                    sequence_type: Some(SequenceType::Sequence(*seq)),
+                }),
+                ..Default::default()
+            })
+            .collect(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_compensate_marker_lists_produced_sequences_idempotently() {
+    use prost::Message;
+    let marker = compensate_marker(&produced("inventory", &[4, 5]), "ReserveSaga", "declined")
+        .expect("events to compensate");
+    let again =
+        compensate_marker(&produced("inventory", &[4, 5]), "ReserveSaga", "declined").unwrap();
+    assert_eq!(
+        marker, again,
+        "redelivered compensation dedupes on external_id"
+    );
+    assert_eq!(marker.cover.as_ref().unwrap().domain, "inventory");
+    let page = &marker.pages[0];
+    let Some(crate::proto::page_header::SequenceType::ExternalDeferred(ext)) =
+        page.header.as_ref().unwrap().sequence_type.as_ref()
+    else {
+        panic!("fact marker expected");
+    };
+    assert!(ext.external_id.contains("ReserveSaga"));
+    assert!(ext.external_id.ends_with("4,5"));
+    let Some(crate::proto::event_page::Payload::Event(any)) = page.payload.as_ref() else {
+        panic!("payload");
+    };
+    assert_eq!(any.type_url, crate::proto_ext::type_url::COMPENSATE);
+    let compensate = crate::proto::Compensate::decode(any.value.as_slice()).unwrap();
+    assert_eq!(compensate.sequences, vec![4, 5]);
+    assert_eq!(compensate.reason, "declined");
+    assert_eq!(compensate.target.unwrap().domain, "inventory");
+}
+
+#[test]
+fn test_compensate_marker_skips_commands_without_events() {
+    assert!(compensate_marker(&produced("inventory", &[]), "S", "r").is_none());
+    assert!(compensate_marker(&EventBook::default(), "S", "r").is_none());
+}
+
+/// Without a fact executor the markers cannot be written; every one is
+/// reported instead of silently dropped.
+#[tokio::test]
+async fn test_write_compensate_markers_reports_missing_executor() {
+    let failures = write_compensate_markers(
+        None,
+        &[produced("inventory", &[1]), produced("shipping", &[2])],
+        "S",
+        "r",
+    )
+    .await;
+    assert_eq!(failures.len(), 2);
+    assert!(failures[0].starts_with("inventory"));
+}

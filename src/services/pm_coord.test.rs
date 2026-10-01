@@ -94,6 +94,7 @@ impl crate::orchestration::process_manager::ProcessManagerContext for MockPmCont
         CommandOutcome::Success(CommandResponse {
             events: None,
             projections: vec![],
+            ..Default::default()
         })
     }
 }
@@ -149,6 +150,7 @@ impl crate::orchestration::command::CommandExecutor for MockCommandExecutor {
         CommandOutcome::Success(CommandResponse {
             events: None,
             projections: vec![],
+            ..Default::default()
         })
     }
 }

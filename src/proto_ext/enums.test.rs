@@ -78,3 +78,23 @@ fn merge_strategy_real_values_pass_through() {
         );
     }
 }
+
+/// Unknown cascade error modes resolve to the documented default, FAIL_FAST;
+/// every real mode passes through.
+#[test]
+fn test_cascade_error_mode_resolution() {
+    use crate::proto::CascadeErrorMode;
+    use crate::proto_ext::CascadeErrorModeExt;
+    assert_eq!(
+        CascadeErrorMode::or_default_fail_fast(999),
+        CascadeErrorMode::CascadeErrorFailFast
+    );
+    for mode in [
+        CascadeErrorMode::CascadeErrorFailFast,
+        CascadeErrorMode::CascadeErrorContinue,
+        CascadeErrorMode::CascadeErrorCompensate,
+        CascadeErrorMode::CascadeErrorDeadLetter,
+    ] {
+        assert_eq!(CascadeErrorMode::or_default_fail_fast(mode as i32), mode);
+    }
+}

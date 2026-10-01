@@ -60,7 +60,9 @@ mod types;
 pub use types::{FactContext, FactResponse, PipelineMode, TemporalQuery};
 
 // Re-exports: traits
-pub use traits::{AggregateContext, AggregateContextFactory, ClientLogic, PersistOutcome};
+pub use traits::{
+    AggregateContext, AggregateContextFactory, ClientLogic, PersistOutcome, SyncFanout,
+};
 
 // Re-exports: client
 pub use client::GrpcBusinessLogic;

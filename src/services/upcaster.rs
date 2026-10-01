@@ -172,13 +172,11 @@ impl Upcaster {
     }
 }
 
-/// What an upcaster must hand back unchanged for each page: its sequence and
-/// its two-phase-commit status. Only the payload may be rewritten.
+/// What an upcaster must hand back unchanged for each page: its sequence.
+/// Only the payload may be rewritten.
 #[derive(Debug, PartialEq, Eq)]
 struct PageIdentity {
     sequence: u32,
-    no_commit: bool,
-    cascade_id: Option<String>,
 }
 
 impl PageIdentity {
@@ -186,8 +184,6 @@ impl PageIdentity {
         use crate::proto_ext::EventPageExt;
         Self {
             sequence: page.sequence_num(),
-            no_commit: page.no_commit,
-            cascade_id: page.cascade_id.clone(),
         }
     }
 }

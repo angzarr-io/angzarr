@@ -21,7 +21,7 @@ use crate::proto::{
     CascadeErrorMode, CommandRequest, CommandResponse, EventRequest, FactInjectionResponse,
     SpeculateCommandHandlerRequest,
 };
-use crate::proto_ext::{CoverExt, SyncModeExt};
+use crate::proto_ext::{CascadeErrorModeExt, CoverExt, SyncModeExt};
 use crate::repository::SnapshotRepository;
 use crate::services::upcaster::Upcaster;
 use crate::storage::EventStore;
@@ -221,10 +221,9 @@ impl CommandHandlerCoordinatorService for AggregateService {
 
         let mut ctx = self
             .create_context_for_sync_mode(sync_request.sync_mode)
-            .with_cascade_error_mode(
-                CascadeErrorMode::try_from(sync_request.cascade_error_mode)
-                    .unwrap_or(CascadeErrorMode::CascadeErrorFailFast),
-            );
+            .with_cascade_error_mode(CascadeErrorMode::or_default_fail_fast(
+                sync_request.cascade_error_mode,
+            ));
         if let Some(ref cascade_id) = sync_request.cascade_id {
             ctx = ctx.with_cascade_id(cascade_id);
         }

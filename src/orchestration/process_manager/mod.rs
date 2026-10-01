@@ -58,6 +58,7 @@ use crate::proto_ext::CoverExt;
 
 use super::command::{CommandExecutor, CommandOutcome, DeliveryPolicy};
 use super::destination::DestinationFetcher;
+use super::shared::UndeliveredCommand;
 use super::FactExecutor;
 use outbox::{CommandOutbox, OutboxEntry};
 
@@ -410,7 +411,7 @@ pub async fn orchestrate_pm(
     sync_mode: SyncMode,
     backoff: ExponentialBuilder,
     error_mode: Option<CascadeErrorMode>,
-) -> Result<(), BusError> {
+) -> Result<Vec<crate::proto::CascadeReactionError>, BusError> {
     let policy = DeliveryPolicy::from_mode(error_mode);
     let trigger_domain = trigger
         .cover
@@ -594,9 +595,10 @@ pub async fn orchestrate_pm(
         // 2. The PM's job is to observe outcomes and react, not guarantee delivery
         // 3. Compensation is the PM's mechanism for handling failures
         //
-        execute_pm_commands(
+        let reaction_errors = execute_pm_commands(
             ctx,
             executor,
+            fact_executor,
             response.commands,
             PmCommandSource {
                 trigger,
@@ -659,18 +661,16 @@ pub async fn orchestrate_pm(
                 debug!(%domain, "Injecting fact from PM");
 
                 fact_exec
-                    .inject(fact)
+                    .inject(fact, super::FactDelivery::handled(sync_mode))
                     .await
                     .map_err(|e| BusError::Publish(format!("PM fact injection failed: {e}")))?;
             }
         }
 
-        // Exit retry loop. PM events are persisted, commands are dispatched.
-        // The workflow continues asynchronously via Notifications.
-        break;
+        // PM events are persisted and commands dispatched; the workflow
+        // continues asynchronously.
+        return Ok(reaction_errors);
     }
-
-    Ok(())
 }
 
 /// What a PM's commands are attributed to.
@@ -698,11 +698,12 @@ struct PmCommandSource<'a> {
 async fn execute_pm_commands(
     ctx: &dyn ProcessManagerContext,
     executor: &dyn CommandExecutor,
+    fact_executor: Option<&dyn FactExecutor>,
     mut commands: Vec<CommandBook>,
     source: PmCommandSource<'_>,
     sync_mode: SyncMode,
     policy: DeliveryPolicy,
-) -> Result<(), BusError> {
+) -> Result<Vec<crate::proto::CascadeReactionError>, BusError> {
     use super::shared::fill_correlation_id;
     use crate::proto_ext::EventPageExt;
     let PmCommandSource {
@@ -748,10 +749,11 @@ async fn execute_pm_commands(
         }
     }
 
-    // Failures reported to the caller once dispatch ends: a Decision-mode
-    // command that could not be answered synchronously, or any failure under
-    // a reporting delivery policy.
+    // A Decision-mode command that could not be answered synchronously is
+    // reported to the caller whatever the delivery policy.
     let mut reported_failures: Vec<String> = Vec::new();
+    let mut undelivered: Vec<UndeliveredCommand> = Vec::new();
+    let mut executed: Vec<EventBook> = Vec::new();
 
     for command_book in commands {
         let cmd_domain = command_book
@@ -789,6 +791,7 @@ async fn execute_pm_commands(
                     has_events = cmd_response.events.is_some(),
                     "PM command executed successfully"
                 );
+                executed.extend(cmd_response.events);
                 None
             }
             CommandOutcome::Rejected { code, message } => {
@@ -805,7 +808,7 @@ async fn execute_pm_commands(
                 if policy.dead_letters() {
                     publish_pm_command_dlq(ctx, &command_book, Some(code), &message, false).await;
                 }
-                Some(message)
+                Some((code, message))
             }
             CommandOutcome::Retryable { reason, .. }
                 if effective_sync_mode == SyncMode::Decision =>
@@ -836,34 +839,30 @@ async fn execute_pm_commands(
                     DeliveryPolicy::DeadLetter => {
                         publish_pm_command_dlq(ctx, &command_book, None, &reason, true).await;
                     }
-                    DeliveryPolicy::Compensate => {
-                        ctx.on_command_rejected(&command_book, &reason, correlation_id)
-                            .await;
-                    }
-                    DeliveryPolicy::FailFast | DeliveryPolicy::Continue => {}
+                    DeliveryPolicy::FailFast
+                    | DeliveryPolicy::Compensate
+                    | DeliveryPolicy::Continue => {}
                 }
-                Some(reason)
+                Some((tonic::Code::Unavailable, reason))
             }
         };
 
-        if let Some(reason) = failure {
-            if policy.reports_failures() {
-                reported_failures.push(format!("{cmd_domain}: {reason}"));
-            }
+        if let Some((code, reason)) = failure {
+            undelivered.push(UndeliveredCommand {
+                command: command_book,
+                code,
+                reason,
+            });
             if policy.stops_on_failure() {
                 break;
             }
         }
     }
 
-    match (reported_failures.is_empty(), policy) {
-        (true, _) => Ok(()),
-        (false, DeliveryPolicy::Background) => Err(BusError::Publish(reported_failures.join("; "))),
-        (false, _) => Err(BusError::Grpc(tonic::Status::aborted(format!(
-            "PM {pm_name}: undeliverable commands: {}",
-            reported_failures.join("; ")
-        )))),
+    if !reported_failures.is_empty() {
+        return Err(BusError::Publish(reported_failures.join("; ")));
     }
+    super::shared::settle_delivery(policy, pm_name, &undelivered, &executed, fact_executor).await
 }
 
 /// Hand a transiently-failed PM command to the outbox for redelivery, or
