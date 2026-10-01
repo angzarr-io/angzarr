@@ -1,6 +1,3 @@
-# DOC: This file is referenced in docs/docs/reference/patterns.mdx
-#      Update documentation when making changes to merge strategy patterns.
-
 Feature: Merge Strategy - Concurrency Control
   The MergeStrategy enum controls how the aggregate coordinator handles sequence
   conflicts when multiple commands target the same aggregate concurrently.

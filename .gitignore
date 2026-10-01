@@ -120,10 +120,6 @@ dist/
 *.tar.gz
 *.egg-info/
 
-# Docusaurus
-docs/node_modules/
-docs/build/
-docs/.docusaurus/
 .docs-backup/
 .claude/settings.local.json
 

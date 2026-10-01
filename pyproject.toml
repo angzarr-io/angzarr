@@ -4,7 +4,6 @@ version = "0.1.0"
 description = "Event sourcing framework with aggregates, sagas, and process managers"
 requires-python = ">=3.11"
 dependencies = [
-    "chevron>=0.14",
     "structlog>=24.0",
 ]
 

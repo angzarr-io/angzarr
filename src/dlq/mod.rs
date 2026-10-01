@@ -1,8 +1,5 @@
 //! Dead Letter Queue (DLQ) infrastructure.
 //!
-//! DOC: This file is referenced in docs/docs/operations/error-recovery.mdx
-//!      Update documentation when making changes to DLQ patterns.
-//!
 //! Provides a trait-based abstraction for publishing failed messages
 //! to a dead letter queue for manual review and replay.
 //!

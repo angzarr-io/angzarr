@@ -262,7 +262,7 @@ Sub-tasks: R2-SNAP-1 through R2-SNAP-8 (see TaskList).
 
 ---
 
-### R2-DEAD-9 `docs/` docusaurus site — **MIGRATION REQUIRED 2026-05-23**
+### R2-DEAD-9 `docs/` docusaurus site — **DONE 2026-09-30**
 
 **Scope.** Entire `docs/` directory at repo root (docusaurus site).
 
@@ -277,7 +277,7 @@ GitHub Pages is per-repo, so each goes to a distinct URL. The original "duplicat
 
 **Why naive deletion is unsafe today.** `deploy-docs.yml` deploys on every push to `main` touching `docs/**`, `proto/**`, or `justfile`. `justfile:318 buf-docs` auto-generates `docs/docs/api/proto/index.md` from the proto files. Deleting `docs/` without first repointing all of this breaks (a) the published URL, (b) the proto-API documentation pipeline, (c) CI.
 
-**Plan.** Status: `todo`. Tracked under task **R2-DOCS-MIGRATE**. Cross-repo work — touches both `angzarr/core` and `angzarr-project`.
+**Plan.** **Status: DONE 2026-09-30.** Tracked under task **R2-DOCS-MIGRATE**. Audit + ports landed in angzarr-project (`site/`, `just proto-docs`); `docs/`, `deploy-docs.yml`, `buf-docs` and `openapi` removed here; dropped items recorded in `doc/HISTORICAL_REMOVED.md`. angzarr.io was already the custom domain of angzarr-project's Pages site; core's Pages site had no custom domain. Cross-repo work — touches both `angzarr/core` and `angzarr-project`.
 
 1. Audit `core/docs/docs/**/*.{md,mdx}` vs `angzarr-project/site/src/` for content overlap.
 2. Port unique content into angzarr-project's Astro site (note: framework change — docusaurus MD/MDX → Astro/Starlight components).

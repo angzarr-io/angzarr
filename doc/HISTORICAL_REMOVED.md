@@ -45,6 +45,65 @@ replaced it.
 
 ---
 
+## Docusaurus documentation site (`docs/`)
+
+**Last existed at**: `a1271caba6d3df1b15ef2d6cc894e11a887601c2` (2026-09-30)
+**Removed**: 2026-09-30
+**Removed by**: R2-DOCS-MIGRATE — see `plans/2026-05-23-second-deep-review.md`
+(R2-DEAD-9).
+
+### What it did
+
+A Docusaurus site under `docs/` (docs pages, blog, theme components,
+static assets) deployed to GitHub Pages by `.github/workflows/deploy-docs.yml`,
+plus `just buf-docs` (protoc-gen-doc → `docs/docs/api/proto/index.md`,
+post-processed by `build/proto/escape_mdx.py` and `build/proto/fix_anchors.py`)
+and `just openapi` (copied `gateway/api/angzarr.swagger.json` to
+`docs/static/openapi.json`). `scripts/render_docs.py` rendered
+`docs/templates/*.mustache` with LOC counts from an in-repo `examples/` tree.
+
+### Why it was removed
+
+angzarr-project's Astro/Starlight site (`site/`) is the single docs home
+and serves angzarr.io. Every page was audited against it; unique content
+was ported there. `buf-docs` is replaced by angzarr-project's
+`just proto-docs`, which writes `site/src/content/docs/reference/proto-api.md`.
+
+Ported to angzarr-project: `glossary.mdx` (as `glossary/index.md`),
+`reference/stack-trace-proto.mdx`, the `stack_trace` section of
+`glossary/dlq.md`, and `examples/container-overlay/` (as
+`docs/examples/container-overlay/`). `implementation-guide.md`,
+`versionator.md` and `plans/cli-implementation.md` moved to `doc/`.
+
+Dropped:
+- `components/cloudevents.mdx`, `features/cloudevents.mdx`,
+  `glossary/cloud-event.md` — the CloudEvents projector is a
+  framework-provided sidecar, not a user-authored component.
+- `glossary/cascade-id.md` and the two-phase-commit material in
+  `features/cascade.mdx` / `features/compensation.mdx` (Revocation,
+  `cascade_id`, CascadeReaper) — two-phase commit is gone from the framework.
+- Poker example pages (`examples/why-poker.md`, `aggregates.mdx`,
+  `sagas.mdx`, `projectors.mdx`, `language-notes.md`) in their six-language
+  form; the poker example is being replaced by blackjack.
+- Non-Python language tabs and the functional guard/validate/compute and
+  router registration style throughout; the site documents the OO
+  `@handles` / `@applies` style with Python snippets.
+- `api/proto/index.md` (generated), the `openapi` recipe (the gateway serves
+  `/openapi.json` itself), `scripts/render_docs.py` and its `chevron`
+  dependency (no templates existed), the Docusaurus theme files
+  (`src/css/custom.css`, `src/pages/*`, `src/components/BlogHeader.tsx`),
+  static logo/favicon, `static/CNAME`, and `README.md` / `justfile` /
+  `package*.json` / `sidebars.ts` / `docusaurus.config.ts`.
+- The seven blog posts already exist in the site's blog.
+
+### Resurrection breadcrumbs
+- `git show a1271cab:docs/` for any page; `git show a1271cab:justfile`
+  for `buf-docs` / `openapi`.
+- Site counterpart: angzarr-project `site/src/content/docs/`, sidebar in
+  `site/astro.config.mjs`.
+
+---
+
 ## In-process orchestration contexts (`Local*Context` family)
 
 **Last existed at**: `77efe14ad6769086e1f1aa6a01abdbea643308b8` (2026-05-23)

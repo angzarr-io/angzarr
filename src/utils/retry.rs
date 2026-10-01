@@ -1,8 +1,5 @@
 //! Retry utilities: backoff builders and retryable error classification.
 //!
-//! DOC: This file is referenced in docs/docs/operations/error-recovery.mdx
-//!      Update documentation when making changes to retry patterns.
-//!
 //! Uses `backon` for exponential backoff with jitter. Provides standard
 //! backoff configurations for saga/PM command retries and gRPC connection retries.
 

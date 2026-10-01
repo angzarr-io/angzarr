@@ -1,6 +1,3 @@
-# DOC: This file is referenced in docs/docs/examples/aggregates.mdx
-#      Update documentation when making changes to player feature scenarios.
-
 # docs:start:feature_overview
 Feature: Player aggregate logic
   The Player aggregate manages a player's bankroll and table reservations.

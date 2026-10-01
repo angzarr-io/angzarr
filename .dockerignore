@@ -33,7 +33,6 @@ examples/**/bin/
 # Documentation and planning
 *.md
 .plan/
-docs/
 
 # Test artifacts
 coverage/

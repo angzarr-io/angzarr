@@ -370,9 +370,6 @@ clean-all:
     rm -rf .venv client/*/.venv
     @echo "=== Cleaning stale extracted directories ==="
     rm -rf client/ examples/
-    @echo "=== Cleaning docs ==="
-    rm -rf docs/build docs/.docusaurus docs/node_modules
-    rm -f docs/static/container-overlay.tar.gz
     @echo "=== Cleaning OpenTofu provider caches ==="
     find deploy/tofu -name ".terraform" -type d -exec rm -rf {} + 2>/dev/null || true
     @echo "=== Cleaning vector search ==="

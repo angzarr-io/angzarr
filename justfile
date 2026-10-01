@@ -326,32 +326,6 @@ buf-lint:
 buf-push:
     just _buf push
 
-# Generate proto documentation (outputs to docs/docs/api/proto/)
-buf-docs:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mkdir -p "{{TOP}}/docs/docs/api/proto"
-    # List proto files (exclude health which is internal). Sererr's
-    # proto root is also mounted because types.proto imports
-    # `sererr/sererr.proto` from the `sererr/` submodule.
-    PROTOS=$(find "{{TOP}}/angzarr-project/proto" -name '*.proto' ! -path '*/health/*' -printf '%P\n' | sort)
-    SERERR_PROTO_DIR="{{TOP}}/sererr/proto"
-    {{CONTAINER_RUN}} \
-        -v "{{TOP}}/angzarr-project/proto:/protos:Z" \
-        -v "${SERERR_PROTO_DIR}:/sererr-protos:Z" \
-        -v "{{TOP}}/docs/docs/api/proto:/out:Z" \
-        docker.io/pseudomuto/protoc-gen-doc \
-        --proto_path=/protos \
-        --proto_path=/sererr-protos \
-        --doc_opt=markdown,index.md \
-        $PROTOS
-    # Escape curly braces for MDX compatibility (handles google.api.http examples)
-    python3 "{{TOP}}/build/proto/escape_mdx.py" "{{TOP}}/docs/docs/api/proto/index.md"
-    # Fix anchors for Docusaurus compatibility (convert <a name=""> to heading IDs)
-    python3 "{{TOP}}/build/proto/fix_anchors.py" "{{TOP}}/docs/docs/api/proto/index.md"
-    # Add frontmatter for Docusaurus
-    sed -i '1i ---\ntitle: Protocol Buffer API\ndescription: Auto-generated documentation for Angzarr protobuf definitions\n---\n' "{{TOP}}/docs/docs/api/proto/index.md"
-
 # === gRPC Gateway ===
 
 # Run command in Go container (has Go, buf, protoc plugins)
@@ -393,12 +367,6 @@ gateway-image-push TAG="latest": gateway-gen
     {{CONTAINER_CMD}} tag "$IMAGE:{{TAG}}" "$IMAGE:latest"
     {{CONTAINER_CMD}} push "$IMAGE:{{TAG}}"
     {{CONTAINER_CMD}} push "$IMAGE:latest"
-
-# Generate OpenAPI spec and copy to docs
-openapi: gateway-gen
-    mkdir -p "{{TOP}}/docs/static"
-    cp "{{TOP}}/gateway/api/angzarr.swagger.json" "{{TOP}}/docs/static/openapi.json"
-    @echo "OpenAPI spec generated at docs/static/openapi.json"
 
 # === Build ===
 

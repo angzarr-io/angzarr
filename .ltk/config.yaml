@@ -112,7 +112,7 @@ rules:
     match: { command: buf }
     mode: confirm
     message: "Drive buf/protoc through the container so generated bindings match the pinned plugins."
-    suggest: "just buf-build     # buf-lint / buf-docs / gateway-gen"
+    suggest: "just buf-build     # buf-lint / buf-push / gateway-gen"
   - id: cargo-llvm-cov-via-just
     match: { command: [cargo, llvm-cov] }
     mode: confirm

@@ -1,8 +1,5 @@
 //! External payload storage for claim check pattern.
 //!
-//! DOC: This file is referenced in docs/docs/operations/payload-offloading.md
-//!      Update documentation when making changes to payload store patterns.
-//!
 //! When event/command payloads exceed message bus size limits, they are stored
 //! externally and replaced with a `PayloadReference` marker. This module provides
 //! the storage backends and related infrastructure.
