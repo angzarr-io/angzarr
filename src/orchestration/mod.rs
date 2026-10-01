@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use crate::proto::EventBook;
 
 pub mod aggregate;
+pub mod channels;
 pub mod command;
 pub mod correlation;
 pub mod destination;

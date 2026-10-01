@@ -9,10 +9,10 @@ use tonic::Status;
 use uuid::Uuid;
 
 use crate::proto::{
-    page_header::SequenceType, CommandBook, CommandResponse, ContextualCommand, EventBook,
-    MergeStrategy,
+    business_response, page_header::SequenceType, BusinessResponse, CommandBook, CommandResponse,
+    ContextualCommand, EventBook, MergeStrategy,
 };
-use crate::proto_ext::{calculate_set_next_seq, CoverExt, EventBookExt};
+use crate::proto_ext::{calculate_set_next_seq, EventBookExt};
 use crate::utils::response_builder::extract_events_from_response;
 use crate::utils::retry::{is_retryable_status, run_with_retry, RetryOutcome, RetryableOperation};
 
@@ -79,14 +79,13 @@ impl<'a> RetryableOperation for AggregateOperation<'a> {
     }
 
     async fn try_execute(&mut self) -> RetryOutcome<Self::Success, Self::Failure> {
-        match execute_mode(self.ctx, self.business, self.command_book.clone()).await {
+        match execute_attempt(self.ctx, self.business, self.command_book.clone()).await {
             Ok(response) => RetryOutcome::Success(response),
-            Err(status) => {
-                if is_retryable_in_place(&status) {
-                    RetryOutcome::Retryable(status)
-                } else {
-                    RetryOutcome::Fatal(status)
-                }
+            Err(AttemptError::BeforePersist(status)) if is_retryable_in_place(&status) => {
+                RetryOutcome::Retryable(status)
+            }
+            Err(AttemptError::BeforePersist(status) | AttemptError::AfterPersist(status)) => {
+                RetryOutcome::Fatal(status)
             }
         }
     }
@@ -184,7 +183,8 @@ async fn try_deferred_idempotency_replay(
         }
     }
 
-    let projections = ctx.post_persist(&existing_events).await?;
+    ctx.publish(&existing_events).await?;
+    let projections = ctx.sync_fanout(&existing_events).await?;
     Ok(Some(CommandResponse {
         events: Some(existing_events),
         projections,
@@ -244,6 +244,40 @@ fn is_retryable_in_place(status: &Status) -> bool {
             && status
                 .message()
                 .starts_with(crate::orchestration::errmsg::SEQUENCE_MISMATCH_CLASS))
+}
+
+/// Prior events loaded for a handler call.
+struct LoadedPrior {
+    /// Upcast events before the 2PC view (uncommitted pages still flagged);
+    /// the cascade-conflict gate partitions on these.
+    raw: EventBook,
+    /// What the handler sees: own cascade visible, unresolved other cascades
+    /// and framework markers as NoOp, revoked pages as NoOp.
+    view: EventBook,
+    /// Whether another cascade has unresolved pages on this aggregate.
+    other_cascades_in_flight: bool,
+}
+
+/// Load, upcast and 2PC-resolve prior events. Every pipeline mode (execute,
+/// speculative, fact) hands the handler this same view.
+async fn load_prior(
+    ctx: &dyn AggregateContext,
+    domain: &str,
+    edition: &str,
+    root: Uuid,
+    temporal: &TemporalQuery,
+    explicit_divergence: Option<u32>,
+) -> Result<LoadedPrior, Status> {
+    let loaded = ctx
+        .load_prior_events_with_divergence(domain, edition, root, temporal, explicit_divergence)
+        .await?;
+    let raw = ctx.transform_events(domain, loaded).await?;
+    let (view, other_cascades_in_flight) = apply_two_phase_transform(ctx, &raw);
+    Ok(LoadedPrior {
+        raw,
+        view,
+        other_cascades_in_flight,
+    })
 }
 
 /// Apply the 2-phase-commit transform to prior events.
@@ -489,56 +523,38 @@ fn resolve_command_persist_outcome(outcome: PersistOutcome) -> Result<(EventBook
     }
 }
 
-/// Attempts at post_persist for a successfully persisted book before
-/// capturing to the DLQ (B1). The bus backends retry internally per attempt,
-/// so this multiplies into roughly a dozen broker tries.
+/// Publish attempts for a successfully persisted book before capturing it to
+/// the DLQ. The bus backends retry internally per attempt.
 pub(crate) const POST_PERSIST_ATTEMPTS: u32 = 3;
-/// Base backoff between post_persist attempts (multiplied by attempt number).
+/// Base backoff between publish attempts (multiplied by attempt number).
 const POST_PERSIST_BACKOFF_MS: u64 = 200;
 
-/// Publish persisted events and run sync projectors, unless this was a NoOp.
+/// Publish persisted events, unless this was a NoOp.
 ///
-/// H-16: a `PersistOutcome::NoOp` book has `pages: vec![]`; publishing it would
-/// push a 0-page book to the bus and trip subscribers that pattern-match
-/// `pages.first()`. The caller still receives the (empty) book in the response
-/// so "command ran, nothing changed" stays observable. (The saga-redelivery
-/// republish path is separate — its book carries pages and is dispatched in
-/// `try_deferred_idempotency_replay`.)
+/// A NoOp book has no pages; publishing it would push an empty book to every
+/// subscriber. The caller still receives it in the response.
 ///
-/// B1 (the standing "persisted but never published" interleave bug): once
-/// persist has SUCCEEDED, a post_persist failure must NOT propagate as a
-/// retryable Status. The whole-pipeline retry would re-execute against state
-/// that now CONTAINS these events, classify the attempt as NoOp, skip publish
-/// per H-16, and return success — events durably stored, never on the bus.
-/// Instead, retry post_persist IN PLACE with the exact persisted book
-/// (downstream sequence/idempotency dedup makes a republish after a partially
-/// failed post_persist safe — the deferred replay path already republishes
-/// the same way). On exhaustion, capture the book to the DLQ for operator
-/// replay and return success: the command DID apply, and an error here would
-/// invite a duplicate business-level retry of an already-applied command.
-async fn publish_unless_noop(
-    ctx: &dyn AggregateContext,
-    persisted: &EventBook,
-    is_noop: bool,
-) -> Result<Vec<crate::proto::Projection>, Status> {
+/// Once persist has succeeded, a publish failure must not fail the attempt: a
+/// pipeline-level retry would re-run against state that now contains these
+/// events, classify the re-run as NoOp, and skip the publish — events stored,
+/// never published. Instead the exact persisted book is republished in place
+/// (subscribers dedup by sequence), and on exhaustion it is captured to the
+/// DLQ for operator replay. The command did apply, so the attempt succeeds.
+async fn publish_unless_noop(ctx: &dyn AggregateContext, persisted: &EventBook, is_noop: bool) {
     if is_noop {
-        tracing::debug!(
-            "Skipping post_persist for PersistOutcome::NoOp (H-16: empty EventBook must not reach the bus)"
-        );
-        return Ok(vec![]);
+        return;
     }
 
     let mut last_err: Option<Status> = None;
     for attempt in 1..=POST_PERSIST_ATTEMPTS {
-        match ctx.post_persist(persisted).await {
-            Ok(projections) => return Ok(projections),
+        match ctx.publish(persisted).await {
+            Ok(()) => return,
             Err(e) => {
                 tracing::warn!(
                     attempt,
                     max_attempts = POST_PERSIST_ATTEMPTS,
                     error = %e,
-                    "post_persist failed for PERSISTED events; retrying in \
-                     place (B1: a pipeline-level retry would mask this as NoOp)"
+                    "publish failed for persisted events; retrying in place"
                 );
                 last_err = Some(e);
                 if attempt < POST_PERSIST_ATTEMPTS {
@@ -553,13 +569,45 @@ async fn publish_unless_noop(
 
     let reason = last_err
         .map(|e| e.to_string())
-        .unwrap_or_else(|| "unknown post_persist failure".to_string());
+        .unwrap_or_else(|| "unknown publish failure".to_string());
     tracing::error!(
         reason = %reason,
-        "post_persist retries exhausted for persisted events; capturing to DLQ"
+        "publish retries exhausted for persisted events; capturing to DLQ"
     );
     ctx.dead_letter_unpublished(persisted, &reason).await;
-    Ok(vec![])
+}
+
+/// Where a failed pipeline attempt stopped.
+enum AttemptError {
+    /// Nothing was persisted; the attempt may be re-run.
+    BeforePersist(Status),
+    /// Events are persisted and published; only the sync fan-out failed.
+    /// Re-running would re-apply nothing and must not be attempted.
+    AfterPersist(Status),
+}
+
+impl AttemptError {
+    fn into_status(self) -> Status {
+        match self {
+            AttemptError::BeforePersist(status) | AttemptError::AfterPersist(status) => status,
+        }
+    }
+}
+
+impl From<Status> for AttemptError {
+    fn from(status: Status) -> Self {
+        AttemptError::BeforePersist(status)
+    }
+}
+
+async fn execute_mode(
+    ctx: &dyn AggregateContext,
+    business: &dyn ClientLogic,
+    command_book: CommandBook,
+) -> Result<CommandResponse, Status> {
+    execute_attempt(ctx, business, command_book)
+        .await
+        .map_err(AttemptError::into_status)
 }
 
 /// Execute an aggregate command in normal (non-speculative) mode.
@@ -605,11 +653,11 @@ async fn publish_unless_noop(
     skip_all,
     fields(domain, edition, root_uuid, merge_strategy)
 )]
-async fn execute_mode(
+async fn execute_attempt(
     ctx: &dyn AggregateContext,
     business: &dyn ClientLogic,
     mut command_book: CommandBook,
-) -> Result<CommandResponse, Status> {
+) -> Result<CommandResponse, AttemptError> {
     use crate::proto_ext::CommandBookExt;
 
     let (domain, root_uuid) = parse_command_cover(&command_book)?;
@@ -669,26 +717,19 @@ async fn execute_mode(
             .await?;
     }
 
-    // Load prior events (with explicit divergence for new edition branches)
-    let prior_events = ctx
-        .load_prior_events_with_divergence(
-            &domain,
-            &edition,
-            root_uuid,
-            &TemporalQuery::Current,
-            explicit_divergence,
-        )
-        .await?;
-
-    // Transform events (upcasting)
-    let prior_events = ctx.transform_events(&domain, prior_events).await?;
-
-    // The cascade-conflict gate partitions committed vs uncommitted pages, so
-    // it needs the pre-transform book; the handler sees the 2PC view (own
-    // cascade visible, other cascades as NoOp).
-    let prior_events_with_uncommitted = prior_events.clone();
-    let (prior_events, has_uncommitted_other_cascades) =
-        apply_two_phase_transform(ctx, &prior_events);
+    let LoadedPrior {
+        raw: prior_events_with_uncommitted,
+        view: prior_events,
+        other_cascades_in_flight: has_uncommitted_other_cascades,
+    } = load_prior(
+        ctx,
+        &domain,
+        &edition,
+        root_uuid,
+        &TemporalQuery::Current,
+        explicit_divergence,
+    )
+    .await?;
 
     let actual = prior_events.next_sequence();
 
@@ -783,7 +824,14 @@ async fn execute_mode(
     // Set next_sequence on persisted EventBook for callers
     calculate_set_next_seq(&mut persisted);
 
-    let projections = publish_unless_noop(ctx, &persisted, is_noop).await?;
+    publish_unless_noop(ctx, &persisted, is_noop).await;
+    let projections = if is_noop {
+        vec![]
+    } else {
+        ctx.sync_fanout(&persisted)
+            .await
+            .map_err(AttemptError::AfterPersist)?
+    };
 
     Ok(CommandResponse {
         events: Some(persisted),
@@ -806,10 +854,17 @@ async fn speculative_mode(
     span.record("edition", edition.as_str());
     span.record("root_uuid", tracing::field::display(&root_uuid));
 
-    let prior_events = ctx
-        .load_prior_events(&domain, &edition, root_uuid, &temporal)
-        .await?;
-    let prior_events = ctx.transform_events(&domain, prior_events).await?;
+    let explicit_divergence = extract_explicit_divergence(&command_book, &domain);
+    let prior_events = load_prior(
+        ctx,
+        &domain,
+        &edition,
+        root_uuid,
+        &temporal,
+        explicit_divergence,
+    )
+    .await?
+    .view;
 
     let contextual_command = ContextualCommand {
         events: Some(prior_events),
@@ -828,6 +883,63 @@ async fn speculative_mode(
         events: Some(speculative_events),
         projections: vec![],
     })
+}
+
+/// Execute a compensation (rejection notification) against the aggregate.
+///
+/// Returns the raw `BusinessResponse` so the saga-side caller can inspect a
+/// revocation response. Events the handler emits are persisted, published and
+/// fanned out like a command's.
+pub async fn execute_compensation_pipeline(
+    ctx: &dyn AggregateContext,
+    business: &dyn ClientLogic,
+    command_book: CommandBook,
+) -> Result<BusinessResponse, Status> {
+    let (domain, root_uuid) = parse_command_cover(&command_book)?;
+    let edition = extract_edition(&command_book)?;
+    let correlation_id = crate::orchestration::correlation::extract_correlation_id(&command_book)?;
+
+    let prior_events = load_prior(
+        ctx,
+        &domain,
+        &edition,
+        root_uuid,
+        &TemporalQuery::Current,
+        None,
+    )
+    .await?
+    .view;
+
+    let response = business
+        .invoke(ContextualCommand {
+            events: Some(prior_events.clone()),
+            command: Some(command_book),
+        })
+        .await?;
+
+    if let Some(business_response::Result::Events(events)) = &response.result {
+        if !events.pages.is_empty() {
+            let outcome = ctx
+                .persist_events(
+                    &prior_events,
+                    events,
+                    &domain,
+                    &edition,
+                    root_uuid,
+                    &correlation_id,
+                    None,
+                    None,
+                )
+                .await?;
+            let (persisted, is_noop) = resolve_command_persist_outcome(outcome)?;
+            publish_unless_noop(ctx, &persisted, is_noop).await;
+            if !is_noop {
+                ctx.sync_fanout(&persisted).await?;
+            }
+        }
+    }
+
+    Ok(response)
 }
 
 /// Execute the fact injection pipeline.
@@ -861,7 +973,7 @@ pub async fn execute_fact_pipeline(
 ) -> Result<FactResponse, Status> {
     let (domain, root_uuid) = parse_event_cover(&fact_events)?;
     let edition = extract_event_edition(&fact_events)?;
-    let correlation_id = fact_events.correlation_id().to_string();
+    let correlation_id = crate::orchestration::correlation::extract_correlation_id(&fact_events)?;
 
     // Extract external_id from first page's header if it has external_deferred
     let external_id = fact_events
@@ -880,10 +992,9 @@ pub async fn execute_fact_pipeline(
     span.record("root_uuid", tracing::field::display(&root_uuid));
     span.record("external_id", external_id.as_str());
 
-    // Pre-handler idempotency check — symmetric with the saga path. On a
-    // webhook redelivery (same external_id under (domain, edition, root))
-    // return the cached events without invoking `business.invoke_fact`.
-    // Storage-level dedup at persist remains the safety net regardless.
+    // A redelivered external_id returns the events it produced the first
+    // time, republished, without invoking the handler again. Storage-level
+    // dedup at persist remains the safety net.
     if !external_id.is_empty() {
         if let Some(mut cached) = ctx
             .check_external_idempotency(&domain, &edition, root_uuid, &external_id)
@@ -893,18 +1004,14 @@ pub async fn execute_fact_pipeline(
                 external_id = external_id.as_str(),
                 "Fact already processed (external_id pre-handler hit), returning cached result"
             );
-            // Stamp the in-flight fact's correlation_id onto the rebuilt
-            // EventBook before republishing — same rationale as the
-            // deferred-idempotency hit above (C-04). The rebuilt cover
-            // from `build_event_book` carries an empty correlation_id;
-            // PMs filter by correlation_id and miss redeliveries
-            // otherwise.
+            // The rebuilt cover carries no correlation_id; PMs filter on it.
             if let Some(ref mut cover) = cached.cover {
                 if cover.correlation_id.is_empty() {
                     cover.correlation_id = correlation_id.clone();
                 }
             }
-            let projections = ctx.post_persist(&cached).await?;
+            publish_unless_noop(ctx, &cached, cached.pages.is_empty()).await;
+            let projections = ctx.sync_fanout(&cached).await?;
             return Ok(FactResponse {
                 events: cached,
                 projections,
@@ -926,15 +1033,17 @@ pub async fn execute_fact_pipeline(
         ));
     }
 
-    // Load prior events to determine next sequence
-    let prior_events = ctx
-        .load_prior_events(&domain, &edition, root_uuid, &TemporalQuery::Current)
-        .await?;
+    let prior_events = load_prior(
+        ctx,
+        &domain,
+        &edition,
+        root_uuid,
+        &TemporalQuery::Current,
+        None,
+    )
+    .await?
+    .view;
 
-    // Transform events (upcasting)
-    let prior_events = ctx.transform_events(&domain, prior_events).await?;
-
-    // Get next available sequence
     let next_seq = prior_events.next_sequence();
 
     // Save cover before moving fact_events into business logic
@@ -952,13 +1061,9 @@ pub async fn execute_fact_pipeline(
     };
 
     // Assign real sequence numbers, replacing ExternalDeferredSequence markers.
-    // Timestamps default to "now" if not provided by the external source.
-    //
-    // NOTE: External facts from historical systems (replays, migrations) should provide
-    // their original timestamps. If `created_at` is missing, we default to current time
-    // which may misrepresent when the fact actually occurred. Temporal queries against
-    // such facts would return incorrect results. Callers injecting historical facts
-    // should always include the original timestamp.
+    // `created_at` defaults to now when the external source supplied none;
+    // historical imports must carry their original timestamps or temporal
+    // queries will place them at import time.
     let mut final_pages = Vec::with_capacity(processed_events.pages.len());
     let mut current_seq = next_seq;
 
@@ -972,10 +1077,12 @@ pub async fn execute_fact_pipeline(
                 .created_at
                 .or_else(|| Some(prost_types::Timestamp::from(std::time::SystemTime::now()))),
             payload: page.payload,
-            // Facts are external realities — always immediately committed.
-            // If this runs inside a cascade, persist_events will override to
-            // no_commit=true and stamp the cascade_id.
-            cascade_id: page.cascade_id,
+            // Facts are committed external realities. Cascade membership is
+            // the coordinator's to assign (persist_events stamps the active
+            // cascade); a cascade_id supplied by the fact's producer is not
+            // trusted, since a committed page carrying it would read as that
+            // cascade's resolution.
+            cascade_id: None,
             no_commit: false,
         };
         final_pages.push(new_page);
@@ -1008,40 +1115,35 @@ pub async fn execute_fact_pipeline(
         )
         .await?;
 
-    match outcome {
-        PersistOutcome::Persisted(mut persisted) | PersistOutcome::NoOp(mut persisted) => {
-            // Set next_sequence
-            calculate_set_next_seq(&mut persisted);
-
-            // Post-persist: publish + sync projectors
-            let projections = ctx.post_persist(&persisted).await?;
-
-            Ok(FactResponse {
-                events: persisted,
-                projections,
-                already_processed: false,
-            })
-        }
+    let (mut persisted, is_noop) = match outcome {
+        PersistOutcome::Persisted(persisted) => (persisted, false),
+        PersistOutcome::NoOp(persisted) => (persisted, true),
         PersistOutcome::Duplicate { .. } => {
-            // The pre-handler `check_external_idempotency` short-circuits all
-            // duplicate fact deliveries before reaching persist, so the
-            // storage layer cannot return Duplicate for a fact in normal
-            // operation. The only way to land here is a TOCTOU race
-            // between two concurrent injections of the same external_id
-            // — both pre-checks miss, both call persist, second one's
-            // storage-level atomic dedup wins. Treat as an internal
-            // condition: storage-level dedup is the safety net, but the
-            // race-loser caller never sees the cached events through this
-            // code path. Logging surfaces the race for diagnostics.
+            // The pre-handler idempotency check normally answers duplicates;
+            // reaching storage-level dedup means two injections of the same
+            // external_id raced. The loser retries and reads the cached result.
             tracing::warn!(
                 external_id = %external_id,
                 "Fact pipeline reached PersistOutcome::Duplicate — concurrent fact race detected"
             );
-            Err(Status::aborted(
+            return Err(Status::aborted(
                 "concurrent fact injection — retry to read the cached result",
-            ))
+            ));
         }
-    }
+    };
+    calculate_set_next_seq(&mut persisted);
+    publish_unless_noop(ctx, &persisted, is_noop).await;
+    let projections = if is_noop {
+        vec![]
+    } else {
+        ctx.sync_fanout(&persisted).await?
+    };
+
+    Ok(FactResponse {
+        events: persisted,
+        projections,
+        already_processed: false,
+    })
 }
 
 #[cfg(test)]

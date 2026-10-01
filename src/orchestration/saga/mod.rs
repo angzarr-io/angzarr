@@ -43,13 +43,13 @@ use crate::bus::CommandBus;
 use crate::dlq::trigger::{CodeDlqExt, DlqTrigger};
 use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher};
 use crate::proto::{
-    page_header::SequenceType, AngzarrDeferredSequence, CommandBook, Cover, EventBook, PageHeader,
-    SagaResponse, SyncMode,
+    page_header::SequenceType, AngzarrDeferredSequence, CascadeErrorMode, CommandBook, Cover,
+    EventBook, PageHeader, SagaResponse, SyncMode,
 };
 use crate::proto_ext::CoverExt;
 use crate::utils::retry::{run_with_retry, RetryOutcome, RetryableOperation};
 
-use super::command::{CommandExecutor, CommandOutcome};
+use super::command::{CommandExecutor, CommandOutcome, DeliveryPolicy};
 use super::destination::DestinationFetcher;
 use super::shared::fill_fact_correlation_id;
 use super::FactExecutor;
@@ -188,6 +188,8 @@ pub trait SagaRetryContext: Send + Sync {
 struct RetryExhaustionTracker {
     failed_commands: Vec<(CommandBook, String)>,
     attempts: u32,
+    /// Commands the destination rejected (non-retryable), across attempts.
+    rejected: Vec<(CommandBook, String)>,
 }
 
 /// State for retryable saga command delivery.
@@ -224,6 +226,7 @@ struct SagaOperation<'a> {
     /// Shared accumulator the builder reads on retry exhaustion to emit
     /// per-command DLQ entries. See [`RetryExhaustionTracker`].
     tracker: Arc<Mutex<RetryExhaustionTracker>>,
+    policy: DeliveryPolicy,
 }
 
 #[async_trait]
@@ -319,8 +322,21 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
                 }
                 CommandOutcome::Rejected { code, message } => {
                     error!(%domain, ?code, error = %message, "Saga command rejected (non-retryable)");
-                    self.context.on_command_rejected(&command, &message).await;
-                    publish_immediate_rejection_dlq(self.context, &command, code, &message).await;
+                    if self.policy.compensates() {
+                        self.context.on_command_rejected(&command, &message).await;
+                    }
+                    if self.policy.dead_letters() {
+                        publish_immediate_rejection_dlq(self.context, &command, code, &message)
+                            .await;
+                    }
+                    self.tracker
+                        .lock()
+                        .await
+                        .rejected
+                        .push((command.clone(), message.clone()));
+                    if self.policy.stops_on_failure() {
+                        return RetryOutcome::Fatal(format!("{domain}: {message}"));
+                    }
                 }
             }
         }
@@ -460,6 +476,7 @@ struct SagaRetryBuilder<'a> {
     sync_mode: SyncMode,
     commands: Vec<CommandBook>,
     backoff: ExponentialBuilder,
+    policy: DeliveryPolicy,
 }
 
 impl<'a> SagaRetryBuilder<'a> {
@@ -479,6 +496,7 @@ impl<'a> SagaRetryBuilder<'a> {
             sync_mode,
             commands: Vec::new(),
             backoff: ExponentialBuilder::default(),
+            policy: DeliveryPolicy::Background,
         }
     }
 
@@ -497,15 +515,25 @@ impl<'a> SagaRetryBuilder<'a> {
         self
     }
 
+    fn policy(mut self, policy: DeliveryPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
     /// Deliver saga commands with retry on sequence conflicts.
+    ///
+    /// Returns the commands that could not be delivered (rejected, or still
+    /// failing when retries ran out) with their reasons, after applying the
+    /// delivery policy's compensation and dead-lettering.
     #[tracing::instrument(name = "saga.retry", skip_all, fields(saga_name = %self.saga_name, correlation_id = %self.correlation_id))]
-    async fn execute(self) {
+    async fn execute(self) -> Vec<(CommandBook, String)> {
         if self.commands.is_empty() {
-            return;
+            return Vec::new();
         }
 
         let tracker = Arc::new(Mutex::new(RetryExhaustionTracker::default()));
         let context = self.context;
+        let policy = self.policy;
         let tracker_for_builder = tracker.clone();
 
         let operation = SagaOperation {
@@ -518,12 +546,27 @@ impl<'a> SagaRetryBuilder<'a> {
             commands: self.commands,
             failed_indices: HashSet::new(),
             tracker,
+            policy,
         };
 
-        if let Err(e) = run_with_retry(operation, self.backoff).await {
-            error!(error = %e, "Saga execution failed after multiple retries");
-            publish_retry_exhausted_dlq(context, &tracker_for_builder).await;
+        let outcome = run_with_retry(operation, self.backoff).await;
+        let mut tracker = tracker_for_builder.lock().await;
+        let mut undelivered = std::mem::take(&mut tracker.rejected);
+        if let Err(e) = outcome {
+            error!(error = %e, "Saga command delivery failed after retries");
+            let exhausted = tracker.failed_commands.clone();
+            if policy.compensates() && policy != DeliveryPolicy::Background {
+                for (command, reason) in &exhausted {
+                    context.on_command_rejected(command, reason).await;
+                }
+            }
+            drop(tracker);
+            if policy.dead_letters() {
+                publish_retry_exhausted_dlq(context, &tracker_for_builder).await;
+            }
+            undelivered.extend(exhausted);
         }
+        undelivered
     }
 }
 
@@ -547,6 +590,14 @@ impl<'a> SagaRetryBuilder<'a> {
 ///
 /// `command_bus` is required when `sync_mode == Async`. If None and sync_mode is Async,
 /// falls back to direct execution.
+///
+/// `error_mode` is the synchronous caller's `CascadeErrorMode` (`None` for
+/// bus-driven sagas, which have no caller): FAIL_FAST and COMPENSATE stop at
+/// the first undeliverable command and return `Err` (COMPENSATE routes it to
+/// its source for compensation first), CONTINUE delivers everything and then
+/// returns `Err` listing the failures, DEAD_LETTER dead-letters failures and
+/// returns `Ok`. Without a caller, failures are compensated and
+/// dead-lettered and the orchestration returns `Ok`.
 #[tracing::instrument(name = "saga.orchestrate", skip_all, fields(%saga_name, %correlation_id))]
 #[allow(clippy::too_many_arguments)]
 pub async fn orchestrate_saga(
@@ -560,7 +611,9 @@ pub async fn orchestrate_saga(
     output_domain_validator: Option<&OutputDomainValidator>,
     sync_mode: SyncMode,
     backoff: ExponentialBuilder,
+    error_mode: Option<CascadeErrorMode>,
 ) -> Result<(), BusError> {
+    let policy = DeliveryPolicy::from_mode(error_mode);
     // Phase 1: Fetch destination sequences for output domains
     // Saga uses these for command stamping via stamp_command() helper.
     let mut destination_sequences = HashMap::new();
@@ -731,15 +784,24 @@ pub async fn orchestrate_saga(
         }
     }
 
-    // Phase 4: Execute commands with retry
-    // Commands have angzarr_deferred set — the executor handles sequence stamping
-    // and retry on conflict at the delivery level.
-    SagaRetryBuilder::new(ctx, executor, saga_name, correlation_id, sync_mode)
+    // Phase 5: Deliver commands, retrying sequence conflicts per command.
+    let undelivered = SagaRetryBuilder::new(ctx, executor, saga_name, correlation_id, sync_mode)
         .command_bus(command_bus)
         .commands(commands)
         .backoff(backoff)
+        .policy(policy)
         .execute()
         .await;
+    if policy.reports_failures() && !undelivered.is_empty() {
+        let detail = undelivered
+            .iter()
+            .map(|(command, reason)| format!("{}: {reason}", command.domain()))
+            .collect::<Vec<_>>()
+            .join("; ");
+        return Err(BusError::Grpc(tonic::Status::aborted(format!(
+            "saga {saga_name}: undeliverable commands: {detail}"
+        ))));
+    }
 
     // Phase 6: Inject facts into target aggregates
     //

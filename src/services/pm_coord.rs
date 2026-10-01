@@ -21,6 +21,7 @@ use crate::orchestration::command::CommandExecutor;
 use crate::orchestration::destination::DestinationFetcher;
 use crate::orchestration::process_manager::{orchestrate_pm, PMContextFactory};
 use crate::orchestration::FactExecutor;
+use crate::proto::CascadeErrorMode;
 use crate::proto::{
     process_manager_coordinator_service_server::ProcessManagerCoordinatorService,
     ProcessManagerCoordinatorRequest, ProcessManagerHandleResponse, SpeculatePmRequest, SyncMode,
@@ -120,8 +121,10 @@ impl ProcessManagerCoordinatorService for PmCoord {
         let trigger = req.trigger.ok_or_else(|| {
             Status::invalid_argument("ProcessManagerCoordinatorRequest requires trigger events")
         })?;
-        // Unspecified (proto3 zero value) and unknown ints resolve to Async.
+        // Unknown ints resolve to the zero-value defaults (Async / FailFast).
         let sync_mode = SyncMode::or_default_async(req.sync_mode);
+        let cascade_error_mode = CascadeErrorMode::try_from(req.cascade_error_mode)
+            .unwrap_or(CascadeErrorMode::CascadeErrorFailFast);
 
         let correlation_id = trigger.correlation_id();
         if correlation_id.is_empty() {
@@ -158,9 +161,10 @@ impl ProcessManagerCoordinatorService for PmCoord {
             &correlation_id,
             sync_mode,
             self.backoff,
+            Some(cascade_error_mode),
         )
         .await
-        .map_err(|e| Status::internal(format!("PM orchestration failed: {}", e)))?;
+        .map_err(|e| super::orchestration_status("PM", e))?;
 
         // Return empty response - commands were delivered during orchestration
         Ok(Response::new(ProcessManagerHandleResponse {

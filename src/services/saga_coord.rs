@@ -20,6 +20,7 @@ use crate::bus::CommandBus;
 use crate::orchestration::command::CommandExecutor;
 use crate::orchestration::saga::{orchestrate_saga, OutputDomainValidator, SagaContextFactory};
 use crate::orchestration::FactExecutor;
+use crate::proto::CascadeErrorMode;
 use crate::proto::{
     saga_coordinator_service_server::SagaCoordinatorService, SagaHandleRequest, SagaResponse,
     SpeculateSagaRequest, SyncMode,
@@ -129,8 +130,10 @@ impl SagaCoordinatorService for SagaCoord {
         let source = req
             .source
             .ok_or_else(|| Status::invalid_argument("SagaHandleRequest requires source events"))?;
-        // Unspecified (proto3 zero value) and unknown ints resolve to Async.
+        // Unknown ints resolve to the zero-value defaults (Async / FailFast).
         let sync_mode = SyncMode::or_default_async(req.sync_mode);
+        let cascade_error_mode = CascadeErrorMode::try_from(req.cascade_error_mode)
+            .unwrap_or(CascadeErrorMode::CascadeErrorFailFast);
 
         let correlation_id = source.correlation_id().to_string();
         let saga_name = self.factory.name();
@@ -159,9 +162,10 @@ impl SagaCoordinatorService for SagaCoord {
             self.output_validator.as_deref(),
             sync_mode,
             self.backoff,
+            Some(cascade_error_mode),
         )
         .await
-        .map_err(|e| Status::internal(format!("Saga orchestration failed: {}", e)))?;
+        .map_err(|e| super::orchestration_status("Saga", e))?;
 
         // The saga response is built by the context during handle()
         // For now, return empty response - commands were delivered during orchestration

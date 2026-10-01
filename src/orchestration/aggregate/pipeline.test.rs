@@ -219,11 +219,14 @@ struct TestCtx {
     /// Outcome returned by `persist_events` (wiring tests; None →
     /// Unimplemented, preserving helper-test behavior).
     persist_outcome: Option<PersistOutcome>,
-    /// Value returned by `post_persist`.
-    post_persist_return: Vec<Projection>,
-    post_persist_calls: Arc<AtomicUsize>,
-    /// B1: fail the first N `post_persist` calls with Unavailable.
-    post_persist_fail_times: usize,
+    /// Projections returned by `sync_fanout`.
+    fanout_return: Vec<Projection>,
+    /// When set, `sync_fanout` fails with this status.
+    fanout_error: Option<Status>,
+    fanout_calls: Arc<AtomicUsize>,
+    publish_calls: Arc<AtomicUsize>,
+    /// Fail the first N `publish` calls with Unavailable.
+    publish_fail_times: usize,
     /// B1: count of `dead_letter_unpublished` captures.
     unpublished_dlq_calls: Arc<AtomicUsize>,
     dlq_calls: Arc<AtomicUsize>,
@@ -296,12 +299,20 @@ impl AggregateContext for TestCtx {
             .ok_or_else(|| Status::unimplemented("persist_events not configured for this test"))
     }
 
-    async fn post_persist(&self, _events: &EventBook) -> Result<Vec<Projection>, Status> {
-        let call = self.post_persist_calls.fetch_add(1, Ordering::SeqCst);
-        if call < self.post_persist_fail_times {
+    async fn publish(&self, _events: &EventBook) -> Result<(), Status> {
+        let call = self.publish_calls.fetch_add(1, Ordering::SeqCst);
+        if call < self.publish_fail_times {
             return Err(Status::unavailable("bus down (synthetic B1 failure)"));
         }
-        Ok(self.post_persist_return.clone())
+        Ok(())
+    }
+
+    async fn sync_fanout(&self, _events: &EventBook) -> Result<Vec<Projection>, Status> {
+        self.fanout_calls.fetch_add(1, Ordering::SeqCst);
+        match &self.fanout_error {
+            Some(status) => Err(status.clone()),
+            None => Ok(self.fanout_return.clone()),
+        }
     }
 
     async fn dead_letter_unpublished(&self, _events: &EventBook, _reason: &str) {
@@ -520,115 +531,50 @@ async fn test_apply_two_phase_cascade_no_uncommitted_is_false() {
 // publish_unless_noop
 // ============================================================================
 
-/// NoOp: post_persist is skipped (H-16) and the result is empty.
+/// NoOp: nothing is published (an empty book must not reach the bus).
 #[tokio::test]
 async fn test_publish_unless_noop_skips_on_noop() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let ctx = TestCtx {
-        post_persist_calls: calls.clone(),
-        post_persist_return: vec![Projection::default()],
-        ..Default::default()
-    };
-    let book = book_with_domain("orders", "c1");
-
-    let projections = publish_unless_noop(&ctx, &book, true).await.unwrap();
-
-    assert!(projections.is_empty(), "NoOp must not publish");
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        0,
-        "post_persist must be skipped"
-    );
+    let ctx = TestCtx::default();
+    publish_unless_noop(&ctx, &book_with_domain("orders", "c1"), true).await;
+    assert_eq!(ctx.publish_calls.load(Ordering::SeqCst), 0);
 }
 
-/// Non-NoOp: post_persist runs and its projections are returned.
+/// Non-NoOp: published exactly once, no DLQ capture.
 #[tokio::test]
 async fn test_publish_unless_noop_publishes_when_not_noop() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let ctx = TestCtx {
-        post_persist_calls: calls.clone(),
-        post_persist_return: vec![Projection::default()],
-        ..Default::default()
-    };
-    let book = book_with_domain("orders", "c1");
-
-    let projections = publish_unless_noop(&ctx, &book, false).await.unwrap();
-
-    assert_eq!(
-        projections.len(),
-        1,
-        "projections from post_persist returned"
-    );
-    assert_eq!(calls.load(Ordering::SeqCst), 1, "post_persist called once");
+    let ctx = TestCtx::default();
+    publish_unless_noop(&ctx, &book_with_domain("orders", "c1"), false).await;
+    assert_eq!(ctx.publish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(ctx.unpublished_dlq_calls.load(Ordering::SeqCst), 0);
 }
 
-/// B1 regression (the standing "persisted but never published" interleave
-/// bug): a transient post_persist failure after a SUCCESSFUL persist must be
-/// retried IN PLACE with the same book — not propagated as a retryable
-/// Status. Propagating re-runs the whole pipeline, which then sees the
-/// persisted events in prior state, classifies the attempt as NoOp, skips
-/// publish (H-16), and reports success — silent event loss.
+/// A transient publish failure after a SUCCESSFUL persist is retried in place
+/// with the same book — a pipeline-level retry would see the persisted events
+/// as prior state, classify the re-run as NoOp and never publish.
 #[tokio::test]
 async fn test_publish_failure_retries_in_place_and_succeeds() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let unpublished = Arc::new(AtomicUsize::new(0));
     let ctx = TestCtx {
-        post_persist_calls: calls.clone(),
-        post_persist_fail_times: 1, // fail first attempt, succeed on retry
-        post_persist_return: vec![Projection::default()],
-        unpublished_dlq_calls: unpublished.clone(),
+        publish_fail_times: 1,
         ..Default::default()
     };
-    let book = book_with_domain("orders", "c1");
-
-    let projections = publish_unless_noop(&ctx, &book, false)
-        .await
-        .expect("transient publish failure must not surface as an error");
-
-    assert_eq!(projections.len(), 1, "retry must return real projections");
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        2,
-        "post_persist must be retried in place with the persisted book"
-    );
-    assert_eq!(
-        unpublished.load(Ordering::SeqCst),
-        0,
-        "no DLQ capture when a retry succeeds"
-    );
+    publish_unless_noop(&ctx, &book_with_domain("orders", "c1"), false).await;
+    assert_eq!(ctx.publish_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(ctx.unpublished_dlq_calls.load(Ordering::SeqCst), 0);
 }
 
-/// B1 exhaustion: when every post_persist attempt fails, the persisted book
-/// is captured via `dead_letter_unpublished` (operator replay path) and the
-/// command still reports success — the events ARE durable, and an error
-/// would invite a duplicate business-level retry of an applied command.
+/// Exhaustion captures the persisted book to the DLQ for operator replay.
 #[tokio::test]
 async fn test_publish_exhaustion_captures_unpublished_to_dlq() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let unpublished = Arc::new(AtomicUsize::new(0));
     let ctx = TestCtx {
-        post_persist_calls: calls.clone(),
-        post_persist_fail_times: usize::MAX, // bus is down hard
-        unpublished_dlq_calls: unpublished.clone(),
+        publish_fail_times: usize::MAX,
         ..Default::default()
     };
-    let book = book_with_domain("orders", "c1");
-
-    let projections = publish_unless_noop(&ctx, &book, false)
-        .await
-        .expect("exhausted publish must not fail the already-applied command");
-
-    assert!(projections.is_empty());
+    publish_unless_noop(&ctx, &book_with_domain("orders", "c1"), false).await;
     assert_eq!(
-        calls.load(Ordering::SeqCst),
-        POST_PERSIST_ATTEMPTS as usize,
-        "all in-place attempts must be made before giving up"
+        ctx.publish_calls.load(Ordering::SeqCst),
+        POST_PERSIST_ATTEMPTS as usize
     );
-    assert_eq!(
-        unpublished.load(Ordering::SeqCst),
-        1,
-        "the persisted-but-unpublished book must be captured to the DLQ"
-    );
+    assert_eq!(ctx.unpublished_dlq_calls.load(Ordering::SeqCst), 1);
 }
 
 /// B1 retry pacing: linear backoff BETWEEN attempts (200ms, then 400ms) and
@@ -640,13 +586,13 @@ async fn test_publish_exhaustion_captures_unpublished_to_dlq() {
 #[tokio::test(start_paused = true)]
 async fn test_publish_exhaustion_backoff_pacing() {
     let ctx = TestCtx {
-        post_persist_fail_times: usize::MAX,
+        publish_fail_times: usize::MAX,
         ..Default::default()
     };
     let book = book_with_domain("orders", "c1");
 
     let start = tokio::time::Instant::now();
-    let _ = publish_unless_noop(&ctx, &book, false).await;
+    publish_unless_noop(&ctx, &book, false).await;
     let elapsed = start.elapsed();
 
     assert_eq!(
@@ -666,7 +612,7 @@ async fn test_publish_exhaustion_backoff_pacing() {
 async fn test_try_deferred_replay_non_deferred_is_none() {
     let calls = Arc::new(AtomicUsize::new(0));
     let ctx = TestCtx {
-        post_persist_calls: calls.clone(),
+        publish_calls: calls.clone(),
         ..Default::default()
     };
     let cmd = plain_command();
@@ -702,14 +648,14 @@ async fn test_try_deferred_replay_deferred_not_cached_is_none() {
 }
 
 /// Deferred command already processed: returns the cached events, republishes
-/// (post_persist), and stamps the in-flight correlation_id onto the empty cover.
+/// (publish), and stamps the in-flight correlation_id onto the empty cover.
 #[tokio::test]
 async fn test_try_deferred_replay_cached_returns_and_stamps_correlation() {
     let calls = Arc::new(AtomicUsize::new(0));
     let ctx = TestCtx {
         // cached book has an empty correlation_id, as build_event_book produces.
         deferred_cached: Some(book_with_domain("orders", "")),
-        post_persist_calls: calls.clone(),
+        publish_calls: calls.clone(),
         ..Default::default()
     };
     let cmd = deferred_command(Some(cover("orders", "")), 1);
@@ -735,7 +681,7 @@ async fn test_try_deferred_replay_cached_returns_and_stamps_correlation() {
     assert_eq!(
         calls.load(Ordering::SeqCst),
         1,
-        "cached result must be republished via post_persist"
+        "cached result must be republished via publish"
     );
 }
 
@@ -1065,7 +1011,7 @@ struct DeferredManualRun {
     result: Result<CommandResponse, Status>,
     /// `send_to_dlq` call count.
     dlq: usize,
-    /// `post_persist` call count (proves the pipeline reached publish).
+    /// `publish` call count (proves the pipeline reached publish).
     published: usize,
 }
 
@@ -1090,8 +1036,8 @@ async fn run_deferred_manual_pipeline(
     let ctx = TestCtx {
         prior_events: Some(prior),
         persist_outcome: Some(PersistOutcome::Persisted(received.clone())),
-        post_persist_calls: published.clone(),
-        post_persist_return: vec![Projection::default()],
+        publish_calls: published.clone(),
+        fanout_return: vec![Projection::default()],
         dlq_calls: dlq.clone(),
         ..Default::default()
     };
@@ -1190,7 +1136,7 @@ async fn test_execute_mode_deferred_manual_disjoint_merges() {
     assert_eq!(
         response.projections.len(),
         1,
-        "projections from post_persist flow back out (pipeline completed)"
+        "projections from the sync fan-out flow back out (pipeline completed)"
     );
 }
 
@@ -1349,8 +1295,8 @@ async fn run_deferred_window_pipeline(
     let ctx = TestCtx {
         prior_events: Some(prior),
         persist_outcome: Some(PersistOutcome::Persisted(received.clone())),
-        post_persist_calls: published.clone(),
-        post_persist_return: vec![Projection::default()],
+        publish_calls: published.clone(),
+        fanout_return: vec![Projection::default()],
         dlq_calls: dlq.clone(),
         ..Default::default()
     };
@@ -1510,8 +1456,8 @@ async fn test_execute_mode_deferred_manual_basis_equals_actual_fast_path() {
     let ctx = TestCtx {
         prior_events: Some(prior),
         persist_outcome: Some(PersistOutcome::Persisted(received.clone())),
-        post_persist_calls: published.clone(),
-        post_persist_return: vec![Projection::default()],
+        publish_calls: published.clone(),
+        fanout_return: vec![Projection::default()],
         dlq_calls: dlq.clone(),
         ..Default::default()
     };
@@ -1849,4 +1795,317 @@ async fn test_commutative_window_ignores_snapshot_newer_than_expected() {
         "state@1 is the history through sequence 0"
     );
     assert_eq!(ctx.persist_calls.load(Ordering::SeqCst), 0);
+}
+
+// ============================================================================
+// Publish vs sync fan-out after persist
+// ============================================================================
+
+/// A failing sync fan-out (projector/saga/PM) after a successful persist and
+/// publish reaches the caller once: the book is not republished, not
+/// dead-lettered as unpublished, and the command is not re-run in place.
+#[tokio::test]
+async fn test_fanout_failure_after_persist_reaches_caller_without_republish() {
+    let mut received = book_with_domain("dest", "");
+    received.pages = vec![make_event_page(0, false, None)];
+    let ctx = TestCtx {
+        prior_events: Some(book_with_domain("dest", "")),
+        persist_outcome: Some(PersistOutcome::Persisted(received.clone())),
+        fanout_error: Some(Status::unavailable("saga-a: down")),
+        ..Default::default()
+    };
+    let business = WiredLogic {
+        replay: StubReplay {
+            states_by_page_count: vec![],
+        },
+        respond_events: received,
+    };
+    let err = execute_command_with_retry(
+        &ctx,
+        &business,
+        explicit_command(MergeStrategy::MergeCommutative, 0),
+        crate::utils::retry::saga_backoff()
+            .with_min_delay(std::time::Duration::from_millis(1))
+            .with_max_delay(std::time::Duration::from_millis(1)),
+    )
+    .await
+    .expect_err("fan-out failure reaches the caller");
+    assert_eq!(err.code(), tonic::Code::Unavailable);
+    assert_eq!(ctx.persist_calls.load(Ordering::SeqCst), 1, "no re-run");
+    assert_eq!(ctx.publish_calls.load(Ordering::SeqCst), 1, "no republish");
+    assert_eq!(ctx.fanout_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(ctx.unpublished_dlq_calls.load(Ordering::SeqCst), 0);
+}
+
+/// Sync projections come from the fan-out; a NoOp command runs no fan-out.
+#[tokio::test]
+async fn test_noop_command_runs_no_fanout() {
+    let ctx = TestCtx {
+        prior_events: Some(book_with_domain("dest", "")),
+        persist_outcome: Some(PersistOutcome::NoOp(book_with_domain("dest", ""))),
+        fanout_return: vec![Projection::default()],
+        ..Default::default()
+    };
+    let business = WiredLogic {
+        replay: StubReplay {
+            states_by_page_count: vec![],
+        },
+        respond_events: book_with_domain("dest", ""),
+    };
+    let response = execute_mode(
+        &ctx,
+        &business,
+        explicit_command(MergeStrategy::MergeCommutative, 0),
+    )
+    .await
+    .unwrap();
+    assert!(response.projections.is_empty());
+    assert_eq!(ctx.publish_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(ctx.fanout_calls.load(Ordering::SeqCst), 0);
+}
+
+// ============================================================================
+// Fact pipeline
+// ============================================================================
+
+fn fact_book(correlation_id: &str, cascade_id: Option<&str>) -> EventBook {
+    let mut book = book_with_domain("dest", correlation_id);
+    book.pages = vec![EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(SequenceType::ExternalDeferred(
+                crate::proto::ExternalDeferredSequence {
+                    external_id: "ext-1".to_string(),
+                    description: String::new(),
+                },
+            )),
+        }),
+        payload: Some(event_page::Payload::Event(Any {
+            type_url: "test.Fact".to_string(),
+            value: vec![],
+        })),
+        created_at: None,
+        no_commit: false,
+        cascade_id: cascade_id.map(String::from),
+    }];
+    book
+}
+
+/// Records the book handed to `persist_events`.
+#[derive(Default)]
+struct FactCtx {
+    inner: TestCtx,
+    persisted: std::sync::Mutex<Vec<EventBook>>,
+}
+
+#[async_trait]
+impl AggregateContext for FactCtx {
+    async fn load_prior_events_with_divergence(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        temporal: &TemporalQuery,
+        divergence: Option<u32>,
+    ) -> Result<EventBook, Status> {
+        self.inner
+            .load_prior_events_with_divergence(domain, edition, root, temporal, divergence)
+            .await
+    }
+
+    async fn persist_events(
+        &self,
+        prior: &EventBook,
+        received: &EventBook,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        correlation_id: &str,
+        external_id: Option<&str>,
+        source_info: Option<&SourceInfo>,
+    ) -> Result<PersistOutcome, Status> {
+        self.persisted.lock().unwrap().push(received.clone());
+        self.inner
+            .persist_events(
+                prior,
+                received,
+                domain,
+                edition,
+                root,
+                correlation_id,
+                external_id,
+                source_info,
+            )
+            .await
+    }
+
+    async fn publish(&self, events: &EventBook) -> Result<(), Status> {
+        self.inner.publish(events).await
+    }
+
+    async fn sync_fanout(&self, events: &EventBook) -> Result<Vec<Projection>, Status> {
+        self.inner.sync_fanout(events).await
+    }
+
+    async fn dead_letter_unpublished(&self, events: &EventBook, reason: &str) {
+        self.inner.dead_letter_unpublished(events, reason).await
+    }
+}
+
+/// A fact that changes nothing (NoOp) is not published — an empty book must
+/// not reach the bus.
+#[tokio::test]
+async fn test_fact_noop_is_not_published() {
+    let ctx = FactCtx {
+        inner: TestCtx {
+            persist_outcome: Some(PersistOutcome::NoOp(book_with_domain("dest", ""))),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let response = execute_fact_pipeline(&ctx, None, fact_book("", None))
+        .await
+        .unwrap();
+    assert!(response.events.pages.is_empty());
+    assert_eq!(ctx.inner.publish_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(ctx.inner.fanout_calls.load(Ordering::SeqCst), 0);
+}
+
+/// A publish failure after a persisted fact is retried in place and
+/// dead-lettered; the fact still reports success (it is durable).
+#[tokio::test]
+async fn test_fact_publish_failure_does_not_fail_persisted_fact() {
+    let mut persisted = book_with_domain("dest", "");
+    persisted.pages = vec![make_event_page(0, false, None)];
+    let ctx = FactCtx {
+        inner: TestCtx {
+            persist_outcome: Some(PersistOutcome::Persisted(persisted)),
+            publish_fail_times: usize::MAX,
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    execute_fact_pipeline(&ctx, None, fact_book("", None))
+        .await
+        .expect("persisted fact succeeds");
+    assert_eq!(
+        ctx.inner.publish_calls.load(Ordering::SeqCst),
+        POST_PERSIST_ATTEMPTS as usize
+    );
+    assert_eq!(ctx.inner.unpublished_dlq_calls.load(Ordering::SeqCst), 1);
+}
+
+/// A malformed correlation id on a fact is refused before anything persists.
+#[tokio::test]
+async fn test_fact_invalid_correlation_rejected() {
+    let ctx = FactCtx::default();
+    let err = execute_fact_pipeline(&ctx, None, fact_book("bad id!", None))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(ctx.persisted.lock().unwrap().is_empty());
+}
+
+/// A cascade_id supplied by the fact's producer is not persisted: on a
+/// committed page it would read as that cascade's resolution.
+#[tokio::test]
+async fn test_fact_strips_producer_cascade_id() {
+    let ctx = FactCtx {
+        inner: TestCtx {
+            persist_outcome: Some(PersistOutcome::NoOp(EventBook::default())),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    execute_fact_pipeline(&ctx, None, fact_book("", Some("cascade-x")))
+        .await
+        .unwrap();
+    let persisted = ctx.persisted.lock().unwrap();
+    assert_eq!(persisted[0].pages.len(), 1);
+    assert_eq!(persisted[0].pages[0].cascade_id, None);
+    assert!(!persisted[0].pages[0].no_commit);
+}
+
+/// The fact handler sees the same 2PC view a command handler does: another
+/// cascade's unresolved page is a NoOp placeholder, not live state.
+#[tokio::test]
+async fn test_fact_handler_sees_two_phase_view() {
+    struct CaptureFact(std::sync::Mutex<Option<EventBook>>);
+    #[async_trait]
+    impl ClientLogic for CaptureFact {
+        async fn invoke(&self, _cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
+            unreachable!()
+        }
+        async fn invoke_fact(&self, ctx: FactContext) -> Result<EventBook, Status> {
+            *self.0.lock().unwrap() = ctx.prior_events.clone();
+            Ok(ctx.facts)
+        }
+    }
+
+    let mut prior = book_with_domain("dest", "");
+    prior.pages = vec![make_event_page(0, true, Some("other-cascade"))];
+    prior.next_sequence = 1;
+    let ctx = FactCtx {
+        inner: TestCtx {
+            prior_events: Some(prior),
+            persist_outcome: Some(PersistOutcome::NoOp(EventBook::default())),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let logic = CaptureFact(std::sync::Mutex::new(None));
+    execute_fact_pipeline(&ctx, Some(&logic), fact_book("", None))
+        .await
+        .unwrap();
+    let seen = logic.0.lock().unwrap().clone().unwrap();
+    assert!(super::super::two_phase::is_noop(&seen.pages[0]));
+    let persisted = ctx.persisted.lock().unwrap();
+    assert_eq!(
+        crate::proto_ext::EventPageExt::sequence_num(&persisted[0].pages[0]),
+        1,
+        "the fact lands after the hidden page"
+    );
+}
+
+/// Speculative execution hands the handler the 2PC view too.
+#[tokio::test]
+async fn test_speculative_handler_sees_two_phase_view() {
+    struct CaptureCommand(std::sync::Mutex<Option<EventBook>>);
+    #[async_trait]
+    impl ClientLogic for CaptureCommand {
+        async fn invoke(&self, cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
+            *self.0.lock().unwrap() = cmd.events.clone();
+            Ok(BusinessResponse {
+                result: Some(business_response::Result::Events(EventBook::default())),
+            })
+        }
+        async fn invoke_fact(&self, _ctx: FactContext) -> Result<EventBook, Status> {
+            unreachable!()
+        }
+    }
+
+    let mut historical = book_with_domain("dest", "");
+    historical.pages = vec![
+        make_event_page(0, false, None),
+        make_event_page(1, true, Some("other-cascade")),
+    ];
+    let ctx = TestCtx {
+        historical_events: Some(historical),
+        ..Default::default()
+    };
+    let logic = CaptureCommand(std::sync::Mutex::new(None));
+    execute_command_pipeline(
+        &ctx,
+        &logic,
+        explicit_command(MergeStrategy::MergeCommutative, 0),
+        PipelineMode::Speculative {
+            as_of_sequence: Some(1),
+            as_of_timestamp: None,
+        },
+    )
+    .await
+    .unwrap();
+    let seen = logic.0.lock().unwrap().clone().unwrap();
+    assert!(!super::super::two_phase::is_noop(&seen.pages[0]));
+    assert!(super::super::two_phase::is_noop(&seen.pages[1]));
 }

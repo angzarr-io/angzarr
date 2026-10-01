@@ -99,9 +99,21 @@ pub trait AggregateContext: Send + Sync {
         source_info: Option<&crate::storage::SourceInfo>,
     ) -> Result<PersistOutcome, Status>;
 
-    /// Publish to event bus AND call sync projectors via service discovery.
-    /// Returns projections from sync projectors.
-    async fn post_persist(&self, events: &EventBook) -> Result<Vec<Projection>, Status>;
+    /// Publish persisted events to the event bus.
+    ///
+    /// The pipeline retries this in place and dead-letters the book when it
+    /// keeps failing; it never re-runs the sync fan-out because of a publish
+    /// failure.
+    async fn publish(&self, events: &EventBook) -> Result<(), Status>;
+
+    /// Synchronous downstream fan-out: SIMPLE / CASCADE sync projectors, and
+    /// CASCADE sagas and PMs. Returns the sync projections.
+    ///
+    /// Runs once, after publish. Its errors reach the caller (subject to the
+    /// request's `CascadeErrorMode`); the events stay persisted and published.
+    async fn sync_fanout(&self, _events: &EventBook) -> Result<Vec<Projection>, Status> {
+        Ok(vec![])
+    }
 
     /// Optional: pre-validate sequence before loading events (gRPC fast-path).
     /// On mismatch, may return Status with EventBook in details.

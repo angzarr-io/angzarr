@@ -173,6 +173,7 @@ async fn test_orchestrate_pm_empty_response() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -205,6 +206,7 @@ async fn test_orchestrate_pm_persists_events() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -238,6 +240,7 @@ async fn test_orchestrate_pm_retries_on_sequence_conflict() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -277,6 +280,7 @@ async fn test_orchestrate_pm_exhausts_retries() {
         "corr-1",
         SyncMode::Async,
         backoff,
+        None,
     )
     .await;
 
@@ -386,6 +390,7 @@ async fn test_per_command_sync_mode_override_is_honored() {
         "corr-1",
         SyncMode::Async, // inherited mode is Async
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -414,6 +419,7 @@ async fn test_inherited_sync_mode_used_when_no_override() {
         "corr-1",
         SyncMode::Cascade, // inherited mode
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -572,6 +578,7 @@ async fn test_orchestrate_pm_does_not_re_emit_earlier_books_after_retry() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -715,6 +722,7 @@ async fn test_orchestrate_pm_decision_retryable_does_not_hang_caller() {
         "corr-1",
         SyncMode::Async, // inherited mode (Async); per-command header overrides to Decision
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -1070,6 +1078,7 @@ async fn pm_persist_retry_exhausted_publishes_dead_letter() {
         "corr-1",
         SyncMode::Simple,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -1122,6 +1131,7 @@ async fn pm_persist_immediate_rejection_publishes_dead_letter() {
         "corr-1",
         SyncMode::Simple,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -1167,6 +1177,7 @@ async fn pm_4xx_command_rejection_publishes_dead_letter_immediately() {
         "corr-1",
         SyncMode::Simple,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -1218,6 +1229,7 @@ async fn pm_h14_decision_degraded_publishes_dead_letter() {
         "corr-1",
         SyncMode::Simple,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -1262,6 +1274,7 @@ async fn pm_2xx_success_does_not_publish() {
         "corr-1",
         SyncMode::Simple,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -1337,6 +1350,7 @@ async fn pm_transient_command_after_persist_enqueues_to_outbox() {
         "corr-1",
         SyncMode::Simple,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -1390,6 +1404,7 @@ async fn pm_transient_command_failure_after_persist_publishes_dead_letter() {
         "corr-1",
         SyncMode::Simple,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -1445,6 +1460,7 @@ async fn test_orchestrate_pm_refuses_facts_without_fact_executor() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -1578,6 +1594,7 @@ async fn test_pm_stamps_component_and_command_index() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
     assert!(result.is_ok(), "orchestrate_pm should succeed");
@@ -1631,6 +1648,7 @@ async fn test_pm_honors_handler_stamped_explicit_sequence() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
     assert!(result.is_ok(), "orchestrate_pm should succeed");
@@ -1697,6 +1715,7 @@ async fn test_pm_preserves_handler_stamped_deferred_source_and_seq() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
     assert!(result.is_ok(), "orchestrate_pm should succeed");
@@ -1766,6 +1785,7 @@ async fn test_pm_stamps_correlation_derived_root_for_friendly_id() {
         "order-42", // friendly (non-UUID) correlation id
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
     assert!(result.is_ok(), "orchestrate_pm should succeed");
@@ -1888,6 +1908,7 @@ async fn test_orchestrate_pm_backfills_correlation_id_on_facts() {
         "corr-42",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -1922,6 +1943,7 @@ async fn test_orchestrate_pm_preserves_explicit_fact_correlation_id() {
         "corr-42",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -2036,6 +2058,7 @@ async fn test_orchestrate_pm_fetch_error_fails_attempt_without_restarting_workfl
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -2078,6 +2101,7 @@ async fn test_orchestrate_pm_fetch_none_still_means_new_workflow() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -2136,6 +2160,7 @@ async fn test_orchestrate_pm_fetch_some_hands_state_to_handler() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -2149,4 +2174,216 @@ async fn test_orchestrate_pm_fetch_some_hands_state_to_handler() {
         "fetched PM state must reach the handler as Some (in-flight \
          workflow continues, not restarts)"
     );
+}
+
+// ============================================================================
+// Delivery policy: the synchronous caller's CascadeErrorMode
+// ============================================================================
+
+/// PM emitting two commands (roots 1 and 2) to `fulfillment`.
+struct TwoCommandPm {
+    inner: DlqCommandPm,
+}
+
+#[async_trait]
+impl ProcessManagerContext for TwoCommandPm {
+    async fn handle(
+        &self,
+        trigger: &EventBook,
+        pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let mut response = self.inner.handle(trigger, pm_state).await?;
+        let mut second = response.commands[0].clone();
+        response.commands[0].cover.as_mut().unwrap().root =
+            Some(crate::proto::Uuid { value: vec![1; 16] });
+        second.cover.as_mut().unwrap().root = Some(crate::proto::Uuid { value: vec![2; 16] });
+        response.commands.push(second);
+        Ok(response)
+    }
+    async fn persist_pm_events(&self, events: &EventBook, correlation_id: &str) -> CommandOutcome {
+        self.inner.persist_pm_events(events, correlation_id).await
+    }
+    async fn on_command_rejected(&self, command: &CommandBook, reason: &str, correlation_id: &str) {
+        self.inner
+            .on_command_rejected(command, reason, correlation_id)
+            .await
+    }
+    fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
+        self.inner.dlq_publisher()
+    }
+}
+
+/// Fails the command addressed to root byte 1 (rejected or transiently),
+/// accepts the rest.
+struct FirstFailsExecutor {
+    executions: AtomicU32,
+    retryable: bool,
+}
+
+#[async_trait]
+impl CommandExecutor for FirstFailsExecutor {
+    async fn execute(&self, command: CommandBook, _sync_mode: SyncMode) -> CommandOutcome {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        let first = command
+            .cover
+            .as_ref()
+            .and_then(|c| c.root.as_ref())
+            .map(|r| r.value[0])
+            == Some(1);
+        match (first, self.retryable) {
+            (false, _) => CommandOutcome::Success(CommandResponse::default()),
+            (true, false) => CommandOutcome::Rejected {
+                code: tonic::Code::FailedPrecondition,
+                message: "out of stock".to_string(),
+            },
+            (true, true) => CommandOutcome::Retryable {
+                reason: "Unavailable".to_string(),
+                current_state: None,
+            },
+        }
+    }
+}
+
+struct PmPolicyRun {
+    result: Result<(), BusError>,
+    executions: u32,
+    compensations: u32,
+    dead_letters: usize,
+}
+
+async fn run_pm_policy(mode: Option<CascadeErrorMode>, retryable: bool) -> PmPolicyRun {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = TwoCommandPm {
+        inner: DlqCommandPm::new(publisher.clone(), false),
+    };
+    let executor = FirstFailsExecutor {
+        executions: AtomicU32::new(0),
+        retryable,
+    };
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger_event(),
+        "pm-policy",
+        "pm-domain",
+        "corr-1",
+        SyncMode::Cascade,
+        fast_backoff(),
+        mode,
+    )
+    .await;
+    let dead_letters = publisher.captured.lock().await.len();
+    PmPolicyRun {
+        result,
+        executions: executor.executions.load(Ordering::SeqCst),
+        compensations: ctx.inner.rejection_count.load(Ordering::SeqCst),
+        dead_letters,
+    }
+}
+
+fn pm_aborted(result: &Result<(), BusError>) -> &tonic::Status {
+    match result {
+        Err(BusError::Grpc(status)) => {
+            assert_eq!(status.code(), tonic::Code::Aborted);
+            status
+        }
+        other => panic!("expected an aborted orchestration, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn pm_background_rejection_compensates_dead_letters_and_continues() {
+    let run = run_pm_policy(None, false).await;
+    run.result.unwrap();
+    assert_eq!(run.executions, 2);
+    assert_eq!(run.compensations, 1);
+    assert_eq!(run.dead_letters, 1);
+}
+
+#[tokio::test]
+async fn pm_fail_fast_rejection_stops_and_reports() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorFailFast), false).await;
+    assert!(pm_aborted(&run.result).message().contains("out of stock"));
+    assert_eq!(run.executions, 1);
+    assert_eq!(run.compensations, 0);
+    assert_eq!(run.dead_letters, 0);
+}
+
+#[tokio::test]
+async fn pm_compensate_rejection_compensates_stops_and_reports() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorCompensate), false).await;
+    pm_aborted(&run.result);
+    assert_eq!(run.executions, 1);
+    assert_eq!(run.compensations, 1);
+    assert_eq!(run.dead_letters, 0);
+}
+
+#[tokio::test]
+async fn pm_continue_rejection_delivers_all_then_reports() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
+    pm_aborted(&run.result);
+    assert_eq!(run.executions, 2);
+    assert_eq!(run.compensations, 0);
+    assert_eq!(run.dead_letters, 0);
+}
+
+#[tokio::test]
+async fn pm_dead_letter_rejection_captures_and_succeeds() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorDeadLetter), false).await;
+    run.result.unwrap();
+    assert_eq!(run.executions, 2);
+    assert_eq!(run.compensations, 0);
+    assert_eq!(run.dead_letters, 1);
+}
+
+/// A transient failure under a synchronous caller is reported, not parked
+/// in the outbox where the caller would never see it.
+#[tokio::test]
+async fn pm_fail_fast_transient_failure_reports() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorFailFast), true).await;
+    assert!(pm_aborted(&run.result).message().contains("Unavailable"));
+    assert_eq!(run.executions, 1);
+    assert_eq!(run.dead_letters, 0);
+}
+
+#[tokio::test]
+async fn pm_compensate_transient_failure_compensates() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorCompensate), true).await;
+    pm_aborted(&run.result);
+    assert_eq!(run.compensations, 1);
+}
+
+#[tokio::test]
+async fn pm_dead_letter_transient_failure_is_captured_as_transient() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = TwoCommandPm {
+        inner: DlqCommandPm::new(publisher.clone(), false),
+    };
+    let executor = FirstFailsExecutor {
+        executions: AtomicU32::new(0),
+        retryable: true,
+    };
+    orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger_event(),
+        "pm-policy",
+        "pm-domain",
+        "corr-1",
+        SyncMode::Cascade,
+        fast_backoff(),
+        Some(CascadeErrorMode::CascadeErrorDeadLetter),
+    )
+    .await
+    .unwrap();
+    let captured = publisher.captured.lock().await;
+    assert_eq!(captured.len(), 1);
+    match &captured[0].rejection_details {
+        Some(RejectionDetails::EventProcessingFailed(d)) => assert!(d.is_transient),
+        other => panic!("unexpected {other:?}"),
+    }
 }

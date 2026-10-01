@@ -303,3 +303,71 @@ async fn test_execute_speculative_requires_request() {
 
     assert!(result.is_err(), "speculative should fail without request");
 }
+
+/// Executor that rejects every command.
+struct RejectingExecutor;
+
+#[async_trait::async_trait]
+impl crate::orchestration::command::CommandExecutor for RejectingExecutor {
+    async fn execute(
+        &self,
+        _command: CommandBook,
+        _sync_mode: SyncMode,
+    ) -> crate::orchestration::command::CommandOutcome {
+        crate::orchestration::command::CommandOutcome::Rejected {
+            code: tonic::Code::FailedPrecondition,
+            message: "insufficient funds".to_string(),
+        }
+    }
+}
+
+/// A CASCADE caller learns that a saga command was rejected: FAIL_FAST and
+/// CONTINUE answer ABORTED with the reason, DEAD_LETTER answers OK. The
+/// coordinator used to answer OK regardless.
+#[tokio::test]
+async fn test_execute_reports_rejected_command_per_cascade_error_mode() {
+    for (mode, rejected) in [
+        (CascadeErrorMode::CascadeErrorFailFast, true),
+        (CascadeErrorMode::CascadeErrorContinue, true),
+        (CascadeErrorMode::CascadeErrorCompensate, true),
+        (CascadeErrorMode::CascadeErrorDeadLetter, false),
+    ] {
+        let factory = Arc::new(MockSagaContextFactory::new("test-saga"));
+        factory.set_commands(vec![test_command()]).await;
+        let service = SagaCoord::new(factory, Arc::new(RejectingExecutor))
+            .with_backoff(backon::ExponentialBuilder::default().with_max_times(0));
+        let result = service
+            .execute(Request::new(SagaHandleRequest {
+                source: Some(test_event_book()),
+                sync_mode: SyncMode::Cascade.into(),
+                cascade_error_mode: mode.into(),
+                destination_sequences: std::collections::HashMap::new(),
+            }))
+            .await;
+        match (rejected, result) {
+            (true, Err(status)) => {
+                assert_eq!(status.code(), tonic::Code::Aborted, "{mode:?}");
+                assert!(status.message().contains("insufficient funds"));
+            }
+            (false, Ok(_)) => {}
+            (expected, other) => panic!("{mode:?}: expected rejected={expected}, got {other:?}"),
+        }
+    }
+}
+
+/// Non-gRPC orchestration failures map to INTERNAL; gRPC ones keep their code.
+#[test]
+fn test_orchestration_status_preserves_grpc_code() {
+    let status = crate::services::orchestration_status(
+        "Saga",
+        crate::bus::BusError::Grpc(Status::unavailable("fetch failed")),
+    );
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert_eq!(status.message(), "Saga orchestration failed: fetch failed");
+    let status = crate::services::orchestration_status(
+        "PM",
+        crate::bus::BusError::Publish("bus down".to_string()),
+    );
+    assert_eq!(status.code(), tonic::Code::Internal);
+    assert!(status.message().starts_with("PM orchestration failed: "));
+}

@@ -53,12 +53,12 @@ use crate::bus::BusError;
 use crate::dlq::trigger::{CodeDlqExt, DlqTrigger};
 use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher};
 use crate::proto::{
-    page_header::SequenceType, AngzarrDeferredSequence, CommandBook, Cover, EventBook,
-    Notification, PageHeader, RevocationResponse, SyncMode, Uuid as ProtoUuid,
+    page_header::SequenceType, AngzarrDeferredSequence, CascadeErrorMode, CommandBook, Cover,
+    EventBook, Notification, PageHeader, RevocationResponse, SyncMode, Uuid as ProtoUuid,
 };
 use crate::proto_ext::CoverExt;
 
-use super::command::{CommandExecutor, CommandOutcome};
+use super::command::{CommandExecutor, CommandOutcome, DeliveryPolicy};
 use super::destination::DestinationFetcher;
 use super::FactExecutor;
 use outbox::{CommandOutbox, OutboxEntry};
@@ -388,9 +388,16 @@ async fn publish_pm_command_dlq(
 /// 4. Execute commands with angzarr_deferred stamped for compensation routing
 /// 5. Inject facts into target aggregates
 ///
-/// `sync_mode` controls how commands are executed:
-/// - `Cascade`: Sync execution, no bus publishing
-/// - `Simple`: Standard execution with bus publishing
+/// `sync_mode` is forwarded to each command's destination unless the command
+/// header overrides it.
+///
+/// `error_mode` is the synchronous caller's `CascadeErrorMode` (`None` for
+/// bus-driven triggers): FAIL_FAST and COMPENSATE stop at the first failed
+/// command and return `Err` (COMPENSATE runs the PM's rejection handling
+/// first), CONTINUE runs every command and then returns `Err` listing the
+/// failures, DEAD_LETTER dead-letters failures and returns `Ok`. Without a
+/// caller, a rejection is compensated and dead-lettered and a transient
+/// failure goes to the command outbox.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(name = "pm.orchestrate", skip_all, fields(%pm_name, %pm_domain, %correlation_id))]
 pub async fn orchestrate_pm(
@@ -404,7 +411,9 @@ pub async fn orchestrate_pm(
     correlation_id: &str,
     sync_mode: SyncMode,
     backoff: ExponentialBuilder,
+    error_mode: Option<CascadeErrorMode>,
 ) -> Result<(), BusError> {
+    let policy = DeliveryPolicy::from_mode(error_mode);
     let trigger_domain = trigger
         .cover
         .as_ref()
@@ -610,6 +619,7 @@ pub async fn orchestrate_pm(
             pm_domain,
             pm_source_seq,
             sync_mode,
+            policy,
         )
         .await?;
 
@@ -702,6 +712,7 @@ async fn execute_pm_commands(
     pm_domain: &str,
     pm_source_seq: u32,
     sync_mode: SyncMode,
+    policy: DeliveryPolicy,
 ) -> Result<(), BusError> {
     use super::shared::{fill_correlation_id, CorrelationRootExt};
     fill_correlation_id(&mut commands, correlation_id);
@@ -805,13 +816,10 @@ async fn execute_pm_commands(
         }
     }
 
-    // H-14: when a per-command sync_mode override is Decision and the
-    // executor returns Retryable, the caller's await is blocked waiting
-    // for an accept/reject answer that will never arrive (the framework's
-    // delivery-retry path is asynchronous and Decision-mode callers do not
-    // observe it). Track whether any Decision-mode command degraded so we
-    // can surface a single Err at the end of the dispatch loop.
-    let mut decision_retryable_failure: Option<String> = None;
+    // Failures reported to the caller once dispatch ends: a Decision-mode
+    // command that could not be answered synchronously, or any failure under
+    // a reporting delivery policy.
+    let mut reported_failures: Vec<String> = Vec::new();
 
     for command_book in commands {
         let cmd_domain = command_book
@@ -820,16 +828,11 @@ async fn execute_pm_commands(
             .map(|c| c.domain.clone())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Per-command sync_mode override: if the PM tagged its first page's
-        // header with a sync_mode (e.g. SYNC_MODE_DECISION when it needs
-        // the accept/reject answer synchronously), honour that; otherwise
-        // inherit the surrounding flow's sync_mode unchanged.
-        //
-        // `sync_mode` is an `optional` field, so presence distinguishes an
-        // explicit override (including ASYNC, the zero value) from none.
-        // Unknown ints are treated as absent and inherit rather than
-        // defaulting, so a garbled header can never demote a Cascade or
-        // Decision flow to fire-and-forget.
+        // A sync_mode on the command's first page header overrides the flow's
+        // mode for that command (e.g. DECISION when the PM needs the
+        // accept/reject answer synchronously). Presence matters — an explicit
+        // ASYNC overrides too; an unknown int inherits, so a garbled header
+        // can never demote a Cascade or Decision flow to fire-and-forget.
         let effective_sync_mode = command_book
             .pages
             .first()
@@ -844,7 +847,7 @@ async fn execute_pm_commands(
             "Executing PM command"
         );
 
-        match executor
+        let failure = match executor
             .execute(command_book.clone(), effective_sync_mode)
             .await
         {
@@ -854,108 +857,121 @@ async fn execute_pm_commands(
                     has_events = cmd_response.events.is_some(),
                     "PM command executed successfully"
                 );
-            }
-            CommandOutcome::Retryable { reason, .. } => {
-                if effective_sync_mode == SyncMode::Decision {
-                    // H-14: Decision contract requires synchronous
-                    // accept/reject. A Retryable transport outcome cannot
-                    // satisfy that contract — the framework has no
-                    // synchronous retry path here. Degrade to a rejection
-                    // with operator-readable reason so the PM's
-                    // compensation handler runs AND the orchestrator
-                    // surfaces an Err to the caller (no silent log-only).
-                    let degraded = format!(
-                        "retryable transport failure under SYNC_MODE_DECISION; \
-                         retry later (underlying: {reason})"
-                    );
-                    error!(
-                        domain = %cmd_domain,
-                        error = %degraded,
-                        "PM Decision-mode command Retryable (H-14 degraded)"
-                    );
-                    ctx.on_command_rejected(&command_book, &degraded, correlation_id)
-                        .await;
-                    // R2-15: H-14 is a permanent failure from the PM's
-                    // perspective (contract loss); DLQ unconditionally.
-                    // No tonic::Code is available here — the original
-                    // Retryable carried only a reason string — so pass
-                    // None to skip the classify gate. is_transient=false:
-                    // the contract loss, not the transport, is the failure.
-                    publish_pm_command_dlq(ctx, &command_book, None, &degraded, false).await;
-                    if decision_retryable_failure.is_none() {
-                        decision_retryable_failure = Some(degraded);
-                    }
-                } else {
-                    // C04: a non-Decision (fire-and-forget) command failed
-                    // transiently AFTER the PM persist boundary. It cannot be
-                    // retried in place — re-running the handler would duplicate
-                    // the already-persisted PM events — and it MUST NOT be
-                    // silently dropped (the pre-fix warn-only bug that stalled
-                    // workflows with no operator signal).
-                    //
-                    // Capture it to the command outbox for at-least-once
-                    // redelivery by the PM's drain loop. If no outbox is wired,
-                    // fall back to DLQ *capture* so the failure is at minimum
-                    // operator-visible (transient, no redelivery attempted).
-                    match ctx.command_outbox() {
-                        Some(ob) => {
-                            let entry = OutboxEntry::for_redelivery(&command_book, &reason);
-                            let key = entry.dedup_key.clone();
-                            if let Err(e) = ob.enqueue(entry).await {
-                                error!(
-                                    domain = %cmd_domain,
-                                    error = %e,
-                                    "failed to enqueue PM command to outbox; \
-                                     falling back to DLQ capture"
-                                );
-                                publish_pm_command_dlq(ctx, &command_book, None, &reason, true)
-                                    .await;
-                            } else {
-                                warn!(
-                                    domain = %cmd_domain,
-                                    dedup_key = %key,
-                                    error = %reason,
-                                    "PM command failed transiently post-persist; \
-                                     enqueued to outbox for at-least-once redelivery"
-                                );
-                            }
-                        }
-                        None => {
-                            error!(
-                                domain = %cmd_domain,
-                                error = %reason,
-                                "PM command failed transiently post-persist and no \
-                                 outbox is wired; capturing to DLQ (no redelivery)"
-                            );
-                            publish_pm_command_dlq(ctx, &command_book, None, &reason, true).await;
-                        }
-                    }
-                }
+                None
             }
             CommandOutcome::Rejected { code, message } => {
                 error!(
                     domain = %cmd_domain,
                     ?code,
                     error = %message,
-                    "PM command rejected, invoking compensation"
+                    "PM command rejected"
                 );
-                ctx.on_command_rejected(&command_book, &message, correlation_id)
+                if policy.compensates() {
+                    ctx.on_command_rejected(&command_book, &message, correlation_id)
+                        .await;
+                }
+                if policy.dead_letters() {
+                    publish_pm_command_dlq(ctx, &command_book, Some(code), &message, false).await;
+                }
+                Some(message)
+            }
+            CommandOutcome::Retryable { reason, .. }
+                if effective_sync_mode == SyncMode::Decision =>
+            {
+                // A Decision-mode caller waits for accept/reject; a transient
+                // failure cannot answer it, so it is a rejection from the
+                // PM's point of view (compensated, dead-lettered, reported).
+                let degraded = format!(
+                    "retryable transport failure under SYNC_MODE_DECISION; \
+                     retry later (underlying: {reason})"
+                );
+                error!(domain = %cmd_domain, error = %degraded, "PM Decision-mode command Retryable");
+                ctx.on_command_rejected(&command_book, &degraded, correlation_id)
                     .await;
-                // R2-15: DLQ alongside compensation. Gate on
-                // classify_for_dlq for drift-protection (the alignment
-                // invariant says Rejected codes are Immediate, but the
-                // gate makes that explicit rather than implicit).
-                // is_transient=false: a Rejected outcome is a permanent
-                // rejection, not a transient transport failure.
-                publish_pm_command_dlq(ctx, &command_book, Some(code), &message, false).await;
+                publish_pm_command_dlq(ctx, &command_book, None, &degraded, false).await;
+                reported_failures.push(format!("{cmd_domain}: {degraded}"));
+                None
+            }
+            CommandOutcome::Retryable { reason, .. } => {
+                match policy {
+                    DeliveryPolicy::Background => {
+                        // The PM events are already persisted, so the command
+                        // cannot be re-produced by re-running the handler:
+                        // hand it to the outbox for at-least-once redelivery,
+                        // or failing that, capture it to the DLQ.
+                        enqueue_or_dead_letter(ctx, &command_book, &cmd_domain, &reason).await;
+                    }
+                    DeliveryPolicy::DeadLetter => {
+                        publish_pm_command_dlq(ctx, &command_book, None, &reason, true).await;
+                    }
+                    DeliveryPolicy::Compensate => {
+                        ctx.on_command_rejected(&command_book, &reason, correlation_id)
+                            .await;
+                    }
+                    DeliveryPolicy::FailFast | DeliveryPolicy::Continue => {}
+                }
+                Some(reason)
+            }
+        };
+
+        if let Some(reason) = failure {
+            if policy.reports_failures() {
+                reported_failures.push(format!("{cmd_domain}: {reason}"));
+            }
+            if policy.stops_on_failure() {
+                break;
             }
         }
     }
 
-    if let Some(reason) = decision_retryable_failure {
-        return Err(BusError::Publish(reason));
+    match (reported_failures.is_empty(), policy) {
+        (true, _) => Ok(()),
+        (false, DeliveryPolicy::Background) => Err(BusError::Publish(reported_failures.join("; "))),
+        (false, _) => Err(BusError::Grpc(tonic::Status::aborted(format!(
+            "PM {pm_name}: undeliverable commands: {}",
+            reported_failures.join("; ")
+        )))),
     }
-    Ok(())
+}
+
+/// Hand a transiently-failed PM command to the outbox for redelivery, or
+/// capture it to the DLQ when no outbox is wired or enqueueing fails.
+async fn enqueue_or_dead_letter(
+    ctx: &dyn ProcessManagerContext,
+    command_book: &CommandBook,
+    cmd_domain: &str,
+    reason: &str,
+) {
+    match ctx.command_outbox() {
+        Some(outbox) => {
+            let entry = OutboxEntry::for_redelivery(command_book, reason);
+            let key = entry.dedup_key.clone();
+            if let Err(e) = outbox.enqueue(entry).await {
+                error!(
+                    domain = %cmd_domain,
+                    error = %e,
+                    "failed to enqueue PM command to outbox; falling back to DLQ capture"
+                );
+                publish_pm_command_dlq(ctx, command_book, None, reason, true).await;
+            } else {
+                warn!(
+                    domain = %cmd_domain,
+                    dedup_key = %key,
+                    error = %reason,
+                    "PM command failed transiently post-persist; enqueued to outbox"
+                );
+            }
+        }
+        None => {
+            error!(
+                domain = %cmd_domain,
+                error = %reason,
+                "PM command failed transiently post-persist and no outbox is wired; \
+                 capturing to DLQ"
+            );
+            publish_pm_command_dlq(ctx, command_book, None, reason, true).await;
+        }
+    }
 }
 
 #[cfg(test)]

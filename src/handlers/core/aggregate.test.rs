@@ -366,7 +366,7 @@ impl crate::orchestration::aggregate::AggregateContext for UnreachableContext {
     ) -> Result<crate::orchestration::aggregate::PersistOutcome, Status> {
         unreachable!()
     }
-    async fn post_persist(&self, _: &EventBook) -> Result<Vec<crate::proto::Projection>, Status> {
+    async fn publish(&self, _: &EventBook) -> Result<(), Status> {
         unreachable!()
     }
 }

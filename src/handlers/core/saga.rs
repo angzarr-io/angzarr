@@ -179,6 +179,7 @@ impl EventHandler for SagaEventHandler {
                     validator_ref,
                     SyncMode::Async,
                     backoff,
+                    None,
                 )
                 .await
                 {

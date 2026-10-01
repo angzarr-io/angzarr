@@ -769,6 +769,7 @@ async fn run_saga(ctx: &dyn SagaRetryContext, executor: &dyn CommandExecutor) {
         None, // output_domain_validator
         SyncMode::Simple,
         fast_backoff(),
+        None,
     )
     .await;
 }
@@ -915,6 +916,7 @@ async fn run_pm(
         "corr-pm",
         SyncMode::Simple,
         fast_backoff(),
+        None,
     )
     .await
 }

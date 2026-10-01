@@ -26,6 +26,22 @@ use crate::proto::EventBook;
 ///
 /// # Returns
 /// The filled EventBook, or the original if no gap filler is available.
+/// The status a saga/PM coordinator returns for a failed orchestration.
+///
+/// A gRPC status raised inside the orchestration (an undeliverable command,
+/// a failed destination fetch) keeps its code so the caller can tell a
+/// rejected cascade (non-retryable) from a transient fault; anything else is
+/// `Internal`.
+pub(crate) fn orchestration_status(component: &str, error: crate::bus::BusError) -> Status {
+    match error {
+        crate::bus::BusError::Grpc(status) => Status::new(
+            status.code(),
+            format!("{component} orchestration failed: {}", status.message()),
+        ),
+        other => Status::internal(format!("{component} orchestration failed: {other}")),
+    }
+}
+
 pub(crate) async fn fill_gaps_if_needed(
     gap_filler: Option<
         &Arc<gap_fill::GapFiller<gap_fill::NoOpPositionStore, gap_fill::RemoteEventSource>>,
@@ -45,6 +61,8 @@ pub(crate) async fn fill_gaps_if_needed(
 pub mod errmsg {
     /// CommandRequest missing command.
     pub const COMMAND_REQUEST_MISSING_COMMAND: &str = "CommandRequest must have a command";
+    /// Book addressed to a domain this coordinator does not own.
+    pub const DOMAIN_MISMATCH: &str = "Book addressed to another domain: ";
     /// SpeculateAggregateRequest missing command.
     pub const SPECULATE_AGG_MISSING_COMMAND: &str = "SpeculateAggregateRequest must have a command";
     /// EventRequest missing events.

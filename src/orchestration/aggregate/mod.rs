@@ -69,7 +69,10 @@ pub use client::GrpcBusinessLogic;
 pub use parsing::{extract_command_sequence, parse_command_cover, parse_event_cover};
 
 // Re-exports: pipeline
-pub use pipeline::{execute_command_pipeline, execute_command_with_retry, execute_fact_pipeline};
+pub use pipeline::{
+    execute_command_pipeline, execute_command_with_retry, execute_compensation_pipeline,
+    execute_fact_pipeline,
+};
 
 // Re-exports: two_phase
 pub use two_phase::{is_noop, transform_for_two_phase, TwoPhaseContext, TwoPhaseResult};

@@ -991,10 +991,7 @@ fn test_cascade_id_trait_default() {
         ) -> Result<super::traits::PersistOutcome, tonic::Status> {
             unimplemented!()
         }
-        async fn post_persist(
-            &self,
-            _: &EventBook,
-        ) -> Result<Vec<crate::proto::Projection>, tonic::Status> {
+        async fn publish(&self, _: &EventBook) -> Result<(), tonic::Status> {
             unimplemented!()
         }
     }

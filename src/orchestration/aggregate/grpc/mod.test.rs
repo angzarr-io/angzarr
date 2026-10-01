@@ -10,6 +10,7 @@
 use super::*;
 use crate::bus::MockEventBus;
 use crate::discovery::StaticServiceDiscovery;
+use crate::orchestration::channels::ChannelCache;
 use crate::proto::Snapshot;
 use crate::repository::SnapshotRepository;
 use crate::storage::mock::{MockEventStore, MockSnapshotStore};
@@ -270,7 +271,7 @@ async fn post_persist_suppresses_fully_provisional_book() {
         make_uncommitted_event_page(0, "cascade-x"),
         make_uncommitted_event_page(1, "cascade-x"),
     ]);
-    ctx.post_persist(&provisional).await.unwrap();
+    ctx.publish(&provisional).await.unwrap();
 
     assert_eq!(
         bus.published_count().await,
@@ -288,7 +289,7 @@ async fn post_persist_publishes_committed_book() {
     let (ctx, bus) = build_ctx_with_bus();
 
     let committed = book_with_cover(vec![make_event_page(0), make_event_page(1)]);
-    ctx.post_persist(&committed).await.unwrap();
+    ctx.publish(&committed).await.unwrap();
 
     let published = bus.take_published().await;
     assert_eq!(published.len(), 1, "committed events must be published");
@@ -311,7 +312,7 @@ async fn post_persist_publishes_only_committed_pages_from_mixed_book() {
         make_event_page(0),                          // committed
         make_uncommitted_event_page(1, "cascade-y"), // provisional
     ]);
-    ctx.post_persist(&mixed).await.unwrap();
+    ctx.publish(&mixed).await.unwrap();
 
     let published = bus.take_published().await;
     assert_eq!(published.len(), 1, "the committed page must be published");
@@ -492,7 +493,7 @@ async fn post_persist_projector_leg_receives_only_committed_pages() {
         make_event_page(0),                          // committed
         make_uncommitted_event_page(1, "cascade-p"), // provisional
     ]);
-    ctx.post_persist(&mixed).await.unwrap();
+    ctx.sync_fanout(&mixed).await.unwrap();
 
     let requests = captured.lock().await;
     assert_eq!(requests.len(), 1, "projector must be called exactly once");
@@ -581,7 +582,7 @@ async fn post_persist_saga_and_pm_legs_receive_full_book_including_provisional()
         snapshot: None,
         next_sequence: 0,
     };
-    ctx.post_persist(&mixed).await.unwrap();
+    ctx.sync_fanout(&mixed).await.unwrap();
 
     // Saga leg: full book, provisional page intact.
     let saga_requests = saga_captured.lock().await;
@@ -1191,7 +1192,7 @@ async fn post_persist_republishes_confirmed_events_on_confirmation_marker() {
         .unwrap();
 
     let events = book_with_root(root, vec![marker]);
-    ctx.post_persist(&events)
+    ctx.publish(&events)
         .await
         .expect("post_persist must succeed");
 
@@ -1254,7 +1255,7 @@ async fn post_persist_confirmation_does_not_republish_already_committed_sequence
         .unwrap();
 
     let events = book_with_root(root, vec![marker]);
-    ctx.post_persist(&events).await.unwrap();
+    ctx.publish(&events).await.unwrap();
 
     let published = bus.take_published().await;
     assert_eq!(
@@ -1324,7 +1325,7 @@ async fn post_persist_confirm_after_revoke_does_not_republish_and_dlqs() {
         .unwrap();
 
     let events = book_with_root(root, vec![marker]);
-    ctx.post_persist(&events)
+    ctx.publish(&events)
         .await
         .expect("post_persist must not error — the conflict is handled, not propagated");
 
@@ -1342,4 +1343,445 @@ async fn post_persist_confirm_after_revoke_does_not_republish_and_dlqs() {
         "confirm-after-revoke conflict must be surfaced to the DLQ/operator, \
          not silently swallowed"
     );
+}
+
+// ============================================================================
+// Sync fan-out: CascadeErrorMode, deadlines, channel reuse
+// ============================================================================
+
+/// A saga coordinator that answers every Execute with `fail` (or OK) and
+/// records the requests (with their metadata) it received.
+#[derive(Clone, Default)]
+struct ScriptedSagaServer {
+    fail: Option<tonic::Code>,
+    requests: Arc<Mutex<Vec<(SagaHandleRequest, tonic::metadata::MetadataMap)>>>,
+}
+
+#[tonic::async_trait]
+impl SagaCoordServiceTrait for ScriptedSagaServer {
+    async fn execute(
+        &self,
+        request: tonic::Request<SagaHandleRequest>,
+    ) -> Result<tonic::Response<SagaResponse>, Status> {
+        let metadata = request.metadata().clone();
+        self.requests
+            .lock()
+            .await
+            .push((request.into_inner(), metadata));
+        match self.fail {
+            Some(code) => Err(Status::new(code, "saga delivery rejected")),
+            None => Ok(tonic::Response::new(SagaResponse::default())),
+        }
+    }
+
+    async fn execute_speculative(
+        &self,
+        _request: tonic::Request<SpeculateSagaRequest>,
+    ) -> Result<tonic::Response<SagaResponse>, Status> {
+        Err(Status::unimplemented("not exercised"))
+    }
+}
+
+/// Serve `server` on an ephemeral port and register it as a saga for
+/// `orders` under `name`.
+async fn spawn_saga(discovery: &StaticServiceDiscovery, name: &str, server: ScriptedSagaServer) {
+    let (listener, port) = bind_ephemeral().await;
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(SagaCoordinatorServiceServer::new(server))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    discovery
+        .register_saga(name, "orders", "127.0.0.1", port)
+        .await;
+}
+
+struct CascadeRig {
+    ctx: GrpcAggregateContext,
+    dlq: Arc<CapturingDlqPublisher>,
+    first: ScriptedSagaServer,
+    second: ScriptedSagaServer,
+}
+
+/// Two sagas subscribed to `orders`: `saga-a` answers `first_fails`,
+/// `saga-b` answers `second_fails`. Discovery order is unspecified.
+async fn cascade_rig_with(
+    mode: CascadeErrorMode,
+    first_fails: Option<tonic::Code>,
+    second_fails: Option<tonic::Code>,
+) -> CascadeRig {
+    let discovery = Arc::new(StaticServiceDiscovery::new());
+    let first = ScriptedSagaServer {
+        fail: first_fails,
+        ..Default::default()
+    };
+    let second = ScriptedSagaServer {
+        fail: second_fails,
+        ..Default::default()
+    };
+    spawn_saga(&discovery, "saga-a", first.clone()).await;
+    spawn_saga(&discovery, "saga-b", second.clone()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    let dlq = Arc::new(CapturingDlqPublisher::default());
+    let ctx = GrpcAggregateContext::new(
+        Arc::new(MockEventStore::new()),
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        discovery,
+        Arc::new(MockEventBus::new()),
+    )
+    .with_sync_mode(crate::proto::SyncMode::Cascade)
+    .with_cascade_error_mode(mode)
+    .with_dlq_publisher(dlq.clone());
+    CascadeRig {
+        ctx,
+        dlq,
+        first,
+        second,
+    }
+}
+
+/// `saga-a` answers `first_fails`; `saga-b` succeeds.
+async fn cascade_rig(mode: CascadeErrorMode, first_fails: Option<tonic::Code>) -> CascadeRig {
+    cascade_rig_with(mode, first_fails, None).await
+}
+
+fn cascade_book() -> EventBook {
+    book_with_cover(vec![make_event_page(0)])
+}
+
+async fn calls(server: &ScriptedSagaServer) -> usize {
+    server.requests.lock().await.len()
+}
+
+/// FAIL_FAST (the default): the first failing saga fails the command and no
+/// saga after it is called.
+#[tokio::test]
+async fn sync_fanout_fail_fast_stops_at_first_failure() {
+    let rig = cascade_rig_with(
+        CascadeErrorMode::CascadeErrorFailFast,
+        Some(tonic::Code::FailedPrecondition),
+        Some(tonic::Code::FailedPrecondition),
+    )
+    .await;
+    let err = rig.ctx.sync_fanout(&cascade_book()).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(err.message().contains("saga delivery rejected"));
+    assert_eq!(calls(&rig.first).await + calls(&rig.second).await, 1);
+    assert_eq!(rig.dlq.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+/// COMPENSATE also stops at the first failure and fails the command (the
+/// saga coordinator compensates the rejected command at its source).
+#[tokio::test]
+async fn sync_fanout_compensate_stops_at_first_failure() {
+    let rig = cascade_rig_with(
+        CascadeErrorMode::CascadeErrorCompensate,
+        Some(tonic::Code::FailedPrecondition),
+        Some(tonic::Code::FailedPrecondition),
+    )
+    .await;
+    rig.ctx.sync_fanout(&cascade_book()).await.unwrap_err();
+    assert_eq!(calls(&rig.first).await + calls(&rig.second).await, 1);
+    assert_eq!(rig.dlq.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+/// CONTINUE runs every saga, then reports every failure.
+#[tokio::test]
+async fn sync_fanout_continue_runs_all_then_fails() {
+    let rig = cascade_rig_with(
+        CascadeErrorMode::CascadeErrorContinue,
+        Some(tonic::Code::FailedPrecondition),
+        Some(tonic::Code::FailedPrecondition),
+    )
+    .await;
+    let err = rig.ctx.sync_fanout(&cascade_book()).await.unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(err.message().contains("saga-a: saga delivery rejected"));
+    assert!(err.message().contains("saga-b: saga delivery rejected"));
+    assert_eq!(calls(&rig.first).await, 1);
+    assert_eq!(calls(&rig.second).await, 1);
+    assert_eq!(rig.dlq.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+/// CONTINUE with one failure still calls the healthy saga and fails.
+#[tokio::test]
+async fn sync_fanout_continue_single_failure() {
+    let rig = cascade_rig(
+        CascadeErrorMode::CascadeErrorContinue,
+        Some(tonic::Code::FailedPrecondition),
+    )
+    .await;
+    let err = rig.ctx.sync_fanout(&cascade_book()).await.unwrap_err();
+    assert!(err.message().contains("saga-a"));
+    assert!(!err.message().contains("saga-b"));
+    assert_eq!(calls(&rig.second).await, 1);
+}
+
+/// DEAD_LETTER runs every saga, dead-letters each failure, and lets the
+/// command succeed.
+#[tokio::test]
+async fn sync_fanout_dead_letter_runs_all_and_captures_failures() {
+    let rig = cascade_rig(
+        CascadeErrorMode::CascadeErrorDeadLetter,
+        Some(tonic::Code::FailedPrecondition),
+    )
+    .await;
+    rig.ctx.sync_fanout(&cascade_book()).await.unwrap();
+    assert_eq!(calls(&rig.first).await, 1);
+    assert_eq!(calls(&rig.second).await, 1);
+    let captured = rig.dlq.captured.lock().await.clone();
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].source_component, "saga-a");
+    assert_eq!(captured[0].source_component_type, "cascade");
+    match &captured[0].rejection_details {
+        Some(RejectionDetails::EventProcessingFailed(details)) => {
+            assert!(!details.is_transient, "a rejection is not transient");
+            assert!(details.error.contains("saga-a"));
+        }
+        other => panic!("expected EventProcessingFailed, got {other:?}"),
+    }
+}
+
+/// A transient saga failure is dead-lettered as transient.
+#[tokio::test]
+async fn sync_fanout_dead_letter_marks_transient_failures() {
+    let rig = cascade_rig(
+        CascadeErrorMode::CascadeErrorDeadLetter,
+        Some(tonic::Code::Unavailable),
+    )
+    .await;
+    rig.ctx.sync_fanout(&cascade_book()).await.unwrap();
+    let captured = rig.dlq.captured.lock().await.clone();
+    match &captured[0].rejection_details {
+        Some(RejectionDetails::EventProcessingFailed(details)) => assert!(details.is_transient),
+        other => panic!("expected EventProcessingFailed, got {other:?}"),
+    }
+}
+
+/// Every mode succeeds when every saga succeeds; each saga receives the
+/// caller's cascade error mode and a deadline.
+#[tokio::test]
+async fn sync_fanout_forwards_mode_and_deadline() {
+    for mode in [
+        CascadeErrorMode::CascadeErrorFailFast,
+        CascadeErrorMode::CascadeErrorContinue,
+        CascadeErrorMode::CascadeErrorCompensate,
+        CascadeErrorMode::CascadeErrorDeadLetter,
+    ] {
+        let rig = cascade_rig(mode, None).await;
+        let ctx = rig
+            .ctx
+            .with_downstream_timeout(std::time::Duration::from_secs(7));
+        ctx.sync_fanout(&cascade_book()).await.unwrap();
+        let requests = rig.first.requests.lock().await;
+        assert_eq!(requests.len(), 1);
+        let (request, metadata) = &requests[0];
+        assert_eq!(request.cascade_error_mode, mode as i32);
+        assert_eq!(
+            request.sync_mode,
+            crate::proto::SyncMode::Cascade as i32,
+            "the cascade continues downstream"
+        );
+        let timeout = metadata
+            .get("grpc-timeout")
+            .expect("fan-out calls carry a deadline")
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(timeout.starts_with('7'), "deadline was {timeout}");
+    }
+}
+
+/// Repeated fan-outs reuse one channel per saga endpoint.
+#[tokio::test]
+async fn sync_fanout_reuses_channels_across_commands() {
+    let rig = cascade_rig(CascadeErrorMode::CascadeErrorFailFast, None).await;
+    let channels = Arc::new(ChannelCache::new());
+    let ctx = rig.ctx.with_channel_cache(channels.clone());
+    ctx.sync_fanout(&cascade_book()).await.unwrap();
+    ctx.sync_fanout(&cascade_book()).await.unwrap();
+    assert_eq!(channels.len(), 2, "one channel per saga endpoint");
+    assert_eq!(calls(&rig.first).await, 2);
+}
+
+/// Without a sync mode there is no synchronous fan-out at all.
+#[tokio::test]
+async fn sync_fanout_without_sync_mode_calls_nothing() {
+    let rig = cascade_rig(CascadeErrorMode::CascadeErrorFailFast, None).await;
+    let ctx = GrpcAggregateContext::new(
+        Arc::new(MockEventStore::new()),
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        Arc::new(StaticServiceDiscovery::new()),
+        Arc::new(MockEventBus::new()),
+    );
+    assert!(ctx.sync_fanout(&cascade_book()).await.unwrap().is_empty());
+    drop(rig);
+}
+
+/// SIMPLE runs projectors only — sagas are never called.
+#[tokio::test]
+async fn sync_fanout_simple_does_not_call_sagas() {
+    let rig = cascade_rig(CascadeErrorMode::CascadeErrorFailFast, None).await;
+    let ctx = rig.ctx.with_sync_mode(crate::proto::SyncMode::Simple);
+    ctx.sync_fanout(&cascade_book()).await.unwrap();
+    assert_eq!(calls(&rig.first).await, 0);
+    assert_eq!(calls(&rig.second).await, 0);
+}
+
+/// A projector endpoint that does not serve ProjectorCoordinatorService
+/// (UNIMPLEMENTED) is skipped instead of failing every SIMPLE command.
+#[tokio::test]
+async fn sync_projectors_skip_unimplemented_endpoints() {
+    #[derive(Clone)]
+    struct Unserved(tonic::Code);
+    #[tonic::async_trait]
+    impl ProjectorCoordServiceTrait for Unserved {
+        async fn handle_sync(
+            &self,
+            _request: tonic::Request<EventRequest>,
+        ) -> Result<tonic::Response<Projection>, Status> {
+            Err(Status::new(self.0, "nope"))
+        }
+        async fn handle(
+            &self,
+            _request: tonic::Request<EventBook>,
+        ) -> Result<tonic::Response<()>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+        async fn handle_speculative(
+            &self,
+            _request: tonic::Request<SpeculateProjectorRequest>,
+        ) -> Result<tonic::Response<Projection>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+    }
+
+    for (code, ok) in [
+        (tonic::Code::Unimplemented, true),
+        (tonic::Code::NotFound, true),
+        (tonic::Code::Internal, false),
+    ] {
+        let (listener, port) = bind_ephemeral().await;
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(ProjectorCoordinatorServiceServer::new(Unserved(code)))
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let discovery = Arc::new(StaticServiceDiscovery::new());
+        discovery
+            .register_projector("prj", "orders", "127.0.0.1", port)
+            .await;
+        let ctx = GrpcAggregateContext::new(
+            Arc::new(MockEventStore::new()),
+            Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+            discovery,
+            Arc::new(MockEventBus::new()),
+        )
+        .with_sync_mode(crate::proto::SyncMode::Simple);
+        let result = ctx.sync_fanout(&cascade_book()).await;
+        assert_eq!(result.is_ok(), ok, "{code:?}: {result:?}");
+        if let Ok(projections) = result {
+            assert!(projections.is_empty());
+        }
+    }
+}
+
+// ============================================================================
+// persist_target_cover
+// ============================================================================
+
+fn response_with_cover(domain: &str, root: Option<Uuid>) -> EventBook {
+    EventBook {
+        cover: Some(Cover {
+            domain: domain.to_string(),
+            root: root.map(|r| ProtoUuid {
+                value: r.as_bytes().to_vec(),
+            }),
+            correlation_id: "from-business".to_string(),
+            edition: Some(Edition {
+                name: "v2".to_string(),
+                divergences: vec![],
+            }),
+            ext: None,
+        }),
+        ..Default::default()
+    }
+}
+
+/// Events always land on the command's aggregate under the validated
+/// correlation id; the response's edition is kept.
+#[test]
+fn persist_target_cover_uses_command_target() {
+    let root = Uuid::new_v4();
+    let cover = persist_target_cover(
+        &response_with_cover("orders", Some(root)),
+        "orders",
+        root,
+        "corr",
+    )
+    .unwrap();
+    assert_eq!(cover.domain, "orders");
+    assert_eq!(cover.root.unwrap().value, root.as_bytes().to_vec());
+    assert_eq!(cover.correlation_id, "corr");
+    assert_eq!(cover.edition.unwrap().name, "v2");
+}
+
+/// An unset domain/root in the response is filled from the command.
+#[test]
+fn persist_target_cover_fills_missing_identity() {
+    let root = Uuid::new_v4();
+    for received in [EventBook::default(), response_with_cover("", None)] {
+        let cover = persist_target_cover(&received, "orders", root, "corr").unwrap();
+        assert_eq!(cover.domain, "orders");
+        assert_eq!(cover.root.unwrap().value, root.as_bytes().to_vec());
+    }
+}
+
+/// A response naming another domain or root is refused (non-retryable).
+#[test]
+fn persist_target_cover_refuses_foreign_aggregate() {
+    let root = Uuid::new_v4();
+    for received in [
+        response_with_cover("payments", Some(root)),
+        response_with_cover("orders", Some(Uuid::new_v4())),
+        response_with_cover("", Some(Uuid::new_v4())),
+    ] {
+        let err = persist_target_cover(&received, "orders", root, "corr").unwrap_err();
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(!crate::utils::retry::is_retryable_status(&err));
+    }
+}
+
+/// persist_events writes the new pages to the command's aggregate even when
+/// the business response's cover points elsewhere — never to the foreign one.
+#[tokio::test]
+async fn persist_events_refuses_business_cover_for_another_aggregate() {
+    let store = Arc::new(MockEventStore::new());
+    let ctx = build_ctx_with_stores(store.clone(), Arc::new(MockSnapshotStore::new()));
+    let root = Uuid::new_v4();
+    let foreign = Uuid::new_v4();
+    let mut received = response_with_cover("orders", Some(foreign));
+    received.pages = vec![make_event_page(0)];
+    let err = ctx
+        .persist_events(
+            &EventBook::default(),
+            &received,
+            "orders",
+            "",
+            root,
+            "corr",
+            None,
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(store.get("orders", "", foreign).await.unwrap().is_empty());
+    assert!(store.get("orders", "", root).await.unwrap().is_empty());
 }
