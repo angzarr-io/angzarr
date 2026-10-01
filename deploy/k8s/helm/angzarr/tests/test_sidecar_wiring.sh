@@ -140,7 +140,8 @@ check(service_port(pm_svc, "query") is None, "PM Service exposes no listener-les
 # --- projector ------------------------------------------------------------
 prj = container(find("Deployment", "order-audit-projector"), "angzarr")
 prj_env = env(prj)
-check(prj_env.get("ANGZARR_SUBSCRIPTIONS") == "order", "projector subscribes to its topics' domain")
+check(prj_env.get("ANGZARR_SUBSCRIPTIONS") == "order;payment",
+      "multi-domain projector subscribes to every topic's domain, not just the first")
 check(prj_env.get("ANGZARR__TRANSPORT__TCP__HOST") == "0.0.0.0", "projector health binds all interfaces")
 health_port = ports(prj).get("health")
 check(health_port is not None and prj_env.get("ANGZARR__TRANSPORT__TCP__PORT") == str(health_port),
@@ -152,6 +153,13 @@ check(health_port is not None and prj.get("livenessProbe", {}).get("grpc", {}).g
 agg_deploy = find("Deployment", "order-aggregate")
 agg = container(agg_deploy, "angzarr")
 check("query" not in ports(agg), "aggregate declares only the port it listens on")
+check(env(agg).get("ANGZARR_UPCASTER_ENABLED") == "true", "upcaster enabled for the aggregate that has one")
+pay = container(find("Deployment", "payment-aggregate"), "angzarr")
+check("ANGZARR_UPCASTER_ENABLED" not in env(pay), "upcaster is per aggregate, not global")
+order_client = container(agg_deploy, "order")
+check(env(order_client).get("ANGZARR_SNAPSHOT_EVERY") == "20", "per-aggregate snapshot interval reaches the client")
+check("ANGZARR_SNAPSHOT_EVERY" not in env(container(find("Deployment", "payment-aggregate"), "payment")),
+      "snapshot interval unset where not configured")
 agg_svc = find("Service", "order-aggregate")
 check(service_port(agg_svc, "query") is None,
       "aggregate Service exposes only the single gRPC server's port")

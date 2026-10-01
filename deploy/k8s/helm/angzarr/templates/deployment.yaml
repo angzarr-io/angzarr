@@ -114,6 +114,12 @@ spec:
             {{- end }}
             - name: ANGZARR_LOG
               value: {{ $.Values.logging.level }}
+            {{- with .snapshotEvery }}
+            # The aggregate returns snapshot state every N events; the
+            # sidecar persists whatever snapshot the aggregate returns.
+            - name: ANGZARR_SNAPSHOT_EVERY
+              value: {{ . | quote }}
+            {{- end }}
             {{- if .env }}
             {{- toYaml .env | nindent 12 }}
             {{- end }}
@@ -201,13 +207,14 @@ spec:
               value: {{ $.Values.messaging.amqp.url }}
               {{- end }}
             {{- end }}
-            # Upcaster configuration (client implements UpcasterService on same server)
-            {{- if $.Values.upcaster.enabled }}
+            # Upcaster for this aggregate's events (by default the client
+            # serves UpcasterService on its own address)
+            {{- if and .upcaster .upcaster.enabled }}
             - name: ANGZARR_UPCASTER_ENABLED
               value: "true"
-            {{- if $.Values.upcaster.address }}
+            {{- with .upcaster.address }}
             - name: ANGZARR_UPCASTER_ADDRESS
-              value: {{ $.Values.upcaster.address | quote }}
+              value: {{ . | quote }}
             {{- end }}
             {{- end }}
             {{- include "angzarr.otel-env" (dict "root" $ "service" "aggregate" "domain" .domain) | nindent 12 }}

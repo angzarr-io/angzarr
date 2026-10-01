@@ -6,6 +6,8 @@ applications:
       domain: order
       port: 50051
       image: {repository: order-agg, tag: test}
+      upcaster: {enabled: true}
+      snapshotEvery: 20
     - name: payment
       domain: payment
       port: 50052
@@ -14,7 +16,7 @@ applications:
     - name: order-audit
       domain: order
       port: 50061
-      topics: ["order.*"]
+      topics: ["order.*", "payment.*"]
       image: {repository: order-audit, tag: test}
   sagas:
     - name: order-payment

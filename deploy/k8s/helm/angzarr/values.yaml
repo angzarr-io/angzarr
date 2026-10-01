@@ -311,17 +311,6 @@ storage:
     # Redis connection URI
     uri: "redis://angzarr-redis:6379"
 
-# Upcaster configuration
-# Upcaster transforms old event versions to current versions during replay.
-# By default, the client binary implements UpcasterService alongside AggregateService.
-# The aggregate coordinator calls the client's UpcasterService on the same address.
-upcaster:
-  # Enable upcaster transformation during event replay
-  enabled: false
-  # Optional: separate address for upcaster service (if not on same server as client logic)
-  # If not set, uses the same address as client logic (default and recommended)
-  # address: "localhost:50053"
-
 # Sidecar configuration file, rendered verbatim as config.yaml into the
 # `<release>-sidecar-config` Secret and mounted at /etc/angzarr/config.yaml
 # (ANGZARR_CONFIG) in every angzarr sidecar and in angzarr-status.
@@ -412,6 +401,14 @@ applications:
   #   # go:
   #   #   library: /app/libbusiness.so
   #   resources: {}
+  #   # Upcaster: the sidecar upcasts this aggregate's events on load by
+  #   # calling the client's UpcasterService (same address unless set)
+  #   upcaster:
+  #     enabled: false
+  #     # address: "localhost:50053"
+  #   # Snapshot every N events (passed to the client as
+  #   # ANGZARR_SNAPSHOT_EVERY; unset = the client's own default)
+  #   snapshotEvery: 20
   #   # Debug access - expose this application's sidecar via NodePort
   #   debug:
   #     enabled: false
