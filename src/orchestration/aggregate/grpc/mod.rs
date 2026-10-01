@@ -179,6 +179,22 @@ pub struct GrpcAggregateContext {
 /// Default deadline for one synchronous projector / saga / PM call.
 pub const DEFAULT_DOWNSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// A sync fan-out target: its registered name and component type.
+#[derive(Clone, Copy)]
+struct FanoutTarget<'a> {
+    name: &'a str,
+    component_type: &'static str,
+}
+
+impl<'a> FanoutTarget<'a> {
+    fn new(name: &'a str, component_type: &'static str) -> Self {
+        Self {
+            name,
+            component_type,
+        }
+    }
+}
+
 /// A sync fan-out target that failed.
 #[derive(Debug)]
 struct FanoutFailure {
@@ -360,7 +376,8 @@ impl GrpcAggregateContext {
             match self.call_saga(endpoint, events).await {
                 Ok(reported) => reaction_errors.extend(reported),
                 Err(status) => {
-                    self.record_fanout_failure(&endpoint.name, status, events, reaction_errors)
+                    let target = FanoutTarget::new(&endpoint.name, "saga");
+                    self.record_fanout_failure(target, status, events, reaction_errors)
                         .await?
                 }
             }
@@ -375,7 +392,8 @@ impl GrpcAggregateContext {
                 match self.call_pm(endpoint, events).await {
                     Ok(reported) => reaction_errors.extend(reported),
                     Err(status) => {
-                        self.record_fanout_failure(&endpoint.name, status, events, reaction_errors)
+                        let target = FanoutTarget::new(&endpoint.name, "process_manager");
+                        self.record_fanout_failure(target, status, events, reaction_errors)
                             .await?
                     }
                 }
@@ -393,14 +411,14 @@ impl GrpcAggregateContext {
     /// that target and keeps going.
     async fn record_fanout_failure(
         &self,
-        target: &str,
+        target: FanoutTarget<'_>,
         status: Status,
         events: &EventBook,
         reaction_errors: &mut Vec<CascadeReactionError>,
     ) -> Result<(), Status> {
-        warn!(target = %target, error = %status, mode = ?self.cascade_error_mode, "Sync fan-out target failed");
+        warn!(target = %target.name, error = %status, mode = ?self.cascade_error_mode, "Sync fan-out target failed");
         let failure = FanoutFailure {
-            target: target.to_string(),
+            target: target.name.to_string(),
             status,
         };
         match self.cascade_error_mode {
@@ -425,7 +443,7 @@ impl GrpcAggregateContext {
                     crate::utils::retry::is_retryable_status(&failure.status),
                     Vec::new(),
                     &failure.target,
-                    "cascade",
+                    target.component_type,
                 );
                 if let Err(e) = self.dlq_publisher.publish(dead_letter).await {
                     tracing::error!(target = %failure.target, error = %e, "Failed to dead-letter cascade failure");
@@ -470,7 +488,8 @@ impl GrpcAggregateContext {
                     warn!(error = %e, "Projector endpoint does not serve ProjectorCoordinatorService; skipped");
                 }
                 Err(e) => {
-                    self.record_fanout_failure("projector", e, events, reaction_errors)
+                    let target = FanoutTarget::new("projector", "projector");
+                    self.record_fanout_failure(target, e, events, reaction_errors)
                         .await?;
                 }
             }

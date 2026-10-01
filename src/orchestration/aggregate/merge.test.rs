@@ -501,3 +501,23 @@ async fn test_cascade_confirmed_pages_are_not_locks() {
         "replay saw a framework marker: {seen:?}"
     );
 }
+
+/// A multi-byte varint followed by further fields is split at the right
+/// boundary: the later fields still parse and compare.
+#[test]
+fn test_wire_diff_multibyte_varint_then_more_fields() {
+    let before = ClientState {
+        balance: 300,
+        name: "alice".into(),
+        ..Default::default()
+    };
+    let after = ClientState {
+        balance: 428,
+        name: "alice".into(),
+        ..Default::default()
+    };
+    assert_eq!(
+        diff_wire_fields(&before.encode_to_vec(), &after.encode_to_vec()),
+        Some(names(&["#1"]))
+    );
+}

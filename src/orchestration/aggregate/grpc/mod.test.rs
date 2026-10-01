@@ -1543,7 +1543,7 @@ async fn sync_fanout_dead_letter_runs_all_and_captures_failures() {
     let captured = rig.dlq.captured.lock().await.clone();
     assert_eq!(captured.len(), 1);
     assert_eq!(captured[0].source_component, "saga-a");
-    assert_eq!(captured[0].source_component_type, "cascade");
+    assert_eq!(captured[0].source_component_type, "saga");
     match &captured[0].rejection_details {
         Some(RejectionDetails::EventProcessingFailed(details)) => {
             assert!(!details.is_transient, "a rejection is not transient");
