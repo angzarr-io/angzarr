@@ -901,7 +901,7 @@ pub async fn test_per_root_ordering_under_concurrent_publish(
 // =============================================================================
 
 /// Handler that records the sequence of every delivery and fails the first
-/// delivery of sequence 0.
+/// delivery of sequence 0 after a delay.
 #[allow(dead_code)]
 struct FailFirstOfRoot {
     attempts: Arc<std::sync::Mutex<Vec<(u32, bool)>>>,
@@ -927,6 +927,10 @@ impl angzarr::bus::EventHandler for FailFirstOfRoot {
             if ok {
                 Ok(())
             } else {
+                // Fail slowly: by now the root's later events have reached
+                // the consumer, so a transport that hands them out ahead
+                // of the redelivery is caught reordering.
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 Err(angzarr::bus::BusError::Subscribe(
                     "first attempt fails".into(),
                 ))

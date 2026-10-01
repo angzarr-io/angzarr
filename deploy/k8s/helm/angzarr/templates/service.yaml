@@ -17,16 +17,11 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    # Angzarr sidecar aggregate coordinator (external access)
+    # Angzarr sidecar: coordinator and event query on one gRPC server
     - port: {{ $.Values.service.aggregatePort }}
       targetPort: aggregate
       protocol: TCP
       name: grpc
-    # Event query: served by the same gRPC server as the coordinator
-    - port: {{ $.Values.service.queryPort }}
-      targetPort: aggregate
-      protocol: TCP
-      name: query
     {{- if $.Values.ports.coordinatorDebug.enabled }}
     # Coordinator debug port (base + 2)
     - port: {{ add $.Values.service.aggregatePort 2 }}

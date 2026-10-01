@@ -25,6 +25,7 @@
 //! # Process manager coordinator (multiple source domains)
 //! labels:
 //!   app.kubernetes.io/component: process-manager
+//! annotations:
 //!   angzarr.io/subscriptions: order,inventory,fulfillment
 //! ```
 //!
@@ -67,11 +68,9 @@ const DOMAIN_LABEL: &str = "angzarr.io/domain";
 /// Label for the source domain a saga subscribes to (single value).
 const SOURCE_DOMAIN_LABEL: &str = "angzarr.io/source-domain";
 
-/// Annotation (preferred) or label naming the source domains a process
-/// manager subscribes to, comma-separated. Label values cannot contain
-/// commas, so a multi-domain PM must use the annotation; the label form
-/// serves single-domain PMs.
-const SUBSCRIPTIONS_LABEL: &str = "angzarr.io/subscriptions";
+/// Annotation naming the source domains a process manager subscribes to,
+/// comma-separated (an annotation: label values cannot hold commas).
+const SUBSCRIPTIONS_ANNOTATION: &str = "angzarr.io/subscriptions";
 
 /// Component values.
 const COMPONENT_AGGREGATE: &str = "aggregate";
@@ -528,18 +527,16 @@ impl K8sServiceDiscovery {
 
     fn extract_pm_with_namespace(svc: &Service, namespace: &str) -> Option<PmService> {
         let service = Self::extract_service_with_namespace(svc, namespace)?;
-        let labels = svc.metadata.labels.as_ref();
         let raw = svc
             .metadata
             .annotations
             .as_ref()
-            .and_then(|a| a.get(SUBSCRIPTIONS_LABEL))
-            .or_else(|| labels.and_then(|l| l.get(SUBSCRIPTIONS_LABEL)))
+            .and_then(|a| a.get(SUBSCRIPTIONS_ANNOTATION))
             .cloned();
         let Some(raw) = raw else {
             tracing::warn!(
                 service = %service.name,
-                "PM service missing {SUBSCRIPTIONS_LABEL} label — skipping registration"
+                "PM service missing {SUBSCRIPTIONS_ANNOTATION} annotation — skipping registration"
             );
             return None;
         };
@@ -552,7 +549,7 @@ impl K8sServiceDiscovery {
             tracing::warn!(
                 service = %service.name,
                 raw = %raw,
-                "PM service has empty {SUBSCRIPTIONS_LABEL} label — skipping registration"
+                "PM service has empty {SUBSCRIPTIONS_ANNOTATION} annotation — skipping registration"
             );
             return None;
         }

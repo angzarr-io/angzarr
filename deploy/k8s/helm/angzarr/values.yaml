@@ -97,8 +97,8 @@ debug:
 # Angzarr gRPC ports
 service:
   type: ClusterIP
-  aggregatePort: 1310     # Aggregate sidecar gRPC
-  queryPort: 1315         # Aggregate sidecar client logic port (EventQuery)
+  aggregatePort: 1310     # Sidecar gRPC (aggregate coordinator + EventQuery; saga/PM coordinator)
+  queryPort: 1315         # Projector sidecar gRPC health
   # NodePort for local development access
   nodePort:
     enabled: false

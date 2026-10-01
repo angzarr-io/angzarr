@@ -212,7 +212,7 @@ async fn as_is_submits_unchanged_command_with_lineage() {
     let seen_cmd = &seen.commands[0];
     let sent = seen_cmd.request.command.as_ref().unwrap();
     assert_eq!(sequence_of(&sent.pages[0]), Some(3));
-    assert_eq!(seen_cmd.request.sync_mode, SyncMode::Simple as i32);
+    assert_eq!(seen_cmd.request.sync_mode(), SyncMode::Simple);
     assert_eq!(seen_cmd.dlq_id.as_deref(), Some("42"));
     assert_eq!(
         seen_cmd.original_correlation_id.as_deref(),

@@ -77,22 +77,6 @@ fn test_subscriber_all_config_binds_every_routing_key() {
     assert_eq!(config.routing_keys, vec!["#".to_string()]);
 }
 
-/// A durable queue that once subscribed to every domain keeps its `#`
-/// binding across restarts; a now domain-scoped subscriber must drop it
-/// or it keeps receiving every event on the bus.
-#[test]
-fn test_domain_scoped_subscriber_unbinds_all_domains_key() {
-    assert!(AmqpEventBus::should_unbind_all_domains(&[
-        "orders.*".to_string()
-    ]));
-}
-
-/// The all-domains subscriber must keep its `#` binding.
-#[test]
-fn test_all_domains_subscriber_keeps_all_domains_key() {
-    assert!(!AmqpEventBus::should_unbind_all_domains(&["#".to_string()]));
-}
-
 // ----------------------------------------------------------------------------
 // H-06: DLX naming + queue-argument table
 // ----------------------------------------------------------------------------

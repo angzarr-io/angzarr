@@ -146,9 +146,8 @@ agg_deploy = find("Deployment", "order-aggregate")
 agg = container(agg_deploy, "angzarr")
 check("query" not in ports(agg), "aggregate declares only the port it listens on")
 agg_svc = find("Service", "order-aggregate")
-query = service_port(agg_svc, "query")
-check(query is not None and query["targetPort"] == "aggregate",
-      "aggregate Service query port reaches the single gRPC server")
+check(service_port(agg_svc, "query") is None,
+      "aggregate Service exposes only the single gRPC server's port")
 
 # --- sidecar config (dlq) -------------------------------------------------
 cfg_secret = find("Secret", "angzarr-sidecar-config")

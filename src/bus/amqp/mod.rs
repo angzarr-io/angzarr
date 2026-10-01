@@ -532,12 +532,6 @@ impl AmqpEventBus {
         in_session_message_count == 1
     }
 
-    /// Whether a durable queue's leftover all-domains (`#`) binding must be
-    /// removed: true when this subscriber binds only domain-scoped keys.
-    pub(crate) fn should_unbind_all_domains(routing_keys: &[String]) -> bool {
-        !routing_keys.iter().any(|k| k == ALL_DOMAINS_ROUTING_KEY)
-    }
-
     /// Set up consumer channel, queue, and bindings.
     async fn setup_consumer(
         pool: &Pool,
@@ -626,24 +620,6 @@ impl AmqpEventBus {
                 )
                 .await
                 .map_err(|e| BusError::Subscribe(format!("Failed to bind queue: {}", e)))?;
-        }
-
-        // The queue is durable: a queue that previously subscribed to every
-        // domain keeps its `#` binding across restarts and would go on
-        // receiving every event. Drop it when this subscriber is
-        // domain-scoped (unbinding an absent binding is a broker no-op).
-        if Self::should_unbind_all_domains(routing_keys) {
-            channel
-                .queue_unbind(
-                    queue,
-                    exchange,
-                    ALL_DOMAINS_ROUTING_KEY,
-                    FieldTable::default(),
-                )
-                .await
-                .map_err(|e| {
-                    BusError::Subscribe(format!("Failed to unbind all-domains key: {}", e))
-                })?;
         }
 
         info!(

@@ -148,21 +148,21 @@ fn make_test_saga_service(name: &str, source_domain: Option<&str>, port: i32) ->
     }
 }
 
-/// Helper to make a PM Service with the subscriptions label populated.
+/// Helper to make a PM Service with the subscriptions annotation populated.
 fn make_test_pm_service(name: &str, subscriptions: Option<&str>, port: i32) -> Service {
     let mut labels = BTreeMap::new();
     labels.insert(
         COMPONENT_LABEL.to_string(),
         COMPONENT_PROCESS_MANAGER.to_string(),
     );
-    if let Some(s) = subscriptions {
-        labels.insert(SUBSCRIPTIONS_LABEL.to_string(), s.to_string());
-    }
+    let annotations = subscriptions
+        .map(|s| BTreeMap::from([(SUBSCRIPTIONS_ANNOTATION.to_string(), s.to_string())]));
     Service {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
             namespace: Some("test-ns".to_string()),
             labels: Some(labels),
+            annotations,
             ..Default::default()
         },
         spec: Some(ServiceSpec {
@@ -237,7 +237,7 @@ fn test_extract_pm_subscriptions_trims_whitespace() {
     );
 }
 
-/// A PM with no subscriptions label is unroutable for the same reason
+/// A PM with no subscriptions annotation is unroutable for the same reason
 /// as an unlabeled saga — skip it.
 #[test]
 fn test_extract_pm_missing_subscriptions_skipped() {
@@ -245,7 +245,7 @@ fn test_extract_pm_missing_subscriptions_skipped() {
     assert!(K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").is_none());
 }
 
-/// An empty subscriptions label (e.g. `""` or just commas) shouldn't
+/// An empty subscriptions annotation (e.g. `""` or just commas) shouldn't
 /// register a no-op PM — that's also unroutable.
 #[test]
 fn test_extract_pm_empty_subscriptions_skipped() {
@@ -370,15 +370,15 @@ fn test_pm_watcher_path_uses_configured_namespace_not_metadata() {
         COMPONENT_LABEL.to_string(),
         COMPONENT_PROCESS_MANAGER.to_string(),
     );
-    labels.insert(
-        SUBSCRIPTIONS_LABEL.to_string(),
-        "order,inventory".to_string(),
-    );
     let svc = Service {
         metadata: ObjectMeta {
             name: Some("pmg-fulfillment".to_string()),
             namespace: Some("prod-services".to_string()),
             labels: Some(labels),
+            annotations: Some(BTreeMap::from([(
+                SUBSCRIPTIONS_ANNOTATION.to_string(),
+                "order,inventory".to_string(),
+            )])),
             ..Default::default()
         },
         spec: Some(ServiceSpec {
@@ -722,33 +722,16 @@ async fn test_watch_apply_of_unqualified_service_removes_it() {
 // PM subscriptions annotation
 // ============================================================================
 
-/// Kubernetes label values cannot hold commas, so a multi-domain PM lists
-/// its subscriptions in the `angzarr.io/subscriptions` annotation; it
-/// takes precedence over the label.
+/// The subscriptions are read from the annotation only; a label of the
+/// same name (which could not hold a comma list anyway) is not consulted.
 #[test]
-fn test_extract_pm_reads_subscriptions_annotation() {
-    let mut svc = make_test_pm_service("pmg-checkout", Some("legacy"), 1310);
-    svc.metadata.annotations = Some(BTreeMap::from([(
-        SUBSCRIPTIONS_LABEL.to_string(),
-        "order,payment".to_string(),
-    )]));
-
-    let pm = K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").expect("pm");
-    assert_eq!(
-        pm.subscriptions,
-        vec!["order".to_string(), "payment".to_string()]
-    );
-}
-
-/// The annotation alone (no label) is enough to register the PM.
-#[test]
-fn test_extract_pm_annotation_without_label() {
+fn test_extract_pm_ignores_subscriptions_label() {
     let mut svc = make_test_pm_service("pmg-checkout", None, 1310);
-    svc.metadata.annotations = Some(BTreeMap::from([(
-        SUBSCRIPTIONS_LABEL.to_string(),
-        "order".to_string(),
-    )]));
+    svc.metadata
+        .labels
+        .as_mut()
+        .unwrap()
+        .insert(SUBSCRIPTIONS_ANNOTATION.to_string(), "order".to_string());
 
-    let pm = K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").expect("pm");
-    assert_eq!(pm.subscriptions, vec!["order".to_string()]);
+    assert!(K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").is_none());
 }
