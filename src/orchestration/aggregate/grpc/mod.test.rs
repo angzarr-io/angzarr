@@ -1488,36 +1488,20 @@ async fn sync_fanout_compensate_stops_at_first_failure() {
     assert_eq!(rig.dlq.publish_calls.load(Ordering::SeqCst), 0);
 }
 
-/// CONTINUE runs every saga, then reports every failure.
+/// CONTINUE runs every saga and succeeds with the ones that succeeded —
+/// nothing is dead-lettered.
 #[tokio::test]
-async fn sync_fanout_continue_runs_all_then_fails() {
+async fn sync_fanout_continue_runs_all_and_succeeds() {
     let rig = cascade_rig_with(
         CascadeErrorMode::CascadeErrorContinue,
         Some(tonic::Code::FailedPrecondition),
         Some(tonic::Code::FailedPrecondition),
     )
     .await;
-    let err = rig.ctx.sync_fanout(&cascade_book()).await.unwrap_err();
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    assert!(err.message().contains("saga-a: saga delivery rejected"));
-    assert!(err.message().contains("saga-b: saga delivery rejected"));
+    rig.ctx.sync_fanout(&cascade_book()).await.unwrap();
     assert_eq!(calls(&rig.first).await, 1);
     assert_eq!(calls(&rig.second).await, 1);
     assert_eq!(rig.dlq.publish_calls.load(Ordering::SeqCst), 0);
-}
-
-/// CONTINUE with one failure still calls the healthy saga and fails.
-#[tokio::test]
-async fn sync_fanout_continue_single_failure() {
-    let rig = cascade_rig(
-        CascadeErrorMode::CascadeErrorContinue,
-        Some(tonic::Code::FailedPrecondition),
-    )
-    .await;
-    let err = rig.ctx.sync_fanout(&cascade_book()).await.unwrap_err();
-    assert!(err.message().contains("saga-a"));
-    assert!(!err.message().contains("saga-b"));
-    assert_eq!(calls(&rig.second).await, 1);
 }
 
 /// DEAD_LETTER runs every saga, dead-letters each failure, and lets the

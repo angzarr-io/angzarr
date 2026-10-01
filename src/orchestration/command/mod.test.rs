@@ -34,12 +34,13 @@ fn test_compensate_stops_compensates_and_reports() {
     assert!(!policy.dead_letters());
 }
 
+/// CONTINUE runs everything and succeeds with what was delivered.
 #[test]
-fn test_continue_reports_without_stopping() {
+fn test_continue_neither_stops_nor_reports() {
     let policy = DeliveryPolicy::from_mode(Some(CascadeErrorMode::CascadeErrorContinue));
     assert_eq!(policy, DeliveryPolicy::Continue);
     assert!(!policy.stops_on_failure());
-    assert!(policy.reports_failures());
+    assert!(!policy.reports_failures());
     assert!(!policy.compensates());
     assert!(!policy.dead_letters());
 }

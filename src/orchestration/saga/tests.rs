@@ -2307,11 +2307,11 @@ async fn test_compensate_rejection_compensates_stops_and_reports() {
     assert_eq!(run.dead_letters, 0);
 }
 
-/// CONTINUE: every command is delivered, then the failure is reported.
+/// CONTINUE: every command is delivered and the orchestration succeeds.
 #[tokio::test]
-async fn test_continue_rejection_delivers_all_then_reports() {
+async fn test_continue_rejection_delivers_all_and_succeeds() {
     let run = run_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
-    aborted(&run.result);
+    run.result.unwrap();
     assert_eq!(run.executions, 2);
     assert_eq!(run.compensations, 0);
     assert_eq!(run.dead_letters, 0);

@@ -322,13 +322,13 @@ impl crate::orchestration::command::CommandExecutor for RejectingExecutor {
 }
 
 /// A CASCADE caller learns that a saga command was rejected: FAIL_FAST and
-/// CONTINUE answer ABORTED with the reason, DEAD_LETTER answers OK. The
-/// coordinator used to answer OK regardless.
+/// COMPENSATE answer ABORTED with the reason; CONTINUE and DEAD_LETTER let the
+/// request succeed.
 #[tokio::test]
 async fn test_execute_reports_rejected_command_per_cascade_error_mode() {
     for (mode, rejected) in [
         (CascadeErrorMode::CascadeErrorFailFast, true),
-        (CascadeErrorMode::CascadeErrorContinue, true),
+        (CascadeErrorMode::CascadeErrorContinue, false),
         (CascadeErrorMode::CascadeErrorCompensate, true),
         (CascadeErrorMode::CascadeErrorDeadLetter, false),
     ] {

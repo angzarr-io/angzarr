@@ -226,17 +226,16 @@ struct FanoutFailure {
 }
 
 impl FanoutFailure {
-    fn summary(failures: &[FanoutFailure]) -> Status {
-        let code = failures
-            .first()
-            .map(|f| f.status.code())
-            .unwrap_or(tonic::Code::Internal);
-        let detail = failures
-            .iter()
-            .map(|f| format!("{}: {}", f.target, f.status.message()))
-            .collect::<Vec<_>>()
-            .join("; ");
-        Status::new(code, format!("Sync fan-out failed: {detail}"))
+    /// The status the command fails with: the target's code, naming it.
+    fn into_status(self) -> Status {
+        Status::new(
+            self.status.code(),
+            format!(
+                "Sync fan-out failed: {}: {}",
+                self.target,
+                self.status.message()
+            ),
+        )
     }
 }
 
@@ -381,7 +380,6 @@ impl GrpcAggregateContext {
     #[tracing::instrument(name = "aggregate.sync_cascade", skip_all)]
     async fn call_sync_sagas_and_pms(&self, events: &EventBook) -> Result<(), Status> {
         let source_domain = events.domain();
-        let mut failures = Vec::new();
 
         let sagas = self
             .discovery
@@ -389,7 +387,7 @@ impl GrpcAggregateContext {
             .await;
         for endpoint in &sagas {
             if let Err(status) = self.call_saga(endpoint, events).await {
-                self.record_fanout_failure(&mut failures, &endpoint.name, status, events)
+                self.record_fanout_failure(&endpoint.name, status, events)
                     .await?;
             }
         }
@@ -401,23 +399,23 @@ impl GrpcAggregateContext {
                 .await;
             for endpoint in &pms {
                 if let Err(status) = self.call_pm(endpoint, events).await {
-                    self.record_fanout_failure(&mut failures, &endpoint.name, status, events)
+                    self.record_fanout_failure(&endpoint.name, status, events)
                         .await?;
                 }
             }
         }
 
-        self.finish_fanout(failures)
+        Ok(())
     }
 
     /// Apply the cascade error mode to one failed fan-out target.
     ///
     /// FAIL_FAST and COMPENSATE stop at the first failure (`Err`). CONTINUE
-    /// records it and keeps going. DEAD_LETTER dead-letters the book for
-    /// that target and keeps going.
+    /// logs it and keeps going; the request succeeds with the reactions that
+    /// succeeded. DEAD_LETTER dead-letters the book for that target and keeps
+    /// going.
     async fn record_fanout_failure(
         &self,
-        failures: &mut Vec<FanoutFailure>,
         target: &str,
         status: Status,
         events: &EventBook,
@@ -429,12 +427,9 @@ impl GrpcAggregateContext {
         };
         match self.cascade_error_mode {
             CascadeErrorMode::CascadeErrorFailFast | CascadeErrorMode::CascadeErrorCompensate => {
-                Err(FanoutFailure::summary(std::slice::from_ref(&failure)))
+                Err(failure.into_status())
             }
-            CascadeErrorMode::CascadeErrorContinue => {
-                failures.push(failure);
-                Ok(())
-            }
+            CascadeErrorMode::CascadeErrorContinue => Ok(()),
             CascadeErrorMode::CascadeErrorDeadLetter => {
                 let dead_letter = AngzarrDeadLetter::from_event_processing_failure(
                     events,
@@ -450,15 +445,6 @@ impl GrpcAggregateContext {
                 }
                 Ok(())
             }
-        }
-    }
-
-    /// CONTINUE reports every collected failure once all targets ran.
-    fn finish_fanout(&self, failures: Vec<FanoutFailure>) -> Result<(), Status> {
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(FanoutFailure::summary(&failures))
         }
     }
 
@@ -480,7 +466,6 @@ impl GrpcAggregateContext {
 
         let correlation_id = events.correlation_id();
         let mut projections = Vec::new();
-        let mut failures = Vec::new();
         for mut client in clients {
             let request = self.downstream_request(
                 EventRequest {
@@ -497,12 +482,10 @@ impl GrpcAggregateContext {
                     warn!(error = %e, "Projector endpoint does not serve ProjectorCoordinatorService; skipped");
                 }
                 Err(e) => {
-                    self.record_fanout_failure(&mut failures, "projector", e, events)
-                        .await?;
+                    self.record_fanout_failure("projector", e, events).await?;
                 }
             }
         }
-        self.finish_fanout(failures)?;
         Ok(projections)
     }
 

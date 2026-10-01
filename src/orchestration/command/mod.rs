@@ -60,7 +60,8 @@ pub(crate) enum DeliveryPolicy {
     FailFast,
     /// Compensate the failed command at its source, then stop and fail.
     Compensate,
-    /// Deliver every command, then fail if any failed.
+    /// Deliver every command; the orchestration succeeds with the commands
+    /// that were delivered.
     Continue,
     /// Dead-letter failures and carry on; the orchestration succeeds.
     DeadLetter,
@@ -100,10 +101,7 @@ impl DeliveryPolicy {
 
     /// Whether failures are reported to the caller as an error.
     pub(crate) fn reports_failures(self) -> bool {
-        matches!(
-            self,
-            DeliveryPolicy::FailFast | DeliveryPolicy::Compensate | DeliveryPolicy::Continue
-        )
+        matches!(self, DeliveryPolicy::FailFast | DeliveryPolicy::Compensate)
     }
 }
 
