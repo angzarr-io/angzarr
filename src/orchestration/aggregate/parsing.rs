@@ -55,7 +55,15 @@ pub fn parse_event_cover(event_book: &EventBook) -> Result<(String, Uuid), Statu
 ///
 /// Handles both explicit sequences and deferred sequences:
 /// - Explicit sequence: returns the sequence number
-/// - Deferred sequences: returns 0 (framework will stamp on receipt)
+/// - `AngzarrDeferred`: returns `basis_seq` — the destination head sequence
+///   the producing saga/PM observed at stamp time (D-7). This becomes the
+///   lower bound of the field-overlap concurrency window (`expected` in the
+///   pipeline), so conflict checks diff `state@basis` vs `state@actual`
+///   instead of the whole destination history. `basis_seq == 0` (legacy /
+///   unset) preserves the old behavior exactly: the conservative
+///   whole-history window.
+/// - `ExternalDeferred`: returns 0 (framework will stamp on receipt; external
+///   facts carry no observed destination basis)
 pub fn extract_command_sequence(command: &CommandBook) -> u32 {
     command
         .pages
@@ -64,8 +72,10 @@ pub fn extract_command_sequence(command: &CommandBook) -> u32 {
         .and_then(|h| h.sequence_type.as_ref())
         .map(|st| match st {
             SequenceType::Sequence(seq) => *seq,
-            // Deferred sequences don't have a fixed sequence yet
-            SequenceType::ExternalDeferred(_) | SequenceType::AngzarrDeferred(_) => 0,
+            // D-7: the saga-observed destination basis (0 = no basis recorded).
+            SequenceType::AngzarrDeferred(ad) => ad.basis_seq,
+            // External facts don't have a fixed sequence yet
+            SequenceType::ExternalDeferred(_) => 0,
         })
         .unwrap_or(0)
 }
@@ -110,6 +120,12 @@ pub fn extract_angzarr_deferred(command: &CommandBook) -> Option<&AngzarrDeferre
 ///
 /// Converts deferred sequences to explicit sequences while preserving
 /// the provenance information in the header.
+///
+/// NOTE (D-7 ordering): this rewrite ERASES the deferred header — including
+/// `basis_seq` and the idempotency provenance. Callers must extract anything
+/// they need from the deferred header first (`extract_command_sequence` for
+/// the basis, `extract_source_info` for provenance) before stamping; the
+/// pipeline does both before calling this.
 pub fn stamp_deferred_sequences(command: &mut CommandBook, actual_sequence: u32) {
     for (i, page) in command.pages.iter_mut().enumerate() {
         if let Some(header) = &mut page.header {

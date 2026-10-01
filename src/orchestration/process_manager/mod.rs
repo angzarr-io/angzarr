@@ -390,7 +390,7 @@ async fn publish_pm_command_dlq(
 ///
 /// `sync_mode` controls how commands are executed:
 /// - `Cascade`: Sync execution, no bus publishing
-/// - `Simple`/`Unspecified`: Standard execution with bus publishing
+/// - `Simple`: Standard execution with bus publishing
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(name = "pm.orchestrate", skip_all, fields(%pm_name, %pm_domain, %correlation_id))]
 pub async fn orchestrate_pm(
@@ -688,7 +688,7 @@ pub async fn orchestrate_pm(
 ///
 /// `sync_mode` controls how commands are executed:
 /// - `Cascade`: Sync execution, no bus publishing
-/// - `Simple`/`Unspecified`: Standard execution with bus publishing
+/// - `Simple`: Standard execution with bus publishing
 ///
 /// `pm_source_seq` is the PM's max sequence after persisting its events. This
 /// identifies which PM state produced these commands, enabling idempotency checks.
@@ -742,6 +742,17 @@ async fn execute_pm_commands(
     // - source_component + command_index are framework provenance (the
     //   PM's registered name and the command's position in this
     //   invocation's output) — always stamped, never handler data.
+    // - basis_seq (D-7): unlike the saga orchestrator, the PM coordinator has
+    //   NO destination-sequence fetch phase in scope here (the PM handle path
+    //   sends `destination_sequences: Default::default()` — see
+    //   grpc/mod.rs), so the framework cannot fill an observed basis. A
+    //   handler-provided nonzero basis is preserved (it is the handler's own
+    //   observation claim, same fill-only-when-empty philosophy as the saga
+    //   side); otherwise 0 = legacy conservative whole-history overlap
+    //   window at the destination. Wiring a PM-side destination fetch (the
+    //   `fetcher` exists in `orchestrate_pm`) is a known deferred gap —
+    //   doing it after PM-event persistence would add a new post-persist
+    //   failure mode and deserves its own decision.
     for (command_index, cmd) in commands.iter_mut().enumerate() {
         for page in &mut cmd.pages {
             // Preserve any per-command sync_mode the PM set on the header
@@ -761,6 +772,12 @@ async fn execute_pm_commands(
                                 source_seq: existing.source_seq,
                                 source_component: pm_name.to_string(),
                                 command_index: command_index as u32,
+                                // D-7: handler-provided basis preserved as-is
+                                // (nonzero = handler's observation claim; 0 =
+                                // no basis, and no framework map exists here
+                                // to fill it from — see stamping-strategy
+                                // note above).
+                                basis_seq: existing.basis_seq,
                             },
                         )),
                     });
@@ -775,6 +792,11 @@ async fn execute_pm_commands(
                                 source_seq: pm_source_seq,
                                 source_component: pm_name.to_string(),
                                 command_index: command_index as u32,
+                                // D-7: no destination-sequence value is
+                                // available in this scope (deferred gap, see
+                                // stamping-strategy note above) → 0 = legacy
+                                // conservative whole-history overlap window.
+                                basis_seq: 0,
                             },
                         )),
                     });
@@ -802,6 +824,12 @@ async fn execute_pm_commands(
         // header with a sync_mode (e.g. SYNC_MODE_DECISION when it needs
         // the accept/reject answer synchronously), honour that; otherwise
         // inherit the surrounding flow's sync_mode unchanged.
+        //
+        // `sync_mode` is an `optional` field, so presence distinguishes an
+        // explicit override (including ASYNC, the zero value) from none.
+        // Unknown ints are treated as absent and inherit rather than
+        // defaulting, so a garbled header can never demote a Cascade or
+        // Decision flow to fire-and-forget.
         let effective_sync_mode = command_book
             .pages
             .first()

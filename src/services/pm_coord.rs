@@ -25,7 +25,7 @@ use crate::proto::{
     process_manager_coordinator_service_server::ProcessManagerCoordinatorService,
     ProcessManagerCoordinatorRequest, ProcessManagerHandleResponse, SpeculatePmRequest, SyncMode,
 };
-use crate::proto_ext::CoverExt;
+use crate::proto_ext::{CoverExt, SyncModeExt};
 use crate::services::gap_fill::{GapFiller, NoOpPositionStore, RemoteEventSource};
 
 /// Process Manager coordinator service.
@@ -120,7 +120,8 @@ impl ProcessManagerCoordinatorService for PmCoord {
         let trigger = req.trigger.ok_or_else(|| {
             Status::invalid_argument("ProcessManagerCoordinatorRequest requires trigger events")
         })?;
-        let sync_mode = SyncMode::try_from(req.sync_mode).unwrap_or(SyncMode::Async);
+        // Unspecified (proto3 zero value) and unknown ints resolve to Async.
+        let sync_mode = SyncMode::or_default_async(req.sync_mode);
 
         let correlation_id = trigger.correlation_id();
         if correlation_id.is_empty() {

@@ -1903,3 +1903,232 @@ async fn saga_async_publish_failure_dlqs_failing_command_and_remainder() {
         }
     }
 }
+
+// ============================================================================
+// D-7: basis_seq stamping — the destination head observed at stamp time
+// ============================================================================
+//
+// A deferred command's `AngzarrDeferredSequence.basis_seq` records the
+// destination's `next_sequence` the saga observed (Phase-1 fetch) when it
+// stamped the command. The aggregate pipeline uses it as the LOWER BOUND of the
+// field-overlap concurrency window (state@basis .. state@actual) instead of the
+// whole destination history — without a written basis, a repeat-writer saga's
+// harmless commands get over-DLQ'd (that is the whole point of D-7).
+//
+// The stamp loop must WRITE basis from the fetched destination-sequence map,
+// while PRESERVING a handler-provided nonzero basis (fill-only-when-empty,
+// mirroring the source-Cover / correlation backfill). These tests pin both
+// directions of that rule on the real `orchestrate_saga` path.
+
+/// Saga that declares ONE output domain and emits a single command to it, with
+/// a configurable page `header` so tests can drive the default (no header) and
+/// existing-`AngzarrDeferred` stamping branches. Declaring the output domain is
+/// what makes the Phase-1 fetch populate `destination_sequences` for it — the
+/// source of the stamped basis.
+struct SagaEmittingToOutputDomain {
+    domain: String,
+    header: Option<PageHeader>,
+}
+
+#[async_trait]
+impl SagaRetryContext for SagaEmittingToOutputDomain {
+    async fn handle(
+        &self,
+        _destination_sequences: HashMap<String, u32>,
+        _sync_mode: SyncMode,
+    ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(SagaResponse {
+            commands: vec![CommandBook {
+                cover: Some(Cover {
+                    domain: self.domain.clone(),
+                    correlation_id: "corr-1".to_string(),
+                    ..Default::default()
+                }),
+                pages: vec![CommandPage {
+                    header: self.header.clone(),
+                    merge_strategy: MergeStrategy::MergeCommutative as i32,
+                    payload: Some(CmdPayload::Command(prost_types::Any {
+                        type_url: "test.SagaCommand".to_string(),
+                        value: vec![],
+                    })),
+                }],
+            }],
+            events: vec![],
+        })
+    }
+    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
+    fn source_cover(&self) -> Option<&Cover> {
+        None
+    }
+    fn source_max_sequence(&self) -> u32 {
+        0
+    }
+    fn output_domains(&self) -> &[String] {
+        std::slice::from_ref(&self.domain)
+    }
+}
+
+/// DestinationFetcher whose correlation lookup reports a fixed `next_sequence`
+/// for every domain — the destination head the saga "observes" in Phase 1.
+struct FixedNextSequenceFetcher {
+    next_sequence: u32,
+}
+
+#[async_trait]
+impl crate::orchestration::destination::DestinationFetcher for FixedNextSequenceFetcher {
+    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(None)
+    }
+    async fn fetch_by_correlation(
+        &self,
+        _domain: &str,
+        _correlation_id: &str,
+    ) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(Some(EventBook {
+            next_sequence: self.next_sequence,
+            ..Default::default()
+        }))
+    }
+}
+
+/// D-7: the stamp loop must WRITE basis_seq from the Phase-1 destination fetch.
+/// A saga whose destination fetch returns `next_sequence = N` → the stamped
+/// command's `basis_seq == N`. Kills "basis_seq never written / hardcoded 0":
+/// with basis pinned to 0 the aggregate pipeline falls back to the conservative
+/// whole-history overlap window and over-DLQs repeat-writer sagas — the exact
+/// regression D-7 fixes. (Default stamping branch: the handler set no header.)
+#[tokio::test]
+async fn test_saga_stamps_basis_seq_from_fetched_destination_sequence() {
+    let ctx = SagaEmittingToOutputDomain {
+        domain: "inventory".to_string(),
+        header: None, // default stamping branch (no handler-set sequence_type)
+    };
+    let executor = CapturingExecutor::new();
+    let fetcher = FixedNextSequenceFetcher { next_sequence: 9 };
+
+    let result = orchestrate_saga(
+        &ctx,
+        &executor,
+        None,
+        Some(&fetcher),
+        None,
+        "saga-orders-inventory",
+        "corr-1",
+        None,
+        SyncMode::Simple,
+        fast_backoff(),
+    )
+    .await;
+    assert!(result.is_ok(), "orchestrate_saga should succeed");
+
+    let captured = executor.seen.lock().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "expected the emitted command through the executor"
+    );
+    let deferred = captured_deferred(&captured[0]);
+    assert_eq!(
+        deferred.basis_seq, 9,
+        "D-7: basis_seq must equal the destination next_sequence (9) the saga \
+         observed for its target domain in Phase 1 — not hardcoded 0"
+    );
+}
+
+/// D-7 fill-only-when-empty (PRESERVE side): a handler that pre-stamps a NONZERO
+/// basis_seq is making its own observation claim — the stamp loop must PRESERVE
+/// it and NOT overwrite it with the fetched destination sequence. Mirrors the
+/// source-Cover / correlation backfill philosophy (fill only when empty). Kills
+/// the mutant that always fills basis from the fetched map, which would clobber
+/// a handler's deliberate basis (3) with the fetched value (9).
+#[tokio::test]
+async fn test_saga_preserves_handler_stamped_nonzero_basis_seq() {
+    let ctx = SagaEmittingToOutputDomain {
+        domain: "inventory".to_string(),
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(SequenceType::AngzarrDeferred(AngzarrDeferredSequence {
+                source: None,
+                source_seq: 7,
+                basis_seq: 3, // handler's own observed basis
+                ..Default::default()
+            })),
+        }),
+    };
+    let executor = CapturingExecutor::new();
+    // The Phase-1 fetch would fill 9 — the preserve rule must ignore it.
+    let fetcher = FixedNextSequenceFetcher { next_sequence: 9 };
+
+    let result = orchestrate_saga(
+        &ctx,
+        &executor,
+        None,
+        Some(&fetcher),
+        None,
+        "saga-orders-inventory",
+        "corr-1",
+        None,
+        SyncMode::Simple,
+        fast_backoff(),
+    )
+    .await;
+    assert!(result.is_ok(), "orchestrate_saga should succeed");
+
+    let captured = executor.seen.lock().await;
+    let deferred = captured_deferred(&captured[0]);
+    assert_eq!(
+        deferred.basis_seq, 3,
+        "D-7 fill-only-when-empty: a handler-provided NONZERO basis_seq must be \
+         preserved, NOT overwritten by the fetched destination sequence (9)"
+    );
+    assert_eq!(
+        deferred.source_seq, 7,
+        "the handler's source_seq is preserved alongside its basis_seq"
+    );
+}
+
+/// D-7 fill-only-when-empty (FILL side): a handler-set `AngzarrDeferred` header
+/// that leaves basis_seq at 0 must be FILLED from the Phase-1 fetch — the same
+/// existing-deferred branch as the preserve test, exercised on its empty arm.
+/// Together the two tests pin BOTH directions of the `existing.basis_seq != 0`
+/// guard (kills the mutant that always keeps the handler's 0).
+#[tokio::test]
+async fn test_saga_fills_zero_basis_seq_on_handler_set_deferred() {
+    let ctx = SagaEmittingToOutputDomain {
+        domain: "inventory".to_string(),
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(SequenceType::AngzarrDeferred(AngzarrDeferredSequence {
+                source: None,
+                source_seq: 7,
+                basis_seq: 0, // empty → must be filled from the fetch
+                ..Default::default()
+            })),
+        }),
+    };
+    let executor = CapturingExecutor::new();
+    let fetcher = FixedNextSequenceFetcher { next_sequence: 9 };
+
+    let result = orchestrate_saga(
+        &ctx,
+        &executor,
+        None,
+        Some(&fetcher),
+        None,
+        "saga-orders-inventory",
+        "corr-1",
+        None,
+        SyncMode::Simple,
+        fast_backoff(),
+    )
+    .await;
+    assert!(result.is_ok(), "orchestrate_saga should succeed");
+
+    let captured = executor.seen.lock().await;
+    let deferred = captured_deferred(&captured[0]);
+    assert_eq!(
+        deferred.basis_seq, 9,
+        "D-7: an empty (0) handler basis_seq on an existing AngzarrDeferred \
+         header must be filled from the fetched destination sequence (9)"
+    );
+}

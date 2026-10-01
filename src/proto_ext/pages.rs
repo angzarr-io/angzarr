@@ -9,6 +9,8 @@ use crate::proto::{
 };
 use prost::Name;
 
+use super::enums::MergeStrategyExt;
+
 /// Extract the message-name suffix from a protobuf `Any.type_url`.
 ///
 /// Two shapes appear in the wild:
@@ -181,7 +183,8 @@ pub trait CommandPageExt {
 
     /// Get the merge strategy for this command.
     ///
-    /// Returns the MergeStrategy enum value. Defaults to Commutative (0) if unset.
+    /// Returns the MergeStrategy enum value. Unknown wire ints resolve to
+    /// Commutative, the documented default (also the proto3 zero value).
     fn merge_strategy(&self) -> MergeStrategy;
 }
 
@@ -232,7 +235,7 @@ impl CommandPageExt for CommandPage {
     }
 
     fn merge_strategy(&self) -> MergeStrategy {
-        MergeStrategy::try_from(self.merge_strategy).unwrap_or(MergeStrategy::MergeCommutative)
+        MergeStrategy::or_default_commutative(self.merge_strategy)
     }
 }
 

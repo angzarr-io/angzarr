@@ -63,7 +63,9 @@ impl FactExecutor for GrpcFactExecutor {
         let event_request = EventRequest {
             events: Some(fact),
             sync_mode: SyncMode::Async.into(),
-            route_to_handler: true,
+            // skip_handler omitted (proto3 default false): facts route
+            // through the aggregate's handle_fact — the safe default.
+            ..Default::default()
         };
 
         client

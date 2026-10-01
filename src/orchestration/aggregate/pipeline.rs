@@ -267,14 +267,15 @@ async fn enforce_merge_strategy(
             // review, returning ABORTED (non-retryable).
             //
             // Deferred (saga-produced) commands are the exception (D-7): they
-            // never claim a destination sequence, so `expected` is a
-            // placeholder 0 and `expected != actual` fires for EVERY deferred
-            // command landing on a non-empty aggregate — which is NOT a
-            // conflict. DLQ'ing them here would dead-letter every deferred
-            // MANUAL command against a non-empty aggregate. Instead their DLQ
-            // decision is deferred to the post-execution field-overlap gate
-            // (`enforce_deferred_manual_gate`), which DLQs only on a genuine
-            // field conflict. (Mirrors the STRICT `!is_deferred` skip above.)
+            // never claim a destination sequence — `expected` is the saga's
+            // observed basis (`basis_seq`; 0 legacy), so `expected != actual`
+            // fires whenever the destination advanced past that basis —
+            // which is NOT by itself a conflict. DLQ'ing them here would
+            // dead-letter every such deferred MANUAL command. Instead their
+            // DLQ decision is deferred to the post-execution field-overlap
+            // gate (`enforce_deferred_manual_gate`), which DLQs only on a
+            // genuine field conflict within `basis..actual`. (Mirrors the
+            // STRICT `!is_deferred` skip above.)
             if !is_deferred {
                 ctx.send_to_dlq(command_book, expected, actual, domain)
                     .await;
@@ -370,8 +371,10 @@ async fn enforce_commutative_gate(
 }
 
 /// The sequence window a deferred-command conflict check runs over: the
-/// command's claimed basis (`expected` — placeholder 0 for deferred commands
-/// today; a real origin-stamped basis once D-7 basis stamping lands) vs the
+/// command's origin-stamped basis (`expected` — the destination head the
+/// producing saga/PM observed at stamp time, carried in
+/// `AngzarrDeferredSequence.basis_seq`; 0 for legacy/unstamped commands,
+/// which degrades to the conservative whole-history window) vs the
 /// destination's current head (`actual`).
 struct SeqWindow {
     expected: u32,
@@ -381,18 +384,24 @@ struct SeqWindow {
 /// Post-execution field-overlap gate for deferred (saga-produced) MANUAL
 /// commands (D-7).
 ///
-/// A deferred command never claims a destination sequence (`expected` is a
-/// placeholder 0), so the upfront MANUAL sequence gate would DLQ *every*
-/// deferred command landing on a non-empty aggregate — even when the
-/// saga-produced events touch fields nothing has changed since. That
-/// over-DLQs harmless saga work. Instead we wait until after the handler runs,
-/// so `received_events` reveals which fields the command actually touched, and
+/// A deferred command never claims a destination sequence, so the upfront
+/// MANUAL sequence gate would DLQ *every* deferred command landing on a
+/// destination that advanced past its basis — even when the saga-produced
+/// events touch fields nothing has changed since. That over-DLQs harmless
+/// saga work. Instead we wait until after the handler runs, so
+/// `received_events` reveals which fields the command actually touched, and
 /// route to the DLQ only on a genuine field conflict.
 ///
+/// `window.expected` is the origin-stamped `basis_seq` (the destination head
+/// the saga observed when it produced the command), so the overlap check
+/// diffs `state@basis` vs `state@actual` — a REAL concurrency window covering
+/// only writes that landed after the saga's observation. Legacy commands
+/// (`basis_seq == 0`) keep the conservative whole-history window.
+///
 /// Reuses the same `check_commutative_overlap` used by the COMMUTATIVE gate
-/// (deferred COMMUTATIVE commands already run it with `expected == 0`), so
-/// deferred MANUAL and deferred COMMUTATIVE agree on what "overlap" means; they
-/// differ only in the mismatch outcome:
+/// (deferred COMMUTATIVE commands run it with the same basis-derived
+/// `expected`), so deferred MANUAL and deferred COMMUTATIVE agree on what
+/// "overlap" means; they differ only in the mismatch outcome:
 /// - `Disjoint` → proceed with the merge (no conflict, no human review needed).
 /// - `Overlap` → DLQ + ABORTED (non-retryable) for human review.
 /// - Replay unavailable (`Err`) → conservatively DLQ + ABORTED, preserving the
@@ -571,10 +580,14 @@ async fn publish_unless_noop(
 ///
 /// Saga-produced commands use `AngzarrDeferred` sequences. The flow:
 /// 1. Check idempotency using source provenance (return cached if duplicate)
-/// 2. Skip pre-validation (can't validate until we know actual sequence)
-/// 3. Load prior events to get actual sequence
-/// 4. Stamp actual sequence onto command pages
-/// 5. Proceed with normal execution
+/// 2. Extract the origin-stamped `basis_seq` as `expected` (D-7) — the
+///    destination head the saga observed; 0 legacy = whole-history window
+/// 3. Skip pre-validation (deferred commands claim no write position)
+/// 4. Load prior events to get actual sequence
+/// 5. Stamp actual sequence onto command pages (erases the deferred header,
+///    which is why basis/provenance are extracted in steps 1-2 first)
+/// 6. Proceed with normal execution; on `basis != actual` the post-execution
+///    gates check field overlap over `basis..actual` only
 #[tracing::instrument(
     name = "aggregate.execute",
     skip_all,
@@ -683,18 +696,29 @@ async fn execute_mode(
     // Sequence validation based on merge strategy.
     //
     // For non-deferred commands `expected` is the explicit sequence the
-    // client claimed; for deferred (saga-produced) commands
-    // `extract_command_sequence` returns 0, so `expected != actual` fires
-    // exactly when the destination has prior history. That's the trigger
-    // we want for COMMUTATIVE/MANUAL on deferred commands (H-18): the
-    // upfront sequence check is genuinely meaningless for sagas (they
-    // never claimed a destination sequence), but the *field-overlap*
-    // check still applies — a saga that produced a command against
-    // stale destination field state must still be caught. Pre-fix the
-    // gate was `!is_deferred && expected != actual` which skipped
-    // COMMUTATIVE/MANUAL entirely for deferred commands; the cascade
-    // gate (C-03) only catches uncommitted-cascade overlaps, leaving
-    // committed-intervening overlap unchecked.
+    // client claimed. For deferred (saga-produced) commands
+    // `extract_command_sequence` returns the origin-stamped `basis_seq` —
+    // the destination head the saga observed at stamp time (D-7) — so
+    // `expected != actual` fires exactly when the destination advanced
+    // PAST the saga's observation. Consequences for the deferred path:
+    //
+    // - basis == actual (no intervening writes): no mismatch → no gates
+    //   arm → the merge proceeds directly. This is the D-7 FAST PATH: the
+    //   saga translated against the exact current head, so there is no
+    //   concurrency window to check and no replay round-trips are spent.
+    // - basis < actual: the mismatch arms the post-execution gates with
+    //   window `basis..actual` — the field-overlap check diffs state@basis
+    //   vs state@actual, catching a saga that produced a command against
+    //   stale destination field state (H-18) without penalizing writes the
+    //   saga had already seen.
+    // - basis == 0 (legacy / unstamped): behaves exactly as before D-7
+    //   basis stamping — fires for any non-empty destination and the gates
+    //   run over the conservative whole-history window.
+    //
+    // Pre-H-18 the gate was `!is_deferred && expected != actual` which
+    // skipped COMMUTATIVE/MANUAL entirely for deferred commands; the
+    // cascade gate (C-03) only catches uncommitted-cascade overlaps,
+    // leaving committed-intervening overlap unchecked.
     let sequence_mismatch = expected != actual;
 
     // Track if we need post-execution commutative check
@@ -703,9 +727,10 @@ async fn execute_mode(
 
     // Track if we need the post-execution deferred-MANUAL field-overlap gate
     // (D-7). A deferred MANUAL command can't use the upfront sequence gate
-    // (`expected` is a placeholder 0), so `enforce_merge_strategy` lets it
-    // through and we DLQ only on a genuine field conflict after the handler
-    // reveals which fields the command touched.
+    // (`expected` is the saga's observed basis, not a claimed write
+    // position), so `enforce_merge_strategy` lets it through and we DLQ only
+    // on a genuine field conflict — within `basis..actual` — after the
+    // handler reveals which fields the command touched.
     let needs_deferred_manual_check =
         sequence_mismatch && merge_strategy == MergeStrategy::MergeManual && is_deferred;
 

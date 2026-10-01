@@ -1224,6 +1224,352 @@ async fn test_execute_mode_deferred_strict_overlap_not_manual_gated() {
 }
 
 // ============================================================================
+// execute_mode wiring — D-7 basis_seq overlap WINDOW behavior
+//
+// The wiring tests above all use `expected == 0` (an unstamped deferred
+// command), so the field-overlap check diffs state@0 .. state@actual — the
+// whole destination history. D-7 makes `expected` the origin-stamped
+// `basis_seq`: the destination head the saga observed at stamp time. The
+// overlap check then diffs state@basis .. state@actual — a REAL concurrency
+// window covering only writes that landed AFTER the saga's observation.
+//
+// These tests drive the REAL `execute_mode` path with a NONZERO basis so the
+// window is a strict sub-range of history, and pin the four behaviors that
+// distinguish D-7 from the old whole-history check:
+//   1. overlap ONLY in PRE-basis history  → PROCEEDS (the over-DLQ fix)
+//   2. overlap WITHIN basis..actual        → DLQ + Aborted (real conflict caught)
+//   3. basis == actual                     → gate never armed (fast path)
+//   4. basis == 0 (legacy)                 → whole-history window (unchanged)
+//
+// `StubReplay` keys replay state by the replayed book's PAGE COUNT.
+// `check_commutative_overlap` replays three books:
+//   * state@basis  = build_events_up_to_sequence(prior, basis) → prior pages
+//                    with seq < basis  (a STRICT SUBSET when basis > 0)
+//   * state@actual = replay(prior)                             → all prior pages
+//   * state@after  = replay(prior + received)                 → prior + command
+// With prior pages at seq [0,1,2,3] (actual == 4) and a 1-page command, a basis
+// of 2 gives page counts 2 / 4 / 5 — three distinct replay keys — so the states
+// vector is indexed by those counts. basis 0 collapses state@basis to page
+// count 0 (the whole-history lower bound), exactly the legacy behavior.
+// ============================================================================
+
+/// A deferred command (given strategy) carrying an explicit D-7 `basis_seq` —
+/// the destination head the producing saga observed at stamp time.
+/// `deferred_command_with_strategy` leaves basis_seq at its default 0 (legacy);
+/// the window tests set a nonzero basis so `expected == basis_seq` and the
+/// overlap check runs over state@basis .. state@actual, not the whole history.
+fn deferred_command_with_strategy_and_basis(
+    strategy: MergeStrategy,
+    basis_seq: u32,
+) -> CommandBook {
+    let mut cmd = deferred_command_with_strategy(strategy);
+    if let Some(SequenceType::AngzarrDeferred(ad)) = cmd.pages[0]
+        .header
+        .as_mut()
+        .and_then(|h| h.sequence_type.as_mut())
+    {
+        ad.basis_seq = basis_seq;
+    }
+    cmd
+}
+
+/// A `ClientLogic` whose `invoke` returns canned events but whose `replay` is
+/// the trait default (Unimplemented). Used by the basis==actual fast-path test:
+/// if the deferred-MANUAL gate were (wrongly) armed, its replay call would fail
+/// and it would CONSERVATIVELY DLQ+abort (the replay-unavailable arm). A clean
+/// merge therefore proves the gate was never consulted — the whole point of the
+/// basis==actual fast path (no window ⇒ no check ⇒ no replay round-trips).
+struct WiredInvokeOnly {
+    respond_events: EventBook,
+}
+
+#[async_trait]
+impl ClientLogic for WiredInvokeOnly {
+    async fn invoke(&self, _cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
+        Ok(BusinessResponse {
+            result: Some(business_response::Result::Events(
+                self.respond_events.clone(),
+            )),
+        })
+    }
+
+    async fn invoke_fact(&self, _ctx: FactContext) -> Result<EventBook, Status> {
+        Err(Status::unimplemented(
+            "invoke_fact not used in window tests",
+        ))
+    }
+    // replay() uses the trait default → Unimplemented.
+}
+
+/// Drive `execute_mode` end-to-end for a deferred command with an explicit
+/// `basis_seq` against a destination whose prior history has committed pages at
+/// `prior_seqs` (so `actual == max(prior_seqs) + 1`, read from `next_sequence`).
+/// The command produces one event, so `prior + received` is `prior_seqs.len() +
+/// 1` pages. `StubReplay` maps each replayed page count to a state, letting a
+/// test pin distinct state@basis / state@actual / state@after replays even when
+/// basis > 0. Persist is configured to SUCCEED so a merge visibly reaches
+/// publish (and a wrongly-DLQ'd command visibly does not).
+async fn run_deferred_window_pipeline(
+    strategy: MergeStrategy,
+    basis_seq: u32,
+    prior_seqs: &[u32],
+    states_by_page_count: Vec<&'static str>,
+) -> DeferredManualRun {
+    let mut prior = book_with_domain("dest", "");
+    prior.pages = prior_seqs
+        .iter()
+        .map(|&s| make_event_page(s, false, None))
+        .collect();
+    // `actual` is read from the raw `next_sequence` field (not recomputed): one
+    // past the highest prior sequence, or 0 for an empty destination.
+    prior.next_sequence = prior_seqs.iter().copied().max().map_or(0, |m| m + 1);
+
+    // One received page. Only its COUNT matters (for the state@after replay
+    // key); its sequence is cosmetic.
+    let mut received = book_with_domain("dest", "");
+    received.pages = vec![make_event_page(prior.next_sequence, false, None)];
+
+    let dlq = Arc::new(AtomicUsize::new(0));
+    let published = Arc::new(AtomicUsize::new(0));
+    let ctx = TestCtx {
+        prior_events: Some(prior),
+        persist_outcome: Some(PersistOutcome::Persisted(received.clone())),
+        post_persist_calls: published.clone(),
+        post_persist_return: vec![Projection::default()],
+        dlq_calls: dlq.clone(),
+        ..Default::default()
+    };
+    let business = WiredLogic {
+        replay: StubReplay {
+            states_by_page_count,
+        },
+        respond_events: received,
+    };
+
+    let result = execute_mode(
+        &ctx,
+        &business,
+        deferred_command_with_strategy_and_basis(strategy, basis_seq),
+    )
+    .await;
+    DeferredManualRun {
+        result,
+        dlq: dlq.load(Ordering::SeqCst),
+        published: published.load(Ordering::SeqCst),
+    }
+}
+
+/// Replay states shared by the killer test and the legacy test — the ONLY thing
+/// that differs between them is `basis_seq`, which makes the contrast the whole
+/// point of D-7: SAME destination history, SAME command, and yet basis=2 merges
+/// while basis=0 (legacy) dead-letters.
+///
+/// Prior history is [0,1,2,3] (actual == 4); the command emits one event
+/// (state@after is page count 5). The field story encoded here:
+///   * `field_a` changed 0→1 BEFORE basis (it is already 1 at basis seq 2)
+///   * `field_a` is UNCHANGED across basis..actual (still 1 at actual)
+///   * `field_b` changed 0→1 WITHIN basis..actual (the only intervening write)
+///   * the command changes `field_a` 1→2
+///
+/// So the command's only field-overlap with prior writes is with the PRE-basis
+/// change to `field_a` — nothing in the real basis..actual window.
+fn pre_basis_overlap_states() -> Vec<&'static str> {
+    vec![
+        r#"{"field_a":"0","field_b":"0"}"#, // 0: state@0  (legacy whole-history basis)
+        r#"{"field_a":"0","field_b":"0"}"#, // 1: unused filler
+        r#"{"field_a":"1","field_b":"0"}"#, // 2: state@basis=2 (field_a already changed pre-basis)
+        r#"{"field_a":"1","field_b":"0"}"#, // 3: unused filler
+        r#"{"field_a":"1","field_b":"1"}"#, // 4: state@actual (only field_b changed in basis..actual)
+        r#"{"field_a":"2","field_b":"1"}"#, // 5: state@after (command changed field_a)
+    ]
+}
+
+/// THE KILLER TEST (D-7's whole reason to exist).
+///
+/// A deferred MANUAL command with `basis < actual`, where the command's ONLY
+/// field-overlap with prior writes lies in PRE-basis history: `field_a` was
+/// changed before the saga observed the destination (basis seq 2) and was NOT
+/// touched again in the real concurrency window basis..actual. The command
+/// changes `field_a`.
+///
+/// With D-7, the overlap check diffs state@basis .. state@actual. In that
+/// window only `field_b` changed; the command changed `field_a`; the sets are
+/// DISJOINT, so there is no genuine concurrent conflict and the command MUST
+/// merge (no DLQ, reaches persist+publish).
+///
+/// Pre-D-7 this EXACT case was wrongly dead-lettered: `expected` was hardcoded
+/// 0, so the check diffed state@0 .. state@actual — the whole history — which
+/// includes the pre-basis `field_a` change. The command's `field_a` write
+/// "overlapped" a change the saga had ALREADY accounted for when it translated,
+/// and a harmless repeat-writer saga command got DLQ'd. See the legacy test
+/// below for that exact (basis=0) behavior on the SAME history.
+#[tokio::test]
+async fn test_execute_mode_deferred_manual_pre_basis_only_overlap_merges() {
+    let run = run_deferred_window_pipeline(
+        MergeStrategy::MergeManual,
+        2,             // basis: saga observed destination head at seq 2
+        &[0, 1, 2, 3], // actual == 4
+        pre_basis_overlap_states(),
+    )
+    .await;
+
+    run.result.expect(
+        "D-7: the command's only field-overlap is with a PRE-basis change the \
+         saga already accounted for; within the real basis..actual window the \
+         command's fields are disjoint from intervening writes → it MUST merge, \
+         not dead-letter",
+    );
+    assert_eq!(
+        run.dlq, 0,
+        "a pre-basis-only overlap is NOT a genuine concurrent conflict — the \
+         D-7 basis window must not DLQ it (this is the over-DLQ bug fixed)"
+    );
+    assert_eq!(
+        run.published, 1,
+        "the merged command must reach persist+publish exactly once"
+    );
+}
+
+/// Overlap WITHIN the real basis..actual window is still a genuine concurrent
+/// conflict and is still caught: `field_a` changed AFTER the saga's basis and
+/// the command ALSO changes `field_a` → Overlap → DLQ + Aborted. This is the
+/// complement of the killer test: narrowing the window to basis..actual must
+/// not blind the gate to conflicts that genuinely fall inside it.
+#[tokio::test]
+async fn test_execute_mode_deferred_manual_in_window_overlap_dlqs() {
+    let run = run_deferred_window_pipeline(
+        MergeStrategy::MergeManual,
+        2,
+        &[0, 1, 2, 3], // actual == 4
+        vec![
+            r#"{"field_a":"0","field_b":"0"}"#, // 0: unused
+            r#"{"field_a":"0","field_b":"0"}"#, // 1: unused
+            r#"{"field_a":"0","field_b":"0"}"#, // 2: state@basis=2
+            r#"{"field_a":"0","field_b":"0"}"#, // 3: unused
+            r#"{"field_a":"1","field_b":"0"}"#, // 4: state@actual: field_a changed IN basis..actual
+            r#"{"field_a":"2","field_b":"0"}"#, // 5: state@after: command changed field_a AGAIN → overlap
+        ],
+    )
+    .await;
+
+    let err = run
+        .result
+        .expect_err("a genuine in-window field conflict must abort");
+    assert_eq!(
+        err.code(),
+        tonic::Code::Aborted,
+        "an in-window conflict is non-retryable ABORTED"
+    );
+    assert_eq!(
+        run.dlq, 1,
+        "an in-window field conflict must route the command to the DLQ"
+    );
+    assert_eq!(run.published, 0, "a DLQ'd command must not persist/publish");
+}
+
+/// basis == actual: the saga translated against the EXACT current destination
+/// head, so there were no intervening writes and `expected != actual` is false
+/// — the deferred-MANUAL gate is never armed and never even replays. This is
+/// the D-7 fast path (trace (a)).
+///
+/// The business here ERRORS on `replay` (`WiredInvokeOnly`): if a mutant armed
+/// the gate anyway, its replay would fail and it would conservatively DLQ+abort.
+/// A clean merge (Ok, no DLQ, published once) therefore proves the gate was
+/// never consulted — a strictly stronger statement than "it happened to find no
+/// overlap".
+#[tokio::test]
+async fn test_execute_mode_deferred_manual_basis_equals_actual_fast_path() {
+    let mut prior = book_with_domain("dest", "");
+    prior.pages = vec![
+        make_event_page(0, false, None),
+        make_event_page(1, false, None),
+        make_event_page(2, false, None),
+    ];
+    prior.next_sequence = 3; // actual == 3
+
+    let mut received = book_with_domain("dest", "");
+    received.pages = vec![make_event_page(3, false, None)];
+
+    let dlq = Arc::new(AtomicUsize::new(0));
+    let published = Arc::new(AtomicUsize::new(0));
+    let ctx = TestCtx {
+        prior_events: Some(prior),
+        persist_outcome: Some(PersistOutcome::Persisted(received.clone())),
+        post_persist_calls: published.clone(),
+        post_persist_return: vec![Projection::default()],
+        dlq_calls: dlq.clone(),
+        ..Default::default()
+    };
+    let business = WiredInvokeOnly {
+        respond_events: received,
+    };
+
+    // basis_seq == actual (3): no concurrency window at all.
+    let result = execute_mode(
+        &ctx,
+        &business,
+        deferred_command_with_strategy_and_basis(MergeStrategy::MergeManual, 3),
+    )
+    .await;
+
+    result.expect(
+        "basis == actual → expected != actual is false → the deferred-MANUAL \
+         gate is never armed (and replay is never called) → the command merges",
+    );
+    assert_eq!(
+        dlq.load(Ordering::SeqCst),
+        0,
+        "the fast path must not DLQ; a DLQ here means the gate was wrongly armed \
+         and hit the replay-unavailable arm"
+    );
+    assert_eq!(
+        published.load(Ordering::SeqCst),
+        1,
+        "the fast-path command must persist+publish exactly once"
+    );
+}
+
+/// Legacy (`basis_seq == 0`) preserves the pre-D-7 whole-history window exactly.
+/// Run on the SAME history and command as the killer test above, but with
+/// basis=0: the check diffs state@0 .. state@actual (the whole history), which
+/// includes the PRE-basis `field_a` change, so the command's `field_a` write
+/// now overlaps → DLQ + Aborted.
+///
+/// This is the crux of D-7 stated as a differential: identical destination
+/// history and identical command, basis=2 MERGES (killer test) while basis=0
+/// DLQs (here). It also proves the change is backward-compatible — an unstamped
+/// (legacy) command behaves exactly as before basis stamping existed.
+#[tokio::test]
+async fn test_execute_mode_deferred_manual_legacy_zero_basis_whole_history_dlqs() {
+    let run = run_deferred_window_pipeline(
+        MergeStrategy::MergeManual,
+        0,             // legacy / unstamped: whole-history window
+        &[0, 1, 2, 3], // actual == 4 (SAME history as the killer test)
+        pre_basis_overlap_states(),
+    )
+    .await;
+
+    let err = run.result.expect_err(
+        "basis=0 uses the whole-history window: the pre-basis field_a \
+                     change is now inside it, so the command overlaps → abort",
+    );
+    assert_eq!(
+        err.code(),
+        tonic::Code::Aborted,
+        "legacy whole-history overlap is non-retryable ABORTED"
+    );
+    assert_eq!(
+        run.dlq, 1,
+        "legacy (basis=0) still DLQs a pre-basis-only overlap — proving the old \
+         conservative behavior is unchanged for unstamped commands"
+    );
+    assert_eq!(
+        run.published, 0,
+        "the DLQ'd legacy command must not publish"
+    );
+}
+
+// ============================================================================
 // AggregateOperation::name (trivial, but mutated — pin it)
 // ============================================================================
 

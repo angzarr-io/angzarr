@@ -27,8 +27,8 @@ use prost::{Message, Name};
 use super::*;
 use crate::proto::page_header::SequenceType;
 use crate::proto::{
-    command_page, event_page, CommandPage, Confirmation, Cover, EventPage, NoOp, PageHeader,
-    Uuid as ProtoUuid,
+    command_page, event_page, CommandPage, Confirmation, Cover, EventPage, MergeStrategy, NoOp,
+    PageHeader, Uuid as ProtoUuid,
 };
 
 // ----- Helpers --------------------------------------------------------------
@@ -74,7 +74,7 @@ fn make_command_page(type_url: &str, value: Vec<u8>) -> CommandPage {
             sync_mode: None,
             sequence_type: Some(SequenceType::Sequence(1)),
         }),
-        merge_strategy: 0,
+        merge_strategy: MergeStrategy::MergeCommutative as i32,
         payload: Some(command_page::Payload::Command(prost_types::Any {
             type_url: type_url.to_string(),
             value,

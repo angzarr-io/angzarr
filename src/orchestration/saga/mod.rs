@@ -607,8 +607,10 @@ pub async fn orchestrate_saga(
     // Saga receives source events and destination sequences for command stamping.
     // Pass the inherited sync_mode so distributed (gRPC) contexts can stamp it
     // onto the outgoing SagaHandleRequest instead of hardcoding Simple (H-17).
+    // The map is also needed after handle() for D-7 basis stamping — clone
+    // the (small, per-output-domain) map into the call.
     let saga_response = ctx
-        .handle(destination_sequences, sync_mode)
+        .handle(destination_sequences.clone(), sync_mode)
         .await
         .map_err(|e| BusError::Publish(e.to_string()))?;
 
@@ -640,10 +642,26 @@ pub async fn orchestrate_saga(
     // - source_component + command_index are framework provenance (the
     //   component's registered name and the command's position in this
     //   invocation's output) — always stamped, never handler data.
+    // - basis_seq (D-7): the destination head observed by THIS invocation —
+    //   the Phase-1 fetch keyed by the command's destination domain. A
+    //   handler-provided nonzero basis is preserved; 0/unset is filled from
+    //   the map (same fill-only-when-empty philosophy as correlation
+    //   backfill). Absent map entry (no output_domains declared / no
+    //   fetcher) → 0: the legacy conservative whole-history overlap window.
     let source_cover = ctx.source_cover().cloned();
     let source_max_seq = ctx.source_max_sequence();
 
     for (command_index, cmd) in commands.iter_mut().enumerate() {
+        // D-7: basis for this command's field-overlap concurrency window =
+        // the destination's next_sequence fetched in Phase 1 (load-bearing
+        // per D-5, O9-guarded: a fetch error already failed orchestration,
+        // so a present entry is trustworthy — never a defaulted blip).
+        let fetched_basis = cmd
+            .cover
+            .as_ref()
+            .and_then(|c| destination_sequences.get(&c.domain))
+            .copied()
+            .unwrap_or(0);
         for page in &mut cmd.pages {
             // Preserve any per-command sync_mode the saga handler set on the
             // header before we rewrite the sequence_type for angzarr_deferred
@@ -655,6 +673,15 @@ pub async fn orchestrate_saga(
                 // honor it; the destination validates and rejects on mismatch.
                 Some(SequenceType::Sequence(_)) => {}
                 Some(SequenceType::AngzarrDeferred(existing)) => {
+                    // D-7: a handler-provided nonzero basis is the handler's
+                    // own observation claim — preserve it; fill from the
+                    // Phase-1 fetch only when empty (0), mirroring the
+                    // source-Cover fill above.
+                    let basis_seq = if existing.basis_seq != 0 {
+                        existing.basis_seq
+                    } else {
+                        fetched_basis
+                    };
                     page.header = Some(PageHeader {
                         sync_mode: preserved_sync_mode,
                         sequence_type: Some(SequenceType::AngzarrDeferred(
@@ -663,6 +690,7 @@ pub async fn orchestrate_saga(
                                 source_seq: existing.source_seq,
                                 source_component: saga_name.to_string(),
                                 command_index: command_index as u32,
+                                basis_seq,
                             },
                         )),
                     });
@@ -677,6 +705,10 @@ pub async fn orchestrate_saga(
                                 source_seq: source_max_seq,
                                 source_component: saga_name.to_string(),
                                 command_index: command_index as u32,
+                                // D-7: destination head observed at stamp time
+                                // (0 when the domain wasn't fetched → legacy
+                                // conservative whole-history window).
+                                basis_seq: fetched_basis,
                             },
                         )),
                     });

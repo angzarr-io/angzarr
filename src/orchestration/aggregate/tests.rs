@@ -20,8 +20,8 @@ use super::merge::{
     partition_by_commit_status,
 };
 use crate::proto::{
-    command_page, event_page, page_header, CommandBook, CommandPage, Cover, EventBook,
-    MergeStrategy, PageHeader, Uuid as ProtoUuid,
+    command_page, event_page, page_header, AngzarrDeferredSequence, CommandBook, CommandPage,
+    Cover, EventBook, ExternalDeferredSequence, MergeStrategy, PageHeader, Uuid as ProtoUuid,
 };
 use crate::proto_ext::{calculate_set_next_seq, CommandBookExt, EventBookExt};
 use prost_types::Any;
@@ -192,6 +192,84 @@ fn test_extract_command_sequence_empty_pages() {
     };
 
     assert_eq!(extract_command_sequence(&command), 0);
+}
+
+/// A command carrying the given `AngzarrDeferred` header on its first page.
+fn make_deferred_command(deferred: AngzarrDeferredSequence) -> CommandBook {
+    let root = Uuid::new_v4();
+    let mut command = make_command_book("orders", root, 0);
+    command.pages[0].header = Some(PageHeader {
+        sync_mode: None,
+        sequence_type: Some(page_header::SequenceType::AngzarrDeferred(deferred)),
+    });
+    command
+}
+
+/// D-7: a deferred (saga-produced) command's `expected` sequence is its
+/// origin-stamped `basis_seq` — the destination head the saga observed at
+/// stamp time. This is what turns the pipeline's overlap window from
+/// whole-history into `basis..actual`; returning anything else (e.g. the
+/// pre-D-7 hardcoded 0) silently re-widens every deferred conflict check.
+#[test]
+fn test_extract_command_sequence_deferred_returns_basis_seq() {
+    let command = make_deferred_command(AngzarrDeferredSequence {
+        basis_seq: 7,
+        ..Default::default()
+    });
+
+    assert_eq!(extract_command_sequence(&command), 7);
+}
+
+/// D-7 legacy: a deferred command with no recorded basis (`basis_seq == 0`,
+/// pre-upgrade producers) must keep yielding 0 — the pipeline then applies
+/// the conservative whole-history overlap window, byte-for-byte the pre-D-7
+/// behavior.
+#[test]
+fn test_extract_command_sequence_deferred_legacy_zero_basis() {
+    let command = make_deferred_command(AngzarrDeferredSequence::default());
+
+    assert_eq!(extract_command_sequence(&command), 0);
+}
+
+/// External (webhook/integration) deferred sequences carry no observed
+/// destination basis — extraction must stay 0 (framework stamps on receipt).
+/// Pins that D-7 basis extraction is scoped to `AngzarrDeferred` only.
+#[test]
+fn test_extract_command_sequence_external_deferred_is_zero() {
+    let root = Uuid::new_v4();
+    let mut command = make_command_book("orders", root, 0);
+    command.pages[0].header = Some(PageHeader {
+        sync_mode: None,
+        sequence_type: Some(page_header::SequenceType::ExternalDeferred(
+            ExternalDeferredSequence::default(),
+        )),
+    });
+
+    assert_eq!(extract_command_sequence(&command), 0);
+}
+
+/// D-7 ordering hazard: `stamp_deferred_sequences` rewrites the deferred
+/// header into an explicit `Sequence(actual + idx)`, ERASING `basis_seq`.
+/// The pipeline must therefore extract the basis BEFORE stamping (it does —
+/// pipeline.rs extracts `expected` before the stamp). This test pins the
+/// erasure itself: after stamping, extraction returns the stamped actual,
+/// not the basis — so any future reordering of extract-vs-stamp fails loudly
+/// in review instead of silently reading a rewritten header.
+#[test]
+fn test_stamp_deferred_sequences_erases_basis() {
+    let mut command = make_deferred_command(AngzarrDeferredSequence {
+        basis_seq: 7,
+        ..Default::default()
+    });
+
+    assert_eq!(extract_command_sequence(&command), 7, "basis before stamp");
+    super::parsing::stamp_deferred_sequences(&mut command, 9);
+    assert_eq!(
+        extract_command_sequence(&command),
+        9,
+        "after stamping, the header is an explicit Sequence(actual); the \
+         basis is gone — readers must run before the rewrite"
+    );
 }
 
 /// Next sequence is last event sequence + 1.

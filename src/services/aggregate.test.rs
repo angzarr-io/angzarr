@@ -47,6 +47,10 @@ struct MockClientLogic {
     responses: Mutex<VecDeque<Result<BusinessResponse, Status>>>,
     fact_responses: Mutex<VecDeque<Result<EventBook, Status>>>,
     invocations: Mutex<Vec<ContextualCommand>>,
+    /// How many times invoke_fact ran. Lets tests observe whether fact
+    /// injection actually routed through the handler (skip_handler
+    /// semantics) instead of inferring it from response shape.
+    fact_invocations: std::sync::atomic::AtomicUsize,
 }
 
 impl MockClientLogic {
@@ -55,7 +59,13 @@ impl MockClientLogic {
             responses: Mutex::new(VecDeque::new()),
             fact_responses: Mutex::new(VecDeque::new()),
             invocations: Mutex::new(Vec::new()),
+            fact_invocations: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    fn fact_invocation_count(&self) -> usize {
+        self.fact_invocations
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     async fn enqueue_response(&self, response: Result<BusinessResponse, Status>) {
@@ -86,6 +96,8 @@ impl ClientLogic for MockClientLogic {
     }
 
     async fn invoke_fact(&self, ctx: FactContext) -> Result<EventBook, Status> {
+        self.fact_invocations
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.fact_responses
             .lock()
             .await
@@ -561,7 +573,7 @@ async fn test_handle_event_missing_events_returns_error() {
     let request = Request::new(EventRequest {
         events: None,
         sync_mode: SyncMode::Async as i32,
-        route_to_handler: true,
+        skip_handler: false,
     });
 
     let response = service.handle_event(request).await;
@@ -570,9 +582,19 @@ async fn test_handle_event_missing_events_returns_error() {
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
 }
 
-/// Facts with route_to_handler invoke aggregate logic.
+/// An EventRequest with skip_handler unset/false routes the fact through
+/// the aggregate's handle_fact — the safe proto3 default.
+///
+/// WHY (D-13, proto3 zero-value hazard): the removed routing bool
+/// (EventRequest field 3, now reserved) claimed "default: true", but proto3
+/// bools decode omitted fields as false — so a caller that set nothing
+/// silently BYPASSED fact validation. skip_handler inverts the field so
+/// the zero value means
+/// "handler participates". This test pins that pivot: we deliberately
+/// leave skip_handler out of the struct init (`..Default::default()`)
+/// and assert the handler ran.
 #[tokio::test]
-async fn test_handle_event_with_route_to_handler() {
+async fn test_handle_event_default_routes_through_handler() {
     let (service, business) = create_test_service().await;
 
     let root = Uuid::new_v4();
@@ -582,7 +604,8 @@ async fn test_handle_event_with_route_to_handler() {
     let request = Request::new(EventRequest {
         events: Some(facts),
         sync_mode: SyncMode::Async as i32,
-        route_to_handler: true,
+        // skip_handler intentionally omitted: an unset field must route.
+        ..Default::default()
     });
 
     let response = service.handle_event(request).await;
@@ -593,6 +616,11 @@ async fn test_handle_event_with_route_to_handler() {
     );
     let fact_response = response.unwrap().into_inner();
     assert!(fact_response.events.is_some());
+    assert_eq!(
+        business.fact_invocation_count(),
+        1,
+        "unset skip_handler must invoke handle_fact (safe default)"
+    );
 }
 
 /// Facts are persisted with no_commit=false (committed) regardless of input.
@@ -615,7 +643,7 @@ async fn test_handle_event_facts_persisted_as_committed() {
     let request = Request::new(EventRequest {
         events: Some(facts),
         sync_mode: SyncMode::Async as i32,
-        route_to_handler: false,
+        skip_handler: true,
     });
 
     let response = service.handle_event(request).await;
@@ -638,10 +666,14 @@ async fn test_handle_event_facts_persisted_as_committed() {
     }
 }
 
-/// Facts without route_to_handler persist directly.
+/// skip_handler: true persists facts directly without invoking handle_fact.
+///
+/// WHY: bypassing the handler is now an explicit opt-in (projector-originated
+/// writes) rather than the accidental result of omitting a proto3 bool, as it
+/// was with the removed routing field (D-13).
 #[tokio::test]
-async fn test_handle_event_without_route_to_handler() {
-    let (service, _) = create_test_service().await;
+async fn test_handle_event_skip_handler_bypasses_handler() {
+    let (service, business) = create_test_service().await;
 
     let root = Uuid::new_v4();
     let facts = make_event_book("orders", root, vec![make_fact_page()]);
@@ -649,7 +681,7 @@ async fn test_handle_event_without_route_to_handler() {
     let request = Request::new(EventRequest {
         events: Some(facts),
         sync_mode: SyncMode::Async as i32,
-        route_to_handler: false,
+        skip_handler: true,
     });
 
     let response = service.handle_event(request).await;
@@ -657,6 +689,11 @@ async fn test_handle_event_without_route_to_handler() {
         response.is_ok(),
         "Expected ok but got: {:?}",
         response.err()
+    );
+    assert_eq!(
+        business.fact_invocation_count(),
+        0,
+        "skip_handler: true must persist directly, never touching handle_fact"
     );
 }
 
@@ -687,8 +724,14 @@ async fn test_create_sync_context_succeeds() {
 #[tokio::test]
 async fn test_create_context_for_sync_mode_async() {
     let (service, _) = create_test_service().await;
-    // SyncMode::Async = 0
     let _ctx = service.create_context_for_sync_mode(SyncMode::Async as i32);
+}
+
+/// create_context_for_sync_mode with an unknown wire int resolves to async.
+#[tokio::test]
+async fn test_create_context_for_sync_mode_unknown_defaults_to_async() {
+    let (service, _) = create_test_service().await;
+    let _ctx = service.create_context_for_sync_mode(999);
 }
 
 /// create_context_for_sync_mode with Simple int creates sync context.
@@ -697,7 +740,6 @@ async fn test_create_context_for_sync_mode_async() {
 #[tokio::test]
 async fn test_create_context_for_sync_mode_simple() {
     let (service, _) = create_test_service().await;
-    // SyncMode::Simple = 1
     let _ctx = service.create_context_for_sync_mode(SyncMode::Simple as i32);
 }
 
@@ -705,7 +747,6 @@ async fn test_create_context_for_sync_mode_simple() {
 #[tokio::test]
 async fn test_create_context_for_sync_mode_cascade() {
     let (service, _) = create_test_service().await;
-    // SyncMode::Cascade = 2
     let _ctx = service.create_context_for_sync_mode(SyncMode::Cascade as i32);
 }
 
@@ -720,7 +761,6 @@ async fn test_create_context_for_sync_mode_cascade() {
 #[tokio::test]
 async fn test_create_context_for_sync_mode_isolated() {
     let (service, _) = create_test_service().await;
-    // SyncMode::Isolated = 4
     let _ctx = service.create_context_for_sync_mode(SyncMode::Isolated as i32);
 }
 

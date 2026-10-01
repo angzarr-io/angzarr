@@ -8,6 +8,7 @@
 //! - [`constants`] - Shared constants (domain names, type URLs, headers)
 //! - [`cover`] - CoverExt trait for accessing cover fields
 //! - [`edition`] - EditionExt trait and Edition constructors
+//! - [`enums`] - SyncModeExt and MergeStrategyExt wire-value resolution
 //! - [`uuid`] - UUID conversion traits
 //! - [`pages`] - EventPageExt and CommandPageExt traits
 //! - [`books`] - EventBookExt, CommandBookExt, and sequence helpers
@@ -18,6 +19,7 @@ pub mod books;
 pub mod constants;
 pub mod cover;
 pub mod edition;
+pub mod enums;
 pub mod grpc;
 pub mod pages;
 pub mod type_url;
@@ -31,6 +33,7 @@ pub use constants::{
 };
 pub use cover::CoverExt;
 pub use edition::EditionExt;
+pub use enums::{MergeStrategyExt, SyncModeExt};
 pub use grpc::correlated_request;
 pub use pages::{AngzarrDeferredSequenceExt, CommandPageExt, EventPageExt, PageHeaderExt};
 pub use uuid::{ProtoUuidExt, UuidExt};

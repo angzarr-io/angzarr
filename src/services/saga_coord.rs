@@ -24,7 +24,7 @@ use crate::proto::{
     saga_coordinator_service_server::SagaCoordinatorService, SagaHandleRequest, SagaResponse,
     SpeculateSagaRequest, SyncMode,
 };
-use crate::proto_ext::CoverExt;
+use crate::proto_ext::{CoverExt, SyncModeExt};
 use crate::services::gap_fill::{GapFiller, NoOpPositionStore, RemoteEventSource};
 
 /// Saga coordinator service.
@@ -129,7 +129,8 @@ impl SagaCoordinatorService for SagaCoord {
         let source = req
             .source
             .ok_or_else(|| Status::invalid_argument("SagaHandleRequest requires source events"))?;
-        let sync_mode = SyncMode::try_from(req.sync_mode).unwrap_or(SyncMode::Async);
+        // Unspecified (proto3 zero value) and unknown ints resolve to Async.
+        let sync_mode = SyncMode::or_default_async(req.sync_mode);
 
         let correlation_id = source.correlation_id().to_string();
         let saga_name = self.factory.name();
@@ -200,7 +201,8 @@ impl SagaCoordinatorService for SagaCoord {
         // so the gRPC saga context stamps it on the wire (H-17). Speculative
         // execution still respects the requested mode even though it produces
         // no side effects — handlers can inspect the inherited mode.
-        let sync_mode = SyncMode::try_from(req.sync_mode).unwrap_or(SyncMode::Async);
+        // Unspecified (proto3 zero value) and unknown ints resolve to Async.
+        let sync_mode = SyncMode::or_default_async(req.sync_mode);
 
         // Create context and call handle() directly (no command delivery)
         // For speculative execution, pass empty sequences since we're not actually delivering commands

@@ -457,6 +457,7 @@ fn deferred_command_book(
                         source_seq,
                         source_component: source_component.to_string(),
                         command_index,
+                        basis_seq: 0,
                     },
                 )),
             }),

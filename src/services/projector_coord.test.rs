@@ -80,7 +80,7 @@ async fn test_handle_sync_with_no_projectors_returns_empty_projection() {
     let sync_request = EventRequest {
         events: Some(event_book),
         sync_mode: crate::proto::SyncMode::Simple.into(),
-        route_to_handler: false,
+        skip_handler: true, // Projectors don't route to aggregates
     };
 
     let response = coordinator.handle_sync(Request::new(sync_request)).await;

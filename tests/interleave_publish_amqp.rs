@@ -296,7 +296,9 @@ fn fact_request(book: EventBook) -> Request<EventRequest> {
     Request::new(EventRequest {
         events: Some(book),
         sync_mode: SyncMode::Async as i32,
-        route_to_handler: true,
+        // false = route through handle_fact (the safe proto3 default;
+        // same behavior the old routing bool opted into explicitly).
+        skip_handler: false,
     })
 }
 

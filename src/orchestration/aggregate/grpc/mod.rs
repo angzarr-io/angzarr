@@ -381,7 +381,7 @@ impl GrpcAggregateContext {
                 EventRequest {
                     events: Some(events.clone()),
                     sync_mode: sync_mode.into(),
-                    route_to_handler: false, // Projectors don't route to aggregates
+                    skip_handler: true, // Projectors don't route to aggregates
                 },
                 correlation_id,
             );

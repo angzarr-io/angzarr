@@ -22,7 +22,7 @@ use crate::proto::{
     CommandResponse, ContextualCommand, EventRequest, FactInjectionResponse,
     SpeculateCommandHandlerRequest,
 };
-use crate::proto_ext::CoverExt;
+use crate::proto_ext::{CoverExt, SyncModeExt};
 use crate::repository::SnapshotRepository;
 use crate::services::upcaster::Upcaster;
 use crate::storage::EventStore;
@@ -164,9 +164,9 @@ impl AggregateService {
     /// Parses the proto sync mode and creates async context for Async mode,
     /// sync context otherwise. This consolidates the repeated pattern of
     /// extracting sync mode and conditionally creating the right context type.
+    /// Unknown ints resolve to Async — see [`crate::proto_ext::SyncModeExt`].
     fn create_context_for_sync_mode(&self, sync_mode_int: i32) -> GrpcAggregateContext {
-        let sync_mode = crate::proto::SyncMode::try_from(sync_mode_int)
-            .unwrap_or(crate::proto::SyncMode::Async);
+        let sync_mode = crate::proto::SyncMode::or_default_async(sync_mode_int);
         if sync_mode == crate::proto::SyncMode::Async {
             self.create_async_context()
         } else {
@@ -308,10 +308,14 @@ impl CommandHandlerCoordinatorService for AggregateService {
     /// Facts are events that already happened externally and cannot be rejected by business logic.
     /// They are persisted unconditionally with coordinator-assigned sequence numbers.
     ///
-    /// `route_to_handler`: When true (default), invokes the aggregate's handle_fact method
-    /// for validation/error checking before persistence. The aggregate cannot reject facts,
-    /// but can validate data integrity and log warnings. When false, facts are persisted
-    /// directly without aggregate involvement.
+    /// `skip_handler`: When false/unset (the proto3 zero value — the safe default),
+    /// the fact is routed through the aggregate's handle_fact method for
+    /// validation/error checking before persistence. The aggregate cannot reject
+    /// facts, but can validate data integrity and log warnings. When true, facts
+    /// are persisted directly without aggregate involvement (projector-originated
+    /// writes). This replaces the removed routing bool (EventRequest field 3,
+    /// now reserved — see types.proto), whose proto3 zero value silently
+    /// bypassed the handler when the field was omitted.
     ///
     /// Idempotent: subsequent requests with same external_id return original events.
     #[tracing::instrument(name = "aggregate.handle_event", skip_all)]
@@ -326,11 +330,14 @@ impl CommandHandlerCoordinatorService for AggregateService {
 
         let ctx = self.create_context_for_sync_mode(sync_event_book.sync_mode);
 
-        // Use aggregate handler if route_to_handler is true (default behavior)
-        let business: Option<&dyn ClientLogic> = if sync_event_book.route_to_handler {
-            Some(&*self.business)
-        } else {
+        // Route through the aggregate's handle_fact unless the caller opted
+        // out. skip_handler's proto3 zero value (false/unset) means "route" —
+        // the safe default: omission can no longer bypass fact validation the
+        // way the removed routing bool's zero value used to.
+        let business: Option<&dyn ClientLogic> = if sync_event_book.skip_handler {
             None
+        } else {
+            Some(&*self.business)
         };
 
         let fact_response = execute_fact_pipeline(&ctx, business, fact_events).await?;
