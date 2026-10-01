@@ -1,7 +1,7 @@
 //! Acceptance harness for `features/acceptance/end_to_end.feature` (T14).
 //!
-//! Drives a DEPLOYED angzarr system — kind cluster with the poker examples
-//! (`just kind up` + skaffold) — through its public gRPC surface, using the
+//! Drives a DEPLOYED angzarr system — kind cluster with the blackjack
+//! examples (`just kind up` + skaffold) — through its public gRPC surface, using the
 //! `tests/common` fixture layer. This is the "direct (deployed cluster)"
 //! acceptance mode from CLAUDE.md: client → gateway → coordinator → storage.
 //!
@@ -22,10 +22,10 @@ use cucumber::{given, then, when, World};
 use futures::StreamExt;
 use uuid::Uuid;
 
-/// The poker player-domain command this feature exercises. Field tags match
-/// `angzarr-project/proto/.../examples/v1/player.proto` — the examples protos
-/// are not compiled into the framework crate, so the harness carries its own
-/// minimal mirror (display_name=1, email=2; player_type defaults to HUMAN).
+/// The blackjack player-domain command this feature exercises. Field tags
+/// match `angzarr-project/proto/io/angzarr/examples/blackjack/v1/player.proto`
+/// — the examples protos are not compiled into the framework crate, so the
+/// harness carries its own minimal mirror (display_name=1, email=2).
 #[derive(Clone, PartialEq, prost::Message)]
 struct RegisterPlayer {
     #[prost(string, tag = "1")]
@@ -35,7 +35,7 @@ struct RegisterPlayer {
 }
 
 const PLAYER_DOMAIN: &str = "player";
-const REGISTER_PLAYER_TYPE: &str = "io.angzarr.examples.v1.RegisterPlayer";
+const REGISTER_PLAYER_TYPE: &str = "io.angzarr.examples.blackjack.v1.RegisterPlayer";
 
 #[derive(Debug, Default, World)]
 struct AcceptanceWorld {

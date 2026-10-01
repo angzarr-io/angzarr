@@ -104,7 +104,7 @@ pub fn build_command_book_at_sequence(
                 sequence_type: Some(page_header::SequenceType::Sequence(sequence)),
             }),
             payload: Some(command_page::Payload::Command(prost_types::Any {
-                type_url: format!("type.googleapis.com/{}", type_url),
+                type_url: format!("/{}", type_url),
                 value: command.encode_to_vec(),
             })),
             merge_strategy: MergeStrategy::MergeCommutative as i32,

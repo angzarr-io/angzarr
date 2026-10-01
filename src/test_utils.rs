@@ -138,7 +138,7 @@ pub fn make_test_event_book(correlation_id: &str) -> EventBook {
 /// Convenience helper for multi-page event tests.
 pub fn make_multi_page_event_book(correlation_id: &str, page_count: usize) -> EventBook {
     let pages = (0..page_count)
-        .map(|i| make_event_page_typed(i as u32, &format!("type.googleapis.com/test.Event{}", i)))
+        .map(|i| make_event_page_typed(i as u32, &format!("/test.Event{}", i)))
         .collect();
     make_event_book_with_correlation("test", correlation_id, pages)
 }
