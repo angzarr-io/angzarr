@@ -227,6 +227,17 @@ struct TestCtx {
     /// B1: count of `dead_letter_unpublished` captures.
     unpublished_dlq_calls: Arc<AtomicUsize>,
     dlq_calls: Arc<AtomicUsize>,
+    /// `pre_validate_sequence` call count. The fake rejects like the gRPC
+    /// context does: any `expected != prior.next_sequence` fails.
+    pre_validate_calls: Arc<AtomicUsize>,
+    /// `load_prior_events_with_divergence` call count (one per attempt).
+    load_calls: Arc<AtomicUsize>,
+    /// `persist_events` call count.
+    persist_calls: Arc<AtomicUsize>,
+    /// Book returned for `TemporalQuery::AsOfSequence` loads, with the
+    /// requested sequences recorded.
+    historical_events: Option<EventBook>,
+    historical_requests: Arc<std::sync::Mutex<Vec<u32>>>,
 }
 
 #[async_trait]
@@ -239,7 +250,33 @@ impl AggregateContext for TestCtx {
         _temporal: &TemporalQuery,
         _explicit_divergence: Option<u32>,
     ) -> Result<EventBook, Status> {
+        if let TemporalQuery::AsOfSequence(seq) = _temporal {
+            self.historical_requests.lock().unwrap().push(*seq);
+            return Ok(self.historical_events.clone().unwrap_or_default());
+        }
+        self.load_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.prior_events.clone().unwrap_or_default())
+    }
+
+    async fn pre_validate_sequence(
+        &self,
+        _domain: &str,
+        _edition: &str,
+        _root: Uuid,
+        expected: u32,
+    ) -> Result<(), Status> {
+        self.pre_validate_calls.fetch_add(1, Ordering::SeqCst);
+        let actual = self
+            .prior_events
+            .as_ref()
+            .map(|b| b.next_sequence)
+            .unwrap_or(0);
+        if expected != actual {
+            return Err(
+                crate::utils::single_sequence_check::sequence_mismatch_error(expected, actual),
+            );
+        }
+        Ok(())
     }
 
     async fn persist_events(
@@ -253,6 +290,7 @@ impl AggregateContext for TestCtx {
         _external_id: Option<&str>,
         _source_info: Option<&SourceInfo>,
     ) -> Result<PersistOutcome, Status> {
+        self.persist_calls.fetch_add(1, Ordering::SeqCst);
         self.persist_outcome
             .clone()
             .ok_or_else(|| Status::unimplemented("persist_events not configured for this test"))
@@ -342,18 +380,24 @@ fn test_should_pre_validate_strict_runs() {
     ));
 }
 
+/// COMMUTATIVE must reach the post-execution field-overlap gate: a stale
+/// sequence alone is not a conflict, so the reject-on-mismatch pre-check must
+/// not run for it.
 #[test]
-fn test_should_pre_validate_commutative_runs() {
-    assert!(should_pre_validate(
+fn test_should_pre_validate_commutative_skipped() {
+    assert!(!should_pre_validate(
         MergeStrategy::MergeCommutative,
         false,
         false
     ));
 }
 
+/// MANUAL dead-letters only on a genuine field conflict, decided after
+/// execution — the pre-check would turn every stale sequence into a retryable
+/// rejection that never reaches the DLQ.
 #[test]
-fn test_should_pre_validate_manual_runs() {
-    assert!(should_pre_validate(
+fn test_should_pre_validate_manual_skipped() {
+    assert!(!should_pre_validate(
         MergeStrategy::MergeManual,
         false,
         false
@@ -696,136 +740,90 @@ async fn test_try_deferred_replay_cached_returns_and_stamps_correlation() {
 }
 
 // ============================================================================
-// enforce_merge_strategy
+// enforce_strict_gate
 // ============================================================================
 
-#[tokio::test]
-async fn test_enforce_strict_non_deferred_rejects() {
-    let ctx = TestCtx::default();
-    let err = enforce_merge_strategy(
-        &ctx,
-        &plain_command(),
-        MergeStrategy::MergeStrict,
-        1,
-        2,
-        "dest",
-        false,
-    )
-    .await
-    .expect_err("STRICT mismatch must reject");
-    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+fn window(expected: u32, actual: u32) -> SeqWindow {
+    SeqWindow { expected, actual }
 }
 
-/// STRICT is skipped for deferred commands (they never claim a sequence).
-#[tokio::test]
-async fn test_enforce_strict_deferred_is_ok() {
-    let ctx = TestCtx::default();
-    enforce_merge_strategy(
-        &ctx,
-        &plain_command(),
+/// STRICT rejects a stale explicit sequence with a retryable
+/// FAILED_PRECONDITION whose details carry the current EventBook, so the
+/// caller can rebuild without another fetch.
+#[test]
+fn test_enforce_strict_non_deferred_rejects_with_state() {
+    use prost::Message;
+    let mut current = book_with_domain("dest", "");
+    current.pages = vec![
+        make_event_page(0, false, None),
+        make_event_page(1, false, None),
+    ];
+    let err = enforce_strict_gate(MergeStrategy::MergeStrict, window(1, 2), false, &current)
+        .expect_err("STRICT mismatch must reject");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        err.message(),
+        "Sequence mismatch: command expects 1, aggregate at 2"
+    );
+    let details = EventBook::decode(err.details()).expect("details carry the EventBook");
+    assert_eq!(details.pages.len(), 2);
+}
+
+/// STRICT does not gate deferred commands (they never claim a sequence).
+#[test]
+fn test_enforce_strict_deferred_is_ok() {
+    enforce_strict_gate(
         MergeStrategy::MergeStrict,
-        0,
-        2,
-        "dest",
+        window(0, 2),
         true,
+        &EventBook::default(),
     )
-    .await
     .expect("STRICT is meaningless for deferred → Ok");
 }
 
-/// COMMUTATIVE proceeds (defers to the post-execution overlap check).
-#[tokio::test]
-async fn test_enforce_commutative_is_ok() {
-    let ctx = TestCtx::default();
-    enforce_merge_strategy(
-        &ctx,
-        &plain_command(),
+/// Only STRICT gates upfront; COMMUTATIVE, MANUAL and AGGREGATE_HANDLES all
+/// proceed to execution.
+#[test]
+fn test_enforce_strict_gate_ignores_other_strategies() {
+    for strategy in [
         MergeStrategy::MergeCommutative,
-        1,
-        2,
-        "dest",
-        false,
-    )
-    .await
-    .expect("COMMUTATIVE proceeds past the sequence gate");
-}
-
-/// MANUAL routes to the DLQ and aborts (non-retryable).
-#[tokio::test]
-async fn test_enforce_manual_sends_to_dlq_and_aborts() {
-    let dlq = Arc::new(AtomicUsize::new(0));
-    let ctx = TestCtx {
-        dlq_calls: dlq.clone(),
-        ..Default::default()
-    };
-    let err = enforce_merge_strategy(
-        &ctx,
-        &plain_command(),
         MergeStrategy::MergeManual,
-        1,
-        2,
-        "dest",
-        false,
-    )
-    .await
-    .expect_err("MANUAL must abort");
-    assert_eq!(err.code(), tonic::Code::Aborted);
-    assert_eq!(dlq.load(Ordering::SeqCst), 1, "MANUAL must send to DLQ");
-}
-
-/// D-7: a deferred (saga-produced) MANUAL command must NOT be DLQ'd at the
-/// upfront sequence gate. Deferred commands carry a placeholder `expected == 0`,
-/// so `expected != actual` fires for every deferred command landing on a
-/// non-empty aggregate — which is not a real conflict. The upfront gate must
-/// let it through (Ok, no DLQ); the genuine-conflict decision is made later by
-/// `enforce_deferred_manual_gate`. Pins the `!is_deferred` guard on the MANUAL
-/// arm — without it, every deferred MANUAL command to a non-empty aggregate is
-/// wrongly dead-lettered.
-#[tokio::test]
-async fn test_enforce_manual_deferred_skips_upfront_dlq() {
-    let dlq = Arc::new(AtomicUsize::new(0));
-    let ctx = TestCtx {
-        dlq_calls: dlq.clone(),
-        ..Default::default()
-    };
-    enforce_merge_strategy(
-        &ctx,
-        &deferred_command(Some(cover("orders", "")), 1),
-        MergeStrategy::MergeManual,
-        0, // deferred placeholder expected
-        2, // non-empty destination
-        "dest",
-        true, // is_deferred
-    )
-    .await
-    .expect("deferred MANUAL must pass the upfront gate (overlap decided post-exec)");
-    assert_eq!(
-        dlq.load(Ordering::SeqCst),
-        0,
-        "deferred MANUAL must not DLQ at the upfront sequence gate"
-    );
-}
-
-/// AGGREGATE_HANDLES does no coordinator-level validation.
-#[tokio::test]
-async fn test_enforce_aggregate_handles_is_ok() {
-    let dlq = Arc::new(AtomicUsize::new(0));
-    let ctx = TestCtx {
-        dlq_calls: dlq.clone(),
-        ..Default::default()
-    };
-    enforce_merge_strategy(
-        &ctx,
-        &plain_command(),
         MergeStrategy::MergeAggregateHandles,
-        1,
-        2,
-        "dest",
-        false,
-    )
-    .await
-    .expect("AGGREGATE_HANDLES self-manages → Ok");
-    assert_eq!(dlq.load(Ordering::SeqCst), 0, "must not touch the DLQ");
+    ] {
+        enforce_strict_gate(strategy, window(1, 2), false, &EventBook::default())
+            .unwrap_or_else(|e| panic!("{strategy:?} must pass the upfront gate: {e}"));
+    }
+}
+
+// ============================================================================
+// is_retryable_in_place
+// ============================================================================
+
+/// Merge-gate rejections are decided by the command's own expected sequence;
+/// an in-place re-run with the identical book cannot change the answer.
+#[test]
+fn test_merge_gate_rejections_not_retried_in_place() {
+    for message in [
+        "Sequence mismatch: command expects 1, aggregate at 2",
+        "Sequence mismatch: overlapping fields, command expects 1, aggregate at 2",
+    ] {
+        let status = Status::failed_precondition(message);
+        assert!(is_retryable_status(&status), "callers still refresh+retry");
+        assert!(!is_retryable_in_place(&status), "{message}");
+    }
+}
+
+/// Storage races and transient codes reload fresh state on the next attempt.
+#[test]
+fn test_storage_race_and_transient_retried_in_place() {
+    assert!(is_retryable_in_place(&Status::failed_precondition(
+        "Sequence conflict: expected 3, got 4"
+    )));
+    assert!(is_retryable_in_place(&Status::unavailable("bus down")));
+    assert!(!is_retryable_in_place(&Status::aborted("manual review")));
+    assert!(!is_retryable_in_place(&Status::failed_precondition(
+        "Hand already dealt"
+    )));
 }
 
 // ============================================================================
@@ -857,9 +855,17 @@ async fn test_commutative_gate_replay_unimplemented_degrades_to_strict() {
     let prior = book_with_domain("orders", "c1");
     let received = book_with_domain("orders", "c1");
 
-    let err = enforce_commutative_gate(&business, &prior, &received, 1, 2)
-        .await
-        .expect_err("unimplemented replay must degrade to a rejection");
+    let err = enforce_commutative_gate(
+        &business,
+        OverlapBooks {
+            base: &EventBook::default(),
+            prior: &prior,
+            received: &received,
+        },
+        window(1, 2),
+    )
+    .await
+    .expect_err("unimplemented replay must degrade to a rejection");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
     assert!(
         err.message()
@@ -913,12 +919,15 @@ async fn test_deferred_manual_gate_disjoint_proceeds_no_dlq() {
     };
     let (prior, received) = non_empty_prior_and_command();
 
-    enforce_deferred_manual_gate(
+    enforce_manual_gate(
         &ctx,
         &business,
         &plain_command(),
-        &prior,
-        &received,
+        OverlapBooks {
+            base: &EventBook::default(),
+            prior: &prior,
+            received: &received,
+        },
         SeqWindow {
             expected: 0,
             actual: 1,
@@ -954,12 +963,15 @@ async fn test_deferred_manual_gate_overlap_dlqs_and_aborts() {
     };
     let (prior, received) = non_empty_prior_and_command();
 
-    let err = enforce_deferred_manual_gate(
+    let err = enforce_manual_gate(
         &ctx,
         &business,
         &plain_command(),
-        &prior,
-        &received,
+        OverlapBooks {
+            base: &EventBook::default(),
+            prior: &prior,
+            received: &received,
+        },
         SeqWindow {
             expected: 0,
             actual: 1,
@@ -993,12 +1005,15 @@ async fn test_deferred_manual_gate_replay_unavailable_dlqs() {
     let business = NoReplay; // replay() → Unimplemented
     let (prior, received) = non_empty_prior_and_command();
 
-    let err = enforce_deferred_manual_gate(
+    let err = enforce_manual_gate(
         &ctx,
         &business,
         &plain_command(),
-        &prior,
-        &received,
+        OverlapBooks {
+            base: &EventBook::default(),
+            prior: &prior,
+            received: &received,
+        },
         SeqWindow {
             expected: 0,
             actual: 1,
@@ -1583,4 +1598,255 @@ fn test_aggregate_operation_name() {
         command_book: plain_command(),
     };
     assert_eq!(op.name(), "aggregate_command");
+}
+
+// ============================================================================
+// execute_mode wiring — client (non-deferred) commands per merge strategy
+//
+// Client commands carry an explicit sequence. The prior book has two committed
+// pages (seq 0, 1; head 2) and the command claims sequence 1, so one write
+// landed after the client's observation. `StubReplay` states are keyed by
+// replayed page count: 1 → state at expected (pages < 1), 2 → state at actual,
+// 3 → state after the command. `TestCtx::pre_validate_sequence` rejects any
+// mismatch, exactly like the gRPC context, so a strategy that wrongly runs
+// the pre-check fails before reaching its gate.
+// ============================================================================
+
+fn explicit_command(strategy: MergeStrategy, sequence: u32) -> CommandBook {
+    let mut cmd = plain_command();
+    cmd.pages[0].merge_strategy = strategy as i32;
+    cmd.pages[0].header = Some(PageHeader {
+        sync_mode: None,
+        sequence_type: Some(SequenceType::Sequence(sequence)),
+    });
+    cmd
+}
+
+struct ClientRun {
+    result: Result<CommandResponse, Status>,
+    dlq: usize,
+    persisted: usize,
+    pre_validated: usize,
+    attempts: usize,
+}
+
+const DISJOINT_STATES: [&str; 4] = [
+    "{}",
+    r#"{"field_a":"0","field_b":"0"}"#,
+    r#"{"field_a":"1","field_b":"0"}"#,
+    r#"{"field_a":"1","field_b":"1"}"#,
+];
+const OVERLAP_STATES: [&str; 4] = [
+    "{}",
+    r#"{"field_a":"0","field_b":"0"}"#,
+    r#"{"field_a":"1","field_b":"0"}"#,
+    r#"{"field_a":"2","field_b":"0"}"#,
+];
+
+async fn run_client_command(
+    strategy: MergeStrategy,
+    claimed: u32,
+    states: [&'static str; 4],
+) -> ClientRun {
+    let mut prior = book_with_domain("dest", "");
+    prior.pages = vec![
+        make_event_page(0, false, None),
+        make_event_page(1, false, None),
+    ];
+    prior.next_sequence = 2;
+    let mut received = book_with_domain("dest", "");
+    received.pages = vec![make_event_page(2, false, None)];
+
+    let ctx = TestCtx {
+        prior_events: Some(prior),
+        persist_outcome: Some(PersistOutcome::Persisted(received.clone())),
+        ..Default::default()
+    };
+    let business = WiredLogic {
+        replay: StubReplay {
+            states_by_page_count: states.to_vec(),
+        },
+        respond_events: received,
+    };
+    let result = execute_command_with_retry(
+        &ctx,
+        &business,
+        explicit_command(strategy, claimed),
+        crate::utils::retry::saga_backoff()
+            .with_min_delay(std::time::Duration::from_millis(1))
+            .with_max_delay(std::time::Duration::from_millis(1)),
+    )
+    .await;
+    ClientRun {
+        result,
+        dlq: ctx.dlq_calls.load(Ordering::SeqCst),
+        persisted: ctx.persist_calls.load(Ordering::SeqCst),
+        pre_validated: ctx.pre_validate_calls.load(Ordering::SeqCst),
+        attempts: ctx.load_calls.load(Ordering::SeqCst),
+    }
+}
+
+/// The default strategy merges a stale client command whose fields are
+/// disjoint from the intervening write — the field-overlap merge is reachable
+/// for client commands, not only saga ones.
+#[tokio::test]
+async fn test_client_commutative_stale_disjoint_merges() {
+    let run = run_client_command(MergeStrategy::MergeCommutative, 1, DISJOINT_STATES).await;
+    run.result
+        .expect("disjoint stale COMMUTATIVE command must merge");
+    assert_eq!(run.pre_validated, 0, "COMMUTATIVE must skip the pre-check");
+    assert_eq!(run.persisted, 1);
+}
+
+/// An overlapping stale COMMUTATIVE command is a genuine conflict: retryable
+/// FAILED_PRECONDITION (callers refresh + resubmit) with the current EventBook
+/// attached, nothing persisted, and no futile in-place re-run.
+#[tokio::test]
+async fn test_client_commutative_stale_overlap_rejects_retryable_with_state() {
+    use prost::Message;
+    let run = run_client_command(MergeStrategy::MergeCommutative, 1, OVERLAP_STATES).await;
+    let err = run.result.expect_err("overlap must reject");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        err.message(),
+        "Sequence mismatch: overlapping fields, command expects 1, aggregate at 2"
+    );
+    assert!(
+        is_retryable_status(&err),
+        "callers must classify it retryable"
+    );
+    let current = EventBook::decode(err.details()).expect("details carry the EventBook");
+    assert_eq!(current.next_sequence, 2);
+    assert_eq!(run.persisted, 0);
+    assert_eq!(run.dlq, 0);
+    assert_eq!(
+        run.attempts, 1,
+        "identical book must not be re-run in place"
+    );
+}
+
+/// MANUAL merges a stale client command when the fields are disjoint.
+#[tokio::test]
+async fn test_client_manual_stale_disjoint_merges_without_dlq() {
+    let run = run_client_command(MergeStrategy::MergeManual, 1, DISJOINT_STATES).await;
+    run.result
+        .expect("disjoint stale MANUAL command must merge");
+    assert_eq!(run.pre_validated, 0, "MANUAL must skip the pre-check");
+    assert_eq!(run.dlq, 0);
+    assert_eq!(run.persisted, 1);
+}
+
+/// MANUAL routes a genuinely conflicting client command to the DLQ (ABORTED,
+/// non-retryable) — it must not die as a retryable pre-check rejection.
+#[tokio::test]
+async fn test_client_manual_stale_overlap_dead_letters() {
+    let run = run_client_command(MergeStrategy::MergeManual, 1, OVERLAP_STATES).await;
+    let err = run.result.expect_err("overlap must abort");
+    assert_eq!(err.code(), tonic::Code::Aborted);
+    assert_eq!(run.dlq, 1);
+    assert_eq!(run.persisted, 0);
+    assert_eq!(run.attempts, 1);
+}
+
+/// STRICT rejects any stale client command at the pre-check, before load, and
+/// the aggregate does not spend retries re-sending the identical book.
+#[tokio::test]
+async fn test_client_strict_stale_rejected_once_at_pre_check() {
+    let run = run_client_command(MergeStrategy::MergeStrict, 1, DISJOINT_STATES).await;
+    let err = run.result.expect_err("STRICT stale must reject");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(run.pre_validated, 1);
+    assert_eq!(run.attempts, 0, "rejected before load, not re-run");
+    assert_eq!(run.persisted, 0);
+}
+
+/// A client command at the current head passes every strategy untouched.
+#[tokio::test]
+async fn test_client_command_at_head_succeeds_for_every_strategy() {
+    for strategy in [
+        MergeStrategy::MergeStrict,
+        MergeStrategy::MergeCommutative,
+        MergeStrategy::MergeManual,
+    ] {
+        let run = run_client_command(strategy, 2, OVERLAP_STATES).await;
+        run.result
+            .unwrap_or_else(|e| panic!("{strategy:?} at head must succeed: {e}"));
+        assert_eq!(run.persisted, 1);
+        assert_eq!(run.dlq, 0);
+    }
+}
+
+/// Replay keyed by book shape, for snapshot-bearing window tests.
+struct ShapeReplay;
+
+#[async_trait]
+impl ClientLogic for ShapeReplay {
+    async fn invoke(&self, _cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
+        let mut received = book_with_domain("dest", "");
+        received.pages = vec![make_event_page(3, false, None)];
+        Ok(BusinessResponse {
+            result: Some(business_response::Result::Events(received)),
+        })
+    }
+
+    async fn invoke_fact(&self, _ctx: FactContext) -> Result<EventBook, Status> {
+        Err(Status::unimplemented("unused"))
+    }
+
+    async fn replay(&self, events: &EventBook) -> Result<prost_types::Any, Status> {
+        let state = match (events.snapshot.is_some(), events.pages.len()) {
+            // Historical book: state before the intervening writes.
+            (false, _) => r#"{"field_a":"0","field_b":"0"}"#,
+            // Snapshot (covers the intervening writes to field_a).
+            (true, 0) => r#"{"field_a":"1","field_b":"0"}"#,
+            // Snapshot + the command's event: the command also writes field_a.
+            (true, _) => r#"{"field_a":"2","field_b":"0"}"#,
+        };
+        Ok(Any {
+            type_url: "test.StatefulState".to_string(),
+            value: state.as_bytes().to_vec(),
+        })
+    }
+}
+
+/// The aggregate's snapshot (seq 2) already folds in the writes that landed
+/// after the command's observation (expected 1). The overlap window must be
+/// rebuilt from history, not from the snapshot — otherwise the intervening
+/// write to `field_a` is invisible and the conflicting command merges.
+#[tokio::test]
+async fn test_commutative_window_ignores_snapshot_newer_than_expected() {
+    let mut prior = book_with_domain("dest", "");
+    prior.snapshot = Some(crate::proto::Snapshot {
+        sequence: 2,
+        ..Default::default()
+    });
+    prior.next_sequence = 3;
+    let mut historical = book_with_domain("dest", "");
+    historical.pages = vec![make_event_page(0, false, None)];
+
+    let ctx = TestCtx {
+        prior_events: Some(prior),
+        historical_events: Some(historical),
+        persist_outcome: Some(PersistOutcome::Persisted(EventBook::default())),
+        ..Default::default()
+    };
+    let err = execute_mode(
+        &ctx,
+        &ShapeReplay,
+        explicit_command(MergeStrategy::MergeCommutative, 1),
+    )
+    .await
+    .expect_err("intervening write hidden in the snapshot overlaps the command");
+    assert!(
+        err.message()
+            .starts_with(crate::orchestration::errmsg::SEQUENCE_MISMATCH_OVERLAP),
+        "got: {}",
+        err.message()
+    );
+    assert_eq!(
+        *ctx.historical_requests.lock().unwrap(),
+        vec![0],
+        "state@1 is the history through sequence 0"
+    );
+    assert_eq!(ctx.persist_calls.load(Ordering::SeqCst), 0);
 }

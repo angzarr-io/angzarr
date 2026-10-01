@@ -39,9 +39,12 @@ pub mod errmsg {
     pub const INVALID_UUID: &str = "Invalid UUID: ";
     pub const SPECULATIVE_REQUIRES_TEMPORAL: &str =
         "Speculative requires either as_of_sequence or as_of_timestamp";
+    /// Prefix shared by every merge-gate sequence-mismatch message. Callers
+    /// treat it as "refresh state and resubmit" (see `utils::retry`).
+    pub const SEQUENCE_MISMATCH_CLASS: &str = "Sequence mismatch:";
     pub const SEQUENCE_MISMATCH: &str = "Sequence mismatch: command expects ";
     pub const SEQUENCE_MISMATCH_OVERLAP: &str =
-        "Sequence mismatch with overlapping fields: command expects ";
+        "Sequence mismatch: overlapping fields, command expects ";
     pub const SEQUENCE_MISMATCH_DLQ_SUFFIX: &str = ". Sent to DLQ for manual review.";
     pub const FACT_EVENTS_MISSING_MARKER: &str =
         "Fact events must have ExternalDeferredSequence markers";

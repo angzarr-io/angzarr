@@ -40,40 +40,33 @@ pub(crate) enum CommutativeMergeResult {
 ///
 /// # Algorithm
 ///
-/// 1. Replay aggregate state at `expected` sequence (what command assumed)
-/// 2. Replay aggregate state at `actual` sequence (current reality)
-/// 3. Replay aggregate state after applying command's events
+/// 1. Replay `events_at_expected` (the state the command assumed — see
+///    [`window_base_from_prior`])
+/// 2. Replay `prior_events` (current reality)
+/// 3. Replay prior + the command's events
 /// 4. Diff (expected, actual) → fields changed by intervening events
 /// 5. Diff (actual, after_command) → fields changed by this command
-/// 6. If disjoint → persist; if overlap → reject and retry
+/// 6. If disjoint → persist; if overlap → reject
 ///
-/// # Why Check Post-Execution
-///
-/// We check AFTER command execution because we can observe what fields the command
-/// actually changed, rather than trying to predict from command metadata. This is
-/// more accurate and requires no annotations or naming conventions.
+/// We check AFTER command execution because we can observe what fields the
+/// command actually changed, rather than predicting from command metadata.
 ///
 /// # Graceful Degradation
 ///
-/// If Replay RPC fails (unimplemented, timeout, etc.), we degrade to STRICT
-/// behavior. This is conservative: we'd rather retry unnecessarily than risk
-/// incorrect merges.
+/// If Replay fails (unimplemented, timeout, ...) the caller cannot tell
+/// whether the writes overlap and must answer conservatively.
 ///
 /// Returns:
 /// - `Ok(Disjoint)` if changes don't overlap → safe to persist
-/// - `Ok(Overlap)` if changes overlap → must retry
-/// - `Err(_)` if Replay unavailable → degrade to STRICT behavior
+/// - `Ok(Overlap)` if changes overlap
+/// - `Err(_)` if Replay is unavailable
 pub(crate) async fn check_commutative_overlap(
     business: &dyn ClientLogic,
+    events_at_expected: &EventBook,
     prior_events: &EventBook,
     received_events: &EventBook,
-    expected: u32,
 ) -> Result<CommutativeMergeResult, Status> {
-    // Build EventBook with events up to `expected` sequence
-    let events_at_expected = build_events_up_to_sequence(prior_events, expected);
-
-    // Get state at expected sequence (what command assumed)
-    let state_at_expected = business.replay(&events_at_expected).await?;
+    let state_at_expected = business.replay(events_at_expected).await?;
 
     // Get state at actual sequence (current reality before command)
     let state_at_actual = business.replay(prior_events).await?;
@@ -148,61 +141,137 @@ pub(crate) fn build_events_up_to_sequence(events: &EventBook, up_to_sequence: u3
     }
 }
 
-/// Diff two Any-packed state messages to find changed field names.
+/// The events that reproduce the aggregate's state just before `expected`,
+/// when the already-loaded `prior` book can supply them.
 ///
-/// # Fallback Strategy
+/// A current load is a snapshot plus the pages after it. That reproduces
+/// state@expected only when the snapshot predates `expected`; a snapshot at
+/// or past `expected` already folds in the window's intervening writes, so
+/// replaying it would hide them and report a false `Disjoint`. Returns `None`
+/// in that case — the caller must load the historical book instead.
+/// `expected == 0` is the empty aggregate.
+pub(crate) fn window_base_from_prior(prior: &EventBook, expected: u32) -> Option<EventBook> {
+    if expected == 0 {
+        return Some(EventBook {
+            cover: prior.cover.clone(),
+            ..Default::default()
+        });
+    }
+    match &prior.snapshot {
+        Some(snapshot) if snapshot.sequence >= expected => None,
+        _ => Some(build_events_up_to_sequence(prior, expected)),
+    }
+}
+
+/// Diff two Any-packed state messages to find changed fields.
 ///
-/// This function uses a layered approach, trying more precise methods first:
+/// Layered, most precise first:
 ///
-/// 1. **Type URL check**: If types differ, return "*" (all fields). Different
-///    state types mean a schema change occurred — we can't meaningfully compare.
+/// 1. **Type URL check**: different state types mean a schema change; the
+///    fields cannot be compared, so every field counts as changed (`"*"`).
+/// 2. **Test state handler**: in test builds, `test.StatefulState` uses a
+///    simple JSON-like parse.
+/// 3. **Proto reflection**: when the descriptor pool knows the type, diff by
+///    field name (map entries as `field[key]`). A decode failure against a
+///    known type answers `"*"` rather than mixing naming schemes inside one
+///    overlap check.
+/// 4. **Wire diff**: when the type is not in the pool (client state types
+///    usually are not), diff the top-level fields of the protobuf wire
+///    encoding by tag number (`#<tag>`). Needs no schema.
+/// 5. **Byte comparison**: an unparseable encoding counts as `"*"` whenever the
+///    bytes differ.
 ///
-/// 2. **Test state handler**: In test builds, handles `test.StatefulState` with
-///    simple JSON-like parsing for field-level comparison.
-///
-/// 3. **Proto reflection**: If initialized, use `proto_reflect::diff_fields` for
-///    proper protobuf field comparison. This handles production aggregates.
-///
-/// 4. **Byte comparison fallback**: If all else fails, compare raw bytes. If bytes
-///    differ, assume all fields changed ("*"). This is maximally conservative.
-///
-/// # Why "*" When Types Differ
-///
-/// If `before.type_url != after.type_url`, the aggregate's state schema changed
-/// (via upcasting, migration, or bug). Field-level comparison is meaningless
-/// because field semantics may have changed. Treating this as "all fields changed"
-/// forces a retry with fresh state, which is the safe choice.
+/// `"*"` always overlaps, so every fallback errs toward rejecting a merge.
 pub(crate) fn diff_state_fields(
     before: &prost_types::Any,
     after: &prost_types::Any,
 ) -> HashSet<String> {
-    // If types differ, assume complete overlap (all fields changed)
+    let all_fields = || ["*".to_string()].into_iter().collect::<HashSet<String>>();
+
     if before.type_url != after.type_url {
-        return ["*".to_string()].into_iter().collect();
+        return all_fields();
     }
 
-    // Test state handler for test.StatefulState type
     #[cfg(any(test, feature = "test-utils"))]
     if before.type_url == "test.StatefulState" {
         return test_support::diff_test_state_fields(&before.value, &after.value);
     }
 
-    // Try proto_reflect if pool is initialized
-    if crate::proto_reflect::is_initialized() {
-        match crate::proto_reflect::diff_fields(before, after) {
-            Ok(fields) => return fields,
-            Err(e) => {
-                tracing::debug!(error = %e, "proto_reflect diff failed, using fallback");
-            }
+    match crate::proto_reflect::diff_fields(before, after) {
+        Ok(fields) => return fields,
+        Err(
+            crate::proto_reflect::ReflectError::NotInitialized
+            | crate::proto_reflect::ReflectError::UnknownType(_)
+            | crate::proto_reflect::ReflectError::InvalidTypeUrl(_),
+        ) => {}
+        Err(e) => {
+            tracing::debug!(error = %e, "proto_reflect diff failed for a known type");
+            return all_fields();
         }
     }
 
-    // Fallback: if bytes are different, assume all fields changed
-    if before.value != after.value {
-        ["*".to_string()].into_iter().collect()
-    } else {
-        HashSet::new()
+    match diff_wire_fields(&before.value, &after.value) {
+        Some(fields) => fields,
+        None if before.value != after.value => all_fields(),
+        None => HashSet::new(),
     }
+}
+
+/// Top-level field diff over two protobuf wire encodings, keyed `#<tag>`.
+///
+/// Every occurrence of a tag (repeated, packed, map entries) is compared in
+/// encoding order, so a reordered map encoding reads as changed — a false
+/// overlap, never a missed one. Returns `None` when either buffer is not a
+/// well-formed message (including deprecated group wire types).
+pub(crate) fn diff_wire_fields(before: &[u8], after: &[u8]) -> Option<HashSet<String>> {
+    let before_fields = wire_fields(before)?;
+    let after_fields = wire_fields(after)?;
+    let mut changed = HashSet::new();
+    for (tag, values) in &before_fields {
+        if after_fields.get(tag) != Some(values) {
+            changed.insert(format!("#{tag}"));
+        }
+    }
+    for tag in after_fields.keys() {
+        if !before_fields.contains_key(tag) {
+            changed.insert(format!("#{tag}"));
+        }
+    }
+    Some(changed)
+}
+
+/// Split a protobuf encoding into its top-level fields: tag → the encoded
+/// value of each occurrence, in order.
+fn wire_fields(mut buf: &[u8]) -> Option<std::collections::BTreeMap<u32, Vec<Vec<u8>>>> {
+    use prost::encoding::decode_varint;
+
+    let mut fields: std::collections::BTreeMap<u32, Vec<Vec<u8>>> = Default::default();
+    while !buf.is_empty() {
+        let key = decode_varint(&mut buf).ok()?;
+        let tag = u32::try_from(key >> 3).ok().filter(|t| *t != 0)?;
+        let value_start = buf;
+        let len = match key & 0x7 {
+            0 => {
+                decode_varint(&mut buf).ok()?;
+                value_start.len() - buf.len()
+            }
+            1 => 8,
+            2 => {
+                let payload_len = usize::try_from(decode_varint(&mut buf).ok()?).ok()?;
+                let prefix_len = value_start.len() - buf.len();
+                prefix_len.checked_add(payload_len)?
+            }
+            5 => 4,
+            _ => return None,
+        };
+        if len > value_start.len() {
+            return None;
+        }
+        let (value, rest) = value_start.split_at(len);
+        fields.entry(tag).or_default().push(value.to_vec());
+        buf = rest;
+    }
+    Some(fields)
 }
 
 // ============================================================================
@@ -315,3 +384,7 @@ pub(crate) async fn check_cascade_conflict(
 
     Ok(CascadeConflictResult::NoConflict)
 }
+
+#[cfg(test)]
+#[path = "merge.test.rs"]
+mod tests;

@@ -12,27 +12,27 @@
 //!
 //! | Strategy | Behavior | Use Case |
 //! |----------|----------|----------|
-//! | **STRICT** | Return FAILED_PRECONDITION, retry with fresh state | Default, most operations |
-//! | **COMMUTATIVE** | Check field overlap; proceed if disjoint, else retry | High-concurrency aggregates |
-//! | **MANUAL** | Send to DLQ for human review | Conflict-sensitive operations |
-//! | **AGGREGATE_HANDLES** | Skip validation, let aggregate decide | Custom concurrency control |
+//! | **COMMUTATIVE** (default) | Merge when the command's fields are disjoint from the window's writes; overlap → retryable FAILED_PRECONDITION | Concurrent writes to independent fields |
+//! | **STRICT** | Retryable FAILED_PRECONDITION; the caller refreshes and resubmits | Operations that must see the latest state |
+//! | **MANUAL** | Merge when disjoint; overlap → DLQ + ABORTED for human review | Conflict-sensitive operations |
+//! | **AGGREGATE_HANDLES** | No coordinator check; the aggregate decides | Custom concurrency control |
 //!
-//! STRICT is the safest default: always retry on mismatch. COMMUTATIVE optimizes
-//! for throughput when concurrent writes often touch different fields (e.g.,
-//! counters, independent properties). MANUAL is for operations where automatic
-//! retry could cause business problems (e.g., financial transactions).
+//! Mismatch statuses carry the current EventBook in their details. The field
+//! comparison replays state through the client's `Replay` and diffs it by
+//! field (descriptor pool when the type is known, protobuf wire tags
+//! otherwise); when replay is unavailable COMMUTATIVE answers as STRICT and
+//! MANUAL dead-letters.
 //!
 //! # Architecture
 //!
-//! - `AggregateContext`: Storage access and post-persist hooks (local vs gRPC impl)
+//! - `AggregateContext`: Storage access, publish and sync fan-out hooks
 //! - `ClientLogic`: Business logic invocation (gRPC client to aggregate handler)
 //! - `execute_command_pipeline`: The main execution flow
-//! - `try_commutative_merge`: Field-level conflict detection for COMMUTATIVE mode
+//! - `merge`: Field-level conflict detection for COMMUTATIVE / MANUAL
 //!
 //! # Module Structure
 //!
-//! - `local/`: SQLite-backed storage with static service discovery
-//! - `grpc/`: Remote storage with K8s service discovery
+//! - `grpc/`: the production context (storage, bus, service discovery)
 //! - `types`: Enums and structs (TemporalQuery, PipelineMode, FactContext, FactResponse)
 //! - `traits`: Trait definitions (AggregateContext, ClientLogic, AggregateContextFactory)
 //! - `client`: gRPC client logic implementation (GrpcBusinessLogic)
