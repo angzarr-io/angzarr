@@ -1620,3 +1620,137 @@ async fn test_get_events_by_correlation_id_withholds_revoked_provisional_page() 
         "streamed correlation query must not return the raw revoked business event"
     );
 }
+
+// ============================================================================
+// Every query RPC honours the same selection and validation
+// ============================================================================
+
+async fn seed_three_events(event_store: &Arc<MockEventStore>, root: uuid::Uuid) {
+    let pages = (0..3)
+        .map(|seq| EventPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(seq)),
+            }),
+            payload: Some(event_page::Payload::Event(Any {
+                type_url: "test.Event".to_string(),
+                value: vec![],
+            })),
+            ..Default::default()
+        })
+        .collect();
+    event_store
+        .add("orders", "", root, pages, &AddMeta::default())
+        .await
+        .unwrap();
+}
+
+fn root_query(root: uuid::Uuid, edition: Option<&str>, selection: Option<Selection>) -> Query {
+    Query {
+        cover: Some(crate::proto::Cover {
+            domain: "orders".to_string(),
+            root: Some(ProtoUuid {
+                value: root.as_bytes().to_vec(),
+            }),
+            correlation_id: String::new(),
+            edition: edition.map(|name| crate::proto::Edition {
+                name: name.to_string(),
+                divergences: vec![],
+            }),
+            ext: None,
+        }),
+        selection,
+    }
+}
+
+/// GetEvents streams the selected range, exactly like GetEventBook — not the
+/// whole aggregate.
+#[tokio::test]
+async fn test_get_events_honours_range_selection() {
+    let (service, event_store, _) = create_default_test_service();
+    let root = uuid::Uuid::new_v4();
+    seed_three_events(&event_store, root).await;
+    let range = Some(Selection::Range(SequenceRange {
+        lower: 1,
+        upper: Some(1),
+    }));
+
+    let unary = service
+        .get_event_book(Request::new(root_query(root, None, range.clone())))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut stream = service
+        .get_events(Request::new(root_query(root, None, range)))
+        .await
+        .unwrap()
+        .into_inner();
+    let streamed = stream.next().await.unwrap().unwrap();
+    assert_eq!(streamed.pages.len(), 1);
+    assert_eq!(streamed.pages[0].sequence_num(), 1);
+    assert_eq!(streamed.pages, unary.pages);
+}
+
+/// GetEvents rejects an invalid edition name like GetEventBook does.
+#[tokio::test]
+async fn test_get_events_validates_edition() {
+    let (service, _, _) = create_default_test_service();
+    let bad = "x".repeat(1000);
+    let err = service
+        .get_events(Request::new(root_query(
+            uuid::Uuid::new_v4(),
+            Some(&bad),
+            None,
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+/// Synchronize applies the unary RPC's domain and edition validation to each
+/// query (an invalid one is answered with INVALID_ARGUMENT, not served).
+#[tokio::test]
+async fn test_synchronize_validates_domain_and_edition() {
+    let root = uuid::Uuid::new_v4();
+    let mut bad_domain = root_query(root, None, None);
+    bad_domain.cover.as_mut().unwrap().domain = "bad domain!".to_string();
+    let bad_edition = root_query(root, Some(&"x".repeat(1000)), None);
+
+    for (invalid, valid_answer) in [
+        (Some(bad_domain), None),
+        (Some(bad_edition), None),
+        (None, Some(3)),
+    ] {
+        let (service, event_store, _) = create_default_test_service();
+        seed_three_events(&event_store, root).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    crate::proto::event_query_service_server::EventQueryServiceServer::new(service),
+                )
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+        let mut client = crate::proto::event_query_service_client::EventQueryServiceClient::new(
+            tonic::transport::Channel::from_shared(format!("http://127.0.0.1:{port}"))
+                .unwrap()
+                .connect_lazy(),
+        );
+        let query = invalid.unwrap_or_else(|| root_query(root, None, None));
+        let mut out = client
+            .synchronize(tokio_stream::iter(vec![query]))
+            .await
+            .unwrap()
+            .into_inner();
+        match valid_answer {
+            None => assert_eq!(
+                out.message().await.unwrap_err().code(),
+                tonic::Code::InvalidArgument
+            ),
+            Some(pages) => assert_eq!(out.message().await.unwrap().unwrap().pages.len(), pages),
+        }
+    }
+}
