@@ -96,6 +96,20 @@ inventory::submit! {
     }
 }
 
+/// Treat `ALREADY_EXISTS` from a topic/subscription create as success.
+///
+/// Replicas starting together all see "missing" and race to create the
+/// same resource; the losers get `ALREADY_EXISTS`, which means the resource
+/// they wanted is there.
+pub(crate) fn tolerate_already_exists(
+    result: std::result::Result<(), tonic::Status>,
+) -> std::result::Result<(), tonic::Status> {
+    match result {
+        Err(status) if status.code() == tonic::Code::AlreadyExists => Ok(()),
+        other => other,
+    }
+}
+
 #[cfg(test)]
 #[path = "mod.test.rs"]
 mod tests;

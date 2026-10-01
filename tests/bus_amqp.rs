@@ -81,6 +81,21 @@ async fn test_amqp_event_bus() {
 
     // Run shared tests (without DLQ - those need separate container lifetime)
     run_event_bus_tests!(&bus, &prefix);
+    run_all_domains_subscription_test!(&bus, &prefix);
+
+    let domain = format!("{}-order-after-fail", prefix);
+    let subscriber = bus
+        .create_subscriber(&format!("{}-sub-order-after-fail", prefix), Some(&domain))
+        .await
+        .expect("create subscriber");
+    bus::event_bus_tests::test_root_order_preserved_after_handler_failure(
+        subscriber,
+        &bus,
+        &domain,
+        std::time::Duration::from_secs(20),
+    )
+    .await;
+    println!("  test_root_order_preserved_after_handler_failure: PASSED");
 
     println!("=== All AMQP EventBus tests PASSED ===");
 }

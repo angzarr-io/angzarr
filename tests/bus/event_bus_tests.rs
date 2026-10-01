@@ -897,6 +897,169 @@ pub async fn test_per_root_ordering_under_concurrent_publish(
 }
 
 // =============================================================================
+// Ordering after a handler failure (X-067)
+// =============================================================================
+
+/// Handler that records the sequence of every delivery and fails the first
+/// delivery of sequence 0.
+#[allow(dead_code)]
+struct FailFirstOfRoot {
+    attempts: Arc<std::sync::Mutex<Vec<(u32, bool)>>>,
+}
+
+impl angzarr::bus::EventHandler for FailFirstOfRoot {
+    fn handle(
+        &self,
+        book: Arc<EventBook>,
+    ) -> futures::future::BoxFuture<'static, Result<(), angzarr::bus::BusError>> {
+        let seq = match book.pages.first().and_then(|p| p.header.as_ref()) {
+            Some(PageHeader {
+                sequence_type: Some(SequenceType::Sequence(s)),
+                ..
+            }) => *s,
+            _ => u32::MAX,
+        };
+        let mut attempts = self.attempts.lock().unwrap();
+        let first_try = !attempts.iter().any(|(s, _)| *s == seq);
+        let ok = !(seq == 0 && first_try);
+        attempts.push((seq, ok));
+        Box::pin(async move {
+            if ok {
+                Ok(())
+            } else {
+                Err(angzarr::bus::BusError::Subscribe(
+                    "first attempt fails".into(),
+                ))
+            }
+        })
+    }
+}
+
+/// After a handler failure, the failed event of a root is handled again
+/// before any later event of the same root: per-root order survives
+/// redelivery (AMQP prefetch 1 + requeue to head, SQS/Pub/Sub skipping the
+/// rest of the failed group's batch, Kafka seek-back).
+#[allow(dead_code)]
+pub async fn test_root_order_preserved_after_handler_failure(
+    subscriber: Arc<dyn EventBus>,
+    publisher: &dyn EventBus,
+    domain: &str,
+    redelivery_deadline: Duration,
+) {
+    let attempts = Arc::new(std::sync::Mutex::new(Vec::new()));
+    subscriber
+        .subscribe(Box::new(FailFirstOfRoot {
+            attempts: attempts.clone(),
+        }))
+        .await
+        .expect("subscribe");
+    subscriber.start_consuming().await.expect("start consuming");
+
+    let root = uuid::Uuid::new_v4();
+    for seq in 0..3 {
+        publisher
+            .publish(Arc::new(make_event_book_with_root_and_seq(
+                domain, root, seq,
+            )))
+            .await
+            .expect("publish");
+    }
+
+    let deadline = std::time::Instant::now() + redelivery_deadline;
+    loop {
+        let succeeded = attempts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, ok)| *ok)
+            .count();
+        if succeeded >= 3 || std::time::Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let attempts = attempts.lock().unwrap().clone();
+    let successes: Vec<u32> = attempts
+        .iter()
+        .filter(|(_, ok)| *ok)
+        .map(|(s, _)| *s)
+        .collect();
+    assert_eq!(
+        successes,
+        vec![0, 1, 2],
+        "events of one root must be handled in publish order after a failure \
+         (attempts: {attempts:?})"
+    );
+}
+
+// =============================================================================
+// Domain-scoped subscriptions on per-domain-topic transports (X-010)
+// =============================================================================
+
+/// A transport with one topic per domain has nothing to attach an
+/// all-domains subscription to; it must refuse at start-up rather than
+/// silently subscribe to a topic nothing publishes to.
+#[allow(dead_code)]
+pub async fn test_all_domains_subscription_refused<B: EventBus>(
+    publisher: &B,
+    subscriber_name: &str,
+) {
+    let subscriber = publisher
+        .create_subscriber(subscriber_name, None)
+        .await
+        .expect("create subscriber");
+    let err = subscriber
+        .start_consuming()
+        .await
+        .expect_err("all-domains subscription must be refused");
+    assert!(
+        matches!(err, angzarr::bus::BusError::AllDomainsUnsupported(_)),
+        "unexpected error: {err}"
+    );
+}
+
+/// A subscriber naming several domains receives events from each of them.
+#[allow(dead_code)]
+pub async fn test_explicit_multi_domain_subscription(
+    subscriber: Arc<dyn EventBus>,
+    publisher: &dyn EventBus,
+    domain1: &str,
+    domain2: &str,
+) {
+    let (tx, mut rx) = mpsc::channel(10);
+    subscriber
+        .subscribe(Box::new(CapturingHandler::new(tx)))
+        .await
+        .expect("subscribe");
+    subscriber.start_consuming().await.expect("start consuming");
+
+    for domain in [domain1, domain2] {
+        publisher
+            .publish(Arc::new(make_event_book(domain)))
+            .await
+            .expect("publish");
+    }
+
+    let (mut seen1, mut seen2) = (false, false);
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    while !(seen1 && seen2) {
+        let remaining = deadline
+            .checked_duration_since(std::time::Instant::now())
+            .unwrap_or_else(|| panic!("timed out (saw {domain1}: {seen1}, {domain2}: {seen2})"));
+        let book = tokio::time::timeout(remaining, rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("timed out (saw {domain1}: {seen1}, {domain2}: {seen2})"))
+            .expect("channel closed");
+        match book.cover.as_ref().unwrap().domain.as_str() {
+            d if d == domain1 => seen1 = true,
+            d if d == domain2 => seen2 = true,
+            other => panic!("received event from unsubscribed domain {other}"),
+        }
+    }
+}
+
+// =============================================================================
 // Test runner macro
 // =============================================================================
 
@@ -944,16 +1107,6 @@ macro_rules! run_event_bus_tests {
         .await;
         println!("  test_domain_filtering: PASSED");
 
-        // Multi-domain subscription
-        test_multi_domain_subscription(
-            $publisher,
-            &format!("{}-md1", $prefix),
-            &format!("{}-md2", $prefix),
-            &format!("{}-sub-multi-domain", $prefix),
-        )
-        .await;
-        println!("  test_multi_domain_subscription: PASSED");
-
         // Multiple handlers independent
         test_multiple_handlers_independent(
             $publisher,
@@ -981,6 +1134,22 @@ macro_rules! run_event_bus_tests {
         )
         .await;
         println!("  test_payload_bytes_exact: PASSED");
+    };
+}
+
+/// Run the all-domains subscription test against a transport that supports
+/// subscribing to every domain (AMQP `#`, Kafka topic regex).
+#[macro_export]
+macro_rules! run_all_domains_subscription_test {
+    ($publisher:expr, $prefix:expr) => {
+        $crate::bus::event_bus_tests::test_multi_domain_subscription(
+            $publisher,
+            &format!("{}-md1", $prefix),
+            &format!("{}-md2", $prefix),
+            &format!("{}-sub-multi-domain", $prefix),
+        )
+        .await;
+        println!("  test_multi_domain_subscription: PASSED");
     };
 }
 

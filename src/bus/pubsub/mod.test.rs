@@ -43,3 +43,35 @@ fn test_subscription_for_domain() {
         "angzarr-saga-fulfillment-orders"
     );
 }
+
+// ============================================================================
+// Create races and subscriber derivation
+// ============================================================================
+
+/// Losing a create race to another replica is success: the resource
+/// exists.
+#[test]
+fn test_already_exists_is_success() {
+    assert!(tolerate_already_exists(Err(tonic::Status::already_exists("topic"))).is_ok());
+    assert!(tolerate_already_exists(Ok(())).is_ok());
+}
+
+/// Any other create failure still fails.
+#[test]
+fn test_other_create_errors_propagate() {
+    let err = tolerate_already_exists(Err(tonic::Status::permission_denied("no"))).unwrap_err();
+    assert_eq!(err.code(), tonic::Code::PermissionDenied);
+}
+
+/// A subscriber derived from a publisher keeps its project and topic
+/// prefix, so it reads the topics that publisher writes.
+#[test]
+fn test_subscriber_config_keeps_project_and_prefix() {
+    let publisher = PubSubConfig::publisher("proj").with_topic_prefix("tenant-a");
+    let sub = publisher.subscriber_config("audit", Some("orders"));
+    assert_eq!(sub.project_id, "proj");
+    assert_eq!(sub.topic_prefix, "tenant-a");
+    assert_eq!(sub.subscription_id.as_deref(), Some("audit"));
+    assert_eq!(sub.domains, vec!["orders".to_string()]);
+    assert!(publisher.subscriber_config("all", None).domains.is_empty());
+}

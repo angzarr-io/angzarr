@@ -12,6 +12,8 @@ mod bus;
 
 use std::time::Duration;
 
+use angzarr::bus::EventBus;
+
 use angzarr::bus::sns_sqs::{SnsSqsConfig, SnsSqsEventBus};
 use angzarr::dlq::DlqConfig;
 use testcontainers::{
@@ -110,6 +112,41 @@ async fn test_sns_sqs_event_bus() {
     .expect("Failed to create SNS/SQS publisher");
 
     run_event_bus_tests!(&bus, &prefix);
+
+    bus::event_bus_tests::test_all_domains_subscription_refused(
+        &bus,
+        &format!("{}-sub-all", prefix),
+    )
+    .await;
+    println!("  test_all_domains_subscription_refused: PASSED");
+
+    let (d1, d2) = (format!("{}-md1", prefix), format!("{}-md2", prefix));
+    let multi: std::sync::Arc<dyn angzarr::bus::EventBus> = std::sync::Arc::new(
+        SnsSqsEventBus::new(
+            SnsSqsConfig::subscriber(format!("{}-sub-md", prefix), vec![d1.clone(), d2.clone()])
+                .with_endpoint(&endpoint_url)
+                .with_region("us-east-1"),
+        )
+        .await
+        .expect("multi-domain subscriber"),
+    );
+    bus::event_bus_tests::test_explicit_multi_domain_subscription(multi, &bus, &d1, &d2).await;
+    println!("  test_explicit_multi_domain_subscription: PASSED");
+
+    let domain = format!("{}-order-after-fail", prefix);
+    let subscriber = bus
+        .create_subscriber(&format!("{}-sub-order-after-fail", prefix), Some(&domain))
+        .await
+        .expect("create subscriber");
+    // Redelivery waits out the 30 s SQS visibility timeout.
+    bus::event_bus_tests::test_root_order_preserved_after_handler_failure(
+        subscriber,
+        &bus,
+        &domain,
+        Duration::from_secs(120),
+    )
+    .await;
+    println!("  test_root_order_preserved_after_handler_failure: PASSED");
 
     // H-11: per-root ordering contract test. Re-create the bus inside an
     // Arc so the helper can clone it across concurrent producer tasks

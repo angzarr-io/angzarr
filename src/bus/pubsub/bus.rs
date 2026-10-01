@@ -81,7 +81,7 @@ impl PubSubEventBus {
             .await
             .map_err(|e| BusError::Publish(format!("Failed to check topic existence: {}", e)))?
         {
-            topic.create(None, None).await.map_err(|e| {
+            super::tolerate_already_exists(topic.create(None, None).await).map_err(|e| {
                 BusError::Publish(format!("Failed to create topic {}: {}", topic_name, e))
             })?;
             info!(topic = %topic_name, "Created Pub/Sub topic");
