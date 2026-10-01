@@ -1,9 +1,6 @@
 //! Projector abstraction shared across in-process and distributed modes.
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
-use tokio::sync::Mutex;
 use tonic::Status;
 
 use crate::proto::projector_service_client::ProjectorServiceClient;
@@ -48,36 +45,34 @@ pub trait ProjectorHandler: Send + Sync + 'static {
     async fn handle(&self, events: &EventBook, mode: ProjectionMode) -> Result<Projection, Status>;
 }
 
-/// gRPC projector handler that forwards to a remote `Projector` service.
+/// gRPC projector handler that forwards to a remote `ProjectorService`.
 ///
-/// Client logic implements the simple `Projector` service (not `ProjectorCoordinator`).
-/// Skips calls in `Speculate` mode since remote side effects can't be controlled.
+/// `Execute` calls `Handle`; `Speculate` calls `HandleSpeculative`, where the
+/// projector computes the projection without external side effects.
 pub struct GrpcProjectorHandler {
-    client: Arc<Mutex<ProjectorServiceClient<tonic::transport::Channel>>>,
+    client: ProjectorServiceClient<tonic::transport::Channel>,
 }
 
 impl GrpcProjectorHandler {
     /// Wrap a gRPC projector client as a `ProjectorHandler`.
     pub fn new(client: ProjectorServiceClient<tonic::transport::Channel>) -> Self {
-        Self {
-            client: Arc::new(Mutex::new(client)),
-        }
+        Self { client }
     }
 }
 
 #[async_trait]
 impl ProjectorHandler for GrpcProjectorHandler {
     async fn handle(&self, events: &EventBook, mode: ProjectionMode) -> Result<Projection, Status> {
-        if mode == ProjectionMode::Speculate {
-            return Ok(Projection::default());
-        }
-        let correlation_id = events.correlation_id();
-        Ok(self
-            .client
-            .lock()
-            .await
-            .handle(correlated_request(events.clone(), correlation_id))
-            .await?
-            .into_inner())
+        let request = correlated_request(events.clone(), events.correlation_id());
+        let mut client = self.client.clone();
+        let response = match mode {
+            ProjectionMode::Execute => client.handle(request).await?,
+            ProjectionMode::Speculate => client.handle_speculative(request).await?,
+        };
+        Ok(response.into_inner())
     }
 }
+
+#[cfg(test)]
+#[path = "mod.test.rs"]
+mod tests;

@@ -132,3 +132,72 @@ async fn test_add_projector_invalid_address() {
 
     assert!(result.is_err());
 }
+
+// ============================================================================
+// Speculative projection
+// ============================================================================
+
+/// Projector that records which RPC it received.
+#[derive(Clone, Default)]
+struct RecordingProjector {
+    calls: Arc<tokio::sync::Mutex<Vec<&'static str>>>,
+}
+
+#[tonic::async_trait]
+impl crate::proto::projector_service_server::ProjectorService for RecordingProjector {
+    async fn handle(&self, _request: Request<EventBook>) -> Result<Response<Projection>, Status> {
+        self.calls.lock().await.push("handle");
+        Ok(Response::new(Projection::default()))
+    }
+
+    async fn handle_speculative(
+        &self,
+        _request: Request<EventBook>,
+    ) -> Result<Response<Projection>, Status> {
+        self.calls.lock().await.push("speculative");
+        Ok(Response::new(Projection {
+            projector: "speculative".into(),
+            ..Default::default()
+        }))
+    }
+}
+
+/// HandleSpeculative ("without side effects") reaches the projector's
+/// HandleSpeculative, never its persisting Handle.
+#[tokio::test]
+async fn test_handle_speculative_calls_projector_speculative_rpc() {
+    let addr = start_event_query_server().await;
+    let coordinator = ProjectorCoord::connect(&addr.to_string()).await.unwrap();
+
+    let projector = RecordingProjector::default();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let projector_addr = listener.local_addr().unwrap();
+    let server = projector.clone();
+    tokio::spawn(async move {
+        Server::builder()
+            .add_service(
+                crate::proto::projector_service_server::ProjectorServiceServer::new(server),
+            )
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    coordinator
+        .add_projector(ServiceEndpoint {
+            name: "prj".to_string(),
+            address: projector_addr.to_string(),
+        })
+        .await
+        .unwrap();
+
+    let projection = coordinator
+        .handle_speculative(Request::new(SpeculateProjectorRequest {
+            events: Some(make_event_book()),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(projection.projector, "speculative");
+    assert_eq!(*projector.calls.lock().await, vec!["speculative"]);
+}

@@ -181,9 +181,8 @@ impl ProjectorCoordinatorService for ProjectorCoord {
         Ok(Response::new(()))
     }
 
-    /// Handle events speculatively - returns projection without side effects.
-    ///
-    /// Same as handle_sync but explicitly for speculative execution.
+    /// Handle events speculatively: the projector's `HandleSpeculative`
+    /// computes the projection without external side effects.
     async fn handle_speculative(
         &self,
         request: Request<SpeculateProjectorRequest>,
@@ -216,7 +215,7 @@ impl ProjectorCoordinatorService for ProjectorCoord {
         let correlation_id = event_book.correlation_id().to_string();
         if let Some((config, mut client)) = connections.into_iter().next() {
             let req = correlated_request(event_book.clone(), &correlation_id);
-            match client.handle(req).await {
+            match client.handle_speculative(req).await {
                 Ok(response) => {
                     info!(projector.name = %config.name, "Speculative projection completed");
                     return Ok(response);
