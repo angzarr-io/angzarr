@@ -26,10 +26,10 @@ use super::metrics::{
     domain_attr, handler_attr, operation_attr, storage_type_attr, DOMAIN_CORRELATION_QUERY,
     EVENTS_LOADED_TOTAL, EVENTS_STORED_TOTAL, OP_EVENT_ADD, OP_EVENT_DELETE_EDITION, OP_EVENT_GET,
     OP_EVENT_GET_BY_CORRELATION, OP_EVENT_GET_FROM, OP_EVENT_GET_FROM_TO,
-    OP_EVENT_GET_NEXT_SEQUENCE, OP_EVENT_GET_UNTIL_TIMESTAMP, OP_EVENT_LIST_DOMAINS,
-    OP_EVENT_LIST_ROOTS, OP_POSITION_GET, OP_POSITION_PUT, OP_SNAPSHOT_DELETE, OP_SNAPSHOT_GET,
-    OP_SNAPSHOT_GET_AT_SEQ, OP_SNAPSHOT_PUT, POSITIONS_UPDATED_TOTAL, SNAPSHOTS_LOADED_TOTAL,
-    SNAPSHOTS_STORED_TOTAL, STORAGE_DURATION,
+    OP_EVENT_GET_NEXT_SEQUENCE, OP_EVENT_GET_UNTIL_TIMESTAMP, OP_EVENT_GET_WITH_DIVERGENCE,
+    OP_EVENT_LIST_DOMAINS, OP_EVENT_LIST_ROOTS, OP_POSITION_GET, OP_POSITION_PUT,
+    OP_SNAPSHOT_DELETE, OP_SNAPSHOT_GET, OP_SNAPSHOT_GET_AT_SEQ, OP_SNAPSHOT_PUT,
+    POSITIONS_UPDATED_TOTAL, SNAPSHOTS_LOADED_TOTAL, SNAPSHOTS_STORED_TOTAL, STORAGE_DURATION,
 };
 
 /// Wrapper that adds metrics instrumentation to any storage implementation.
@@ -152,6 +152,42 @@ impl<T: EventStore> EventStore for Instrumented<T> {
                 start.elapsed().as_secs_f64(),
                 &[
                     operation_attr(OP_EVENT_GET_FROM),
+                    storage_type_attr(self.storage_type),
+                ],
+            );
+
+            if let Ok(ref events) = result {
+                EVENTS_LOADED_TOTAL.add(
+                    events.len() as u64,
+                    &[domain_attr(domain), storage_type_attr(self.storage_type)],
+                );
+            }
+        }
+
+        result
+    }
+
+    async fn get_with_divergence(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        explicit_divergence: Option<u32>,
+    ) -> Result<Vec<EventPage>> {
+        #[cfg(feature = "otel")]
+        let start = std::time::Instant::now();
+
+        let result = self
+            .inner
+            .get_with_divergence(domain, edition, root, explicit_divergence)
+            .await;
+
+        #[cfg(feature = "otel")]
+        {
+            STORAGE_DURATION.record(
+                start.elapsed().as_secs_f64(),
+                &[
+                    operation_attr(OP_EVENT_GET_WITH_DIVERGENCE),
                     storage_type_attr(self.storage_type),
                 ],
             );
