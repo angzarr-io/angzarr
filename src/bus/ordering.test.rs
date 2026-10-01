@@ -77,3 +77,50 @@ fn ordering_key_rejects_missing_root() {
 fn ordering_key_rejects_empty_root() {
     assert!(require_ordering_key(&book_with_root(Some(vec![])), "Pub/Sub").is_err());
 }
+
+// ============================================================================
+// AwaitingRedelivery (across pulls)
+// ============================================================================
+
+/// After a key's message fails, the key's other messages wait — even when
+/// they arrive in a later pull — until the failed one is redelivered.
+#[test]
+fn later_messages_wait_for_failed_message() {
+    let mut awaiting = AwaitingRedelivery::default();
+    assert!(!awaiting.must_wait("root-a", "m2"));
+
+    awaiting.record_failure("root-a", "m1");
+
+    assert!(awaiting.must_wait("root-a", "m2"));
+    assert!(
+        !awaiting.must_wait("root-a", "m1"),
+        "the failed message itself is handled"
+    );
+    assert!(!awaiting.must_wait("root-b", "m9"), "other keys flow");
+}
+
+/// Once the failed message is handled, the key flows again.
+#[test]
+fn handled_failed_message_releases_key() {
+    let mut awaiting = AwaitingRedelivery::default();
+    awaiting.record_failure("root-a", "m1");
+
+    awaiting.record_handled("root-a", "m2");
+    assert!(
+        awaiting.must_wait("root-a", "m3"),
+        "only the awaited message releases"
+    );
+
+    awaiting.record_handled("root-a", "m1");
+    assert!(!awaiting.must_wait("root-a", "m3"));
+}
+
+/// A repeated failure keeps waiting for the first failed message.
+#[test]
+fn first_failure_is_the_one_awaited() {
+    let mut awaiting = AwaitingRedelivery::default();
+    awaiting.record_failure("root-a", "m1");
+    awaiting.record_failure("root-a", "m2");
+    assert!(awaiting.must_wait("root-a", "m2"));
+    assert!(!awaiting.must_wait("root-a", "m1"));
+}

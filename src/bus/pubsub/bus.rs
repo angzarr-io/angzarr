@@ -15,7 +15,7 @@ use super::config::PubSubConfig;
 use super::consumer::{ensure_subscription_exists, process_message_payload, ProcessResult};
 use super::{CORRELATION_ID_ATTR, DOMAIN_ATTR, ROOT_ID_ATTR};
 use crate::bus::error::{BusError, Result};
-use crate::bus::ordering::{require_ordering_key, FailedGroups};
+use crate::bus::ordering::{require_ordering_key, AwaitingRedelivery};
 use crate::bus::traits::{EventBus, EventHandler, PublishResult};
 use crate::proto::EventBook;
 use crate::proto_ext::CoverExt;
@@ -187,23 +187,26 @@ impl EventBus for PubSubEventBus {
 
                 let backoff_builder = crate::bus::reconnect_backoff();
                 let mut backoff_iter = backoff_builder.build();
+                let mut awaiting = AwaitingRedelivery::default();
 
                 loop {
                     match subscription.pull(10, None).await {
                         Ok(messages) => {
                             backoff_iter = backoff_builder.build();
 
-                            let mut failed_keys = FailedGroups::default();
                             for message in messages {
                                 // Empty ordering key = unordered message: it
-                                // neither blocks nor is blocked by failures.
-                                let ordering_key = Some(message.message.ordering_key.as_str())
+                                // neither waits nor is waited for.
+                                let ordering_key = Some(message.message.ordering_key.clone())
                                     .filter(|k| !k.is_empty());
-                                if ordering_key.is_some() && failed_keys.is_blocked(ordering_key) {
-                                    // Redelivered behind the failed message
-                                    // of the same ordering key.
-                                    let _ = message.nack().await;
-                                    continue;
+                                let message_id = message.message.message_id.clone();
+                                if let Some(key) = ordering_key.as_deref() {
+                                    if awaiting.must_wait(key, &message_id) {
+                                        // Redelivered behind the failed
+                                        // message of the same ordering key.
+                                        let _ = message.nack().await;
+                                        continue;
+                                    }
                                 }
 
                                 let data = message.message.data.as_slice();
@@ -226,11 +229,14 @@ impl EventBus for PubSubEventBus {
                                     ProcessResult::Success
                                     | ProcessResult::Filtered
                                     | ProcessResult::DecodeError => {
+                                        if let Some(key) = ordering_key.as_deref() {
+                                            awaiting.record_handled(key, &message_id);
+                                        }
                                         let _ = message.ack().await;
                                     }
                                     ProcessResult::HandlerFailed => {
-                                        if ordering_key.is_some() {
-                                            failed_keys.record_failure(ordering_key);
+                                        if let Some(key) = ordering_key.as_deref() {
+                                            awaiting.record_failure(key, &message_id);
                                         }
                                         let _ = message.nack().await;
                                     }

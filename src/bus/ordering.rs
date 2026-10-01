@@ -1,6 +1,6 @@
 //! Per-root ordering helpers shared by batch-delivering transports.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::error::{BusError, Result};
 use crate::proto::EventBook;
@@ -58,6 +58,43 @@ impl FailedGroups {
                 self.groups.insert(g.to_string());
             }
             None => self.unknown_group_failed = true,
+        }
+    }
+}
+
+/// Ordering keys whose failed message awaits redelivery, across pulls.
+///
+/// A pulling transport (Pub/Sub) can hand out a key's later messages in a
+/// later pull while the failed one waits to be redelivered. Until the failed
+/// message itself comes back and succeeds, the key's other messages are
+/// sent back (nacked) so they are redelivered behind it.
+#[derive(Debug, Default)]
+pub struct AwaitingRedelivery {
+    failed: HashMap<String, String>,
+}
+
+impl AwaitingRedelivery {
+    /// Whether `message_id` of `key` must wait for the key's failed message.
+    pub fn must_wait(&self, key: &str, message_id: &str) -> bool {
+        matches!(self.failed.get(key), Some(failed) if failed != message_id)
+    }
+
+    /// The message `message_id` of `key` failed; later messages of the key
+    /// wait for it. The first failure of a key is the one waited for.
+    pub fn record_failure(&mut self, key: &str, message_id: &str) {
+        self.failed
+            .entry(key.to_string())
+            .or_insert_with(|| message_id.to_string());
+    }
+
+    /// The key's awaited message was handled; its later messages may flow.
+    pub fn record_handled(&mut self, key: &str, message_id: &str) {
+        if self
+            .failed
+            .get(key)
+            .is_some_and(|failed| failed == message_id)
+        {
+            self.failed.remove(key);
         }
     }
 }
