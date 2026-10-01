@@ -198,6 +198,8 @@ async fn as_is_submits_unchanged_command_with_lineage() {
     let (agg, seen) = fake(9, false);
     let addr = start(agg).await;
     let publisher = GrpcReplayPublisher::new([("order".to_string(), addr)]);
+    // The status console reports which backend performed the replay.
+    assert_eq!(publisher.source_id(), "grpc-aggregate");
 
     publisher
         .replay(command("order"), metadata(ReplayMode::AsIs))

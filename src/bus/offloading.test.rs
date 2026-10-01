@@ -683,7 +683,8 @@ async fn test_bus_derived_threshold_reserves_envelope_room() {
     let inner: Arc<dyn EventBus> = Arc::clone(&mock_bus) as Arc<dyn EventBus>;
     let bus = OffloadingEventBus::wrap(inner, OffloadingConfig::new(store));
 
-    let book = make_event_book(limit - ENVELOPE_RESERVE_BYTES / 2);
+    // 4 KiB under the raw limit: within the 8 KiB envelope reserve.
+    let book = make_event_book(limit - 4 * 1024);
     assert!(book.encoded_len() < limit);
     bus.publish(Arc::new(book)).await.unwrap();
 

@@ -207,18 +207,46 @@ async fn budgets_are_tracked_per_event() {
     assert!(rx.try_recv().is_err(), "each event has failed only once");
 }
 
-/// A success clears the event's count: a later failure starts a fresh
+/// Handler whose n-th call fails when `script[n]` is `false`.
+struct ScriptedHandler {
+    calls: Arc<AtomicU32>,
+    script: Vec<bool>,
+}
+
+impl EventHandler for ScriptedHandler {
+    fn handle(&self, _book: Arc<EventBook>) -> BoxFuture<'static, Result<(), BusError>> {
+        let n = self.calls.fetch_add(1, Ordering::SeqCst) as usize;
+        let ok = self.script.get(n).copied().unwrap_or(true);
+        Box::pin(async move {
+            if ok {
+                Ok(())
+            } else {
+                Err(BusError::Subscribe("scripted failure".into()))
+            }
+        })
+    }
+}
+
+/// A success clears the event's count: a failure after it starts a fresh
 /// budget instead of being dead-lettered early.
 #[tokio::test(start_paused = true)]
 async fn success_resets_the_failure_count() {
-    let (inner, calls) = flaky(1);
+    let calls = Arc::new(AtomicU32::new(0));
+    let inner = Box::new(ScriptedHandler {
+        calls: Arc::clone(&calls),
+        script: vec![false, true, false],
+    });
     let (dlq, mut rx) = ChannelDeadLetterPublisher::new();
     let handler = DeadLetteringHandler::new(inner, policy(2), Arc::new(dlq), "c", "saga");
     let event = book("order", "t/x.A", 1);
 
     assert!(handler.handle(Arc::clone(&event)).await.is_err());
     handler.handle(Arc::clone(&event)).await.expect("recovers");
-    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert!(
+        handler.handle(Arc::clone(&event)).await.is_err(),
+        "first failure after a success is redelivered, not dead-lettered"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 3);
     assert!(rx.try_recv().is_err());
 }
 
