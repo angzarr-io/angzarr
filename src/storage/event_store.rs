@@ -8,17 +8,47 @@ use prost_types::Any;
 use super::Result;
 use crate::proto::EventPage;
 
+/// What a deferred provenance tuple is attached to.
+///
+/// The deferred-idempotency key is (kind, source, source_seq,
+/// source_component, command_index): a Notification delivery envelope
+/// carries the provenance tuple of the command it concerns, so the kind keeps
+/// a notification from being deduplicated against that command (or a
+/// rejection notification against a compensate notification).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ProvenanceKind {
+    /// A deferred (saga/PM-emitted) command.
+    #[default]
+    Command,
+    /// A Notification delivery envelope carrying a RejectionNotification.
+    RejectionNotification,
+    /// A Notification delivery envelope carrying a Compensate.
+    CompensateNotification,
+}
+
+impl ProvenanceKind {
+    /// The stored spelling of the kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProvenanceKind::Command => "command",
+            ProvenanceKind::RejectionNotification => "rejection-notification",
+            ProvenanceKind::CompensateNotification => "compensate-notification",
+        }
+    }
+}
+
 /// Source tracking info for saga-produced events.
 ///
 /// Used for idempotency: if events exist with matching source info,
-/// the saga command was already processed.
+/// the saga command (or notification) was already processed.
 ///
-/// The full key is (edition, domain, root, seq, component, command_index).
-/// The first four identify only the triggering event; component and
-/// command_index identify which emission of that trigger this is — one
-/// invocation emitting several commands at the same destination (or two
-/// components reacting to the same event) must not share a key (O1).
-#[derive(Debug, Clone, Default)]
+/// The full key is (kind, edition, domain, root, seq, component,
+/// command_index). edition/domain/root/seq identify only the triggering
+/// event; component and command_index identify which emission of that
+/// trigger this is — one invocation emitting several commands at the same
+/// destination (or two components reacting to the same event) must not share
+/// a key (O1); kind separates a command from the notifications about it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceInfo {
     /// Source edition (usually "angzarr")
     pub edition: String,
@@ -29,14 +59,15 @@ pub struct SourceInfo {
     /// Source event sequence that triggered the saga
     pub seq: u32,
     /// Registered name of the producing component (saga/PM).
-    /// Empty on pre-upgrade rows/messages.
     pub component: String,
     /// Position of the command within the invocation's emitted command list.
     pub command_index: u32,
+    /// What the provenance tuple is attached to.
+    pub kind: ProvenanceKind,
 }
 
 impl SourceInfo {
-    /// Create new source info from saga origin.
+    /// Create new source info for a deferred command.
     pub fn new(
         edition: impl Into<String>,
         domain: impl Into<String>,
@@ -52,7 +83,14 @@ impl SourceInfo {
             seq,
             component: component.into(),
             command_index,
+            kind: ProvenanceKind::Command,
         }
+    }
+
+    /// The same provenance tuple attached to a different kind.
+    pub fn with_kind(mut self, kind: ProvenanceKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Check if this source info is empty/unset.
@@ -346,54 +384,4 @@ pub trait EventStore: Send + Sync {
     /// The main timeline (`""` or `"angzarr"`) is refused with
     /// `StorageError::MainTimelineProtected`.
     async fn delete_edition_events(&self, domain: &str, edition: &str) -> Result<u32>;
-
-    // =========================================================================
-    // Cascade (2PC) Query Methods - Phase 5
-    // =========================================================================
-
-    /// Query cascade IDs that have at least one unresolved participant past
-    /// the threshold.
-    ///
-    /// Used by the CascadeReaper background job to find stale cascades that
-    /// need timeout-based revocation. Resolution is **per-participant** (per
-    /// `(cascade_id, domain, edition, root)` tuple) — a participant is
-    /// resolved when there is a committed cascade row (Confirmation or
-    /// Revocation) on the same `(domain, edition, root)` for that cascade.
-    /// A cascade is therefore "stale" when:
-    /// - It has at least one uncommitted (`committed=false`) row
-    /// - That row's `created_at` is older than `threshold`
-    /// - That participant's `(domain, edition, root)` has no committed
-    ///   cascade row for the same cascade_id
-    ///
-    /// Pre-C-02 semantics excluded the cascade globally when ANY committed
-    /// row existed for that cascade_id; that stranded participants 2..N
-    /// after participant 1's Revocation succeeded.
-    ///
-    /// # Arguments
-    /// * `threshold` - ISO 8601 timestamp string. Events older than this are considered stale.
-    async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>>;
-
-    /// Query unresolved participants (aggregates) in a cascade.
-    ///
-    /// Returns a list of `(domain, edition, root, sequences)` tuples for all
-    /// aggregates that have uncommitted events for the given cascade_id AND
-    /// have not yet been resolved (no committed cascade row on that
-    /// `(domain, edition, root)` for the same cascade_id). Used by the
-    /// CascadeReaper to write Revocation events without re-revoking
-    /// participants that previous reaper passes already resolved.
-    async fn query_cascade_participants(&self, cascade_id: &str)
-        -> Result<Vec<CascadeParticipant>>;
-}
-
-/// Information about an aggregate participating in a cascade.
-#[derive(Debug, Clone)]
-pub struct CascadeParticipant {
-    /// Domain name of the aggregate.
-    pub domain: String,
-    /// Edition (timeline) of the aggregate.
-    pub edition: String,
-    /// Root UUID of the aggregate.
-    pub root: Uuid,
-    /// Sequences of uncommitted events for this cascade.
-    pub sequences: Vec<u32>,
 }

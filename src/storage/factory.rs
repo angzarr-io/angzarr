@@ -180,8 +180,7 @@ pub async fn init_event_store(
         ))),
         #[cfg(feature = "immudb")]
         BackendConfig::Immudb(_) => Err(Box::new(StorageError::NotImplemented(
-            "immudb event store not yet wired into the registry factory (pending cascade rework)"
-                .to_string(),
+            "immudb event store not yet wired into the registry factory".to_string(),
         ))),
         #[cfg(feature = "bigtable")]
         BackendConfig::Bigtable(c) => {

@@ -20,7 +20,7 @@ Feature: Merge Strategy - Concurrency Control
   - AGGREGATE_HANDLES enables CRDT-style operations: counters, sets, last-writer-wins.
     Same pattern applies to distributed counters, collaborative editing.
 
-  Why poker exercises merge strategy patterns well:
+  Why a player wallet exercises merge strategy patterns well:
   - STRICT for fund operations: ReserveFunds must see current balance to prevent
     over-reserving. Two players can't both reserve the same $500.
   - COMMUTATIVE for non-critical updates: AddBonusPoints can retry automatically

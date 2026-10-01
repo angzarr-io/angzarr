@@ -22,7 +22,6 @@ fn event(seq: u32) -> EventPage {
             type_url: "type.example/Test".to_string(),
             value: vec![seq as u8],
         })),
-        ..Default::default()
     }
 }
 
@@ -321,52 +320,4 @@ fn guard_edition_delete_rejects_both_main_spellings() {
 #[test]
 fn guard_edition_delete_allows_named_edition() {
     assert!(guard_edition_delete("v2").is_ok());
-}
-
-// ---------------------------------------------------------------------------
-// canonical_rfc3339
-// ---------------------------------------------------------------------------
-
-/// `Z`, `+00:00` and non-UTC offsets naming the same instant all render to
-/// the stored form.
-#[test]
-fn canonical_rfc3339_normalizes_offset_spellings() {
-    let stored = "2024-01-02T03:04:05.500+00:00";
-    assert_eq!(canonical_rfc3339("2024-01-02T03:04:05.5Z").unwrap(), stored);
-    assert_eq!(canonical_rfc3339(stored).unwrap(), stored);
-    assert_eq!(
-        canonical_rfc3339("2024-01-02T05:04:05.5+02:00").unwrap(),
-        stored
-    );
-}
-
-/// The canonical form orders lexicographically like the instants it names,
-/// including across differing fractional precision.
-#[test]
-fn canonical_rfc3339_orders_like_instants() {
-    let earlier = canonical_rfc3339("2024-01-02T03:04:05Z").unwrap();
-    let later = canonical_rfc3339("2024-01-02T03:04:05.000000001Z").unwrap();
-    let latest = canonical_rfc3339("2024-01-02T03:04:05.5Z").unwrap();
-    assert!(earlier < later, "{earlier} must sort before {later}");
-    assert!(later < latest, "{later} must sort before {latest}");
-}
-
-#[test]
-fn canonical_rfc3339_rejects_garbage() {
-    assert!(matches!(
-        canonical_rfc3339("yesterday"),
-        Err(StorageError::InvalidTimestampFormat(_))
-    ));
-}
-
-/// Any offset spelling parses to the same UTC instant.
-#[test]
-fn parse_rfc3339_utc_normalizes_offsets() {
-    let utc = parse_rfc3339_utc("2024-01-02T03:04:05Z").unwrap();
-    assert_eq!(parse_rfc3339_utc("2024-01-02T05:04:05+02:00").unwrap(), utc);
-    assert_eq!(utc.timestamp(), 1_704_164_645);
-    assert!(matches!(
-        parse_rfc3339_utc("not a time"),
-        Err(StorageError::InvalidTimestampFormat(_))
-    ));
 }

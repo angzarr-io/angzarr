@@ -53,7 +53,6 @@ mod parsing;
 mod pipeline;
 mod sync_policy;
 mod traits;
-pub mod two_phase;
 mod types;
 
 // Re-exports: types
@@ -66,6 +65,7 @@ pub use traits::{AggregateContext, ClientLogic, PersistOutcome, SyncFanout};
 pub use client::GrpcBusinessLogic;
 
 // Re-exports: parsing
+pub(crate) use parsing::deferred_source_info;
 pub use parsing::{edition_key, extract_command_sequence, parse_command_cover, parse_event_cover};
 
 // Re-exports: pipeline
@@ -73,9 +73,6 @@ pub use pipeline::{
     execute_command_pipeline, execute_command_with_retry, execute_compensation_pipeline,
     execute_fact_pipeline,
 };
-
-// Re-exports: two_phase
-pub use two_phase::{is_noop, transform_for_two_phase, TwoPhaseContext, TwoPhaseResult};
 
 // Re-export default edition constant
 pub use crate::proto_ext::constants::DEFAULT_EDITION;

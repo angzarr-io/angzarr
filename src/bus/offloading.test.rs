@@ -45,7 +45,6 @@ fn make_event_book(payload_size: usize) -> EventBook {
                 type_url: "test.Event".to_string(),
                 value: vec![0u8; payload_size],
             })),
-            ..Default::default()
         }],
         snapshot: None,
         next_sequence: 1,
@@ -228,7 +227,6 @@ async fn test_resolving_handler_resolves_external_payloads() {
             }),
             created_at: None,
             payload: Some(event_page::Payload::External(reference)),
-            ..Default::default()
         }],
         snapshot: None,
         next_sequence: 1,
@@ -547,7 +545,6 @@ async fn test_resolving_handler_propagates_store_get_failure_as_error() {
             }),
             created_at: None,
             payload: Some(event_page::Payload::External(reference)),
-            ..Default::default()
         }],
         snapshot: None,
         next_sequence: 1,

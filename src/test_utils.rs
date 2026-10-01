@@ -67,8 +67,6 @@ pub fn make_event_page(seq: u32) -> EventPage {
             value: vec![],
         })),
         created_at: None,
-        cascade_id: None,
-        ..Default::default()
     }
 }
 
@@ -84,25 +82,6 @@ pub fn make_event_page_typed(seq: u32, type_url: &str) -> EventPage {
             value: vec![],
         })),
         created_at: None,
-        cascade_id: None,
-        ..Default::default()
-    }
-}
-
-/// Create an uncommitted `EventPage` for 2PC testing.
-pub fn make_uncommitted_event_page(seq: u32, cascade_id: &str) -> EventPage {
-    EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(SequenceType::Sequence(seq)),
-        }),
-        payload: Some(event_page::Payload::Event(Any {
-            type_url: format!("test.Event{}", seq),
-            value: vec![],
-        })),
-        created_at: None,
-        no_commit: true,
-        cascade_id: Some(cascade_id.to_string()),
     }
 }
 
@@ -159,7 +138,7 @@ pub fn make_test_event_book(correlation_id: &str) -> EventBook {
 /// Convenience helper for multi-page event tests.
 pub fn make_multi_page_event_book(correlation_id: &str, page_count: usize) -> EventBook {
     let pages = (0..page_count)
-        .map(|i| make_event_page_typed(i as u32, &format!("type.googleapis.com/test.Event{}", i)))
+        .map(|i| make_event_page_typed(i as u32, &format!("/test.Event{}", i)))
         .collect();
     make_event_book_with_correlation("test", correlation_id, pages)
 }

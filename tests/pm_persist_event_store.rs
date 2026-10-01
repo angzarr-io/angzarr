@@ -151,7 +151,6 @@ fn pm_event_book(
                     value: vec![],
                 })),
                 created_at: None,
-                ..Default::default()
             })
             .collect(),
         snapshot: None,

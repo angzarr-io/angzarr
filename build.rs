@@ -67,8 +67,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // The full descriptor at `descriptor.bin` contains every framework
     // proto (command-handler, saga, PM, projector, query, stream,
-    // upcaster, types) and exposes internal messages (Confirmation,
-    // Revocation, NoOp, AngzarrDeferredSequence, ...) to anyone who
+    // upcaster, types) and exposes internal messages (Notification,
+    // Compensate, AngzarrDeferredSequence, ...) to anyone who
     // calls `grpcurl list`. For the reflection-exposed surface, we
     // ship only `io/angzarr/status/v1/dlq_admin.proto` and its
     // transitive imports.

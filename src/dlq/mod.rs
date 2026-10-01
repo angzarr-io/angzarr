@@ -71,8 +71,9 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 
 use crate::proto::{
-    angzarr_dead_letter, AngzarrDeadLetter as ProtoAngzarrDeadLetter, CommandBook, Cover,
-    EventBook, EventProcessingFailedDetails as ProtoEventProcessingFailedDetails, MergeStrategy,
+    angzarr_dead_letter, AngzarrDeadLetter as ProtoAngzarrDeadLetter, CommandBook,
+    CompensationDeliveryFailedDetails as ProtoCompensationDeliveryFailedDetails, Cover, EventBook,
+    EventProcessingFailedDetails as ProtoEventProcessingFailedDetails, MergeStrategy,
     PayloadRetrievalFailedDetails as ProtoPayloadRetrievalFailedDetails, PayloadStorageType,
     SequenceMismatchDetails as ProtoSequenceMismatchDetails,
 };
@@ -215,6 +216,18 @@ pub enum RejectionDetails {
     EventProcessingFailed(EventProcessingFailedDetails),
     /// Payload retrieval failed from external storage.
     PayloadRetrievalFailed(PayloadRetrievalFailedDetails),
+    /// A compensation Notification exhausted its delivery attempts (or its
+    /// target answered UNIMPLEMENTED).
+    CompensationDeliveryFailed(CompensationDeliveryFailedDetails),
+}
+
+/// Compensation delivery failure details for DLQ entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompensationDeliveryFailedDetails {
+    /// Delivery attempts made before dead-lettering.
+    pub attempts: u32,
+    /// Error returned by the last attempt.
+    pub last_error: String,
 }
 
 /// Dead letter queue entry for failed messages.
@@ -405,6 +418,35 @@ impl AngzarrDeadLetter {
         }
     }
 
+    /// Create a dead letter for a compensation Notification whose delivery
+    /// failed: the delivery envelope is the rejected command, routed to the
+    /// target domain's DLQ.
+    pub fn from_compensation_delivery_failure(
+        envelope: &CommandBook,
+        attempts: u32,
+        last_error: &str,
+        source_component: &str,
+        source_component_type: &str,
+    ) -> Self {
+        Self {
+            cover: envelope.cover.clone(),
+            payload: DeadLetterPayload::Command(envelope.clone()),
+            rejection_reason: format!(
+                "Compensation delivery failed after {attempts} attempts: {last_error}"
+            ),
+            rejection_details: Some(RejectionDetails::CompensationDeliveryFailed(
+                CompensationDeliveryFailedDetails {
+                    attempts,
+                    last_error: last_error.to_string(),
+                },
+            )),
+            occurred_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+            metadata: HashMap::new(),
+            source_component: source_component.to_string(),
+            source_component_type: source_component_type.to_string(),
+        }
+    }
+
     /// Create a dead letter for a PM's failed event-persistence attempt.
     ///
     /// Used at the PM persistence loop in `orchestrate_pm` for both:
@@ -508,6 +550,7 @@ impl AngzarrDeadLetter {
             Some(RejectionDetails::SequenceMismatch(_)) => "sequence_mismatch",
             Some(RejectionDetails::EventProcessingFailed(_)) => "event_processing_failed",
             Some(RejectionDetails::PayloadRetrievalFailed(_)) => "payload_retrieval_failed",
+            Some(RejectionDetails::CompensationDeliveryFailed(_)) => "compensation_delivery_failed",
             None => "unknown",
         }
     }
@@ -550,6 +593,14 @@ impl AngzarrDeadLetter {
                                 .cloned()
                                 .map(ProtoCapturedError::from)
                                 .collect(),
+                        },
+                    )
+                }
+                RejectionDetails::CompensationDeliveryFailed(d) => {
+                    angzarr_dead_letter::RejectionDetails::CompensationDeliveryFailed(
+                        ProtoCompensationDeliveryFailedDetails {
+                            attempts: d.attempts,
+                            last_error: d.last_error.clone(),
                         },
                     )
                 }

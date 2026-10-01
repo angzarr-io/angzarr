@@ -39,7 +39,7 @@ CONTAINER_RUN := CONTAINER_CMD + " run --rm " + CONTAINER_USER_ARG
 
 # NOTE: Client libraries and examples have been extracted to separate repos:
 #   - angzarr-client-{lang}: Client libraries (pip install angzarr-client, etc.)
-#   - angzarr-examples-{lang}: Example implementations (poker domain)
+#   - angzarr-examples-{lang}: Example implementations (blackjack domain)
 # See: https://github.com/angzarr-io/
 
 mod images "build/images/justfile"

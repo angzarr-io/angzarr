@@ -38,11 +38,8 @@ pub enum Events {
     SourceComponent,
     #[iden = "source_command_index"]
     SourceCommandIndex,
-    // Cascade tracking for 2PC (Phase 5)
-    #[iden = "committed"]
-    Committed,
-    #[iden = "cascade_id"]
-    CascadeId,
+    #[iden = "source_kind"]
+    SourceKind,
     // Parent-aggregate routing cover (Cover.ext), serialized google.protobuf.Any.
     #[iden = "ext"]
     Ext,

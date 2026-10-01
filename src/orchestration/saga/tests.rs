@@ -34,12 +34,10 @@ struct AlwaysSucceeds;
 impl SagaRetryContext for AlwaysSucceeds {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse::default())
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -58,7 +56,6 @@ struct RetryingSagaContext;
 impl SagaRetryContext for RetryingSagaContext {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse {
@@ -66,7 +63,6 @@ impl SagaRetryContext for RetryingSagaContext {
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -87,13 +83,17 @@ struct AlwaysRejects {
 impl SagaRetryContext for AlwaysRejects {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse::default())
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {
+    async fn on_command_rejected(
+        &self,
+        _command: &CommandBook,
+        _reason: &str,
+    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.rejection_count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
     fn source_cover(&self) -> Option<&Cover> {
         None
@@ -293,7 +293,6 @@ async fn test_orchestrate_saga_with_domain_validator() {
         &ctx,
         &executor,
         None, // command_bus
-        None, // fetcher
         None, // fact_executor
         "test-saga",
         "corr-1",
@@ -359,7 +358,6 @@ struct RetryableCommandContext;
 impl SagaRetryContext for RetryableCommandContext {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse {
@@ -367,7 +365,6 @@ impl SagaRetryContext for RetryableCommandContext {
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -449,7 +446,6 @@ struct SagaWithExistingDeferredAndSyncMode {
 impl SagaRetryContext for SagaWithExistingDeferredAndSyncMode {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         let header = PageHeader {
@@ -481,7 +477,6 @@ impl SagaRetryContext for SagaWithExistingDeferredAndSyncMode {
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -501,7 +496,6 @@ struct SagaWithNoDeferredAndSyncMode {
 impl SagaRetryContext for SagaWithNoDeferredAndSyncMode {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         let header = PageHeader {
@@ -529,7 +523,6 @@ impl SagaRetryContext for SagaWithNoDeferredAndSyncMode {
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -555,7 +548,6 @@ async fn test_saga_rewrite_preserves_sync_mode_on_existing_deferred() {
         &ctx,
         &executor,
         None, // command_bus
-        None, // fetcher
         None, // fact_executor
         "saga-h12-existing-deferred",
         "corr-1",
@@ -603,7 +595,6 @@ async fn test_saga_rewrite_preserves_sync_mode_on_default_branch() {
         &ctx,
         &executor,
         None, // command_bus
-        None, // fetcher
         None, // fact_executor
         "saga-h12-default-branch",
         "corr-1",
@@ -653,7 +644,6 @@ struct SagaWithFact;
 impl SagaRetryContext for SagaWithFact {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         let fact = EventBook {
@@ -671,7 +661,6 @@ impl SagaRetryContext for SagaWithFact {
             events: vec![fact],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -692,7 +681,6 @@ async fn test_orchestrate_saga_refuses_facts_without_fact_executor() {
         &ctx,
         &executor,
         None, // command_bus
-        None, // fetcher
         None, // <-- no fact_executor; facts must NOT be silently dropped
         "test-saga",
         "corr-1",
@@ -738,13 +726,11 @@ impl RecordingSyncModeContext {
 impl SagaRetryContext for RecordingSyncModeContext {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         *self.recorded.lock().await = Some(sync_mode);
         Ok(SagaResponse::default())
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -760,7 +746,6 @@ async fn test_orchestrate_saga_threads_sync_mode_to_context_handle() {
     let result = orchestrate_saga(
         &ctx,
         &executor,
-        None,
         None,
         None,
         "saga-h17",
@@ -846,13 +831,17 @@ impl DlqAwareContext {
 impl SagaRetryContext for DlqAwareContext {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse::default())
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {
+    async fn on_command_rejected(
+        &self,
+        _command: &CommandBook,
+        _reason: &str,
+    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.rejection_count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
     fn source_cover(&self) -> Option<&Cover> {
         None
@@ -1053,7 +1042,6 @@ struct SagaEmittingHeaders {
 impl SagaRetryContext for SagaEmittingHeaders {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         let commands = self
@@ -1080,7 +1068,6 @@ impl SagaRetryContext for SagaEmittingHeaders {
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         self.source.as_ref()
     }
@@ -1128,7 +1115,6 @@ async fn test_saga_stamps_component_and_command_index() {
     let result = orchestrate_saga(
         &ctx,
         &executor,
-        None,
         None,
         None,
         "saga-orders-inventory",
@@ -1189,7 +1175,6 @@ async fn test_saga_stamps_component_and_index_on_handler_set_deferred() {
         &executor,
         None,
         None,
-        None,
         "saga-orders-inventory",
         "corr-1",
         None,
@@ -1236,7 +1221,6 @@ async fn test_saga_honors_handler_stamped_explicit_sequence() {
         &executor,
         None,
         None,
-        None,
         "saga-orders-inventory",
         "corr-1",
         None,
@@ -1262,250 +1246,6 @@ async fn test_saga_honors_handler_stamped_explicit_sequence() {
         header.sync_mode,
         Some(SyncMode::Decision as i32),
         "untouched header keeps its sync_mode override too"
-    );
-}
-
-/// The Phase-1 destination-sequence fetch gate: when the saga declares
-/// output_domains, the orchestrator must fetch each destination's
-/// next_sequence (by correlation) and hand the populated map to handle().
-/// D-5 made this fetch load-bearing — handler-stamped explicit sequences
-/// are now honored at the destination, and they come from this map.
-/// Kills the `delete !` mutant on the `!output_domains.is_empty()` gate
-/// (inverted, the fetch only runs when there is nothing to fetch).
-#[tokio::test]
-async fn test_saga_fetches_destination_sequences_for_output_domains() {
-    struct CapturingSequencesSaga {
-        domains: Vec<String>,
-        seen: Arc<std::sync::Mutex<Option<HashMap<String, u32>>>>,
-    }
-
-    #[async_trait]
-    impl SagaRetryContext for CapturingSequencesSaga {
-        async fn handle(
-            &self,
-            destination_sequences: HashMap<String, u32>,
-            _sync_mode: SyncMode,
-        ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
-            *self.seen.lock().unwrap() = Some(destination_sequences);
-            Ok(SagaResponse::default())
-        }
-        async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
-        fn source_cover(&self) -> Option<&Cover> {
-            None
-        }
-        fn source_max_sequence(&self) -> u32 {
-            0
-        }
-        fn output_domains(&self) -> &[String] {
-            &self.domains
-        }
-    }
-
-    struct SequenceFetcher;
-
-    #[async_trait]
-    impl crate::orchestration::destination::DestinationFetcher for SequenceFetcher {
-        async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
-            Ok(None)
-        }
-        async fn fetch_by_correlation(
-            &self,
-            domain: &str,
-            _correlation_id: &str,
-        ) -> Result<Option<EventBook>, tonic::Status> {
-            assert_eq!(domain, "inventory");
-            Ok(Some(EventBook {
-                next_sequence: 5,
-                ..Default::default()
-            }))
-        }
-    }
-
-    let seen = Arc::new(std::sync::Mutex::new(None));
-    let ctx = CapturingSequencesSaga {
-        domains: vec!["inventory".to_string()],
-        seen: seen.clone(),
-    };
-    let executor = CapturingExecutor::new();
-
-    let result = orchestrate_saga(
-        &ctx,
-        &executor,
-        None,
-        Some(&SequenceFetcher),
-        None,
-        "saga-orders-inventory",
-        "corr-1",
-        None,
-        SyncMode::Simple,
-        fast_backoff(),
-        None,
-    )
-    .await;
-    assert!(result.is_ok(), "orchestrate_saga should succeed");
-
-    let captured = seen.lock().unwrap().clone();
-    assert_eq!(
-        captured,
-        Some(HashMap::from([("inventory".to_string(), 5)])),
-        "handle() must receive the fetched destination sequence for every output domain"
-    );
-}
-
-// ============================================================================
-// O9: destination-sequence fetch ERRORS fail saga orchestration
-// ============================================================================
-//
-// Pre-fix the Phase-1 fetch collapsed transport errors to "destination not
-// found → sequence 0". With D-5 honoring handler-stamped explicit sequences,
-// a fabricated 0 travels to the destination and is rejected (or worse,
-// accepted against a fresh timeline). A fetch ERROR must instead fail the
-// orchestration attempt so bus redelivery retries the saga.
-
-/// Saga context that declares one output domain and records whether
-/// handle() ran — shared by the O9 Phase-1 fetch tests.
-struct OutputDomainSaga {
-    domains: Vec<String>,
-    seen: Arc<std::sync::Mutex<Option<HashMap<String, u32>>>>,
-}
-
-#[async_trait]
-impl SagaRetryContext for OutputDomainSaga {
-    async fn handle(
-        &self,
-        destination_sequences: HashMap<String, u32>,
-        _sync_mode: SyncMode,
-    ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
-        *self.seen.lock().unwrap() = Some(destination_sequences);
-        Ok(SagaResponse::default())
-    }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
-    fn source_cover(&self) -> Option<&Cover> {
-        None
-    }
-    fn source_max_sequence(&self) -> u32 {
-        0
-    }
-    fn output_domains(&self) -> &[String] {
-        &self.domains
-    }
-}
-
-/// Fetcher whose correlation lookups fail — a transient gRPC blip, not an
-/// absent destination.
-struct FailingSequenceFetcher;
-
-#[async_trait]
-impl crate::orchestration::destination::DestinationFetcher for FailingSequenceFetcher {
-    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
-        Err(tonic::Status::unavailable("event query connection refused"))
-    }
-    async fn fetch_by_correlation(
-        &self,
-        _domain: &str,
-        _correlation_id: &str,
-    ) -> Result<Option<EventBook>, tonic::Status> {
-        Err(tonic::Status::unavailable("event query connection refused"))
-    }
-}
-
-/// O9 (the defect, saga side): a destination-sequence fetch ERROR must fail
-/// saga orchestration BEFORE the saga handler runs — proceeding would hand
-/// the handler a silently-defaulted sequence 0 for a destination that
-/// exists, producing wrong-sequence commands.
-#[tokio::test]
-async fn test_saga_destination_fetch_error_fails_orchestration() {
-    let seen = Arc::new(std::sync::Mutex::new(None));
-    let ctx = OutputDomainSaga {
-        domains: vec!["inventory".to_string()],
-        seen: seen.clone(),
-    };
-    let executor = CapturingExecutor::new();
-
-    let result = orchestrate_saga(
-        &ctx,
-        &executor,
-        None,
-        Some(&FailingSequenceFetcher),
-        None,
-        "saga-orders-inventory",
-        "corr-1",
-        None,
-        SyncMode::Simple,
-        fast_backoff(),
-        None,
-    )
-    .await;
-
-    assert!(
-        result.is_err(),
-        "a failed destination-sequence fetch must fail saga orchestration \
-         (O9), not proceed with fabricated sequences. Got Ok."
-    );
-    assert!(
-        seen.lock().unwrap().is_none(),
-        "the saga handler must NOT run when destination sequences could not \
-         be fetched — it would translate against a fabricated sequence 0"
-    );
-    assert!(
-        executor.seen.lock().await.is_empty(),
-        "no commands may be delivered for a failed orchestration attempt"
-    );
-}
-
-/// O9 regression guard: Ok(None) still means "destination doesn't exist yet
-/// for this correlation" and defaults the sequence to 0 — a genuinely new
-/// destination timeline must keep working after error propagation.
-#[tokio::test]
-async fn test_saga_destination_fetch_none_still_defaults_sequence_zero() {
-    /// Fetcher that reaches the source of truth and finds nothing.
-    struct AbsentDestinationFetcher;
-
-    #[async_trait]
-    impl crate::orchestration::destination::DestinationFetcher for AbsentDestinationFetcher {
-        async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
-            Ok(None)
-        }
-        async fn fetch_by_correlation(
-            &self,
-            _domain: &str,
-            _correlation_id: &str,
-        ) -> Result<Option<EventBook>, tonic::Status> {
-            Ok(None)
-        }
-    }
-
-    let seen = Arc::new(std::sync::Mutex::new(None));
-    let ctx = OutputDomainSaga {
-        domains: vec!["inventory".to_string()],
-        seen: seen.clone(),
-    };
-    let executor = CapturingExecutor::new();
-
-    let result = orchestrate_saga(
-        &ctx,
-        &executor,
-        None,
-        Some(&AbsentDestinationFetcher),
-        None,
-        "saga-orders-inventory",
-        "corr-1",
-        None,
-        SyncMode::Simple,
-        fast_backoff(),
-        None,
-    )
-    .await;
-
-    assert!(
-        result.is_ok(),
-        "Ok(None) is a valid new destination: {result:?}"
-    );
-    let captured = seen.lock().unwrap().clone();
-    assert_eq!(
-        captured,
-        Some(HashMap::from([("inventory".to_string(), 0)])),
-        "an absent destination (Ok(None)) still defaults its sequence to 0"
     );
 }
 
@@ -1555,7 +1295,6 @@ struct SagaEmittingFact {
 impl SagaRetryContext for SagaEmittingFact {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse {
@@ -1572,7 +1311,6 @@ impl SagaRetryContext for SagaEmittingFact {
             }],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -1596,7 +1334,6 @@ async fn test_orchestrate_saga_backfills_correlation_id_on_facts() {
     let result = orchestrate_saga(
         &ctx,
         &executor,
-        None,
         None,
         Some(&fact_exec),
         "saga-orders-inventory",
@@ -1632,7 +1369,6 @@ async fn test_orchestrate_saga_preserves_explicit_fact_correlation_id() {
     let result = orchestrate_saga(
         &ctx,
         &executor,
-        None,
         None,
         Some(&fact_exec),
         "saga-orders-inventory",
@@ -1919,252 +1655,20 @@ async fn saga_async_publish_failure_dlqs_failing_command_and_remainder() {
 }
 
 // ============================================================================
-// D-7: basis_seq stamping — the destination head observed at stamp time
-// ============================================================================
-//
-// A deferred command's `AngzarrDeferredSequence.basis_seq` records the
-// destination's `next_sequence` the saga observed (Phase-1 fetch) when it
-// stamped the command. The aggregate pipeline uses it as the LOWER BOUND of the
-// field-overlap concurrency window (state@basis .. state@actual) instead of the
-// whole destination history — without a written basis, a repeat-writer saga's
-// harmless commands get over-DLQ'd (that is the whole point of D-7).
-//
-// The stamp loop must WRITE basis from the fetched destination-sequence map,
-// while PRESERVING a handler-provided nonzero basis (fill-only-when-empty,
-// mirroring the source-Cover / correlation backfill). These tests pin both
-// directions of that rule on the real `orchestrate_saga` path.
-
-/// Saga that declares ONE output domain and emits a single command to it, with
-/// a configurable page `header` so tests can drive the default (no header) and
-/// existing-`AngzarrDeferred` stamping branches. Declaring the output domain is
-/// what makes the Phase-1 fetch populate `destination_sequences` for it — the
-/// source of the stamped basis.
-struct SagaEmittingToOutputDomain {
-    domain: String,
-    header: Option<PageHeader>,
-}
-
-#[async_trait]
-impl SagaRetryContext for SagaEmittingToOutputDomain {
-    async fn handle(
-        &self,
-        _destination_sequences: HashMap<String, u32>,
-        _sync_mode: SyncMode,
-    ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(SagaResponse {
-            commands: vec![CommandBook {
-                cover: Some(Cover {
-                    domain: self.domain.clone(),
-                    correlation_id: "corr-1".to_string(),
-                    ..Default::default()
-                }),
-                pages: vec![CommandPage {
-                    header: self.header.clone(),
-                    merge_strategy: MergeStrategy::MergeCommutative as i32,
-                    payload: Some(CmdPayload::Command(prost_types::Any {
-                        type_url: "test.SagaCommand".to_string(),
-                        value: vec![],
-                    })),
-                }],
-            }],
-            events: vec![],
-        })
-    }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
-    fn source_cover(&self) -> Option<&Cover> {
-        None
-    }
-    fn source_max_sequence(&self) -> u32 {
-        0
-    }
-    fn output_domains(&self) -> &[String] {
-        std::slice::from_ref(&self.domain)
-    }
-}
-
-/// DestinationFetcher whose correlation lookup reports a fixed `next_sequence`
-/// for every domain — the destination head the saga "observes" in Phase 1.
-struct FixedNextSequenceFetcher {
-    next_sequence: u32,
-}
-
-#[async_trait]
-impl crate::orchestration::destination::DestinationFetcher for FixedNextSequenceFetcher {
-    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
-        Ok(None)
-    }
-    async fn fetch_by_correlation(
-        &self,
-        _domain: &str,
-        _correlation_id: &str,
-    ) -> Result<Option<EventBook>, tonic::Status> {
-        Ok(Some(EventBook {
-            next_sequence: self.next_sequence,
-            ..Default::default()
-        }))
-    }
-}
-
-/// D-7: the stamp loop must WRITE basis_seq from the Phase-1 destination fetch.
-/// A saga whose destination fetch returns `next_sequence = N` → the stamped
-/// command's `basis_seq == N`. Kills "basis_seq never written / hardcoded 0":
-/// with basis pinned to 0 the aggregate pipeline falls back to the conservative
-/// whole-history overlap window and over-DLQs repeat-writer sagas — the exact
-/// regression D-7 fixes. (Default stamping branch: the handler set no header.)
-#[tokio::test]
-async fn test_saga_stamps_basis_seq_from_fetched_destination_sequence() {
-    let ctx = SagaEmittingToOutputDomain {
-        domain: "inventory".to_string(),
-        header: None, // default stamping branch (no handler-set sequence_type)
-    };
-    let executor = CapturingExecutor::new();
-    let fetcher = FixedNextSequenceFetcher { next_sequence: 9 };
-
-    let result = orchestrate_saga(
-        &ctx,
-        &executor,
-        None,
-        Some(&fetcher),
-        None,
-        "saga-orders-inventory",
-        "corr-1",
-        None,
-        SyncMode::Simple,
-        fast_backoff(),
-        None,
-    )
-    .await;
-    assert!(result.is_ok(), "orchestrate_saga should succeed");
-
-    let captured = executor.seen.lock().await;
-    assert_eq!(
-        captured.len(),
-        1,
-        "expected the emitted command through the executor"
-    );
-    let deferred = captured_deferred(&captured[0]);
-    assert_eq!(
-        deferred.basis_seq, 9,
-        "D-7: basis_seq must equal the destination next_sequence (9) the saga \
-         observed for its target domain in Phase 1 — not hardcoded 0"
-    );
-}
-
-/// D-7 fill-only-when-empty (PRESERVE side): a handler that pre-stamps a NONZERO
-/// basis_seq is making its own observation claim — the stamp loop must PRESERVE
-/// it and NOT overwrite it with the fetched destination sequence. Mirrors the
-/// source-Cover / correlation backfill philosophy (fill only when empty). Kills
-/// the mutant that always fills basis from the fetched map, which would clobber
-/// a handler's deliberate basis (3) with the fetched value (9).
-#[tokio::test]
-async fn test_saga_preserves_handler_stamped_nonzero_basis_seq() {
-    let ctx = SagaEmittingToOutputDomain {
-        domain: "inventory".to_string(),
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(SequenceType::AngzarrDeferred(AngzarrDeferredSequence {
-                source: None,
-                source_seq: 7,
-                basis_seq: 3, // handler's own observed basis
-                ..Default::default()
-            })),
-        }),
-    };
-    let executor = CapturingExecutor::new();
-    // The Phase-1 fetch would fill 9 — the preserve rule must ignore it.
-    let fetcher = FixedNextSequenceFetcher { next_sequence: 9 };
-
-    let result = orchestrate_saga(
-        &ctx,
-        &executor,
-        None,
-        Some(&fetcher),
-        None,
-        "saga-orders-inventory",
-        "corr-1",
-        None,
-        SyncMode::Simple,
-        fast_backoff(),
-        None,
-    )
-    .await;
-    assert!(result.is_ok(), "orchestrate_saga should succeed");
-
-    let captured = executor.seen.lock().await;
-    let deferred = captured_deferred(&captured[0]);
-    assert_eq!(
-        deferred.basis_seq, 3,
-        "D-7 fill-only-when-empty: a handler-provided NONZERO basis_seq must be \
-         preserved, NOT overwritten by the fetched destination sequence (9)"
-    );
-    assert_eq!(
-        deferred.source_seq, 7,
-        "the handler's source_seq is preserved alongside its basis_seq"
-    );
-}
-
-/// D-7 fill-only-when-empty (FILL side): a handler-set `AngzarrDeferred` header
-/// that leaves basis_seq at 0 must be FILLED from the Phase-1 fetch — the same
-/// existing-deferred branch as the preserve test, exercised on its empty arm.
-/// Together the two tests pin BOTH directions of the `existing.basis_seq != 0`
-/// guard (kills the mutant that always keeps the handler's 0).
-#[tokio::test]
-async fn test_saga_fills_zero_basis_seq_on_handler_set_deferred() {
-    let ctx = SagaEmittingToOutputDomain {
-        domain: "inventory".to_string(),
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(SequenceType::AngzarrDeferred(AngzarrDeferredSequence {
-                source: None,
-                source_seq: 7,
-                basis_seq: 0, // empty → must be filled from the fetch
-                ..Default::default()
-            })),
-        }),
-    };
-    let executor = CapturingExecutor::new();
-    let fetcher = FixedNextSequenceFetcher { next_sequence: 9 };
-
-    let result = orchestrate_saga(
-        &ctx,
-        &executor,
-        None,
-        Some(&fetcher),
-        None,
-        "saga-orders-inventory",
-        "corr-1",
-        None,
-        SyncMode::Simple,
-        fast_backoff(),
-        None,
-    )
-    .await;
-    assert!(result.is_ok(), "orchestrate_saga should succeed");
-
-    let captured = executor.seen.lock().await;
-    let deferred = captured_deferred(&captured[0]);
-    assert_eq!(
-        deferred.basis_seq, 9,
-        "D-7: an empty (0) handler basis_seq on an existing AngzarrDeferred \
-         header must be filled from the fetched destination sequence (9)"
-    );
-}
-
-// ============================================================================
 // Delivery policy: the synchronous caller's CascadeErrorMode
 // ============================================================================
 
-/// Saga emitting two commands to `dest`, with a DLQ publisher and a
-/// compensation counter.
+/// Saga emitting two commands to `dest`, with a DLQ publisher, a rejection
+/// counter and (optionally) a compensation outbox.
 struct TwoCommandSaga {
     inner: DlqAwareContext,
+    outbox: Option<Arc<crate::orchestration::outbox::Outbox>>,
 }
 
 #[async_trait]
 impl SagaRetryContext for TwoCommandSaga {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         let command = |n: u8| CommandBook {
@@ -2173,14 +1677,26 @@ impl SagaRetryContext for TwoCommandSaga {
                 root: Some(crate::proto::Uuid { value: vec![n; 16] }),
                 ..Default::default()
             }),
-            pages: vec![],
+            pages: vec![crate::proto::CommandPage {
+                payload: Some(crate::proto::command_page::Payload::Command(
+                    prost_types::Any {
+                        type_url: "/test.Charge".to_string(),
+                        value: vec![],
+                    },
+                )),
+                ..Default::default()
+            }],
         };
         Ok(SagaResponse {
             commands: vec![command(1), command(2)],
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, command: &CommandBook, reason: &str) {
+    async fn on_command_rejected(
+        &self,
+        command: &CommandBook,
+        reason: &str,
+    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.inner.on_command_rejected(command, reason).await
     }
     fn source_cover(&self) -> Option<&Cover> {
@@ -2191,6 +1707,9 @@ impl SagaRetryContext for TwoCommandSaga {
     }
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
         self.inner.dlq_publisher()
+    }
+    fn outbox(&self) -> Option<&Arc<crate::orchestration::outbox::Outbox>> {
+        self.outbox.as_ref()
     }
 }
 
@@ -2226,7 +1745,7 @@ impl CommandExecutor for FirstFailsExecutor {
 }
 
 struct PolicyRun {
-    result: Result<Vec<crate::proto::CascadeReactionError>, BusError>,
+    result: Result<crate::orchestration::shared::ReactionReport, BusError>,
     executions: u32,
     compensations: u32,
     dead_letters: usize,
@@ -2236,6 +1755,7 @@ async fn run_policy(mode: Option<CascadeErrorMode>, retryable: bool) -> PolicyRu
     let publisher = Arc::new(CapturingDlqPublisher::new());
     let ctx = TwoCommandSaga {
         inner: DlqAwareContext::new(publisher.clone()),
+        outbox: None,
     };
     let executor = FirstFailsExecutor {
         executions: AtomicU32::new(0),
@@ -2244,7 +1764,6 @@ async fn run_policy(mode: Option<CascadeErrorMode>, retryable: bool) -> PolicyRu
     let result = orchestrate_saga(
         &ctx,
         &executor,
-        None,
         None,
         None,
         "saga-policy",
@@ -2264,7 +1783,9 @@ async fn run_policy(mode: Option<CascadeErrorMode>, retryable: bool) -> PolicyRu
     }
 }
 
-fn aborted(result: &Result<Vec<crate::proto::CascadeReactionError>, BusError>) -> &tonic::Status {
+fn aborted(
+    result: &Result<crate::orchestration::shared::ReactionReport, BusError>,
+) -> &tonic::Status {
     match result {
         Err(BusError::Grpc(status)) => {
             assert_eq!(status.code(), tonic::Code::Aborted);
@@ -2274,8 +1795,8 @@ fn aborted(result: &Result<Vec<crate::proto::CascadeReactionError>, BusError>) -
     }
 }
 
-/// Bus-driven (no caller): the rejection is compensated and dead-lettered,
-/// the rest still delivered, and the orchestration succeeds.
+/// Bus-driven (no caller): the rejection reaches its source and is
+/// dead-lettered, the rest still delivered, and the orchestration succeeds.
 #[tokio::test]
 async fn test_background_rejection_compensates_dead_letters_and_continues() {
     let run = run_policy(None, false).await;
@@ -2285,47 +1806,48 @@ async fn test_background_rejection_compensates_dead_letters_and_continues() {
     assert_eq!(run.dead_letters, 1);
 }
 
-/// FAIL_FAST: the first rejection stops delivery and reaches the caller —
-/// no compensation, no dead letter.
+/// FAIL_FAST: the first rejection stops delivery and reaches the caller; the
+/// rejection still reaches its source (C-0471); no dead letter.
 #[tokio::test]
 async fn test_fail_fast_rejection_stops_and_reports() {
     let run = run_policy(Some(CascadeErrorMode::CascadeErrorFailFast), false).await;
     let status = aborted(&run.result);
     assert!(status.message().contains("insufficient funds"));
     assert_eq!(run.executions, 1);
-    assert_eq!(run.compensations, 0);
+    assert_eq!(run.compensations, 1);
     assert_eq!(run.dead_letters, 0);
 }
 
 /// COMPENSATE: delivery stops at the rejection and the caller gets the
-/// failure (nothing was delivered before it, so no markers).
+/// failure; the rejection reaches its source.
 #[tokio::test]
 async fn test_compensate_rejection_stops_and_reports() {
     let run = run_policy(Some(CascadeErrorMode::CascadeErrorCompensate), false).await;
     aborted(&run.result);
     assert_eq!(run.executions, 1);
-    assert_eq!(run.compensations, 0);
+    assert_eq!(run.compensations, 1);
     assert_eq!(run.dead_letters, 0);
 }
 
-/// CONTINUE: every command is delivered and the orchestration succeeds.
+/// CONTINUE: every command is delivered and the orchestration succeeds;
+/// the rejection reaches its source.
 #[tokio::test]
 async fn test_continue_rejection_delivers_all_and_succeeds() {
     let run = run_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
     run.result.unwrap();
     assert_eq!(run.executions, 2);
-    assert_eq!(run.compensations, 0);
+    assert_eq!(run.compensations, 1);
     assert_eq!(run.dead_letters, 0);
 }
 
 /// DEAD_LETTER: the failure is dead-lettered, the rest delivered, and the
-/// caller sees success.
+/// caller sees success; the rejection reaches its source.
 #[tokio::test]
 async fn test_dead_letter_rejection_captures_and_succeeds() {
     let run = run_policy(Some(CascadeErrorMode::CascadeErrorDeadLetter), false).await;
     run.result.unwrap();
     assert_eq!(run.executions, 2);
-    assert_eq!(run.compensations, 0);
+    assert_eq!(run.compensations, 1);
     assert_eq!(run.dead_letters, 1);
 }
 
@@ -2338,22 +1860,6 @@ async fn test_fail_fast_retry_exhaustion_reports() {
     assert!(status.message().contains("Unavailable"));
     assert_eq!(run.dead_letters, 0);
     assert_eq!(run.compensations, 0);
-}
-
-/// Records injected facts with how they were delivered.
-#[derive(Default)]
-struct MarkerCapture(AsyncMutex<Vec<(EventBook, crate::orchestration::FactDelivery)>>);
-
-#[async_trait]
-impl FactExecutor for MarkerCapture {
-    async fn inject(
-        &self,
-        fact: EventBook,
-        delivery: crate::orchestration::FactDelivery,
-    ) -> Result<(), crate::orchestration::FactInjectionError> {
-        self.0.lock().await.push((fact, delivery));
-        Ok(())
-    }
 }
 
 /// Accepts the command to root byte 1 (producing an event at sequence 4 on
@@ -2389,24 +1895,26 @@ impl CommandExecutor for SecondRejectedExecutor {
     }
 }
 
-/// COMPENSATE: after the failure, the target of every command already
-/// delivered receives a Compensate marker for the events it produced —
-/// written without the target's fact handler — and the request fails. The
-/// failed command's source is not compensated.
+/// COMPENSATE (C-0439): after the failure, every command its target
+/// executed gets a Compensate notification recorded in the outbox, carrying
+/// the command's type and the sequences its events landed at; the rejected
+/// command gets its RejectionNotification; the request fails. Nothing is
+/// written to the targets' streams by the framework.
 #[tokio::test]
-async fn test_compensate_writes_markers_for_delivered_commands() {
+async fn test_compensate_records_compensates_for_executed_commands() {
+    use crate::storage::ProvenanceKind;
     use prost::Message;
     let publisher = Arc::new(CapturingDlqPublisher::new());
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("ChargeSaga");
     let ctx = TwoCommandSaga {
         inner: DlqAwareContext::new(publisher.clone()),
+        outbox: Some(outbox.clone()),
     };
-    let markers = MarkerCapture::default();
     let result = orchestrate_saga(
         &ctx,
         &SecondRejectedExecutor,
         None,
         None,
-        Some(&markers),
         "ChargeSaga",
         "corr-1",
         None,
@@ -2416,28 +1924,127 @@ async fn test_compensate_writes_markers_for_delivered_commands() {
     )
     .await;
     assert!(aborted(&result).message().contains("card declined"));
-    assert_eq!(ctx.inner.rejection_count.load(Ordering::SeqCst), 0);
+    assert_eq!(ctx.inner.rejection_count.load(Ordering::SeqCst), 1);
     assert!(publisher.captured.lock().await.is_empty());
 
-    let written = markers.0.lock().await;
-    assert_eq!(written.len(), 1, "one marker for the delivered command");
-    let (marker, delivery) = &written[0];
-    assert!(delivery.skip_handler);
-    let target = marker.cover.as_ref().unwrap();
+    let compensates = deliverer.attempted_of(ProvenanceKind::CompensateNotification);
+    assert_eq!(
+        compensates.len(),
+        1,
+        "one Compensate for the executed command"
+    );
+    let target = compensates[0].book.cover.as_ref().unwrap();
     assert_eq!(target.domain, "dest");
     assert_eq!(target.root.as_ref().unwrap().value, vec![1; 16]);
-    let crate::proto::event_page::Payload::Event(any) = marker.pages[0].payload.as_ref().unwrap()
-    else {
-        panic!("marker payload");
-    };
-    assert_eq!(any.type_url, crate::proto_ext::type_url::COMPENSATE);
-    let compensate = crate::proto::Compensate::decode(any.value.as_slice()).unwrap();
+    let notification =
+        crate::orchestration::compensation::envelope_notification(&compensates[0].book).unwrap();
+    let compensate =
+        crate::proto::Compensate::decode(notification.payload.unwrap().value.as_slice()).unwrap();
     assert_eq!(compensate.sequences, vec![4]);
     assert!(compensate.reason.contains("card declined"));
-    assert!(matches!(
-        marker.pages[0].header.as_ref().unwrap().sequence_type,
-        Some(SequenceType::ExternalDeferred(_))
-    ));
+    assert_eq!(compensate.command_type, "test.Charge");
+    let Some(SequenceType::AngzarrDeferred(provenance)) = compensates[0].book.pages[0]
+        .header
+        .as_ref()
+        .unwrap()
+        .sequence_type
+        .as_ref()
+    else {
+        panic!("the Compensate carries the command's provenance");
+    };
+    assert_eq!(provenance.source_component, "ChargeSaga");
+    assert_eq!(provenance.command_index, 0);
+    assert!(outbox.open_keys().await.is_empty(), "delivered and closed");
+}
+
+/// The report lists the commands their targets executed.
+#[tokio::test]
+async fn test_report_lists_executed_commands() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = TwoCommandSaga {
+        inner: DlqAwareContext::new(publisher),
+        outbox: None,
+    };
+    let report = orchestrate_saga(
+        &ctx,
+        &SecondRejectedExecutor,
+        None,
+        None,
+        "ChargeSaga",
+        "corr-1",
+        None,
+        SyncMode::Cascade,
+        fast_backoff(),
+        Some(CascadeErrorMode::CascadeErrorContinue),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.executed.len(), 1);
+    assert_eq!(
+        report.executed[0]
+            .command
+            .cover
+            .as_ref()
+            .unwrap()
+            .root
+            .as_ref()
+            .unwrap()
+            .value,
+        vec![1; 16]
+    );
+    assert_eq!(report.reaction_errors.len(), 1);
+}
+
+/// A rejection whose notification cannot be recorded fails the
+/// orchestration, so the triggering event is not acknowledged (C-0463).
+#[tokio::test]
+async fn test_unrecorded_rejection_fails_the_orchestration() {
+    struct UnrecordableRejections(TwoCommandSaga);
+    #[async_trait]
+    impl SagaRetryContext for UnrecordableRejections {
+        async fn handle(
+            &self,
+            sync_mode: SyncMode,
+        ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
+            self.0.handle(sync_mode).await
+        }
+        async fn on_command_rejected(
+            &self,
+            _command: &CommandBook,
+            _reason: &str,
+        ) -> Result<(), crate::orchestration::outbox::OutboxError> {
+            Err(crate::orchestration::outbox::OutboxError::Log(
+                "disk full".into(),
+            ))
+        }
+        fn source_cover(&self) -> Option<&Cover> {
+            None
+        }
+        fn source_max_sequence(&self) -> u32 {
+            0
+        }
+    }
+    let ctx = UnrecordableRejections(TwoCommandSaga {
+        inner: DlqAwareContext::new(Arc::new(CapturingDlqPublisher::new())),
+        outbox: None,
+    });
+    let result = orchestrate_saga(
+        &ctx,
+        &SecondRejectedExecutor,
+        None,
+        None,
+        "ChargeSaga",
+        "corr-1",
+        None,
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await;
+    let err = result.unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("rejection notification not recorded"));
 }
 
 /// CONTINUE returns one reaction error per undelivered command, naming the
@@ -2445,7 +2052,7 @@ async fn test_compensate_writes_markers_for_delivered_commands() {
 #[tokio::test]
 async fn test_continue_returns_reaction_errors() {
     let run = run_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
-    let errors = run.result.unwrap();
+    let errors = run.result.unwrap().reaction_errors;
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].component, "saga-policy");
     assert_eq!(errors[0].target.as_ref().unwrap().domain, "dest");

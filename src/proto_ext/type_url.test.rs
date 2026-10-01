@@ -5,7 +5,6 @@
 //!
 //! Key behaviors verified:
 //! - for_type() builds correct canonical URLs
-//! - strip_prefix() extracts the message type from a canonical URL
 //! - fqn() extracts the FQN regardless of resolver prefix (recognition)
 
 use super::*;
@@ -21,22 +20,6 @@ fn test_for_type() {
     assert_eq!(for_type("io.angzarr.v1.Notification"), NOTIFICATION);
 }
 
-/// strip_prefix() removes the bare canonical prefix, passes through other URLs.
-#[test]
-fn test_strip_prefix() {
-    assert_eq!(
-        strip_prefix("/io.angzarr.examples.v1.OrderCreated"),
-        "io.angzarr.examples.v1.OrderCreated"
-    );
-    assert_eq!(strip_prefix(NOTIFICATION), "io.angzarr.v1.Notification");
-    // A URL without the bare prefix passes through unchanged — strip_prefix
-    // only peels angzarr's own canonical form, not arbitrary resolver hosts.
-    assert_eq!(
-        strip_prefix("type.googleapis.com/io.angzarr.v1.Notification"),
-        "type.googleapis.com/io.angzarr.v1.Notification"
-    );
-}
-
 /// fqn() yields the absolute proto name regardless of resolver prefix — the
 /// basis for recognizing inbound framework/client events.
 #[test]
@@ -45,11 +28,14 @@ fn test_fqn_is_prefix_agnostic() {
     assert_eq!(fqn(NOTIFICATION), "io.angzarr.v1.Notification");
     // Other-language Any.Pack() default.
     assert_eq!(
-        fqn("type.googleapis.com/io.angzarr.v1.Confirmation"),
-        "io.angzarr.v1.Confirmation"
+        fqn("type.googleapis.com/io.angzarr.v1.Compensate"),
+        "io.angzarr.v1.Compensate"
     );
     // No `/` at all — whole string is the name.
-    assert_eq!(fqn("io.angzarr.v1.NoOp"), "io.angzarr.v1.NoOp");
+    assert_eq!(
+        fqn("io.angzarr.v1.Notification"),
+        "io.angzarr.v1.Notification"
+    );
 }
 
 /// The canonical constants are the bare form: a leading `/` then the FQN,
@@ -60,10 +46,7 @@ fn test_constants_are_bare_canonical() {
         NOTIFICATION,
         REJECTION_NOTIFICATION,
         SAGA_COMPENSATION_FAILED,
-        CONFIRMATION,
-        REVOCATION,
         COMPENSATE,
-        NOOP,
         COMMAND_BOOK,
     ] {
         assert!(

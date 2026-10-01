@@ -2,16 +2,17 @@
 //!
 //! The saga context handles the prepare/execute lifecycle for sagas
 //! in distributed mode. Key behaviors:
-//! - prepare_destinations: Gets covers for destination aggregates
 //! - handle: Executes saga logic and returns commands
 //! - source_cover: Provides access to source event's cover
-//! - on_command_rejected: Initiates compensation flow
+//! - on_command_rejected: records the rejection in the outbox
 //!
 //! In-process tonic servers stand in for the saga's client logic and the
 //! source aggregate's coordinator.
 
 use super::*;
-use crate::proto::{Cover, Edition, Uuid as ProtoUuid};
+use crate::proto::command_handler_coordinator_service_client::CommandHandlerCoordinatorServiceClient;
+use crate::proto::{CommandBook, CommandRequest, Cover, Edition, Uuid as ProtoUuid};
+use crate::utils::saga_compensation::CompensationContext;
 
 fn make_source_event_book(domain: &str) -> EventBook {
     EventBook {
@@ -135,28 +136,37 @@ async fn context_with(
     compensation: Option<RecordingCompensation>,
     source: EventBook,
 ) -> GrpcSagaContext {
+    use crate::orchestration::command::grpc::GrpcCommandExecutor;
+    use crate::orchestration::outbox::{CoordinatorDeliverer, MemoryOutboxLog, RetryPolicy};
     let saga_channel =
         serve(tonic::transport::Server::builder().add_service(SagaServiceServer::new(saga))).await;
-    let compensation_client = match compensation {
-        Some(c) => Some(Arc::new(Mutex::new(
-            CommandHandlerCoordinatorServiceClient::new(
+    let outbox = match compensation {
+        Some(c) => {
+            let client = CommandHandlerCoordinatorServiceClient::new(
                 serve(
                     tonic::transport::Server::builder()
                         .add_service(CommandHandlerCoordinatorServiceServer::new(c)),
                 )
                 .await,
-            ),
-        ))),
+            );
+            let executor =
+                GrpcCommandExecutor::new([("orders".to_string(), client)].into_iter().collect());
+            Some(Arc::new(Outbox::new(
+                "saga-orders-inventory",
+                "saga",
+                Arc::new(MemoryOutboxLog),
+                Arc::new(CoordinatorDeliverer::new(Arc::new(executor))),
+                RetryPolicy::default(),
+            )))
+        }
         None => None,
     };
     GrpcSagaContext::new(
         Arc::new(Mutex::new(SagaServiceClient::new(saga_channel))),
-        Arc::new(crate::bus::MockEventBus::new()),
-        SagaCompensationConfig::default(),
-        compensation_client,
         source,
         Arc::new(crate::dlq::NoopDeadLetterPublisher),
         "saga-orders-inventory".into(),
+        outbox,
     )
 }
 
@@ -168,17 +178,10 @@ async fn test_handle_forwards_sync_mode_and_propagates_source_edition() {
     let saga = RecordingSaga::default();
     let ctx = context_with(saga.clone(), None, make_source_event_book("orders")).await;
 
-    let response = ctx
-        .handle(
-            HashMap::from([("inventory".to_string(), 4)]),
-            SyncMode::Cascade,
-        )
-        .await
-        .unwrap();
+    let response = ctx.handle(SyncMode::Cascade).await.unwrap();
 
     let requests = saga.0.lock().await;
     assert_eq!(requests[0].sync_mode, SyncMode::Cascade as i32);
-    assert_eq!(requests[0].destination_sequences.get("inventory"), Some(&4));
     assert_eq!(
         requests[0]
             .source
@@ -216,8 +219,9 @@ async fn test_source_accessors_describe_the_source_book() {
     assert!(ctx.dlq_publisher().is_some());
 }
 
-/// A rejected saga command is sent back to its source aggregate's
-/// coordinator as a compensation notification.
+/// A rejected saga command's RejectionNotification is recorded in the
+/// saga coordinator's outbox and delivered to its source aggregate's
+/// HandleCompensation (compensation_delivery.feature C-0464).
 #[tokio::test]
 async fn test_rejected_command_is_routed_to_source_compensation() {
     use crate::proto::{
@@ -251,12 +255,22 @@ async fn test_rejected_command_is_routed_to_source_compensation() {
         }],
     };
 
-    ctx.on_command_rejected(&rejected, "out of stock").await;
+    ctx.on_command_rejected(&rejected, "out of stock")
+        .await
+        .unwrap();
 
     let calls = compensation.0.lock().await;
     assert_eq!(calls.len(), 1, "one compensation notification");
-    let notification = calls[0].command.as_ref().unwrap();
-    assert_eq!(notification.cover.as_ref().unwrap().domain, "orders");
+    let envelope = calls[0].command.as_ref().unwrap();
+    assert_eq!(envelope.cover.as_ref().unwrap().domain, "orders");
+    assert_eq!(
+        crate::orchestration::compensation::notification_kind(envelope),
+        Some(crate::storage::ProvenanceKind::RejectionNotification)
+    );
+    assert!(
+        ctx.outbox().unwrap().open_keys().await.is_empty(),
+        "delivered and closed"
+    );
 }
 
 // ============================================================================
@@ -353,44 +367,26 @@ fn test_compensation_context_captures_saga_source() {
 
 #[test]
 fn test_build_saga_handle_request_propagates_inherited_sync_mode_decision() {
-    use std::collections::HashMap as StdHashMap;
     let source = make_source_event_book("orders");
-    let mut dest_sequences = StdHashMap::new();
-    dest_sequences.insert("inventory".to_string(), 7u32);
-    let request = super::build_saga_handle_request(
-        &source,
-        dest_sequences.clone(),
-        crate::proto::SyncMode::Decision,
-    );
+    let request = super::build_saga_handle_request(&source, crate::proto::SyncMode::Decision);
     assert_eq!(
         request.sync_mode,
         crate::proto::SyncMode::Decision as i32,
         "H-17: SagaHandleRequest.sync_mode must reflect orchestrate_saga\'s sync_mode (Decision), not legacy hardcoded Simple"
     );
-    assert_eq!(request.destination_sequences, dest_sequences);
     assert!(request.source.is_some());
 }
 
 #[test]
 fn test_build_saga_handle_request_propagates_inherited_sync_mode_cascade() {
-    use std::collections::HashMap as StdHashMap;
     let source = make_source_event_book("orders");
-    let request = super::build_saga_handle_request(
-        &source,
-        StdHashMap::new(),
-        crate::proto::SyncMode::Cascade,
-    );
+    let request = super::build_saga_handle_request(&source, crate::proto::SyncMode::Cascade);
     assert_eq!(request.sync_mode, crate::proto::SyncMode::Cascade as i32);
 }
 
 #[test]
 fn test_build_saga_handle_request_propagates_inherited_sync_mode_simple() {
-    use std::collections::HashMap as StdHashMap;
     let source = make_source_event_book("orders");
-    let request = super::build_saga_handle_request(
-        &source,
-        StdHashMap::new(),
-        crate::proto::SyncMode::Simple,
-    );
+    let request = super::build_saga_handle_request(&source, crate::proto::SyncMode::Simple);
     assert_eq!(request.sync_mode, crate::proto::SyncMode::Simple as i32);
 }

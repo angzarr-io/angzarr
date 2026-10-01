@@ -133,7 +133,6 @@ fn make_test_event(seq: u32, type_url: &str, value: Vec<u8>) -> EventPage {
             type_url: type_url.to_string(),
             value,
         })),
-        ..Default::default()
     }
 }
 

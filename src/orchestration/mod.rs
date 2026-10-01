@@ -12,9 +12,11 @@ use crate::proto::EventBook;
 pub mod aggregate;
 pub mod channels;
 pub mod command;
+pub mod compensation;
 pub mod correlation;
 pub mod destination;
 pub mod fact;
+pub mod outbox;
 pub mod process_manager;
 pub mod projector;
 pub mod saga;
@@ -74,7 +76,7 @@ pub struct FactDelivery {
     /// Downstream mode at the target, inherited from the flow that produced
     /// the fact (so a CASCADE stays synchronous through injected facts).
     pub sync_mode: crate::proto::SyncMode,
-    /// Persist without invoking the target's fact handler (framework markers).
+    /// Persist without invoking the target's fact handler.
     pub skip_handler: bool,
 }
 

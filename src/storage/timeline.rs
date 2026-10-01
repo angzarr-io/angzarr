@@ -13,8 +13,6 @@
 //! - [`AppendWindow`] / [`validate_append`]: which sequences an `add` may
 //!   write.
 //! - [`guard_edition_delete`]: the main timeline is never bulk-deleted.
-//! - [`canonical_rfc3339`] / [`parse_rfc3339_utc`]: timestamp bounds as the
-//!   stored text form (text-column backends) or as an instant (the rest).
 
 use crate::proto::EventPage;
 use crate::proto_ext::constants::DEFAULT_EDITION;
@@ -194,25 +192,6 @@ pub fn guard_edition_delete(edition: &str) -> Result<()> {
         )));
     }
     Ok(())
-}
-
-/// Parse an RFC 3339 timestamp and re-render it in the exact form the
-/// text-column backends store `created_at` in (UTC, `+00:00` offset,
-/// chrono's automatic fractional precision).
-///
-/// Two strings in that form compare lexicographically in the same order as
-/// the instants they name, so a caller-supplied bound that spells the same
-/// instant differently (`Z` suffix, a non-UTC offset, different fractional
-/// digits) still compares correctly against stored rows.
-pub fn canonical_rfc3339(timestamp: &str) -> Result<String> {
-    Ok(parse_rfc3339_utc(timestamp)?.to_rfc3339())
-}
-
-/// Parse an RFC 3339 timestamp (any offset) as a UTC instant.
-pub fn parse_rfc3339_utc(timestamp: &str) -> Result<chrono::DateTime<chrono::Utc>> {
-    chrono::DateTime::parse_from_rfc3339(timestamp)
-        .map(|parsed| parsed.with_timezone(&chrono::Utc))
-        .map_err(|e| StorageError::InvalidTimestampFormat(format!("{timestamp:?}: {e}")))
 }
 
 #[cfg(test)]

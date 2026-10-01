@@ -31,12 +31,6 @@
 /// proto name.
 pub const PREFIX: &str = "/";
 
-/// Suffix for notification types (used for routing).
-pub const NOTIFICATION_SUFFIX: &str = "Notification";
-
-/// Suffix for CloudEvents response types.
-pub const CLOUD_EVENTS_RESPONSE_SUFFIX: &str = "CloudEventsResponse";
-
 // Canonical type URLs for angzarr framework messages (PREFIX + FQN).
 /// Type URL for Notification messages.
 pub const NOTIFICATION: &str = "/io.angzarr.v1.Notification";
@@ -45,15 +39,8 @@ pub const REJECTION_NOTIFICATION: &str = "/io.angzarr.v1.RejectionNotification";
 /// Type URL for SagaCompensationFailed messages.
 pub const SAGA_COMPENSATION_FAILED: &str = "/io.angzarr.v1.SagaCompensationFailed";
 
-// Two-phase commit framework events
-/// Type URL for Confirmation messages (2PC commit).
-pub const CONFIRMATION: &str = "/io.angzarr.v1.Confirmation";
-/// Type URL for Revocation messages (2PC rollback).
-pub const REVOCATION: &str = "/io.angzarr.v1.Revocation";
-/// Type URL for Compensate messages (client-implemented rollback).
+/// Type URL for Compensate notification payloads.
 pub const COMPENSATE: &str = "/io.angzarr.v1.Compensate";
-/// Type URL for NoOp messages (filtered event placeholder).
-pub const NOOP: &str = "/io.angzarr.v1.NoOp";
 /// Type URL for CommandBook messages wrapped for bus transport.
 pub const COMMAND_BOOK: &str = "/io.angzarr.v1.CommandBook";
 
@@ -71,21 +58,6 @@ pub fn for_type(message_type: &str) -> String {
     format!("{PREFIX}{message_type}")
 }
 
-/// Strip the canonical bare prefix from an angzarr-produced type URL,
-/// yielding the fully-qualified proto name.
-///
-/// # Example
-/// ```
-/// use angzarr::proto_ext::type_url;
-/// assert_eq!(
-///     type_url::strip_prefix("/io.angzarr.examples.v1.OrderCreated"),
-///     "io.angzarr.examples.v1.OrderCreated"
-/// );
-/// ```
-pub fn strip_prefix(type_url: &str) -> &str {
-    type_url.strip_prefix(PREFIX).unwrap_or(type_url)
-}
-
 /// Fully-qualified proto name carried by any type URL, regardless of its
 /// resolver-host prefix (the segment after the last `/`, or the whole
 /// string if there is none).
@@ -99,10 +71,10 @@ pub fn strip_prefix(type_url: &str) -> &str {
 /// # Example
 /// ```
 /// use angzarr::proto_ext::type_url;
-/// assert_eq!(type_url::fqn("/io.angzarr.v1.Confirmation"), "io.angzarr.v1.Confirmation");
+/// assert_eq!(type_url::fqn("/io.angzarr.v1.Compensate"), "io.angzarr.v1.Compensate");
 /// assert_eq!(
-///     type_url::fqn("type.googleapis.com/io.angzarr.v1.Confirmation"),
-///     "io.angzarr.v1.Confirmation"
+///     type_url::fqn("type.googleapis.com/io.angzarr.v1.Compensate"),
+///     "io.angzarr.v1.Compensate"
 /// );
 /// ```
 pub fn fqn(type_url: &str) -> &str {

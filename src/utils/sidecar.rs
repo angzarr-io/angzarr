@@ -18,7 +18,6 @@ use crate::config::{Config, TargetConfig};
 use crate::descriptor::Target;
 use crate::dlq::DeadLetterPublisher;
 use crate::orchestration::command::grpc::GrpcCommandExecutor;
-use crate::orchestration::command::CommandExecutor;
 use crate::orchestration::destination::grpc::GrpcDestinationFetcher;
 use crate::orchestration::destination::DestinationFetcher;
 use crate::orchestration::fact::grpc::GrpcFactExecutor;
@@ -60,39 +59,6 @@ pub fn coordinator_transport(
     coordinator.tcp.host = "0.0.0.0".to_string();
     coordinator.tcp.port = port;
     Ok(coordinator)
-}
-
-/// Address of the aggregate that receives a saga's compensation
-/// notifications: the endpoint of the saga's single source domain.
-///
-/// A saga translating several source domains has no single compensation
-/// target (the notification must reach the aggregate that emitted the
-/// triggering event), so that case — like a source domain missing from
-/// the static endpoints — is reported as the reason compensation is off.
-pub fn compensation_endpoint(
-    inputs: &[Target],
-    endpoints: &[(String, String)],
-) -> Result<String, String> {
-    let mut domains: Vec<&str> = inputs.iter().map(|t| t.domain.as_str()).collect();
-    domains.sort_unstable();
-    domains.dedup();
-    let [source] = domains.as_slice() else {
-        return Err(format!(
-            "compensation needs exactly one source domain, saga subscribes to {:?}",
-            domains
-        ));
-    };
-    endpoints
-        .iter()
-        .find(|(domain, _)| domain == source)
-        .map(|(_, address)| address.clone())
-        .ok_or_else(|| {
-            format!(
-                "source domain {:?} has no entry in {}",
-                source,
-                crate::config::STATIC_ENDPOINTS_ENV_VAR
-            )
-        })
 }
 
 /// Result of bootstrapping a sidecar binary.
@@ -147,7 +113,7 @@ pub async fn connect_endpoints(
     endpoints_str: &str,
 ) -> Result<
     (
-        Arc<dyn CommandExecutor>,
+        Arc<GrpcCommandExecutor>,
         Arc<dyn DestinationFetcher>,
         Arc<dyn FactExecutor>,
     ),
@@ -217,7 +183,7 @@ pub async fn connect_endpoints(
         info!(domain = %domain, address = %address, "Connected to aggregate");
     }
 
-    let executor: Arc<dyn CommandExecutor> = Arc::new(GrpcCommandExecutor::new(command_clients));
+    let executor = Arc::new(GrpcCommandExecutor::new(command_clients));
     let fetcher: Arc<dyn DestinationFetcher> = Arc::new(GrpcDestinationFetcher::new(query_clients));
     let fact_executor: Arc<dyn FactExecutor> = Arc::new(GrpcFactExecutor::new(fact_clients));
 

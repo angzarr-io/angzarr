@@ -4,20 +4,9 @@
 //! message bus (AMQP, Kafka, Pub/Sub or SNS/SQS), forwards to saga for
 //! processing, and executes resulting commands via the command handler.
 //!
-//! ## Two-Phase Saga Protocol
-//! 1. **Prepare**: Saga declares which destination aggregates it needs to read
-//! 2. **Fetch**: Sidecar fetches destination EventBooks via EventQuery
-//! 3. **Execute**: Saga receives source + destinations, produces commands
-//!
 //! ## Architecture
 //! ```text
-//! [Event Bus] -> [angzarr-saga] -> [Saga.Prepare] -> destinations
-//!                        |                               |
-//!                        v                               v
-//!              [EventQuery.GetEventBook] <-------- fetch state
-//!                        |
-//!                        v
-//!              [Saga.Execute(source, destinations)] -> commands
+//! [Event Bus] -> [angzarr-saga] -> [Saga.Handle(source)] -> deferred commands
 //!                        |
 //!                        v
 //!              [AggregateCoordinator.Handle] -> events
@@ -53,21 +42,24 @@ use angzarr::config::STATIC_ENDPOINTS_ENV_VAR;
 use angzarr::descriptor::{parse_subscriptions, Target};
 use angzarr::dlq::init_dlq_publisher;
 use angzarr::handlers::core::saga::SagaEventHandler;
+use angzarr::orchestration::outbox::{
+    CoordinatorDeliverer, EventStoreOutboxLog, MemoryOutboxLog, Outbox, OutboxLog,
+    RevocationHandling,
+};
 use angzarr::orchestration::saga::grpc::GrpcSagaContextFactory;
 use angzarr::payload_store::{init_payload_offload, with_offload};
-use angzarr::proto::command_handler_coordinator_service_client::CommandHandlerCoordinatorServiceClient;
 use angzarr::proto::saga_coordinator_service_server::SagaCoordinatorServiceServer;
 use angzarr::proto::saga_service_client::SagaServiceClient;
 use angzarr::services::SagaCoord;
+use angzarr::storage::init_event_store;
 use angzarr::transport::{
     connect_to_address, grpc_trace_layer, max_grpc_message_size, serve_with_transport,
     GrpcMessageLimits,
 };
-use angzarr::utils::bootstrap::parse_static_endpoints;
 use angzarr::utils::retry::connection_backoff;
 use angzarr::utils::sidecar::{
-    bootstrap_sidecar, compensation_endpoint, connect_endpoints, coordinator_transport,
-    start_subscriber, COORDINATOR_PORT_ENV_VAR,
+    bootstrap_sidecar, connect_endpoints, coordinator_transport, start_subscriber,
+    COORDINATOR_PORT_ENV_VAR,
 };
 
 /// Environment variable for subscription configuration.
@@ -178,38 +170,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         format!("Saga sidecar requires {}", STATIC_ENDPOINTS_ENV_VAR)
     })?;
 
-    info!("Using static endpoint configuration for two-phase saga routing");
+    info!("Using static endpoint configuration for saga command routing");
     let (executor, _fetcher, fact_executor) = connect_endpoints(&endpoints_str).await?;
 
-    // Rejected commands are compensated by notifying the aggregate whose
-    // event triggered the saga, i.e. the saga's source domain.
-    let compensation_handler =
-        match compensation_endpoint(&inputs, &parse_static_endpoints(&endpoints_str)) {
-            Ok(address) => {
-                info!(address = %address, "Compensation routed to source aggregate");
-                let channel = connect_to_address(&address).await?;
-                Some(Arc::new(Mutex::new(
-                    CommandHandlerCoordinatorServiceClient::new(channel).with_message_limits(),
-                )))
-            }
-            Err(reason) => {
-                warn!(reason = %reason, "Saga compensation disabled");
-                None
-            }
-        };
-
-    let factory: Arc<GrpcSagaContextFactory> = Arc::new(GrpcSagaContextFactory::new(
-        Arc::new(Mutex::new(saga_client)),
-        publisher,
-        bootstrap.config.saga_compensation.clone(),
-        compensation_handler,
-        bootstrap.domain.clone(),
+    // Compensation outbox: rejection and Compensate notifications are
+    // recorded before the triggering event is acknowledged and delivered to
+    // their targets' HandleCompensation. Durable when storage is configured.
+    let outbox_log: Arc<dyn OutboxLog> = match init_event_store(&bootstrap.config.storage).await {
+        Ok(store) => Arc::new(EventStoreOutboxLog::new(store, &bootstrap.domain)),
+        Err(e) => {
+            error!(
+                error = %e,
+                "no storage for the saga's compensation outbox; recorded notifications \
+                 will not survive a restart — configure storage for this sidecar"
+            );
+            Arc::new(MemoryOutboxLog)
+        }
+    };
+    let deliverer =
+        CoordinatorDeliverer::new(executor.clone()).with_revocation_handling(RevocationHandling {
+            event_bus: publisher,
+            config: bootstrap.config.saga_compensation.clone(),
+            dlq: dlq_publisher.clone(),
+        });
+    let outbox = Outbox::start(
+        &bootstrap.domain,
+        "saga",
+        outbox_log,
+        Arc::new(deliverer),
+        &bootstrap.config.outbox,
         dlq_publisher.clone(),
-    ));
+    )
+    .await?;
+    let factory: Arc<GrpcSagaContextFactory> = Arc::new(
+        GrpcSagaContextFactory::new(
+            Arc::new(Mutex::new(saga_client)),
+            bootstrap.domain.clone(),
+            dlq_publisher.clone(),
+        )
+        .with_outbox(outbox),
+    );
     let handler = SagaEventHandler::from_factory_with_validator(
         factory.clone(),
         executor.clone(),
-        None,
         None,
         Some(fact_executor.clone()),
         None,

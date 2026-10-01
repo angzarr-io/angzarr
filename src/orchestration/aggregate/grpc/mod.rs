@@ -4,7 +4,6 @@
 //! client logic invocation is handled by the pipeline via gRPC client.
 
 use crate::transport::GrpcMessageLimits;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,16 +16,20 @@ use crate::bus::EventBus;
 use crate::discovery::{DiscoveredService, ServiceDiscovery};
 use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher, NoopDeadLetterPublisher};
 use crate::orchestration::channels::ChannelCache;
-use crate::orchestration::shared::read_reaction_errors;
+use crate::orchestration::outbox::Outbox;
+use crate::orchestration::shared::{
+    read_executed_reactions, read_reaction_errors, ExecutedCommand,
+};
 use crate::proto::process_manager_coordinator_service_client::ProcessManagerCoordinatorServiceClient;
 use crate::proto::saga_coordinator_service_client::SagaCoordinatorServiceClient;
 use crate::proto::{
-    AngzarrDeferredSequence, CascadeErrorMode, CascadeReactionError, CommandBook, Confirmation,
-    Cover, Edition, EventBook, EventPage, EventRequest, MergeStrategy,
-    ProcessManagerCoordinatorRequest, Projection, Revocation, SagaHandleRequest, Snapshot,
-    Uuid as ProtoUuid,
+    CascadeErrorMode, CascadeReactionError, CommandBook, Cover, Edition, EventBook, EventPage,
+    EventRequest, MergeStrategy, ProcessManagerCoordinatorRequest, Projection, SagaHandleRequest,
+    Snapshot, Uuid as ProtoUuid,
 };
-use crate::proto_ext::{calculate_set_next_seq, correlated_request, CoverExt, EventPageExt};
+use crate::proto_ext::{
+    calculate_set_next_seq, correlated_request, CascadeErrorModeExt, CoverExt, EventPageExt,
+};
 use crate::repository::EventBookRepository;
 use crate::repository::SnapshotRepository;
 use crate::services::upcaster::Upcaster;
@@ -36,10 +39,7 @@ use crate::utils::single_sequence_check::sequence_mismatch_error_with_state;
 use crate::storage::AddOutcome;
 
 use super::sync_policy::{should_call_sync_projectors, should_skip_post_persist};
-use super::{
-    is_noop, transform_for_two_phase, AggregateContext, PersistOutcome, SyncFanout, TemporalQuery,
-    TwoPhaseContext,
-};
+use super::{AggregateContext, PersistOutcome, SyncFanout, TemporalQuery};
 
 /// The cover persisted events are written under: the coordinator's resolved
 /// `(domain, root)` and validated correlation id, keeping the response's
@@ -110,42 +110,20 @@ fn build_event_book(
     book
 }
 
-/// O2 (phantom-commit guard): committed-only view of an EventBook for
-/// EXTERNALLY-VISIBLE consumers — the event bus and the sync projector leg.
+/// The book handed to event consumers (the bus and sync projectors): the
+/// persisted pages without the snapshot.
 ///
-/// Pages persisted with `no_commit=true` are PROVISIONAL: they belong to an
-/// in-flight cascade that a Revocation may still undo (see
-/// `crate::cascade::reaper` and `super::two_phase`). Letting the bus or a
-/// projector consume them surfaces a "commit" that may never become real — a
-/// phantom commit — and for projectors specifically there is NO framework path
-/// mapping a later Revocation back to a read-model undo.
-///
-/// Returns `None` when no committed pages remain, so both consumers share the
-/// same skip-entirely semantics. Deliberately NOT applied to the saga/PM
-/// cascade fan-out, which must see provisional pages (forward propagation).
-/// Single helper so the bus filter and the projector filter cannot drift.
-///
-/// C01 #9: the returned book NEVER carries a snapshot. Snapshots are an
-/// aggregate-rehydration optimization; event consumers (projectors, sagas,
-/// PMs, gap-fill) have no use for one, and its presence is actively
-/// harmful — `GapFiller::fill_if_needed` treats `book.snapshot.is_some()`
-/// as "already complete" and skips gap repair entirely
-/// (`src/services/gap_fill/filler.rs`). A bus book carrying a snapshot
-/// would silently suppress gap-fill for any hole (2PC-suppressed or
-/// otherwise) that a consumer needed filled.
-fn committed_only_book(events: &EventBook) -> Option<EventBook> {
-    let committed_pages: Vec<EventPage> = events
-        .pages
-        .iter()
-        .filter(|page| !page.no_commit)
-        .cloned()
-        .collect();
-    if committed_pages.is_empty() {
+/// Snapshots are an aggregate-rehydration optimization; event consumers have
+/// no use for one, and `GapFiller::fill_if_needed` treats a book carrying a
+/// snapshot as already complete and skips gap repair. Returns `None` when
+/// there are no pages to deliver.
+fn consumer_book(events: &EventBook) -> Option<EventBook> {
+    if events.pages.is_empty() {
         return None;
     }
     Some(EventBook {
         cover: events.cover.clone(),
-        pages: committed_pages,
+        pages: events.pages.clone(),
         snapshot: None,
         next_sequence: events.next_sequence,
     })
@@ -166,15 +144,14 @@ pub struct GrpcAggregateContext {
     dlq_publisher: Arc<dyn DeadLetterPublisher>,
     /// Component name for DLQ metadata.
     component_name: String,
-    /// Cascade ID for 2PC atomic execution.
-    /// When set, events are persisted with `no_commit=true` and cascade_id stamped.
-    cascade_id: Option<String>,
     /// How a failing sync fan-out target affects the command (CASCADE).
     cascade_error_mode: CascadeErrorMode,
     /// Channels to saga/PM coordinators, shared across commands.
     channels: Arc<ChannelCache>,
     /// Deadline for each sync fan-out call.
     downstream_timeout: Duration,
+    /// Compensation outbox for CASCADE_ERROR_COMPENSATE.
+    outbox: Option<Arc<Outbox>>,
 }
 
 /// Default deadline for one synchronous projector / saga / PM call.
@@ -192,6 +169,22 @@ impl<'a> FanoutTarget<'a> {
         Self {
             name,
             component_type,
+        }
+    }
+}
+
+/// What a saga/PM coordinator reported for a CASCADE call.
+#[derive(Debug, Default)]
+struct Reported {
+    reaction_errors: Vec<CascadeReactionError>,
+    executed: Vec<ExecutedCommand>,
+}
+
+impl Reported {
+    fn from_metadata(metadata: &tonic::metadata::MetadataMap) -> Self {
+        Self {
+            reaction_errors: read_reaction_errors(metadata),
+            executed: read_executed_reactions(metadata),
         }
     }
 }
@@ -243,10 +236,10 @@ impl GrpcAggregateContext {
             sync_mode: None,
             dlq_publisher: Arc::new(NoopDeadLetterPublisher),
             component_name: "aggregate".to_string(),
-            cascade_id: None,
             cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast,
             channels: Arc::new(ChannelCache::new()),
             downstream_timeout: DEFAULT_DOWNSTREAM_TIMEOUT,
+            outbox: None,
         }
     }
 
@@ -277,16 +270,6 @@ impl GrpcAggregateContext {
         self
     }
 
-    /// Set the cascade ID for 2PC atomic execution.
-    ///
-    /// When cascade_id is set, events are written with `no_commit=true` and
-    /// the cascade_id stamped on each event. This enables atomic commit/rollback
-    /// across multiple aggregates.
-    pub fn with_cascade_id(mut self, cascade_id: impl Into<String>) -> Self {
-        self.cascade_id = Some(cascade_id.into());
-        self
-    }
-
     /// Set how a failing sync fan-out target affects the command.
     pub fn with_cascade_error_mode(mut self, mode: CascadeErrorMode) -> Self {
         self.cascade_error_mode = mode;
@@ -296,6 +279,12 @@ impl GrpcAggregateContext {
     /// Share saga/PM coordinator channels across contexts.
     pub fn with_channel_cache(mut self, channels: Arc<ChannelCache>) -> Self {
         self.channels = channels;
+        self
+    }
+
+    /// Record CASCADE_ERROR_COMPENSATE Compensate notifications in `outbox`.
+    pub fn with_outbox(mut self, outbox: Arc<Outbox>) -> Self {
+        self.outbox = Some(outbox);
         self
     }
 
@@ -314,12 +303,13 @@ impl GrpcAggregateContext {
 
     /// Call one saga coordinator synchronously (CASCADE).
     ///
-    /// Returns the reaction errors a CONTINUE-mode coordinator reported.
+    /// Returns what the coordinator reported: CONTINUE-mode reaction errors
+    /// and, under COMPENSATE, the reaction commands it executed.
     async fn call_saga(
         &self,
         endpoint: &DiscoveredService,
         events: &EventBook,
-    ) -> Result<Vec<CascadeReactionError>, Status> {
+    ) -> Result<Reported, Status> {
         let channel = self.channels.channel(&endpoint.grpc_url())?;
         let mut client = SagaCoordinatorServiceClient::new(channel).with_message_limits();
         let request = self.downstream_request(
@@ -327,22 +317,21 @@ impl GrpcAggregateContext {
                 source: Some(events.clone()),
                 sync_mode: crate::proto::SyncMode::Cascade.into(),
                 cascade_error_mode: self.cascade_error_mode.into(),
-                destination_sequences: std::collections::HashMap::new(),
             },
             events.correlation_id(),
         );
         let response = client.execute(request).await?;
-        Ok(read_reaction_errors(response.metadata()))
+        Ok(Reported::from_metadata(response.metadata()))
     }
 
     /// Call one PM coordinator synchronously (CASCADE).
     ///
-    /// Returns the reaction errors a CONTINUE-mode coordinator reported.
+    /// Returns what the coordinator reported (see [`Self::call_saga`]).
     async fn call_pm(
         &self,
         endpoint: &DiscoveredService,
         events: &EventBook,
-    ) -> Result<Vec<CascadeReactionError>, Status> {
+    ) -> Result<Reported, Status> {
         let channel = self.channels.channel(&endpoint.grpc_url())?;
         let mut client = ProcessManagerCoordinatorServiceClient::new(channel).with_message_limits();
         let request = self.downstream_request(
@@ -354,13 +343,15 @@ impl GrpcAggregateContext {
             events.correlation_id(),
         );
         let response = client.handle(request).await?;
-        Ok(read_reaction_errors(response.metadata()))
+        Ok(Reported::from_metadata(response.metadata()))
     }
 
     /// Call sagas, then PMs, subscribed to this domain (CASCADE).
     ///
     /// PMs need a correlation_id to locate their state, so books without one
-    /// skip the PM leg. Failures follow [`Self::cascade_error_mode`].
+    /// skip the PM leg. Failures follow [`Self::cascade_error_mode`]; under
+    /// COMPENSATE the reaction commands the coordinators called so far
+    /// executed are compensated when one fails.
     #[tracing::instrument(name = "aggregate.sync_cascade", skip_all)]
     async fn call_sync_sagas_and_pms(
         &self,
@@ -368,20 +359,17 @@ impl GrpcAggregateContext {
         reaction_errors: &mut Vec<CascadeReactionError>,
     ) -> Result<(), Status> {
         let source_domain = events.domain();
+        let mut executed: Vec<ExecutedCommand> = Vec::new();
 
         let sagas = self
             .discovery
             .get_saga_endpoints_for_domain(source_domain)
             .await;
         for endpoint in &sagas {
-            match self.call_saga(endpoint, events).await {
-                Ok(reported) => reaction_errors.extend(reported),
-                Err(status) => {
-                    let target = FanoutTarget::new(&endpoint.name, "saga");
-                    self.record_fanout_failure(target, status, events, reaction_errors)
-                        .await?
-                }
-            }
+            let outcome = self.call_saga(endpoint, events).await;
+            let target = FanoutTarget::new(&endpoint.name, "saga");
+            self.settle_reaction(target, outcome, events, reaction_errors, &mut executed)
+                .await?;
         }
 
         if !events.correlation_id().is_empty() {
@@ -390,18 +378,63 @@ impl GrpcAggregateContext {
                 .get_pm_endpoints_for_domain(source_domain)
                 .await;
             for endpoint in &pms {
-                match self.call_pm(endpoint, events).await {
-                    Ok(reported) => reaction_errors.extend(reported),
-                    Err(status) => {
-                        let target = FanoutTarget::new(&endpoint.name, "process_manager");
-                        self.record_fanout_failure(target, status, events, reaction_errors)
-                            .await?
-                    }
-                }
+                let outcome = self.call_pm(endpoint, events).await;
+                let target = FanoutTarget::new(&endpoint.name, "process_manager");
+                self.settle_reaction(target, outcome, events, reaction_errors, &mut executed)
+                    .await?;
             }
         }
 
         Ok(())
+    }
+
+    /// Fold one saga/PM coordinator's outcome into the request: collect what
+    /// it reported, or apply the cascade error mode to its failure.
+    async fn settle_reaction(
+        &self,
+        target: FanoutTarget<'_>,
+        outcome: Result<Reported, Status>,
+        events: &EventBook,
+        reaction_errors: &mut Vec<CascadeReactionError>,
+        executed: &mut Vec<ExecutedCommand>,
+    ) -> Result<(), Status> {
+        match outcome {
+            Ok(reported) => {
+                reaction_errors.extend(reported.reaction_errors);
+                executed.extend(reported.executed);
+                Ok(())
+            }
+            Err(status) => {
+                if CascadeErrorMode::or_default_fail_fast(self.cascade_error_mode as i32)
+                    == CascadeErrorMode::CascadeErrorCompensate
+                {
+                    self.compensate_executed(executed, &target, &status).await;
+                }
+                self.record_fanout_failure(target, status, events, reaction_errors)
+                    .await
+            }
+        }
+    }
+
+    /// Record a Compensate notification for every reaction command executed
+    /// earlier in this request (CASCADE_ERROR_COMPENSATE). The failed
+    /// coordinator compensates its own executed commands.
+    async fn compensate_executed(
+        &self,
+        executed: &[ExecutedCommand],
+        target: &FanoutTarget<'_>,
+        status: &Status,
+    ) {
+        let reason = format!("{}: {}", target.name, status.message());
+        let failures = crate::orchestration::shared::record_compensations(
+            self.outbox.as_ref(),
+            executed,
+            &reason,
+        )
+        .await;
+        for failure in failures {
+            tracing::error!(%failure, "Compensate notification not recorded");
+        }
     }
 
     /// Apply the cascade error mode to one failed fan-out target.
@@ -422,10 +455,10 @@ impl GrpcAggregateContext {
             target: target.name.to_string(),
             status,
         };
-        match self.cascade_error_mode {
-            CascadeErrorMode::CascadeErrorFailFast | CascadeErrorMode::CascadeErrorCompensate => {
-                Err(failure.into_status())
-            }
+        match CascadeErrorMode::or_default_fail_fast(self.cascade_error_mode as i32) {
+            CascadeErrorMode::CascadeErrorFailFast
+            | CascadeErrorMode::CascadeErrorUnspecified
+            | CascadeErrorMode::CascadeErrorCompensate => Err(failure.into_status()),
             CascadeErrorMode::CascadeErrorContinue => {
                 reaction_errors.push(CascadeReactionError {
                     component: failure.target,
@@ -497,152 +530,10 @@ impl GrpcAggregateContext {
         }
         Ok(projections)
     }
-
-    /// C01 #1 — republish the events a Confirmation marker just resolved.
-    ///
-    /// `events` (the book passed to `post_persist`) carries the just-persisted
-    /// Confirmation page for `confirmation.cascade_id`. The sequences it
-    /// confirms were written earlier (by a DIFFERENT call, under
-    /// `no_commit=true`) and were suppressed from the bus at THAT time (O2).
-    /// Nothing else makes them visible on the bus — this is that missing
-    /// consumer-facing half of the design.
-    ///
-    /// # Why a full raw stream read
-    ///
-    /// `persist_events` already committed the Confirmation page to storage
-    /// before `post_persist` runs, so a fresh RAW read of the whole stream
-    /// sees it (no need to splice the just-persisted page back in by hand),
-    /// and ALSO sees any Revocation that might already exist for the same
-    /// `cascade_id` — needed for the #21 guard below. `get_from_to_raw` is
-    /// the deliberately-RAW seam (`EventBookRepository` module doc); this is
-    /// 2PC machinery, not a business-event consumer.
-    #[tracing::instrument(name = "aggregate.republish_confirmed", skip_all, fields(cascade_id = %confirmation.cascade_id))]
-    async fn republish_confirmed(
-        &self,
-        events: &EventBook,
-        confirmation: &Confirmation,
-    ) -> Result<(), Status> {
-        if confirmation.sequences.is_empty() {
-            return Ok(());
-        }
-        let Some(cover) = events.cover.as_ref() else {
-            return Ok(());
-        };
-        let Some(root_proto) = cover.root.as_ref() else {
-            return Ok(());
-        };
-        let domain = cover.domain.clone();
-        let edition = cover.edition().unwrap_or_default().to_string();
-        let root = Uuid::from_slice(&root_proto.value).map_err(|e| {
-            Status::internal(format!(
-                "Confirmation's own stream has invalid root UUID: {e}"
-            ))
-        })?;
-
-        let raw = self
-            .event_book_repo
-            .get_from_to_raw(&domain, &edition, root, 0, u32::MAX)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to load confirmed range: {e}")))?;
-
-        // C01 #21 (confirm-after-revoke guard): O14 already guards the
-        // REVOKE direction — the reaper rechecks for an existing commit
-        // before writing a Revocation (`cascade/reaper.rs`,
-        // `write_revocation`'s O14 recheck). Nothing guarded the reverse
-        // until now. `transform_for_two_phase` documents "revoked always
-        // wins (even if also confirmed - defensive)" — so if a Revocation
-        // for this SAME cascade_id also exists, the confirmed sequences
-        // below will resolve to NOTHING and this call would otherwise
-        // return silently, looking like a routine no-op. Surface it loudly
-        // instead: this is a split-brain cascade resolution and needs
-        // operator attention.
-        let conflicting_revocation = raw.pages.iter().find_map(|p| {
-            p.decode_typed::<Revocation>()
-                .filter(|r| r.cascade_id == confirmation.cascade_id)
-        });
-        if let Some(revocation) = conflicting_revocation {
-            tracing::error!(
-                cascade_id = %confirmation.cascade_id,
-                %domain,
-                %root,
-                confirmed_sequences = ?confirmation.sequences,
-                revoked_sequences = ?revocation.sequences,
-                "confirm-after-revoke conflict: a Revocation already exists for this \
-                 cascade_id; the confirmed sequences resolve as revoked (revoked wins) \
-                 — NOT republishing. This is a split-brain cascade resolution; \
-                 investigate the reaper/confirmer race for this cascade_id."
-            );
-            self.dead_letter_unpublished(
-                events,
-                &format!(
-                    "confirm-after-revoke conflict for cascade_id={}",
-                    confirmation.cascade_id
-                ),
-            )
-            .await;
-            return Ok(());
-        }
-
-        let resolved = transform_for_two_phase(&raw, &TwoPhaseContext::standard()).events;
-
-        // Only sequences THIS Confirmation names, that were actually
-        // provisional in storage (no double-publish of a sequence that
-        // was already committed and published at its own persist time),
-        // and that actually resolved (defensive — should always be true
-        // once the conflict check above passes).
-        let seq_set: HashSet<u32> = confirmation.sequences.iter().copied().collect();
-        let to_publish: Vec<EventPage> = resolved
-            .pages
-            .into_iter()
-            .zip(raw.pages.iter())
-            .filter(|(resolved_page, original)| {
-                seq_set.contains(&resolved_page.sequence_num())
-                    && original.no_commit
-                    && !is_noop(resolved_page)
-            })
-            .map(|(resolved_page, _)| resolved_page)
-            .collect();
-
-        if to_publish.is_empty() {
-            return Ok(());
-        }
-
-        let mut book = EventBook {
-            cover: Some(Cover {
-                domain: domain.clone(),
-                root: Some(ProtoUuid {
-                    value: root.as_bytes().to_vec(),
-                }),
-                // Matches the EventBookRepository read-path convention:
-                // correlation_id is never reconstructed from storage on a
-                // raw/range read (see `get_from_to_raw`, `get`).
-                correlation_id: String::new(),
-                edition: Some(Edition {
-                    name: edition.clone(),
-                    divergences: vec![],
-                }),
-                ext: None,
-            }),
-            pages: to_publish,
-            snapshot: None,
-            next_sequence: 0,
-        };
-        calculate_set_next_seq(&mut book);
-
-        self.event_bus
-            .publish(Arc::new(book))
-            .await
-            .map_err(|e| Status::unavailable(format!("Failed to publish confirmed events: {e}")))?;
-        Ok(())
-    }
 }
 
 #[async_trait]
 impl AggregateContext for GrpcAggregateContext {
-    fn cascade_id(&self) -> Option<&str> {
-        self.cascade_id.as_deref()
-    }
-
     #[tracing::instrument(name = "aggregate.load_events", skip_all, fields(%domain, %root))]
     async fn load_prior_events_with_divergence(
         &self,
@@ -732,7 +623,7 @@ impl AggregateContext for GrpcAggregateContext {
     ) -> Result<PersistOutcome, Status> {
         // Compute new pages: those in received but not in prior
         let prior_max_seq = prior.pages.iter().map(|p| p.sequence_num()).max();
-        let mut new_pages: Vec<_> = received
+        let new_pages: Vec<_> = received
             .pages
             .iter()
             .filter(|p| {
@@ -764,18 +655,6 @@ impl AggregateContext for GrpcAggregateContext {
 
         // Persist new events if any
         if !new_pages.is_empty() {
-            // 2PC: If cascade_id is set, stamp events with no_commit=true
-            if let Some(ref cascade_id) = self.cascade_id {
-                new_pages = new_pages
-                    .into_iter()
-                    .map(|mut page| {
-                        page.no_commit = true;
-                        page.cascade_id = Some(cascade_id.clone());
-                        page
-                    })
-                    .collect();
-            }
-
             let cover = Some(target_cover.clone());
             let events_to_persist = EventBook {
                 cover,
@@ -814,22 +693,8 @@ impl AggregateContext for GrpcAggregateContext {
         // inside snapshot_repo (single source of truth); the
         // snapshot_changed gate avoids re-writing identical bytes when
         // the handler returns the same snapshot object across calls.
-        //
-        // C01 #2: when `self.cascade_id` is set, `new_pages` above were just
-        // stamped `no_commit=true` — they are PROVISIONAL, and a Revocation
-        // may still undo them. Persisting a snapshot here would bake that
-        // unconfirmed state in permanently: a later revoke has no way to
-        // "un-snapshot" it (there is only ONE snapshot slot per aggregate;
-        // `SnapshotRepository::put` replaces it), so rehydration would
-        // silently replay events that never actually committed. Defer:
-        // skip the write here; the CONFIRMING call (which has no
-        // `cascade_id` — see `GrpcAggregateContext::with_cascade_id`) runs
-        // this same snapshot block normally and persists whatever
-        // `received.snapshot` ITS OWN business-logic response supplies,
-        // anchored at ITS OWN sequence. The reaper's revoke path
-        // (`crate::cascade::reaper::write_revocation`) deletes any snapshot
-        // that DID slip through covering a revoked sequence, as a backstop.
-        if snapshot_changed && self.cascade_id.is_none() {
+
+        if snapshot_changed {
             // Choose the sequence the snapshot represents: prefer the
             // last NEW event's seq (this snapshot reflects state through
             // it). When the handler emits a snapshot-only update with
@@ -868,15 +733,6 @@ impl AggregateContext for GrpcAggregateContext {
                      rewritten on the next state change"
                 );
             }
-        } else if snapshot_changed {
-            tracing::debug!(
-                %domain,
-                %edition,
-                %root,
-                cascade_id = %self.cascade_id.as_deref().unwrap_or(""),
-                "deferring snapshot persistence: cascade in flight (C01 #2); \
-                 will persist at the confirming call instead"
-            );
         }
 
         Ok(PersistOutcome::Persisted(EventBook {
@@ -893,19 +749,7 @@ impl AggregateContext for GrpcAggregateContext {
             return Ok(());
         }
 
-        // A Confirmation marker in `events` resolves pages an earlier command
-        // wrote provisionally (and kept off the bus). Republish those first
-        // so live subscribers see ascending sequences; the marker itself goes
-        // out with the committed book below.
-        for page in &events.pages {
-            if let Some(confirmation) = page.decode_typed::<Confirmation>() {
-                self.republish_confirmed(events, &confirmation).await?;
-            }
-        }
-
-        // Provisional (`no_commit`) pages belong to an in-flight cascade a
-        // Revocation may still undo, so the bus sees only committed pages.
-        if let Some(bus_events) = committed_only_book(events) {
+        if let Some(bus_events) = consumer_book(events) {
             self.event_bus
                 .publish(Arc::new(bus_events))
                 .await
@@ -914,19 +758,17 @@ impl AggregateContext for GrpcAggregateContext {
         Ok(())
     }
 
-    /// SIMPLE and CASCADE call sync projectors with the committed-only view
-    /// (a read model has no way to undo a revoked page). CASCADE then calls
-    /// sagas and PMs with the full book: they propagate the cascade and must
-    /// see provisional pages.
+    /// SIMPLE and CASCADE call sync projectors; CASCADE then calls sagas and
+    /// PMs.
     #[tracing::instrument(name = "aggregate.sync_fanout", skip_all)]
     async fn sync_fanout(&self, events: &EventBook) -> Result<SyncFanout, Status> {
         let Some(sync_mode) = self.sync_mode else {
             return Ok(SyncFanout::default());
         };
         let mut reaction_errors = Vec::new();
-        let projections = match committed_only_book(events) {
-            Some(committed) if should_call_sync_projectors(Some(sync_mode)) => {
-                self.call_sync_projectors(&committed, sync_mode, &mut reaction_errors)
+        let projections = match consumer_book(events) {
+            Some(book) if should_call_sync_projectors(Some(sync_mode)) => {
+                self.call_sync_projectors(&book, sync_mode, &mut reaction_errors)
                     .await?
             }
             _ => vec![],
@@ -1005,14 +847,11 @@ impl AggregateContext for GrpcAggregateContext {
         domain: &str,
         edition: &str,
         root: Uuid,
-        deferred: &AngzarrDeferredSequence,
+        source_info: &crate::storage::SourceInfo,
     ) -> Result<Option<EventBook>, Status> {
-        let Some(source_info) = super::parsing::deferred_source_info(deferred)? else {
-            return Ok(None);
-        };
         let pages = self
             .event_store
-            .find_by_source(domain, edition, root, &source_info)
+            .find_by_source(domain, edition, root, source_info)
             .await
             .map_err(|e| Status::internal(format!("Deferred idempotency lookup failed: {e}")))?;
         Ok(pages.map(|pages| build_event_book(domain, edition, root, pages, None)))

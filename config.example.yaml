@@ -111,23 +111,20 @@ transport:
 #     postgres:
 #       uri: postgres://localhost:5432/angzarr
 
+# ======================================================================
 # =============================================================================
-# Limits, saga compensation, payload offload
+# Coordinator Outbox
 # =============================================================================
-# limits:
-#   max_payload_bytes: 262144
-#   max_pages_per_book: 100
-#
-# saga_compensation:
-#   fallback_domain: angzarr.saga-failures
-#   fallback_emit_system_revocation: true
-#   fallback_send_to_dlq: false        # quarantine to dlq.targets
-#   fallback_escalate: false
-#   escalation_webhook_url: https://ops.example/hooks/angzarr
-#
-# payload_offload:                     # claim check for oversized events
-#   enabled: true
-#   type: filesystem
-#   retention_hours: 24
-#   filesystem:
-#     base_path: /var/angzarr/payloads
+# Compensation notifications (and PM commands that fail transiently after the
+# PM's events are persisted) are recorded in the coordinator's outbox and
+# delivered at least once with exponential backoff; after max_attempts the
+# entry is dead-lettered. Overrides are keyed by the coordinator's name.
+# outbox:
+#   max_attempts: 10
+#   initial_backoff_ms: 200
+#   max_backoff_ms: 30000
+#   jitter: true
+#   drain_interval_ms: 1000
+#   overrides:
+#     order-fulfillment:
+#       max_attempts: 5

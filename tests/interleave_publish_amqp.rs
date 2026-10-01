@@ -288,7 +288,6 @@ fn command_request(book: CommandBook) -> Request<CommandRequest> {
         command: Some(book),
         sync_mode: SyncMode::Async as i32,
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        cascade_id: None,
     })
 }
 

@@ -1,119 +1,18 @@
 //! Event query service.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info};
 
-use crate::orchestration::aggregate::{transform_for_two_phase, TwoPhaseContext};
 use crate::proto::{
     event_query_service_server::EventQueryService as EventQueryTrait, query::Selection,
     temporal_query::PointInTime, AggregateRoot, EventBook, Query, Uuid as ProtoUuid,
 };
-use crate::proto_ext::{CoverExt, EventPageExt};
+use crate::proto_ext::CoverExt;
 use crate::repository::{EventBookRepository, SnapshotRepository};
 use crate::storage::{EventStore, SnapshotStore};
 use crate::validation;
-
-/// Resolve 2PC visibility for EVERY book a correlation-id query returned
-/// (C01 #7).
-///
-/// `EventStore::get_by_correlation` filters at the STORAGE layer by the
-/// `correlation_id` column, bypassing `EventBookRepository` entirely — so
-/// its raw results carry unresolved `no_commit` pages, violating the
-/// framework-wide invariant that "no reader outside cascade propagation
-/// may see raw unresolved `no_commit` pages"
-/// (`src/repository/event_book/mod.rs` module doc).
-///
-/// # Why resolve per-root against the FULL stream, not the correlation slice
-///
-/// Reaper-written Revocations (and any Confirmation written the same way)
-/// carry an EMPTY `correlation_id` (`AddMeta::default()` in
-/// `cascade::reaper::write_revocation`) — they never match the
-/// correlation-id filter and so are ABSENT from `books`. Running
-/// `transform_for_two_phase` on the correlation-filtered book alone would
-/// never see the marker that resolves its own provisional pages. Each
-/// book already tells us which `(domain, edition, root)` it came from
-/// (its `cover`); fetch that root's FULL raw stream (which DOES contain
-/// the marker), resolve, then filter back down to just the sequences the
-/// correlation query originally matched — same shape as the sparse path
-/// in `EventBookRepository::get_sequences`.
-async fn resolve_correlation_books(
-    event_store: &Arc<dyn EventStore>,
-    books: Vec<EventBook>,
-) -> Vec<EventBook> {
-    let mut resolved = Vec::with_capacity(books.len());
-    for book in books {
-        resolved.push(resolve_one_correlation_book(event_store, book).await);
-    }
-    resolved
-}
-
-/// Resolve a single correlation-query book against its own full stream.
-///
-/// Fails CLOSED: if the full-stream read errors, the book is dropped to
-/// an empty (but cover-preserving) book rather than falling back to the
-/// unresolved raw pages — silently leaking raw `no_commit` pages on a
-/// storage hiccup would defeat the whole point of this fix.
-async fn resolve_one_correlation_book(
-    event_store: &Arc<dyn EventStore>,
-    book: EventBook,
-) -> EventBook {
-    let Some(cover) = book.cover.clone() else {
-        return book;
-    };
-    let Some(root_proto) = cover.root.as_ref() else {
-        return book;
-    };
-    let Ok(root_uuid) = uuid::Uuid::from_slice(&root_proto.value) else {
-        return book;
-    };
-    if book.pages.is_empty() {
-        return book;
-    }
-
-    let requested_sequences: HashSet<u32> = book.pages.iter().map(|p| p.sequence_num()).collect();
-    let domain = cover.domain.clone();
-    let edition = cover.edition().unwrap_or_default().to_string();
-
-    match event_store.get(&domain, &edition, root_uuid).await {
-        Ok(full_stream_pages) => {
-            let raw = EventBook {
-                cover: Some(cover.clone()),
-                pages: full_stream_pages,
-                ..Default::default()
-            };
-            let resolved = transform_for_two_phase(&raw, &TwoPhaseContext::standard()).events;
-            let filtered_pages = resolved
-                .pages
-                .into_iter()
-                .filter(|p| requested_sequences.contains(&p.sequence_num()))
-                .collect();
-            EventBook {
-                cover: Some(cover),
-                pages: filtered_pages,
-                snapshot: None,
-                next_sequence: book.next_sequence,
-            }
-        }
-        Err(e) => {
-            error!(
-                domain = %domain,
-                root = %root_uuid,
-                error = %e,
-                "Correlation query: full-stream 2PC resolution failed for this root; \
-                 dropping its pages rather than leaking unresolved raw pages"
-            );
-            EventBook {
-                cover: Some(cover),
-                pages: vec![],
-                snapshot: None,
-                next_sequence: book.next_sequence,
-            }
-        }
-    }
-}
 
 /// Event query service.
 ///
@@ -267,11 +166,6 @@ impl EventQueryTrait for EventQueryService {
                     Status::internal(e.to_string())
                 })?;
 
-            // C01 #7: resolve 2PC visibility per-root before returning —
-            // `get_by_correlation` bypasses `EventBookRepository` and its
-            // results carry raw unresolved `no_commit` pages otherwise.
-            let books = resolve_correlation_books(&self.event_store, books).await;
-
             // Return first matching book, or empty book if none found
             let book = books.into_iter().next().unwrap_or_default();
             info!(correlation_id = %correlation_id, pages = book.pages.len(), "GetEventBook by correlation_id completed");
@@ -328,10 +222,6 @@ impl EventQueryTrait for EventQueryService {
             tokio::spawn(async move {
                 match event_store.get_by_correlation(&correlation_id).await {
                     Ok(books) => {
-                        // C01 #7: same per-root resolution as `get_event_book`
-                        // — `get_by_correlation` results carry raw unresolved
-                        // `no_commit` pages otherwise.
-                        let books = resolve_correlation_books(&event_store, books).await;
                         for book in books {
                             if tx.send(Ok(book)).await.is_err() {
                                 break; // Client disconnected

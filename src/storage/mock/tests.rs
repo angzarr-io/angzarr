@@ -40,7 +40,6 @@ async fn test_mock_event_store_add_and_get() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }];
 
     store
@@ -88,7 +87,6 @@ async fn test_mock_event_store_get_by_correlation() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
 
     let event2 = EventPage {
@@ -101,7 +99,6 @@ async fn test_mock_event_store_get_by_correlation() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
 
     // Add events with same correlation_id across different domains
@@ -174,7 +171,6 @@ async fn test_get_until_timestamp_filters_by_created_at() {
                 seconds: 1704067200, // 2024-01-01T00:00:00Z
                 nanos: 0,
             }),
-            ..Default::default()
         },
         EventPage {
             header: Some(PageHeader {
@@ -189,7 +185,6 @@ async fn test_get_until_timestamp_filters_by_created_at() {
                 seconds: 1704153600, // 2024-01-02T00:00:00Z
                 nanos: 0,
             }),
-            ..Default::default()
         },
         EventPage {
             header: Some(PageHeader {
@@ -204,7 +199,6 @@ async fn test_get_until_timestamp_filters_by_created_at() {
                 seconds: 1704240000, // 2024-01-03T00:00:00Z
                 nanos: 0,
             }),
-            ..Default::default()
         },
     ];
     store
@@ -304,7 +298,6 @@ async fn test_get_until_timestamp_excludes_events_without_timestamp() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }];
     store
         .add(
@@ -455,7 +448,6 @@ async fn test_add_idempotency_returns_duplicate() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
 
     // First add succeeds
@@ -528,7 +520,6 @@ async fn test_add_empty_external_id_no_idempotency() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
     let event_1 = EventPage {
         header: Some(PageHeader {
@@ -540,7 +531,6 @@ async fn test_add_empty_external_id_no_idempotency() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
 
     let result1 = store
@@ -600,7 +590,6 @@ async fn test_get_next_sequence_increments_from_max() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         })
         .collect();
 
@@ -645,7 +634,6 @@ async fn test_get_next_sequence_edition_fallback() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         })
         .collect();
 
@@ -691,7 +679,6 @@ async fn test_get_next_sequence_edition_with_events() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         })
         .collect();
 
@@ -723,7 +710,6 @@ async fn test_get_next_sequence_edition_with_events() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         })
         .collect();
 
@@ -774,7 +760,6 @@ async fn test_delete_edition_events_removes_and_counts() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         })
         .collect();
 
@@ -790,7 +775,6 @@ async fn test_delete_edition_events_removes_and_counts() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         })
         .collect();
 
@@ -855,7 +839,6 @@ async fn test_delete_edition_events_scoped_correctly() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
 
     // Add to different domain/edition combinations
@@ -937,6 +920,7 @@ async fn test_find_by_source_returns_matching_events() {
         seq: 5,
         component: "saga-orders-inventory".to_string(),
         command_index: 1,
+        kind: crate::storage::ProvenanceKind::Command,
     };
 
     let event = EventPage {
@@ -949,7 +933,6 @@ async fn test_find_by_source_returns_matching_events() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
 
     store
@@ -991,6 +974,7 @@ async fn test_find_by_source_returns_none_for_mismatch() {
         seq: 5,
         component: "saga-orders-inventory".to_string(),
         command_index: 1,
+        kind: crate::storage::ProvenanceKind::Command,
     };
 
     let event = EventPage {
@@ -1003,7 +987,6 @@ async fn test_find_by_source_returns_none_for_mismatch() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
 
     store
@@ -1030,6 +1013,7 @@ async fn test_find_by_source_returns_none_for_mismatch() {
         seq: 99, // Different sequence
         component: "saga-orders-inventory".to_string(),
         command_index: 1,
+        kind: crate::storage::ProvenanceKind::Command,
     };
 
     let result = store
@@ -1052,6 +1036,7 @@ async fn test_find_by_source_empty_source_returns_none() {
         seq: 0,
         component: String::new(),
         command_index: 0,
+        kind: crate::storage::ProvenanceKind::Command,
     };
 
     let result = store
@@ -1076,6 +1061,7 @@ async fn test_find_by_source_checks_all_fields() {
         seq: 5,
         component: "saga-orders-inventory".to_string(),
         command_index: 1,
+        kind: crate::storage::ProvenanceKind::Command,
     };
 
     let event = EventPage {
@@ -1088,7 +1074,6 @@ async fn test_find_by_source_checks_all_fields() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
 
     store
@@ -1184,73 +1169,6 @@ async fn test_find_by_source_checks_all_fields() {
 }
 
 // ============================================================================
-// query_stale_cascades Tests
-// ============================================================================
-
-/// query_stale_cascades uses strict less-than for timestamp comparison.
-///
-/// Events created exactly at the threshold should NOT be considered stale.
-#[tokio::test]
-async fn test_query_stale_cascades_timestamp_boundary() {
-    let store = MockEventStore::new();
-    let root = Uuid::new_v4();
-
-    // Create event exactly at threshold timestamp
-    let threshold_ts = prost_types::Timestamp {
-        seconds: 1704067200, // 2024-01-01T00:00:00Z
-        nanos: 0,
-    };
-
-    let event = EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(0)),
-        }),
-        payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
-            type_url: "test.Event".to_string(),
-            value: vec![],
-        })),
-        created_at: Some(threshold_ts),
-        no_commit: true,
-        cascade_id: Some("cascade-boundary".to_string()),
-    };
-
-    store
-        .add(
-            "orders",
-            "angzarr",
-            root,
-            vec![event],
-            &AddMeta {
-                correlation_id: "",
-                external_id: None,
-                source_info: None,
-                ext: None,
-            },
-        )
-        .await
-        .unwrap();
-
-    // Query with same timestamp as event - event should NOT be stale (< not <=)
-    let stale = store
-        .query_stale_cascades("2024-01-01T00:00:00Z")
-        .await
-        .unwrap();
-    assert!(
-        stale.is_empty(),
-        "Event at threshold should not be stale (uses < not <=)"
-    );
-
-    // Query with later timestamp - event should be stale
-    let stale = store
-        .query_stale_cascades("2024-01-01T00:00:01Z")
-        .await
-        .unwrap();
-    assert_eq!(stale.len(), 1);
-    assert_eq!(stale[0], "cascade-boundary");
-}
-
-// ============================================================================
 // H-24: mock event_store must reject duplicate/overlap sequences
 // ============================================================================
 //
@@ -1278,7 +1196,6 @@ fn h24_event(seq: u32) -> EventPage {
             value: vec![seq as u8],
         })),
         created_at: None,
-        ..Default::default()
     }
 }
 

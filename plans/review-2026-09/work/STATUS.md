@@ -29,3 +29,17 @@ X-124 | fixed | angzarr-cli a1ea10c | ANZ013 on split runs + strategy: all docum
 X-152 | fixed | angzarr-cli 66153ba | README + developer guide rewritten
 X-175 | fixed (cli part) | angzarr-cli 88fc8aa | version stamped (l11); no fixed /tmp files; router/examples parts not in scope
 X-186 | fixed | angzarr-cli 47c0158, d0498bd, 18d335c, 0a4a04e | F9-F15, F18 (comments, ANZ001, helpers, cppQuote, include, snakeToPascal)
+X-038 | fixed | angzarr-router deb6d3f, 359ed97, 7921e82, 42a46a3, b3c6896, ffc65c5, 6b00290, 315e3ab | ROUTER-01: per-component host state in all 6 bindings + identity PM routing; co-resident PM conformance
+X-098 | fixed | angzarr-router deb6d3f, 359ed97 | ROUTER-02: PM rejections route by issuer/pm_domain, never fan out
+X-024 | fixed (router part) | angzarr-router 9e74f78, c75075e | ROUTER-03: first escalation wins in compensator fan-out; client-rust part not in router
+X-121 | fixed | angzarr-router d5a82ab, 6392b7b, ec84425 | ROUTER-04: idempotent close Java/TS; C# SafeHandle
+X-120 | fixed | angzarr-router d793097, 6a9ef25, c3403f6, 237d4d5, f7816eb, 1bcba01 | ROUTER-05: ABI check in all bindings
+X-130 | fixed | angzarr-router b4fd75f, 821efc3 | ROUTER-06: registry.rs in mutation set; 196/196 then 257 mutants, survivors killed
+X-118 | fixed | angzarr-router c87f34c, 850cdae | ROUTER-07: docs true to code; client-rust planned on Rust-native API
+X-166 | fixed | angzarr-router 40cbca2 | ROUTER-13
+X-176 | fixed | angzarr-router e1ee937 | ROUTER-15
+X-184 | fixed | angzarr-router 8ee881e, 7261418, a2efee3, f4e6ced, 2801c76, 54e0fe7, 6c92268 | ROUTER-08/09/10/11/12/14; register out-Status not added (ABI change)
+X-185 | fixed | angzarr-router ac5b41b, b2bb90e, 50dbd93 | ROUTER-19
+X-187 | fixed (router part) | angzarr-router 00c53f9, 6772e9c, a8011ef, 0aec12c, 0c9265a, 2225a87, e00ea1c, faa8b99 | ROUTER-16
+X-198 | fixed | angzarr-router c87f34c, 764e23a | ROUTER-17
+X-175 | blocked (router part) | - | ROUTER-18: no published toolchain tag set runs the recipes (go/java :latest lack angzarr CLI/JDK25, cpp lacks Catch2, only rust:v0.5.1-97 has cargo-mutants); needs angzarr-project image republish

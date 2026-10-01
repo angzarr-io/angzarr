@@ -115,6 +115,7 @@ pub mod schema {
             source_seq     INTEGER,
             source_component VARCHAR(64),
             source_command_index INTEGER,
+            source_kind    VARCHAR(32),
             ext            BLOB,
             PRIMARY KEY (domain, edition, root, sequence)
         )

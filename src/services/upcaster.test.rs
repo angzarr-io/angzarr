@@ -56,7 +56,6 @@ async fn test_upcaster_passthrough_when_disabled() {
         }),
         created_at: None,
         payload: None,
-        ..Default::default()
     }];
 
     let result = upcaster.upcast("test", events.clone()).await.unwrap();

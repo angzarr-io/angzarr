@@ -67,7 +67,6 @@ impl GrpcCommandExecutor {
             command: Some(command_book),
             sync_mode: sync_mode.into(),
             cascade_error_mode: crate::proto::CascadeErrorMode::CascadeErrorFailFast.into(),
-            cascade_id: None,
         };
         client
             .handle_command(correlated_request(sync_command, &correlation_id))
@@ -93,6 +92,26 @@ impl CommandExecutor for GrpcCommandExecutor {
                 message: e.message().to_string(),
             },
         }
+    }
+}
+
+#[async_trait]
+impl crate::orchestration::outbox::CompensationSender for GrpcCommandExecutor {
+    async fn handle_compensation(
+        &self,
+        envelope: CommandBook,
+    ) -> Result<crate::proto::BusinessResponse, tonic::Status> {
+        let domain = envelope.domain().to_string();
+        let client = self.clients.get(&domain).ok_or_else(|| {
+            tonic::Status::unavailable(format!("{}: {}", errmsg::NO_AGGREGATE_FOR_DOMAIN, domain))
+        })?;
+        let mut client = client.lock().await.clone();
+        client
+            .handle_compensation(
+                crate::orchestration::outbox::delivery::compensation_request(envelope),
+            )
+            .await
+            .map(tonic::Response::into_inner)
     }
 }
 

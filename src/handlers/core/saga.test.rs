@@ -12,10 +12,9 @@
 
 use super::*;
 use crate::orchestration::command::{CommandExecutor, CommandOutcome};
-use crate::orchestration::destination::DestinationFetcher;
 use crate::orchestration::saga::{SagaContextFactory, SagaRetryContext};
 use crate::orchestration::FactExecutor;
-use crate::proto::{CommandBook, Cover, EventBook, SyncMode};
+use crate::proto::{CommandBook, EventBook, SyncMode};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -54,23 +53,6 @@ impl CommandExecutor for MockCommandExecutor {
     }
 }
 
-struct MockDestinationFetcher;
-
-#[async_trait]
-impl DestinationFetcher for MockDestinationFetcher {
-    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
-        unimplemented!("Not needed for constructor tests")
-    }
-
-    async fn fetch_by_correlation(
-        &self,
-        _domain: &str,
-        _correlation_id: &str,
-    ) -> Result<Option<EventBook>, tonic::Status> {
-        unimplemented!("Not needed for constructor tests")
-    }
-}
-
 struct MockFactExecutor;
 
 #[async_trait]
@@ -94,7 +76,7 @@ fn test_from_factory_stores_context_factory() {
     let factory: Arc<dyn SagaContextFactory> = Arc::new(MockSagaContextFactory::new("test-saga"));
     let executor: Arc<dyn CommandExecutor> = Arc::new(MockCommandExecutor);
 
-    let handler = SagaEventHandler::from_factory(factory.clone(), executor, None);
+    let handler = SagaEventHandler::from_factory(factory.clone(), executor);
 
     assert_eq!(handler.context_factory.name(), "test-saga");
 }
@@ -105,33 +87,10 @@ fn test_from_factory_stores_command_executor() {
     let factory: Arc<dyn SagaContextFactory> = Arc::new(MockSagaContextFactory::new("saga"));
     let executor: Arc<dyn CommandExecutor> = Arc::new(MockCommandExecutor);
 
-    let handler = SagaEventHandler::from_factory(factory, executor, None);
+    let handler = SagaEventHandler::from_factory(factory, executor);
 
     // Executor is stored - we can't easily verify but construction succeeds
     assert!(handler.command_bus.is_none());
-}
-
-/// from_factory with destination fetcher stores it.
-#[test]
-fn test_from_factory_with_destination_fetcher() {
-    let factory: Arc<dyn SagaContextFactory> = Arc::new(MockSagaContextFactory::new("saga"));
-    let executor: Arc<dyn CommandExecutor> = Arc::new(MockCommandExecutor);
-    let fetcher: Arc<dyn DestinationFetcher> = Arc::new(MockDestinationFetcher);
-
-    let handler = SagaEventHandler::from_factory(factory, executor, Some(fetcher));
-
-    assert!(handler.destination_fetcher.is_some());
-}
-
-/// from_factory without destination fetcher has None.
-#[test]
-fn test_from_factory_without_destination_fetcher() {
-    let factory: Arc<dyn SagaContextFactory> = Arc::new(MockSagaContextFactory::new("saga"));
-    let executor: Arc<dyn CommandExecutor> = Arc::new(MockCommandExecutor);
-
-    let handler = SagaEventHandler::from_factory(factory, executor, None);
-
-    assert!(handler.destination_fetcher.is_none());
 }
 
 /// from_factory sets default backoff.
@@ -140,7 +99,7 @@ fn test_from_factory_sets_default_backoff() {
     let factory: Arc<dyn SagaContextFactory> = Arc::new(MockSagaContextFactory::new("saga"));
     let executor: Arc<dyn CommandExecutor> = Arc::new(MockCommandExecutor);
 
-    let handler = SagaEventHandler::from_factory(factory, executor, None);
+    let handler = SagaEventHandler::from_factory(factory, executor);
 
     // Can't directly inspect backoff, but we can verify it builds
     let _ = handler.backoff;
@@ -156,7 +115,7 @@ fn test_default_error_propagation_is_at_least_once() {
     let factory: Arc<dyn SagaContextFactory> = Arc::new(MockSagaContextFactory::new("saga"));
     let executor: Arc<dyn CommandExecutor> = Arc::new(MockCommandExecutor);
 
-    let handler = SagaEventHandler::from_factory(factory.clone(), executor.clone(), None);
+    let handler = SagaEventHandler::from_factory(factory.clone(), executor.clone());
     assert!(
         handler.propagate_errors,
         "from_factory must default to propagate_errors=true (at-least-once, D-3)"
@@ -165,7 +124,6 @@ fn test_default_error_propagation_is_at_least_once() {
     let handler = SagaEventHandler::from_factory_with_validator(
         factory,
         executor,
-        None,
         None,
         None,
         None,
@@ -183,7 +141,7 @@ fn test_from_factory_optional_fields_none() {
     let factory: Arc<dyn SagaContextFactory> = Arc::new(MockSagaContextFactory::new("saga"));
     let executor: Arc<dyn CommandExecutor> = Arc::new(MockCommandExecutor);
 
-    let handler = SagaEventHandler::from_factory(factory, executor, None);
+    let handler = SagaEventHandler::from_factory(factory, executor);
 
     assert!(handler.command_bus.is_none());
     assert!(handler.fact_executor.is_none());
@@ -204,7 +162,6 @@ fn test_from_factory_with_validator_stores_fact_executor() {
     let handler = SagaEventHandler::from_factory_with_validator(
         factory,
         executor,
-        None,
         None,
         Some(fact_executor),
         None,
@@ -227,7 +184,6 @@ fn test_from_factory_with_validator_stores_validator() {
         executor,
         None,
         None,
-        None,
         Some(validator),
         saga_backoff(),
     );
@@ -240,7 +196,6 @@ fn test_from_factory_with_validator_stores_validator() {
 fn test_from_factory_with_validator_all_options() {
     let factory: Arc<dyn SagaContextFactory> = Arc::new(MockSagaContextFactory::new("full-saga"));
     let executor: Arc<dyn CommandExecutor> = Arc::new(MockCommandExecutor);
-    let fetcher: Arc<dyn DestinationFetcher> = Arc::new(MockDestinationFetcher);
     let fact_executor: Arc<dyn FactExecutor> = Arc::new(MockFactExecutor);
     // OutputDomainValidator is a type alias for a closure
     let validator: Arc<OutputDomainValidator> = Arc::new(|_cmd: &CommandBook| Ok(()));
@@ -249,13 +204,11 @@ fn test_from_factory_with_validator_all_options() {
         factory,
         executor,
         None, // command_bus
-        Some(fetcher),
         Some(fact_executor),
         Some(validator),
         saga_backoff(),
     );
 
-    assert!(handler.destination_fetcher.is_some());
     assert!(handler.fact_executor.is_some());
     assert!(handler.output_domain_validator.is_some());
     assert_eq!(handler.context_factory.name(), "full-saga");
@@ -273,7 +226,6 @@ fn test_from_factory_with_validator_custom_backoff() {
     let handler = SagaEventHandler::from_factory_with_validator(
         factory,
         executor,
-        None,
         None,
         None,
         None,

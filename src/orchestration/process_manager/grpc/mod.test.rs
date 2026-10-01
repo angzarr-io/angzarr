@@ -51,7 +51,6 @@ fn pm_book(pm_domain: &str, pm_root: Uuid, correlation_id: &str, sequences: &[u3
                     value: vec![],
                 })),
                 created_at: None,
-                ..Default::default()
             })
             .collect(),
         snapshot: None,
@@ -421,7 +420,7 @@ async fn persisted_trigger_is_recognised_by_its_provenance() {
         "pm".to_string(),
         Arc::new(crate::dlq::NoopDeadLetterPublisher),
         "pm-flow".to_string(),
-        Arc::new(crate::orchestration::process_manager::outbox::InMemoryCommandOutbox::new()),
+        None,
     );
     assert!(!ctx.trigger_handled(&trigger, "", "corr").await.unwrap());
 

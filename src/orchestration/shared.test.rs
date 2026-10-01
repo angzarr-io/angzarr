@@ -207,7 +207,7 @@ fn test_correlation_root_distinct_friendly_ids_get_distinct_roots() {
 }
 
 // ============================================================================
-// Reaction errors and Compensate markers
+// Reaction errors, executed reactions and compensation recording
 // ============================================================================
 
 #[test]
@@ -272,6 +272,10 @@ fn produced(domain: &str, sequences: &[u32]) -> EventBook {
                     sync_mode: None,
                     sequence_type: Some(SequenceType::Sequence(*seq)),
                 }),
+                payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
+                    type_url: "/inventory.StockReserved".into(),
+                    value: vec![9; 64],
+                })),
                 ..Default::default()
             })
             .collect(),
@@ -279,53 +283,284 @@ fn produced(domain: &str, sequences: &[u32]) -> EventBook {
     }
 }
 
-#[test]
-fn test_compensate_marker_lists_produced_sequences_idempotently() {
+/// A deferred command from ReserveSaga (triggered by order) to `domain`.
+fn deferred_to(domain: &str, command_index: u32) -> CommandBook {
+    use crate::proto::{
+        command_page, page_header::SequenceType, AngzarrDeferredSequence, CommandPage, PageHeader,
+    };
+    CommandBook {
+        cover: Some(Cover {
+            domain: domain.into(),
+            root: Some(crate::proto::Uuid { value: vec![7; 16] }),
+            correlation_id: "corr-1".into(),
+            ..Default::default()
+        }),
+        pages: vec![CommandPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(SequenceType::AngzarrDeferred(AngzarrDeferredSequence {
+                    source: Some(Cover {
+                        domain: "order".into(),
+                        root: Some(crate::proto::Uuid { value: vec![1; 16] }),
+                        ..Default::default()
+                    }),
+                    source_seq: 0,
+                    source_component: "ReserveSaga".into(),
+                    command_index,
+                })),
+            }),
+            payload: Some(command_page::Payload::Command(prost_types::Any {
+                type_url: "/inventory.ReserveStock".into(),
+                value: vec![3; 64],
+            })),
+            merge_strategy: 0,
+        }],
+    }
+}
+
+fn compensate_of(entry: &crate::orchestration::outbox::OutboxEntry) -> crate::proto::Compensate {
     use prost::Message;
-    let marker = compensate_marker(&produced("inventory", &[4, 5]), "ReserveSaga", "declined")
-        .expect("events to compensate");
-    let again =
-        compensate_marker(&produced("inventory", &[4, 5]), "ReserveSaga", "declined").unwrap();
-    assert_eq!(
-        marker, again,
-        "redelivered compensation dedupes on external_id"
-    );
-    assert_eq!(marker.cover.as_ref().unwrap().domain, "inventory");
-    let page = &marker.pages[0];
-    let Some(crate::proto::page_header::SequenceType::ExternalDeferred(ext)) =
-        page.header.as_ref().unwrap().sequence_type.as_ref()
-    else {
-        panic!("fact marker expected");
-    };
-    assert!(ext.external_id.contains("ReserveSaga"));
-    assert!(ext.external_id.ends_with("4,5"));
-    let Some(crate::proto::event_page::Payload::Event(any)) = page.payload.as_ref() else {
-        panic!("payload");
-    };
-    assert_eq!(any.type_url, crate::proto_ext::type_url::COMPENSATE);
-    let compensate = crate::proto::Compensate::decode(any.value.as_slice()).unwrap();
-    assert_eq!(compensate.sequences, vec![4, 5]);
-    assert_eq!(compensate.reason, "declined");
-    assert_eq!(compensate.target.unwrap().domain, "inventory");
+    let notification =
+        crate::orchestration::compensation::envelope_notification(&entry.book).unwrap();
+    crate::proto::Compensate::decode(notification.payload.unwrap().value.as_slice()).unwrap()
 }
 
+/// Executed reactions travel in response metadata without payload bytes:
+/// the command keeps its cover, provenance and type; its events keep their
+/// sequences.
 #[test]
-fn test_compensate_marker_skips_commands_without_events() {
-    assert!(compensate_marker(&produced("inventory", &[]), "S", "r").is_none());
-    assert!(compensate_marker(&EventBook::default(), "S", "r").is_none());
+fn test_executed_reactions_round_trip_through_response_metadata() {
+    let executed = vec![
+        ExecutedCommand {
+            command: deferred_to("inventory", 0),
+            events: Some(produced("inventory", &[4, 5])),
+        },
+        ExecutedCommand {
+            command: deferred_to("shipping", 1),
+            events: None,
+        },
+    ];
+    let mut response = tonic::Response::new(());
+    attach_executed_reactions(&mut response, &executed);
+
+    let read = read_executed_reactions(response.metadata());
+    assert_eq!(read.len(), 2);
+    assert_eq!(read[0].command.cover, executed[0].command.cover);
+    assert_eq!(
+        read[0].command.pages[0].header,
+        executed[0].command.pages[0].header
+    );
+    let Some(crate::proto::command_page::Payload::Command(any)) =
+        read[0].command.pages[0].payload.as_ref()
+    else {
+        panic!("command payload kept");
+    };
+    assert_eq!(any.type_url, "/inventory.ReserveStock");
+    assert!(any.value.is_empty(), "payload bytes are dropped");
+    let events = read[0].events.as_ref().unwrap();
+    let sequences: Vec<u32> = events
+        .pages
+        .iter()
+        .map(crate::proto_ext::EventPageExt::sequence_num)
+        .collect();
+    assert_eq!(sequences, vec![4, 5]);
+    assert!(events.pages.iter().all(|p| p.payload.is_none()));
+    assert_eq!(
+        read[1].events, None,
+        "a command without events reads back without"
+    );
+
+    let mut empty = tonic::Response::new(());
+    attach_executed_reactions(&mut empty, &[]);
+    assert!(empty
+        .metadata()
+        .get_bin(EXECUTED_REACTIONS_METADATA)
+        .is_none());
+    assert!(read_executed_reactions(empty.metadata()).is_empty());
 }
 
-/// Without a fact executor the markers cannot be written; every one is
-/// reported instead of silently dropped.
+/// A rejected deferred command's RejectionNotification is recorded and
+/// delivered to the command's source.
 #[tokio::test]
-async fn test_write_compensate_markers_reports_missing_executor() {
-    let failures = write_compensate_markers(
-        None,
-        &[produced("inventory", &[1]), produced("shipping", &[2])],
-        "S",
-        "r",
-    )
-    .await;
+async fn test_record_rejection_routes_to_the_source() {
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("S");
+
+    record_rejection(Some(&outbox), &deferred_to("payment", 0), "card declined")
+        .await
+        .unwrap();
+
+    let attempted = deliverer.attempted();
+    assert_eq!(attempted.len(), 1);
+    assert_eq!(
+        attempted[0].kind,
+        crate::storage::ProvenanceKind::RejectionNotification
+    );
+    assert_eq!(
+        crate::proto_ext::CoverExt::domain(&attempted[0].book),
+        "order"
+    );
+}
+
+/// A command without provenance has no source; nothing is recorded.
+#[tokio::test]
+async fn test_record_rejection_without_provenance_records_nothing() {
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("S");
+    let mut command = deferred_to("payment", 0);
+    command.pages[0].header = None;
+
+    record_rejection(Some(&outbox), &command, "card declined")
+        .await
+        .unwrap();
+    record_rejection(None, &deferred_to("payment", 0), "card declined")
+        .await
+        .unwrap();
+
+    assert!(deliverer.attempted().is_empty());
+    assert!(outbox.open_keys().await.is_empty());
+}
+
+/// COMPENSATE records one Compensate per executed command, to its target,
+/// with the failure as the reason.
+#[tokio::test]
+async fn test_record_compensations_one_per_executed_command() {
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("S");
+    let executed = vec![
+        ExecutedCommand {
+            command: deferred_to("inventory", 0),
+            events: Some(produced("inventory", &[4])),
+        },
+        ExecutedCommand {
+            command: deferred_to("shipping", 1),
+            events: None,
+        },
+    ];
+
+    let failures = record_compensations(Some(&outbox), &executed, "payment: card declined").await;
+
+    assert!(failures.is_empty());
+    let attempted = deliverer.attempted();
+    assert_eq!(attempted.len(), 2);
+    assert_eq!(
+        crate::proto_ext::CoverExt::domain(&attempted[0].book),
+        "inventory"
+    );
+    assert_eq!(
+        crate::proto_ext::CoverExt::domain(&attempted[1].book),
+        "shipping"
+    );
+    let first = compensate_of(&attempted[0]);
+    assert_eq!(first.sequences, vec![4]);
+    assert_eq!(first.reason, "payment: card declined");
+    assert_eq!(first.command_type, "inventory.ReserveStock");
+}
+
+/// Without an outbox every Compensate is reported, never silently dropped.
+#[tokio::test]
+async fn test_record_compensations_reports_missing_outbox() {
+    let executed = vec![
+        ExecutedCommand {
+            command: deferred_to("inventory", 0),
+            events: None,
+        },
+        ExecutedCommand {
+            command: deferred_to("shipping", 1),
+            events: None,
+        },
+    ];
+    let failures = record_compensations(None, &executed, "r").await;
     assert_eq!(failures.len(), 2);
     assert!(failures[0].starts_with("inventory"));
+}
+
+fn undelivered_payment() -> UndeliveredCommand {
+    UndeliveredCommand {
+        command: deferred_to("payment", 2),
+        code: tonic::Code::FailedPrecondition,
+        reason: "card declined".into(),
+    }
+}
+
+/// COMPENSATE fails the orchestration with the failure's reason after
+/// recording Compensates for the executed commands; FAIL_FAST records none.
+#[tokio::test]
+async fn test_settle_delivery_compensate_and_fail_fast() {
+    use super::super::command::DeliveryPolicy;
+    let executed = vec![ExecutedCommand {
+        command: deferred_to("inventory", 0),
+        events: None,
+    }];
+
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("S");
+    let err = settle_delivery(
+        DeliveryPolicy::Compensate,
+        "ChargeSaga",
+        &[undelivered_payment()],
+        &executed,
+        Some(&outbox),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("card declined"));
+    assert_eq!(deliverer.attempted().len(), 1);
+
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("S");
+    let err = settle_delivery(
+        DeliveryPolicy::FailFast,
+        "ChargeSaga",
+        &[undelivered_payment()],
+        &executed,
+        Some(&outbox),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("card declined"));
+    assert!(
+        deliverer.attempted().is_empty(),
+        "FAIL_FAST records no Compensate"
+    );
+
+    let err = settle_delivery(
+        DeliveryPolicy::Compensate,
+        "ChargeSaga",
+        &[undelivered_payment()],
+        &executed,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("Compensate notifications not recorded"));
+}
+
+/// CONTINUE reports each failure; DEAD_LETTER and bus-driven delivery
+/// succeed silently; nothing undelivered is a success.
+#[tokio::test]
+async fn test_settle_delivery_continue_dead_letter_and_clean() {
+    use super::super::command::DeliveryPolicy;
+    let continued = settle_delivery(
+        DeliveryPolicy::Continue,
+        "ChargeSaga",
+        &[undelivered_payment()],
+        &[],
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(continued.len(), 1);
+    assert_eq!(continued[0].message, "card declined");
+    for policy in [DeliveryPolicy::DeadLetter, DeliveryPolicy::Background] {
+        assert!(
+            settle_delivery(policy, "S", &[undelivered_payment()], &[], None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    assert!(
+        settle_delivery(DeliveryPolicy::FailFast, "S", &[], &[], None)
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }

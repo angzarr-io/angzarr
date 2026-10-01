@@ -375,7 +375,7 @@ required-features = ["test-utils"]
 
 # --- Deployed-cluster acceptance harness (T14) ---
 # Cucumber-rs harness against features/acceptance/end_to_end.feature, driving
-# a DEPLOYED angzarr system (kind + skaffold poker examples) through the
+# a DEPLOYED angzarr system (kind + skaffold blackjack examples) through the
 # public gRPC surface via the tests/common fixture layer. Opt-in: exits 0
 # unless ANGZARR_ACCEPTANCE=1 so plain `cargo test` needs no cluster. The
 # compensation_* features still need harness coverage (saga topology).

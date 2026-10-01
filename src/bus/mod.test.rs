@@ -27,7 +27,6 @@ fn make_event_book(domain: &str, event_types: &[&str]) -> EventBook {
                     type_url: format!("type.googleapis.com/example.{}", et),
                     value: vec![],
                 })),
-                ..Default::default()
             })
             .collect(),
         snapshot: None,

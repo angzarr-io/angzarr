@@ -18,6 +18,7 @@
 
 use super::*;
 use crate::proto::{event_page, page_header, EventPage, PageHeader, SequenceRange, TemporalQuery};
+use crate::proto_ext::EventPageExt;
 use crate::storage::mock::{MockEventStore, MockSnapshotStore};
 use crate::storage::AddMeta;
 use prost_types::{Any, Timestamp};
@@ -96,7 +97,6 @@ async fn test_get_event_book_with_data() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }];
     event_store
         .add(
@@ -210,7 +210,6 @@ async fn test_get_event_book_with_range() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
             .add(
@@ -303,7 +302,6 @@ async fn test_get_events_with_data() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }];
     event_store
         .add(
@@ -426,7 +424,6 @@ async fn test_get_aggregate_roots_with_data() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
     event_store
         .add(
@@ -483,7 +480,6 @@ async fn test_get_aggregate_roots_multiple_domains() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
     event_store
         .add(
@@ -549,7 +545,6 @@ async fn test_get_event_book_by_correlation_id() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }];
     event_store
         .add(
@@ -633,7 +628,6 @@ async fn test_get_events_by_correlation_id_multiple_aggregates() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
             .add(
@@ -699,7 +693,6 @@ async fn test_get_event_book_temporal_by_time() {
                 seconds: 1704067200, // 2024-01-01T00:00:00Z
                 nanos: 0,
             }),
-            ..Default::default()
         },
         EventPage {
             header: Some(PageHeader {
@@ -714,7 +707,6 @@ async fn test_get_event_book_temporal_by_time() {
                 seconds: 1704153600, // 2024-01-02T00:00:00Z
                 nanos: 0,
             }),
-            ..Default::default()
         },
         EventPage {
             header: Some(PageHeader {
@@ -729,7 +721,6 @@ async fn test_get_event_book_temporal_by_time() {
                 seconds: 1704240000, // 2024-01-03T00:00:00Z
                 nanos: 0,
             }),
-            ..Default::default()
         },
     ];
     event_store
@@ -795,7 +786,6 @@ async fn test_get_event_book_temporal_by_sequence() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
             .add(
@@ -890,7 +880,6 @@ async fn test_get_event_book_returns_all_events_despite_snapshot() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }];
     event_store
         .add(
@@ -977,7 +966,6 @@ async fn test_get_event_book_with_sequences() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
             .add(
@@ -1151,7 +1139,6 @@ async fn test_dispatch_selection_range_upper_is_inclusive() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
             .add(
@@ -1222,7 +1209,6 @@ async fn test_dispatch_selection_matches_get_event_book_on_same_range() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
             .add(
@@ -1311,7 +1297,6 @@ async fn test_dispatch_selection_range_upper_none_returns_to_latest() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
             .add(
@@ -1353,272 +1338,6 @@ async fn test_dispatch_selection_range_upper_none_returns_to_latest() {
     .expect("range query must succeed");
 
     assert_eq!(book.pages.len(), 4, "upper: None means 'to latest'");
-}
-
-// ============================================================================
-// C01 #7: correlation-id query 2PC visibility resolution
-// ============================================================================
-//
-// `EventStore::get_by_correlation` filters at the STORAGE layer by the
-// `correlation_id` column, bypassing `EventBookRepository` entirely. Its raw
-// results carried unresolved `no_commit` pages — a still-pending or already
-// REVOKED provisional business event, verbatim — to any correlation-id
-// caller (typically a saga/PM reconstructing cross-domain workflow state).
-// These tests pin the fix: `get_event_book`/`get_events`'s correlation
-// branch now resolves each returned book against ITS OWN root's full
-// stream before returning.
-
-/// Reaper-style Revocation marker: `no_commit=false`, but written with
-/// `AddMeta::default()` (empty correlation_id) — exactly how
-/// `cascade::reaper::write_revocation` persists it. This is WHY resolution
-/// must happen per-root against the full stream rather than within the
-/// correlation-filtered slice: the marker below would never be selected by
-/// `WHERE correlation_id = ?` and so is invisible to a naive "transform the
-/// correlation slice" approach.
-fn revocation_page(seq: u32, cascade_id: &str, revoked: Vec<u32>) -> EventPage {
-    use crate::proto::Revocation;
-    let rev = Revocation {
-        target: None,
-        sequences: revoked,
-        cascade_id: cascade_id.to_string(),
-        reason: "reaper-timeout".to_string(),
-    };
-    EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(page_header::SequenceType::Sequence(seq)),
-        }),
-        payload: Some(event_page::Payload::Event(Any {
-            type_url: crate::proto_ext::type_url::REVOCATION.to_string(),
-            value: prost::Message::encode_to_vec(&rev),
-        })),
-        ..Default::default()
-    }
-}
-
-/// Confirmation marker, same empty-correlation-id shape as the Revocation
-/// helper above.
-fn confirmation_page(seq: u32, cascade_id: &str, confirmed: Vec<u32>) -> EventPage {
-    use crate::proto::Confirmation;
-    let conf = Confirmation {
-        target: None,
-        sequences: confirmed,
-        cascade_id: cascade_id.to_string(),
-    };
-    EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(page_header::SequenceType::Sequence(seq)),
-        }),
-        payload: Some(event_page::Payload::Event(Any {
-            type_url: crate::proto_ext::type_url::CONFIRMATION.to_string(),
-            value: prost::Message::encode_to_vec(&conf),
-        })),
-        ..Default::default()
-    }
-}
-
-/// A correlation-id query must NEVER hand back a raw, unresolved,
-/// REVOKED `no_commit` page. Pre-fix: `get_event_book`'s correlation branch
-/// returned `event_store.get_by_correlation`'s result untouched — the
-/// caller would see the cancelled business event's real payload as if it
-/// were live.
-#[tokio::test]
-async fn test_get_event_book_by_correlation_id_withholds_revoked_provisional_page() {
-    let (service, event_store, _) = create_default_test_service();
-    let root = uuid::Uuid::new_v4();
-    let correlation_id = "corr-revoked";
-
-    // The provisional business event: carries the correlation_id (a real
-    // client command would stamp this).
-    let provisional = crate::test_utils::make_uncommitted_event_page(0, "cascade-x");
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![provisional],
-            &AddMeta {
-                correlation_id,
-                external_id: None,
-                source_info: None,
-                ext: None,
-            },
-        )
-        .await
-        .unwrap();
-
-    // The Revocation marker that resolves it: reaper-written, so it
-    // carries NO correlation_id — invisible to the correlation filter.
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![revocation_page(1, "cascade-x", vec![0])],
-            &AddMeta::default(),
-        )
-        .await
-        .unwrap();
-
-    let query = Query {
-        cover: Some(crate::proto::Cover {
-            domain: String::new(),
-            root: None,
-            correlation_id: correlation_id.to_string(),
-            edition: None,
-            ext: None,
-        }),
-        selection: None,
-    };
-
-    let response = service.get_event_book(Request::new(query)).await;
-    assert!(response.is_ok());
-    let book = response.unwrap().into_inner();
-
-    // Only sequence 0 was ever stamped with this correlation_id, so the
-    // resolved book has exactly one page — but it must be the withheld
-    // NoOp placeholder, not the raw "test.Event0" payload.
-    assert_eq!(book.pages.len(), 1);
-    let page = &book.pages[0];
-    assert_ne!(
-        page.type_url(),
-        Some("test.Event0"),
-        "correlation query must not return the raw revoked business event"
-    );
-    let noop: crate::proto::NoOp = page.decode_typed().expect("withheld page must be a NoOp");
-    assert_eq!(noop.reason, "revoked");
-    assert_eq!(noop.original_sequence, 0);
-}
-
-/// Companion: a CONFIRMED provisional page flows through the correlation
-/// query with its real payload — resolution isn't a blanket "hide
-/// everything uncommitted", it's the same confirmed/revoked/pending
-/// distinction the aggregate's own read path applies.
-#[tokio::test]
-async fn test_get_event_book_by_correlation_id_delivers_confirmed_provisional_page() {
-    let (service, event_store, _) = create_default_test_service();
-    let root = uuid::Uuid::new_v4();
-    let correlation_id = "corr-confirmed";
-
-    let provisional = crate::test_utils::make_uncommitted_event_page(0, "cascade-y");
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![provisional],
-            &AddMeta {
-                correlation_id,
-                external_id: None,
-                source_info: None,
-                ext: None,
-            },
-        )
-        .await
-        .unwrap();
-
-    // Confirmation marker, also reaper/framework-style: empty correlation_id.
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![confirmation_page(1, "cascade-y", vec![0])],
-            &AddMeta::default(),
-        )
-        .await
-        .unwrap();
-
-    let query = Query {
-        cover: Some(crate::proto::Cover {
-            domain: String::new(),
-            root: None,
-            correlation_id: correlation_id.to_string(),
-            edition: None,
-            ext: None,
-        }),
-        selection: None,
-    };
-
-    let response = service.get_event_book(Request::new(query)).await;
-    assert!(response.is_ok());
-    let book = response.unwrap().into_inner();
-
-    assert_eq!(book.pages.len(), 1);
-    assert_eq!(
-        book.pages[0].type_url(),
-        Some("test.Event0"),
-        "confirmed provisional page must flow with its real payload"
-    );
-}
-
-/// `get_events` (streaming correlation query) must apply the SAME
-/// resolution as the unary `get_event_book` — the two entry points share
-/// `resolve_correlation_books`, but this pins the streaming path
-/// independently so it can't silently regress on its own.
-#[tokio::test]
-async fn test_get_events_by_correlation_id_withholds_revoked_provisional_page() {
-    let (service, event_store, _) = create_default_test_service();
-    let root = uuid::Uuid::new_v4();
-    let correlation_id = "corr-stream-revoked";
-
-    let provisional = crate::test_utils::make_uncommitted_event_page(0, "cascade-z");
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![provisional],
-            &AddMeta {
-                correlation_id,
-                external_id: None,
-                source_info: None,
-                ext: None,
-            },
-        )
-        .await
-        .unwrap();
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![revocation_page(1, "cascade-z", vec![0])],
-            &AddMeta::default(),
-        )
-        .await
-        .unwrap();
-
-    let query = Query {
-        cover: Some(crate::proto::Cover {
-            domain: String::new(),
-            root: None,
-            correlation_id: correlation_id.to_string(),
-            edition: None,
-            ext: None,
-        }),
-        selection: None,
-    };
-
-    let mut stream = service
-        .get_events(Request::new(query))
-        .await
-        .expect("get_events must succeed")
-        .into_inner();
-
-    let book = stream
-        .next()
-        .await
-        .expect("stream must yield one book")
-        .expect("book result must be Ok");
-
-    assert_eq!(book.pages.len(), 1);
-    assert_ne!(
-        book.pages[0].type_url(),
-        Some("test.Event0"),
-        "streamed correlation query must not return the raw revoked business event"
-    );
 }
 
 // ============================================================================

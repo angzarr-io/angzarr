@@ -76,7 +76,6 @@ fn make_event_book(domain: &str, root: Uuid, last_sequence: Option<u32>) -> Even
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }]
     } else {
         vec![]
@@ -202,35 +201,21 @@ fn make_deferred_command(deferred: AngzarrDeferredSequence) -> CommandBook {
     command
 }
 
-/// D-7: a deferred (saga-produced) command's `expected` sequence is its
-/// origin-stamped `basis_seq` — the destination head the saga observed at
-/// stamp time. This is what turns the pipeline's overlap window from
-/// whole-history into `basis..actual`; returning anything else (e.g. the
-/// pre-D-7 hardcoded 0) silently re-widens every deferred conflict check.
+/// A deferred (saga/PM) command claims no sequence: its expected sequence is
+/// 0 whatever provenance it carries.
 #[test]
-fn test_extract_command_sequence_deferred_returns_basis_seq() {
+fn test_extract_command_sequence_deferred_is_zero() {
     let command = make_deferred_command(AngzarrDeferredSequence {
-        basis_seq: 7,
+        source_seq: 7,
+        command_index: 3,
         ..Default::default()
     });
-
-    assert_eq!(extract_command_sequence(&command), 7);
-}
-
-/// D-7 legacy: a deferred command with no recorded basis (`basis_seq == 0`,
-/// pre-upgrade producers) must keep yielding 0 — the pipeline then applies
-/// the conservative whole-history overlap window, byte-for-byte the pre-D-7
-/// behavior.
-#[test]
-fn test_extract_command_sequence_deferred_legacy_zero_basis() {
-    let command = make_deferred_command(AngzarrDeferredSequence::default());
 
     assert_eq!(extract_command_sequence(&command), 0);
 }
 
-/// External (webhook/integration) deferred sequences carry no observed
-/// destination basis — extraction must stay 0 (framework stamps on receipt).
-/// Pins that D-7 basis extraction is scoped to `AngzarrDeferred` only.
+/// External (webhook/integration) deferred sequences claim no sequence
+/// either (framework stamps on receipt).
 #[test]
 fn test_extract_command_sequence_external_deferred_is_zero() {
     let root = Uuid::new_v4();
@@ -245,27 +230,22 @@ fn test_extract_command_sequence_external_deferred_is_zero() {
     assert_eq!(extract_command_sequence(&command), 0);
 }
 
-/// D-7 ordering hazard: `stamp_deferred_sequences` rewrites the deferred
-/// header into an explicit `Sequence(actual + idx)`, ERASING `basis_seq`.
-/// The pipeline must therefore extract the basis BEFORE stamping (it does —
-/// pipeline.rs extracts `expected` before the stamp). This test pins the
-/// erasure itself: after stamping, extraction returns the stamped actual,
-/// not the basis — so any future reordering of extract-vs-stamp fails loudly
-/// in review instead of silently reading a rewritten header.
+/// `stamp_deferred_sequences` rewrites the deferred header into an explicit
+/// `Sequence(actual + idx)`.
 #[test]
-fn test_stamp_deferred_sequences_erases_basis() {
-    let mut command = make_deferred_command(AngzarrDeferredSequence {
-        basis_seq: 7,
-        ..Default::default()
-    });
+fn test_stamp_deferred_sequences_writes_head() {
+    let mut command = make_deferred_command(AngzarrDeferredSequence::default());
 
-    assert_eq!(extract_command_sequence(&command), 7, "basis before stamp");
+    assert_eq!(
+        extract_command_sequence(&command),
+        0,
+        "deferred before stamp"
+    );
     super::parsing::stamp_deferred_sequences(&mut command, 9);
     assert_eq!(
         extract_command_sequence(&command),
         9,
-        "after stamping, the header is an explicit Sequence(actual); the \
-         basis is gone — readers must run before the rewrite"
+        "after stamping, the header is an explicit Sequence(actual)"
     );
 }
 
@@ -327,7 +307,10 @@ fn test_merge_strategy_default_is_commutative() {
     let root = Uuid::new_v4();
     let command = make_command_book("orders", root, 0);
 
-    assert_eq!(command.merge_strategy(), MergeStrategy::MergeCommutative);
+    assert_eq!(
+        command.effective_merge_strategy(),
+        MergeStrategy::MergeCommutative
+    );
 }
 
 /// Strict strategy requires exact sequence match.
@@ -339,7 +322,10 @@ fn test_merge_strategy_strict() {
     let root = Uuid::new_v4();
     let command = make_command_book_with_strategy("orders", root, 0, MergeStrategy::MergeStrict);
 
-    assert_eq!(command.merge_strategy(), MergeStrategy::MergeStrict);
+    assert_eq!(
+        command.effective_merge_strategy(),
+        MergeStrategy::MergeStrict
+    );
 }
 
 /// Aggregate-handles strategy delegates conflict resolution.
@@ -354,8 +340,28 @@ fn test_merge_strategy_aggregate_handles() {
         make_command_book_with_strategy("orders", root, 0, MergeStrategy::MergeAggregateHandles);
 
     assert_eq!(
-        command.merge_strategy(),
+        command.effective_merge_strategy(),
         MergeStrategy::MergeAggregateHandles
+    );
+}
+
+/// An unset strategy (MERGE_UNSPECIFIED, the wire zero) and an unknown wire
+/// value are Commutative — never the raw UNSPECIFIED variant, which no gate
+/// matches.
+#[test]
+fn test_merge_strategy_unspecified_and_unknown_are_commutative() {
+    let root = Uuid::new_v4();
+    let unset = make_command_book_with_strategy("orders", root, 0, MergeStrategy::MergeUnspecified);
+    assert_eq!(
+        unset.effective_merge_strategy(),
+        MergeStrategy::MergeCommutative
+    );
+
+    let mut unknown = make_command_book("orders", root, 0);
+    unknown.pages[0].merge_strategy = 99;
+    assert_eq!(
+        unknown.effective_merge_strategy(),
+        MergeStrategy::MergeCommutative
     );
 }
 
@@ -368,7 +374,10 @@ fn test_merge_strategy_empty_pages_defaults_to_commutative() {
     };
 
     // Empty pages should default to Commutative
-    assert_eq!(command.merge_strategy(), MergeStrategy::MergeCommutative);
+    assert_eq!(
+        command.effective_merge_strategy(),
+        MergeStrategy::MergeCommutative
+    );
 }
 
 // ============================================================================
@@ -402,7 +411,6 @@ fn test_build_combined_events_merges_pages() {
                 }),
                 payload: None,
                 created_at: None,
-                ..Default::default()
             },
             crate::proto::EventPage {
                 header: Some(PageHeader {
@@ -411,7 +419,6 @@ fn test_build_combined_events_merges_pages() {
                 }),
                 payload: None,
                 created_at: None,
-                ..Default::default()
             },
         ],
         snapshot: None,
@@ -427,7 +434,6 @@ fn test_build_combined_events_merges_pages() {
             }),
             payload: None,
             created_at: None,
-            ..Default::default()
         }],
         snapshot: None,
         next_sequence: 3,
@@ -520,7 +526,6 @@ fn test_build_events_up_to_sequence_filters_correctly() {
                 }),
                 payload: None,
                 created_at: None,
-                ..Default::default()
             },
             crate::proto::EventPage {
                 header: Some(PageHeader {
@@ -529,7 +534,6 @@ fn test_build_events_up_to_sequence_filters_correctly() {
                 }),
                 payload: None,
                 created_at: None,
-                ..Default::default()
             },
             crate::proto::EventPage {
                 header: Some(PageHeader {
@@ -538,7 +542,6 @@ fn test_build_events_up_to_sequence_filters_correctly() {
                 }),
                 payload: None,
                 created_at: None,
-                ..Default::default()
             },
             crate::proto::EventPage {
                 header: Some(PageHeader {
@@ -547,7 +550,6 @@ fn test_build_events_up_to_sequence_filters_correctly() {
                 }),
                 payload: None,
                 created_at: None,
-                ..Default::default()
             },
         ],
         snapshot: None,
@@ -580,7 +582,6 @@ fn test_build_events_up_to_sequence_zero_returns_empty() {
             }),
             payload: None,
             created_at: None,
-            ..Default::default()
         }],
         snapshot: None,
         next_sequence: 1,
@@ -854,56 +855,6 @@ fn test_diff_test_state_fields_field_removed() {
     assert!(
         changed.contains("field_b"),
         "removed field should be detected"
-    );
-}
-
-// ============================================================================
-// Cascade / Two-Phase Commit Tests
-// ============================================================================
-
-/// cascade_id accessor returns None for non-cascade contexts.
-///
-/// The default implementation in AggregateContext trait returns None,
-/// which the pipeline uses to skip 2PC transformation entirely.
-#[test]
-fn test_cascade_id_trait_default() {
-    use super::traits::AggregateContext;
-
-    struct DefaultCtx;
-    #[async_trait::async_trait]
-    impl AggregateContext for DefaultCtx {
-        async fn load_prior_events_with_divergence(
-            &self,
-            _: &str,
-            _: &str,
-            _: Uuid,
-            _: &TemporalQuery,
-            _: Option<u32>,
-        ) -> Result<EventBook, tonic::Status> {
-            unimplemented!()
-        }
-        async fn persist_events(
-            &self,
-            _: &EventBook,
-            _: &EventBook,
-            _: &str,
-            _: &str,
-            _: Uuid,
-            _: &str,
-            _: Option<&str>,
-            _: Option<&crate::storage::SourceInfo>,
-        ) -> Result<super::traits::PersistOutcome, tonic::Status> {
-            unimplemented!()
-        }
-        async fn publish(&self, _: &EventBook) -> Result<(), tonic::Status> {
-            unimplemented!()
-        }
-    }
-
-    let ctx = DefaultCtx;
-    assert!(
-        ctx.cascade_id().is_none(),
-        "default cascade_id should be None"
     );
 }
 

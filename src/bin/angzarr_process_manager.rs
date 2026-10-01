@@ -4,10 +4,9 @@
 //! multiple domains via the message bus, coordinates long-running workflows
 //! with event-sourced state.
 //!
-//! ## Two-Phase Protocol
-//! 1. **Prepare**: PM declares additional destinations needed (beyond trigger)
-//! 2. **Fetch**: Sidecar fetches destination EventBooks via EventQuery
-//! 3. **Handle**: PM receives trigger + PM state + destinations, produces commands + PM events
+//! ## Protocol
+//! The PM receives the trigger and its own event-sourced state and produces
+//! commands (deferred: no expected version), facts and PM events.
 //!
 //! ## Differences from Saga
 //! - PM subscribes to MULTIPLE domains (saga recommends single domain)
@@ -47,10 +46,10 @@ use angzarr::descriptor::parse_subscriptions;
 use angzarr::dlq::init_dlq_publisher;
 use angzarr::handlers::core::ProcessManagerEventHandler;
 use angzarr::orchestration::destination::hybrid::HybridDestinationFetcher;
-use angzarr::orchestration::process_manager::grpc::GrpcPMContextFactory;
-use angzarr::orchestration::process_manager::outbox::{
-    drain_once, CommandOutbox, DrainStats, InMemoryCommandOutbox,
+use angzarr::orchestration::outbox::{
+    CoordinatorDeliverer, EventStoreOutboxLog, Outbox, RevocationHandling,
 };
+use angzarr::orchestration::process_manager::grpc::GrpcPMContextFactory;
 use angzarr::payload_store::{init_payload_offload, with_offload};
 use angzarr::proto::process_manager_coordinator_service_server::ProcessManagerCoordinatorServiceServer;
 use angzarr::proto::process_manager_service_client::ProcessManagerServiceClient;
@@ -71,15 +70,6 @@ const SUBSCRIPTIONS_ENV_VAR: &str = "ANGZARR_SUBSCRIPTIONS";
 
 /// Default coordinator port for CASCADE mode.
 const DEFAULT_COORDINATOR_PORT: u16 = 1360;
-
-/// C04 command-outbox drain interval (seconds). DEFAULT — flagged as an outbox
-/// sub-decision. How often the background loop redelivers transiently-failed
-/// post-persist PM commands. Lower = faster recovery, more executor traffic.
-const OUTBOX_DRAIN_INTERVAL_SECS: u64 = 5;
-
-/// C04 command-outbox redelivery budget. DEFAULT — flagged. After this many
-/// failed redelivery attempts an entry moves to the DLQ (terminal sink).
-const OUTBOX_MAX_ATTEMPTS: u32 = 5;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -197,14 +187,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         remote_fetcher,
     ));
 
-    // C04: one shared command outbox for at-least-once redelivery of
-    // post-persist PM commands that fail transiently. Both the CASCADE-mode
-    // coordinator factory and the ASYNC-mode handler enqueue into it (they now
-    // share one factory), and the background drain loop below redelivers from
-    // it. Persistence sub-decision (flagged): in-memory — at-least-once holds
-    // within a process lifetime; a durable impl reusing PM storage is the
-    // recommended follow-up (see remediation report).
-    let command_outbox: Arc<dyn CommandOutbox> = Arc::new(InMemoryCommandOutbox::new());
+    // The PM's outbox, in its event store: post-persist commands that fail
+    // transiently, and rejection / Compensate notifications. Shared by the
+    // CASCADE coordinator and the ASYNC handler (one factory), drained in
+    // the background.
+    let deliverer = CoordinatorDeliverer::new(command_executor.clone())
+        .with_commands(command_executor.clone(), angzarr::proto::SyncMode::Simple)
+        .with_revocation_handling(RevocationHandling {
+            event_bus: event_bus.clone(),
+            config: bootstrap.config.saga_compensation.clone(),
+            dlq: dlq_publisher.clone(),
+        });
+    let outbox = Outbox::start(
+        &bootstrap.domain,
+        "process_manager",
+        Arc::new(EventStoreOutboxLog::new(
+            event_store.clone(),
+            &bootstrap.domain,
+        )),
+        Arc::new(deliverer),
+        &bootstrap.config.outbox,
+        dlq_publisher.clone(),
+    )
+    .await?;
 
     // Create PM context factory shared by the CASCADE coordinator and the
     // ASYNC handler, with direct storage for PM state persistence and the
@@ -219,52 +224,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             bootstrap.domain.clone(), // pm_domain
             dlq_publisher.clone(),
         )
-        .with_command_outbox(command_outbox.clone()),
+        .with_outbox(outbox),
     );
 
-    // ASYNC-mode handler built from the shared factory (same outbox instance).
+    // ASYNC-mode handler built from the shared factory (same outbox).
     let handler = ProcessManagerEventHandler::from_factory(
         pm_factory.clone(),
         hybrid_fetcher.clone(),
         command_executor.clone(),
     )
     .with_fact_executor(Some(fact_executor.clone()));
-
-    // C04: background drain loop — redeliver outbox entries at-least-once via
-    // the command executor (the transport-backed dispatch C13 formalizes), and
-    // DLQ on budget exhaustion. Drain trigger sub-decision (flagged): periodic
-    // interval. Redelivery dispatches under SyncMode::Simple.
-    {
-        let drain_outbox = command_outbox.clone();
-        let drain_executor = command_executor.clone();
-        let drain_dlq = dlq_publisher.clone();
-        let drain_component = bootstrap.domain.clone();
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(OUTBOX_DRAIN_INTERVAL_SECS));
-            loop {
-                ticker.tick().await;
-                match drain_once(
-                    drain_outbox.as_ref(),
-                    drain_executor.as_ref(),
-                    Some(&drain_dlq),
-                    &drain_component,
-                    OUTBOX_MAX_ATTEMPTS,
-                    angzarr::proto::SyncMode::Simple,
-                )
-                .await
-                {
-                    Ok(stats) if stats != DrainStats::default() => info!(
-                        delivered = stats.delivered,
-                        retried = stats.retried,
-                        dead_lettered = stats.dead_lettered,
-                        "PM outbox drain pass"
-                    ),
-                    Ok(_) => {}
-                    Err(e) => warn!(error = %e, "PM outbox drain error"),
-                }
-            }
-        });
-    }
 
     // =========================================================================
     // Start bus subscriber (ASYNC mode)

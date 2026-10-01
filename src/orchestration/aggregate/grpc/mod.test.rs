@@ -15,7 +15,7 @@ use crate::proto::Snapshot;
 use crate::repository::SnapshotRepository;
 use crate::storage::mock::{MockEventStore, MockSnapshotStore};
 use crate::storage::{AddMeta, SnapshotStore};
-use crate::test_utils::{make_event_page, make_uncommitted_event_page};
+use crate::test_utils::make_event_page;
 
 fn build_ctx_with_stores(
     event_store: Arc<MockEventStore>,
@@ -217,14 +217,8 @@ async fn test_load_explicit_divergence_falls_back_when_no_snapshot() {
 }
 
 // ============================================================================
-// O2: post_persist must NOT publish provisional (no_commit) pages to the bus
+// publish: persisted pages reach the bus
 // ============================================================================
-//
-// Cascade pages persisted with no_commit=true are PROVISIONAL — a later
-// Revocation may undo them (see cascade::reaper / two_phase). Publishing them
-// to the bus lets downstream async consumers observe a commit that may never
-// become real (a "phantom commit"). post_persist must publish only committed
-// pages; provisional pages are published later, at the confirmation point.
 
 /// Build a context wired to a MockEventBus we retain for assertions, plus an
 /// empty StaticServiceDiscovery so the sync projector/saga/PM fan-out is a
@@ -260,29 +254,7 @@ fn book_with_cover(pages: Vec<crate::proto::EventPage>) -> EventBook {
     }
 }
 
-/// A fully provisional book (every page no_commit=true) must publish NOTHING —
-/// the whole book is an in-flight cascade that may still be revoked.
-#[tokio::test]
-async fn post_persist_suppresses_fully_provisional_book() {
-    use crate::orchestration::aggregate::traits::AggregateContext;
-    let (ctx, bus) = build_ctx_with_bus();
-
-    let provisional = book_with_cover(vec![
-        make_uncommitted_event_page(0, "cascade-x"),
-        make_uncommitted_event_page(1, "cascade-x"),
-    ]);
-    ctx.publish(&provisional).await.unwrap();
-
-    assert_eq!(
-        bus.published_count().await,
-        0,
-        "provisional (no_commit) pages must not be published — publishing them \
-         would be a phantom commit visible downstream before the cascade commits"
-    );
-}
-
-/// A fully committed book publishes normally (regression guard: the O2 filter
-/// must not suppress ordinary, non-cascade commits).
+/// Every persisted page is published.
 #[tokio::test]
 async fn post_persist_publishes_committed_book() {
     use crate::orchestration::aggregate::traits::AggregateContext;
@@ -300,48 +272,9 @@ async fn post_persist_publishes_committed_book() {
     );
 }
 
-/// A mixed book publishes ONLY the committed pages — the filter is per-page,
-/// not all-or-nothing. Kills mutants that publish the whole book (or nothing)
-/// when any/all pages are provisional.
-#[tokio::test]
-async fn post_persist_publishes_only_committed_pages_from_mixed_book() {
-    use crate::orchestration::aggregate::traits::AggregateContext;
-    let (ctx, bus) = build_ctx_with_bus();
-
-    let mixed = book_with_cover(vec![
-        make_event_page(0),                          // committed
-        make_uncommitted_event_page(1, "cascade-y"), // provisional
-    ]);
-    ctx.publish(&mixed).await.unwrap();
-
-    let published = bus.take_published().await;
-    assert_eq!(published.len(), 1, "the committed page must be published");
-    assert_eq!(
-        published[0].pages.len(),
-        1,
-        "only the committed page is published; the provisional page is withheld"
-    );
-    assert!(
-        !published[0].pages[0].no_commit,
-        "the published page must be the committed one"
-    );
-}
-
 // ============================================================================
-// O2 carve-out: per-leg visibility of provisional pages in the sync fan-out
+// Sync fan-out legs: what projectors, sagas and PMs receive
 // ============================================================================
-//
-// The three sync fan-out legs deliberately see DIFFERENT views of a book that
-// carries provisional (no_commit) pages:
-//
-//   - PROJECTOR leg: committed-only. Projectors write externally visible read
-//     models; a provisional page they consume may later be revoked, and there
-//     is NO framework path mapping a Revocation to a read-model undo. Same
-//     phantom-commit hazard as the bus publish, same filter.
-//   - SAGA / PM legs: FULL book, provisional pages included. In CASCADE mode
-//     these calls ARE the cascade's forward propagation — sagas/PMs react to
-//     the provisional events to emit the next aggregate's commands. Filtering
-//     here would halt every multi-aggregate cascade at its first hop.
 //
 // The tests below capture what each leg actually receives via in-process
 // tonic servers (same pattern as services/projector_coord.test.rs).
@@ -450,13 +383,10 @@ async fn bind_ephemeral() -> (tokio::net::TcpListener, u16) {
     (listener, port)
 }
 
-/// O2 carve-out (projector half): a mixed committed/provisional book must
-/// reach the sync PROJECTOR leg with ONLY the committed pages. Kills the
-/// mutant/regression where `post_persist` hands projectors the raw `events`
-/// book — which would let a read model materialize a provisional page that a
-/// later Revocation undoes, with no framework path to un-project it.
+/// The sync PROJECTOR leg receives every persisted page but never the
+/// snapshot (a book carrying a snapshot makes gap fill skip repair).
 #[tokio::test]
-async fn post_persist_projector_leg_receives_only_committed_pages() {
+async fn post_persist_projector_leg_receives_pages_without_snapshot() {
     use crate::orchestration::aggregate::traits::AggregateContext;
 
     // In-process projector coordinator capturing what it is sent.
@@ -489,11 +419,9 @@ async fn post_persist_projector_leg_receives_only_committed_pages() {
     // projector-side assertion.
     .with_sync_mode(crate::proto::SyncMode::Simple);
 
-    let mixed = book_with_cover(vec![
-        make_event_page(0),                          // committed
-        make_uncommitted_event_page(1, "cascade-p"), // provisional
-    ]);
-    ctx.sync_fanout(&mixed).await.unwrap();
+    let mut book = book_with_snapshot_state(vec![make_event_page(0), make_event_page(1)]);
+    book.cover = book_with_cover(vec![]).cover;
+    ctx.sync_fanout(&book).await.unwrap();
 
     let requests = captured.lock().await;
     assert_eq!(requests.len(), 1, "projector must be called exactly once");
@@ -501,33 +429,16 @@ async fn post_persist_projector_leg_receives_only_committed_pages() {
         .events
         .as_ref()
         .expect("projector EventRequest must carry events");
-    assert_eq!(
-        sent.pages.len(),
-        1,
-        "projector must receive ONLY the committed page; sending the \
-         provisional page would materialize a phantom commit in a read model"
-    );
+    assert_eq!(sent.pages.len(), 2, "projector must receive every page");
     assert!(
-        !sent.pages[0].no_commit,
-        "the page the projector receives must be the committed one"
+        sent.snapshot.is_none(),
+        "the book a projector receives must not carry the snapshot"
     );
 }
 
-/// O2 carve-out PIN (saga/PM half): the saga and PM legs must receive the
-/// FULL book INCLUDING provisional (no_commit) pages.
-///
-/// WHY THIS PIN EXISTS: this is a deliberate carve-out from the O2
-/// phantom-commit filter, not an oversight. In CASCADE mode the sync
-/// saga/PM calls are the cascade's forward propagation — the saga/PM reads
-/// the provisional events of the current hop to emit the commands that drive
-/// the NEXT hop, all before anything is confirmed. Filtering no_commit pages
-/// out of these legs (e.g. by a future "consistency" refactor that reuses the
-/// projector/bus filter here) would silently halt every multi-aggregate
-/// cascade at its first hop: the saga would see an empty/committed-only book
-/// and never produce the follow-on commands. The review explicitly flagged
-/// that nothing pinned this behavior; this test is that pin.
+/// CASCADE calls the saga and PM legs with the full persisted book.
 #[tokio::test]
-async fn post_persist_saga_and_pm_legs_receive_full_book_including_provisional() {
+async fn post_persist_saga_and_pm_legs_receive_full_book() {
     use crate::orchestration::aggregate::traits::AggregateContext;
 
     // One in-process server hosting BOTH coordinator services.
@@ -553,8 +464,7 @@ async fn post_persist_saga_and_pm_legs_receive_full_book_including_provisional()
     discovery
         .register_pm("pm-capture", &["orders"], "127.0.0.1", port)
         .await;
-    // No projectors registered: the projector leg no-ops (empty client list),
-    // keeping this test focused on the saga/PM carve-out.
+    // No projectors registered: the projector leg no-ops (empty client list).
 
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_repo = Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new())));
@@ -575,50 +485,29 @@ async fn post_persist_saga_and_pm_legs_receive_full_book_including_provisional()
             edition: None,
             ext: None,
         }),
-        pages: vec![
-            make_event_page(0),                          // committed
-            make_uncommitted_event_page(1, "cascade-q"), // provisional
-        ],
+        pages: vec![make_event_page(0), make_event_page(1)],
         snapshot: None,
         next_sequence: 0,
     };
     ctx.sync_fanout(&mixed).await.unwrap();
 
-    // Saga leg: full book, provisional page intact.
+    // Saga leg: full book.
     let saga_requests = saga_captured.lock().await;
     assert_eq!(saga_requests.len(), 1, "saga must be called exactly once");
     let saga_book = saga_requests[0]
         .source
         .as_ref()
         .expect("SagaHandleRequest must carry source events");
-    assert_eq!(
-        saga_book.pages.len(),
-        2,
-        "saga must receive the FULL book (committed + provisional); filtering \
-         would break cascade forward propagation"
-    );
-    assert!(
-        saga_book.pages.iter().any(|p| p.no_commit),
-        "the provisional page must reach the saga with no_commit intact"
-    );
+    assert_eq!(saga_book.pages.len(), 2, "saga must receive the full book");
 
-    // PM leg: full book, provisional page intact.
+    // PM leg: full book.
     let pm_requests = pm_captured.lock().await;
     assert_eq!(pm_requests.len(), 1, "PM must be called exactly once");
     let pm_book = pm_requests[0]
         .trigger
         .as_ref()
         .expect("ProcessManagerCoordinatorRequest must carry trigger events");
-    assert_eq!(
-        pm_book.pages.len(),
-        2,
-        "PM must receive the FULL book (committed + provisional); filtering \
-         would break cascade forward propagation"
-    );
-    assert!(
-        pm_book.pages.iter().any(|p| p.no_commit),
-        "the provisional page must reach the PM with no_commit intact"
-    );
+    assert_eq!(pm_book.pages.len(), 2, "PM must receive the full book");
 }
 
 // ============================================================================
@@ -932,67 +821,12 @@ async fn send_to_dlq_on_context_delegates_to_free_fn() {
 }
 
 // ============================================================================
-// C01 #2: snapshot persistence must defer while a cascade is in flight
+// Snapshot persistence
 // ============================================================================
 
-/// While `cascade_id` is set, `persist_events` must NOT persist a snapshot
-/// even when the received book carries one — it would bake in state a
-/// later Revocation could undo (there is only one snapshot slot per
-/// aggregate; a revoke has no way to "un-snapshot" it).
+/// A snapshot the handler returns is persisted with its events.
 #[tokio::test]
-async fn persist_events_defers_snapshot_when_cascade_in_flight() {
-    let event_store = Arc::new(MockEventStore::new());
-    let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store.clone()));
-    let ctx = GrpcAggregateContext::new(
-        event_store.clone(),
-        snapshot_repo,
-        Arc::new(StaticServiceDiscovery::new()),
-        Arc::new(MockEventBus::new()),
-    )
-    .with_cascade_id("cascade-defer");
-    let root = Uuid::new_v4();
-
-    let prior = EventBook::default();
-    let received = book_with_snapshot_state(vec![make_event_page(0)]);
-
-    let outcome = ctx
-        .persist_events(
-            &prior,
-            &received,
-            "orders",
-            "",
-            root,
-            "corr-defer",
-            None,
-            None,
-        )
-        .await
-        .expect("persist must succeed even though the snapshot is deferred");
-
-    match outcome {
-        PersistOutcome::Persisted(book) => {
-            assert_eq!(book.pages.len(), 1);
-            assert!(
-                book.pages[0].no_commit,
-                "cascade pages must be stamped provisional"
-            );
-        }
-        other => panic!("expected Persisted, got {other:?}"),
-    }
-
-    let snapshot = snapshot_store.get("orders", "", root).await.unwrap();
-    assert!(
-        snapshot.is_none(),
-        "C01 #2: snapshot must not be persisted while a cascade is in flight"
-    );
-}
-
-/// Regression guard / companion: OUTSIDE a cascade (no `cascade_id` set),
-/// snapshot persistence proceeds exactly as before — the deferral is
-/// specific to cascades in flight, not a general regression.
-#[tokio::test]
-async fn persist_events_persists_snapshot_when_no_cascade_in_flight() {
+async fn persist_events_persists_snapshot() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
     let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store.clone()));
@@ -1013,7 +847,7 @@ async fn persist_events_persists_snapshot_when_no_cascade_in_flight() {
         "orders",
         "",
         root,
-        "corr-nocascade",
+        "corr-snapshot",
         None,
         None,
     )
@@ -1023,20 +857,20 @@ async fn persist_events_persists_snapshot_when_no_cascade_in_flight() {
     let snapshot = snapshot_store.get("orders", "", root).await.unwrap();
     assert!(
         snapshot.is_some(),
-        "outside a cascade, snapshot persistence must proceed as before"
+        "the handler's snapshot must be persisted"
     );
 }
 
 // ============================================================================
-// C01 #9: bus-published books must never carry a snapshot
+// Consumer books never carry a snapshot
 // ============================================================================
 
-/// `committed_only_book` strips the snapshot from the bus-published view —
-/// a snapshot on a bus book makes `GapFiller::fill_if_needed` treat it as
+/// `consumer_book` strips the snapshot from the bus-published view — a
+/// snapshot on a bus book makes `GapFiller::fill_if_needed` treat it as
 /// "already complete" and skip gap repair entirely, unrelated to whether a
 /// gap actually exists.
 #[test]
-fn committed_only_book_strips_snapshot() {
+fn consumer_book_strips_snapshot() {
     let events = EventBook {
         cover: Some(Cover {
             domain: "orders".to_string(),
@@ -1058,291 +892,18 @@ fn committed_only_book_strips_snapshot() {
         next_sequence: 1,
     };
 
-    let result = committed_only_book(&events).expect("committed pages exist");
+    let result = consumer_book(&events).expect("pages exist");
     assert!(
         result.snapshot.is_none(),
-        "C01 #9: bus-published book must never carry a snapshot"
+        "bus-published book must never carry a snapshot"
     );
+    assert_eq!(result.pages.len(), 1, "every page is kept");
 }
 
-// ============================================================================
-// C01 #1: confirmation-point republish
-// ============================================================================
-//
-// The cascade design suppresses provisional (`no_commit=true`) pages from
-// the bus (O2) on the promise that a Confirmation marker's arrival
-// republishes them. These tests exercise that promise directly against
-// `post_persist`.
-
-fn build_ctx_with_bus_and_store() -> (GrpcAggregateContext, Arc<MockEventBus>, Arc<MockEventStore>)
-{
-    let event_store = Arc::new(MockEventStore::new());
-    let snapshot_store: Arc<MockSnapshotStore> = Arc::new(MockSnapshotStore::default());
-    let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store));
-    let bus = Arc::new(MockEventBus::new());
-    let ctx = GrpcAggregateContext::new(
-        event_store.clone(),
-        snapshot_repo,
-        Arc::new(StaticServiceDiscovery::new()),
-        bus.clone(),
-    );
-    (ctx, bus, event_store)
-}
-
-/// Build a committed Confirmation marker `EventPage` at `seq`.
-fn confirmation_marker_page(seq: u32, cascade_id: &str, confirmed: Vec<u32>) -> EventPage {
-    use crate::proto::Confirmation;
-    use prost::Message;
-    let conf = Confirmation {
-        target: None,
-        sequences: confirmed,
-        cascade_id: cascade_id.to_string(),
-    };
-    EventPage {
-        header: Some(crate::proto::PageHeader {
-            sync_mode: None,
-            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(seq)),
-        }),
-        payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
-            type_url: crate::proto_ext::type_url::CONFIRMATION.to_string(),
-            value: conf.encode_to_vec(),
-        })),
-        ..Default::default()
-    }
-}
-
-/// Build a committed Revocation marker `EventPage` at `seq`.
-fn revocation_marker_page(seq: u32, cascade_id: &str, revoked: Vec<u32>) -> EventPage {
-    use crate::proto::Revocation;
-    use prost::Message;
-    let rev = Revocation {
-        target: None,
-        sequences: revoked,
-        cascade_id: cascade_id.to_string(),
-        reason: "test".to_string(),
-    };
-    EventPage {
-        header: Some(crate::proto::PageHeader {
-            sync_mode: None,
-            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(seq)),
-        }),
-        payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
-            type_url: crate::proto_ext::type_url::REVOCATION.to_string(),
-            value: rev.encode_to_vec(),
-        })),
-        ..Default::default()
-    }
-}
-
-fn book_with_root(root: Uuid, pages: Vec<EventPage>) -> EventBook {
-    EventBook {
-        cover: Some(Cover {
-            domain: "orders".to_string(),
-            root: Some(crate::proto::Uuid {
-                value: root.as_bytes().to_vec(),
-            }),
-            correlation_id: String::new(),
-            edition: None,
-            ext: None,
-        }),
-        pages,
-        snapshot: None,
-        next_sequence: 0,
-    }
-}
-
-/// The acceptance case: a provisional event was suppressed from the bus at
-/// its own persist time (simulated directly here via `event_store.add`,
-/// mirroring what `persist_events` does under a cascade_id); a LATER call
-/// persists a Confirmation marker for it. `post_persist` for that later
-/// call must republish the previously-suppressed event — this is the
-/// consumer-facing half of the 2PC design that C01 completes.
-#[tokio::test]
-async fn post_persist_republishes_confirmed_events_on_confirmation_marker() {
-    use crate::orchestration::aggregate::traits::AggregateContext;
-    let (ctx, bus, event_store) = build_ctx_with_bus_and_store();
-    let root = Uuid::new_v4();
-
-    // Seed storage: the provisional event, suppressed from the bus when it
-    // was originally persisted (simulated by direct storage write, exactly
-    // as `persist_events` would have produced under `cascade_id`).
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![make_uncommitted_event_page(0, "cascade-c1")],
-            &AddMeta::default(),
-        )
-        .await
-        .unwrap();
-
-    let marker = confirmation_marker_page(1, "cascade-c1", vec![0]);
-    // The marker is already durable by the time post_persist runs (persist
-    // happens before post_persist in the real pipeline) — seed it too.
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![marker.clone()],
-            &AddMeta::default(),
-        )
-        .await
-        .unwrap();
-
-    let events = book_with_root(root, vec![marker]);
-    ctx.publish(&events)
-        .await
-        .expect("post_persist must succeed");
-
-    let published = bus.take_published().await;
-    assert_eq!(
-        published.len(),
-        2,
-        "expected the republished confirmed-events book (first, per the \
-         documented ordering) plus the marker's own ordinary committed publish"
-    );
-    assert_eq!(
-        published[0].pages.len(),
-        1,
-        "republished book carries exactly the confirmed sequence"
-    );
-    assert_eq!(published[0].pages[0].sequence_num(), 0);
-    assert_eq!(
-        published[0].pages[0].type_url(),
-        Some("test.Event0"),
-        "the republished page must carry the ORIGINAL suppressed payload"
-    );
-    assert_eq!(
-        published[1].pages[0].type_url(),
-        Some(crate::proto_ext::type_url::CONFIRMATION),
-        "second publish is the marker's own ordinary committed publish"
-    );
-}
-
-/// No double-publish: a sequence the Confirmation names that was ALREADY
-/// committed at its own persist time (no_commit=false in storage) must not
-/// republish — it already reached the bus once.
-#[tokio::test]
-async fn post_persist_confirmation_does_not_republish_already_committed_sequence() {
-    use crate::orchestration::aggregate::traits::AggregateContext;
-    let (ctx, bus, event_store) = build_ctx_with_bus_and_store();
-    let root = Uuid::new_v4();
-
-    // Sequence 0 was already committed (no_commit=false) — e.g. a stale or
-    // redundant Confirmation naming a sequence that was never provisional.
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![make_event_page(0)],
-            &AddMeta::default(),
-        )
-        .await
-        .unwrap();
-    let marker = confirmation_marker_page(1, "cascade-c2", vec![0]);
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![marker.clone()],
-            &AddMeta::default(),
-        )
-        .await
-        .unwrap();
-
-    let events = book_with_root(root, vec![marker]);
-    ctx.publish(&events).await.unwrap();
-
-    let published = bus.take_published().await;
-    assert_eq!(
-        published.len(),
-        1,
-        "only the marker's own ordinary committed publish — sequence 0 was \
-         already committed and must not republish"
-    );
-}
-
-/// C01 #21: confirm-after-revoke guard. If a Revocation for the SAME
-/// cascade_id already exists, `transform_for_two_phase` documents "revoked
-/// wins" — the confirmed sequences resolve to nothing. Pre-fix this would
-/// silently no-op; the fix surfaces it (error log + DLQ) instead.
-#[tokio::test]
-async fn post_persist_confirm_after_revoke_does_not_republish_and_dlqs() {
-    use crate::orchestration::aggregate::traits::AggregateContext;
-    let event_store = Arc::new(MockEventStore::new());
-    let snapshot_store: Arc<MockSnapshotStore> = Arc::new(MockSnapshotStore::default());
-    let snapshot_repo = Arc::new(SnapshotRepository::new(snapshot_store));
-    let bus = Arc::new(MockEventBus::new());
-    let dlq = Arc::new(CapturingDlqPublisher::default());
-    let ctx = GrpcAggregateContext::new(
-        event_store.clone(),
-        snapshot_repo,
-        Arc::new(StaticServiceDiscovery::new()),
-        bus.clone(),
-    )
-    .with_dlq_publisher(dlq.clone());
-    let root = Uuid::new_v4();
-
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![make_uncommitted_event_page(0, "cascade-r1")],
-            &AddMeta::default(),
-        )
-        .await
-        .unwrap();
-    // A Revocation for this cascade already landed (e.g. the reaper timed
-    // it out) BEFORE the confirming call's persist reached storage.
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![revocation_marker_page(1, "cascade-r1", vec![0])],
-            &AddMeta::default(),
-        )
-        .await
-        .unwrap();
-
-    // The confirming call still landed racily (TOCTOU) and its Confirmation
-    // marker is now ALSO durably persisted.
-    let marker = confirmation_marker_page(2, "cascade-r1", vec![0]);
-    event_store
-        .add(
-            "orders",
-            "",
-            root,
-            vec![marker.clone()],
-            &AddMeta::default(),
-        )
-        .await
-        .unwrap();
-
-    let events = book_with_root(root, vec![marker]);
-    ctx.publish(&events)
-        .await
-        .expect("post_persist must not error — the conflict is handled, not propagated");
-
-    let published = bus.take_published().await;
-    assert_eq!(
-        published.len(),
-        1,
-        "only the marker's own ordinary committed publish — the confirmed \
-         sequence must NOT republish when a conflicting Revocation exists"
-    );
-
-    let dlq_calls = dlq.publish_calls.load(std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(
-        dlq_calls, 1,
-        "confirm-after-revoke conflict must be surfaced to the DLQ/operator, \
-         not silently swallowed"
-    );
+/// A book with no pages yields nothing to deliver.
+#[test]
+fn consumer_book_of_empty_book_is_none() {
+    assert!(consumer_book(&EventBook::default()).is_none());
 }
 
 // ============================================================================
@@ -1356,6 +917,9 @@ struct ScriptedSagaServer {
     fail: Option<tonic::Code>,
     /// Reaction errors reported in the success response's metadata.
     report: Vec<CascadeReactionError>,
+    /// Executed reaction commands reported in the success response's
+    /// metadata.
+    executed: Vec<crate::orchestration::shared::ExecutedCommand>,
     requests: Arc<Mutex<Vec<(SagaHandleRequest, tonic::metadata::MetadataMap)>>>,
 }
 
@@ -1377,6 +941,10 @@ impl SagaCoordServiceTrait for ScriptedSagaServer {
                 crate::orchestration::shared::attach_reaction_errors(
                     &mut response,
                     self.report.clone(),
+                );
+                crate::orchestration::shared::attach_executed_reactions(
+                    &mut response,
+                    &self.executed,
                 );
                 Ok(response)
             }
@@ -1856,4 +1424,221 @@ async fn test_load_divergence_with_no_events_starts_at_zero() {
         .unwrap();
     assert!(book.pages.is_empty());
     assert_eq!(book.next_sequence, 0);
+}
+
+/// ReserveStock to inventory, as ReserveSaga delivered it, with the event
+/// it produced.
+fn executed_reserve_stock() -> crate::orchestration::shared::ExecutedCommand {
+    use crate::proto::{
+        command_page, page_header::SequenceType, AngzarrDeferredSequence, CommandPage, PageHeader,
+    };
+    crate::orchestration::shared::ExecutedCommand {
+        command: CommandBook {
+            cover: Some(Cover {
+                domain: "inventory".to_string(),
+                root: Some(crate::proto::Uuid { value: vec![5; 16] }),
+                correlation_id: "corr-1".to_string(),
+                edition: None,
+                ext: None,
+            }),
+            pages: vec![CommandPage {
+                header: Some(PageHeader {
+                    sync_mode: None,
+                    sequence_type: Some(SequenceType::AngzarrDeferred(AngzarrDeferredSequence {
+                        source: Some(Cover {
+                            domain: "orders".to_string(),
+                            root: Some(crate::proto::Uuid { value: vec![1; 16] }),
+                            ..Default::default()
+                        }),
+                        source_seq: 0,
+                        source_component: "ReserveSaga".to_string(),
+                        command_index: 0,
+                    })),
+                }),
+                payload: Some(command_page::Payload::Command(prost_types::Any {
+                    type_url: "/inventory.ReserveStock".to_string(),
+                    value: vec![1, 2, 3],
+                })),
+                merge_strategy: 0,
+            }],
+        },
+        events: Some(EventBook {
+            pages: vec![make_event_page(6)],
+            ..Default::default()
+        }),
+    }
+}
+
+/// C-0439 (cross-saga): under COMPENSATE, when a reaction fails, every
+/// reaction command another coordinator executed earlier in the request gets
+/// one Compensate notification addressed to its target, with the failure as
+/// the reason. Reactions are unordered: if the failing saga ran first, the
+/// other never ran and nothing is compensated.
+#[tokio::test]
+async fn sync_fanout_compensate_records_compensates_for_other_reactions() {
+    use crate::storage::ProvenanceKind;
+    let discovery = Arc::new(StaticServiceDiscovery::new());
+    let reserve = ScriptedSagaServer {
+        executed: vec![executed_reserve_stock()],
+        ..Default::default()
+    };
+    let charge = ScriptedSagaServer {
+        fail: Some(tonic::Code::Aborted),
+        ..Default::default()
+    };
+    spawn_saga(&discovery, "ReserveSaga", reserve.clone()).await;
+    spawn_saga(&discovery, "ChargeSaga", charge.clone()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("orders");
+    let ctx = GrpcAggregateContext::new(
+        Arc::new(MockEventStore::new()),
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        discovery,
+        Arc::new(MockEventBus::new()),
+    )
+    .with_sync_mode(crate::proto::SyncMode::Cascade)
+    .with_cascade_error_mode(CascadeErrorMode::CascadeErrorCompensate)
+    .with_outbox(outbox);
+
+    let err = ctx.sync_fanout(&cascade_book()).await.unwrap_err();
+    assert!(err.message().contains("saga delivery rejected"));
+
+    let compensates = deliverer.attempted_of(ProvenanceKind::CompensateNotification);
+    if calls(&reserve).await == 0 {
+        assert!(
+            compensates.is_empty(),
+            "nothing executed, nothing compensated"
+        );
+        return;
+    }
+    assert_eq!(compensates.len(), 1);
+    let envelope = &compensates[0].book;
+    assert_eq!(envelope.cover.as_ref().unwrap().domain, "inventory");
+    let notification = crate::orchestration::compensation::envelope_notification(envelope).unwrap();
+    let compensate = <crate::proto::Compensate as prost::Message>::decode(
+        notification.payload.unwrap().value.as_slice(),
+    )
+    .unwrap();
+    assert_eq!(compensate.sequences, vec![6]);
+    assert_eq!(compensate.command_type, "inventory.ReserveStock");
+    assert!(compensate.reason.contains("ChargeSaga"));
+    assert!(compensate.reason.contains("saga delivery rejected"));
+}
+
+/// FAIL_FAST never compensates, whatever the other reactions executed.
+#[tokio::test]
+async fn sync_fanout_fail_fast_records_no_compensates() {
+    let discovery = Arc::new(StaticServiceDiscovery::new());
+    spawn_saga(
+        &discovery,
+        "ReserveSaga",
+        ScriptedSagaServer {
+            executed: vec![executed_reserve_stock()],
+            ..Default::default()
+        },
+    )
+    .await;
+    spawn_saga(
+        &discovery,
+        "ChargeSaga",
+        ScriptedSagaServer {
+            fail: Some(tonic::Code::Aborted),
+            ..Default::default()
+        },
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("orders");
+    let ctx = GrpcAggregateContext::new(
+        Arc::new(MockEventStore::new()),
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        discovery,
+        Arc::new(MockEventBus::new()),
+    )
+    .with_sync_mode(crate::proto::SyncMode::Cascade)
+    .with_cascade_error_mode(CascadeErrorMode::CascadeErrorFailFast)
+    .with_outbox(outbox);
+
+    ctx.sync_fanout(&cascade_book()).await.unwrap_err();
+    assert!(deliverer.attempted().is_empty());
+}
+
+/// A PM coordinator that fails every trigger.
+#[derive(Clone, Default)]
+struct FailingPmServer;
+
+#[tonic::async_trait]
+impl PmCoordServiceTrait for FailingPmServer {
+    async fn handle(
+        &self,
+        _request: tonic::Request<ProcessManagerCoordinatorRequest>,
+    ) -> Result<tonic::Response<ProcessManagerHandleResponse>, Status> {
+        Err(Status::aborted("card declined"))
+    }
+
+    async fn handle_speculative(
+        &self,
+        _request: tonic::Request<SpeculatePmRequest>,
+    ) -> Result<tonic::Response<ProcessManagerHandleResponse>, Status> {
+        Err(Status::unimplemented("not exercised by these tests"))
+    }
+}
+
+/// C-0439 (deterministic): the saga leg runs before the PM leg, so when the
+/// PM fails under COMPENSATE the saga's executed reaction is compensated.
+#[tokio::test]
+async fn sync_fanout_compensate_after_pm_failure_compensates_saga_reactions() {
+    use crate::storage::ProvenanceKind;
+    let discovery = Arc::new(StaticServiceDiscovery::new());
+    spawn_saga(
+        &discovery,
+        "ReserveSaga",
+        ScriptedSagaServer {
+            executed: vec![executed_reserve_stock()],
+            ..Default::default()
+        },
+    )
+    .await;
+    let (listener, port) = bind_ephemeral().await;
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(ProcessManagerCoordinatorServiceServer::new(FailingPmServer))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    discovery
+        .register_pm("ChargePm", &["orders"], "127.0.0.1", port)
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("orders");
+    let ctx = GrpcAggregateContext::new(
+        Arc::new(MockEventStore::new()),
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        discovery,
+        Arc::new(MockEventBus::new()),
+    )
+    .with_sync_mode(crate::proto::SyncMode::Cascade)
+    .with_cascade_error_mode(CascadeErrorMode::CascadeErrorCompensate)
+    .with_outbox(outbox);
+    let mut book = cascade_book();
+    book.cover.as_mut().unwrap().correlation_id = "corr-1".to_string();
+
+    let err = ctx.sync_fanout(&book).await.unwrap_err();
+    assert!(err.message().contains("card declined"));
+
+    let compensates = deliverer.attempted_of(ProvenanceKind::CompensateNotification);
+    assert_eq!(compensates.len(), 1);
+    assert_eq!(
+        compensates[0].book.cover.as_ref().unwrap().domain,
+        "inventory"
+    );
+    let notification =
+        crate::orchestration::compensation::envelope_notification(&compensates[0].book).unwrap();
+    let compensate = <crate::proto::Compensate as prost::Message>::decode(
+        notification.payload.unwrap().value.as_slice(),
+    )
+    .unwrap();
+    assert_eq!(compensate.sequences, vec![6]);
+    assert_eq!(compensate.reason, "ChargePm: card declined");
 }

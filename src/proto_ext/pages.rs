@@ -18,8 +18,7 @@ use super::enums::MergeStrategyExt;
 ///     emitted by `Any.Pack()` in every language SDK.
 ///   - `/{full_name}` — prost's `prost::Name::type_url()` default (bare
 ///     leading slash, no domain); also angzarr's canonical form for its
-///     own framework messages (Confirmation / Revocation / Compensate /
-///     NoOp / Notification / CommandBook).
+///     own framework messages (Compensate / Notification / CommandBook).
 ///
 /// Stripping everything up to and including the LAST `/` collapses both
 /// to `{full_name}`. Strings without a `/` fall back to the whole
@@ -181,11 +180,11 @@ pub trait CommandPageExt {
     /// or decoding fails. The expected type URL is derived from M::full_name().
     fn decode_typed<M: prost::Message + Default + Name>(&self) -> Option<M>;
 
-    /// Get the merge strategy for this command.
-    ///
-    /// Returns the MergeStrategy enum value. Unknown wire ints resolve to
-    /// Commutative, the documented default (also the proto3 zero value).
-    fn merge_strategy(&self) -> MergeStrategy;
+    /// The merge strategy this command runs under: MERGE_UNSPECIFIED (the
+    /// wire zero) and unknown wire ints resolve to Commutative, the
+    /// documented default. Named apart from prost's generated
+    /// `merge_strategy()` getter, which returns UNSPECIFIED raw.
+    fn effective_merge_strategy(&self) -> MergeStrategy;
 }
 
 impl CommandPageExt for CommandPage {
@@ -234,7 +233,7 @@ impl CommandPageExt for CommandPage {
         M::decode(command.value.as_slice()).ok()
     }
 
-    fn merge_strategy(&self) -> MergeStrategy {
+    fn effective_merge_strategy(&self) -> MergeStrategy {
         MergeStrategy::or_default_commutative(self.merge_strategy)
     }
 }
@@ -245,7 +244,8 @@ impl CommandPageExt for CommandPage {
 pub trait AngzarrDeferredSequenceExt {
     /// Generate the composite idempotency key for logging and display.
     ///
-    /// Format: `{source.edition}:{source.domain}:{source.root_hex}:{source_seq}`
+    /// Format: `{source.edition}:{source.domain}:{source.root_hex}:{source_seq}`;
+    /// a missing source contributes empty fields.
     ///
     /// Example: `angzarr:order:550e8400e29b41d4a716446655440000:7`
     fn idempotency_key(&self) -> String;
@@ -254,7 +254,7 @@ pub trait AngzarrDeferredSequenceExt {
 impl AngzarrDeferredSequenceExt for AngzarrDeferredSequence {
     fn idempotency_key(&self) -> String {
         use super::cover::CoverExt;
-        let source = self.source.as_ref().expect("source required");
+        let source = self.source.clone().unwrap_or_default();
         format!(
             "{}:{}:{}:{}",
             source.edition().unwrap_or_default(),

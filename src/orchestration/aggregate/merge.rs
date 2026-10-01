@@ -188,7 +188,8 @@ pub(crate) fn diff_state_fields(
 ) -> HashSet<String> {
     let all_fields = || ["*".to_string()].into_iter().collect::<HashSet<String>>();
 
-    if before.type_url != after.type_url {
+    let name = crate::proto_ext::type_url::fqn;
+    if name(&before.type_url) != name(&after.type_url) {
         return all_fields();
     }
 
@@ -272,105 +273,6 @@ fn wire_fields(mut buf: &[u8]) -> Option<std::collections::BTreeMap<u32, Vec<Vec
         buf = rest;
     }
     Some(fields)
-}
-
-// ============================================================================
-// Two-Phase Commit Conflict Detection
-// ============================================================================
-
-/// Result of cascade conflict check.
-#[derive(Debug)]
-pub(crate) enum CascadeConflictResult {
-    /// No uncommitted events, or no field overlap - safe to proceed.
-    NoConflict,
-    /// Fields overlap with uncommitted events from other cascades.
-    Conflict {
-        cascade_ids: Vec<String>,
-        overlapping_fields: HashSet<String>,
-    },
-}
-
-/// Check whether a command touches fields another cascade holds locked.
-///
-/// `view` is the book the handler saw (other cascades' unresolved pages as
-/// NoOp). `raw` is the same book before the 2PC view, and `locked_sequences`
-/// names the unresolved pages of other cascades — confirmed, revoked and
-/// own-cascade pages are not locks.
-///
-/// 1. Locked fields: diff the view against the view with the locked pages
-///    revealed.
-/// 2. Command fields: diff the view against the view plus the command's
-///    events.
-/// 3. Any overlap (or a `"*"` wildcard) is a conflict.
-///
-/// Replays only ever see resolved pages and NoOp placeholders, never raw
-/// framework markers.
-pub(crate) async fn check_cascade_conflict(
-    business: &dyn ClientLogic,
-    raw: &EventBook,
-    view: &EventBook,
-    locked_sequences: &HashSet<u32>,
-    command_events: &EventBook,
-) -> Result<CascadeConflictResult, Status> {
-    if locked_sequences.is_empty() {
-        return Ok(CascadeConflictResult::NoConflict);
-    }
-
-    let locked_raw: Vec<&crate::proto::EventPage> = raw
-        .pages
-        .iter()
-        .filter(|p| locked_sequences.contains(&p.sequence_num()))
-        .collect();
-    let with_locks = EventBook {
-        pages: view
-            .pages
-            .iter()
-            .map(|page| {
-                locked_raw
-                    .iter()
-                    .find(|locked| locked.sequence_num() == page.sequence_num())
-                    .map(|locked| (*locked).clone())
-                    .unwrap_or_else(|| page.clone())
-            })
-            .collect(),
-        ..view.clone()
-    };
-
-    let state_view = business.replay(view).await?;
-    let state_locked = business.replay(&with_locks).await?;
-    let locked_fields = diff_state_fields(&state_view, &state_locked);
-
-    let state_after_cmd = business
-        .replay(&build_combined_events(view, command_events))
-        .await?;
-    let command_fields = diff_state_fields(&state_view, &state_after_cmd);
-
-    let mut cascade_ids: Vec<String> = locked_raw
-        .iter()
-        .filter_map(|p| p.cascade_id.clone())
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect();
-    cascade_ids.sort();
-
-    let overlapping_fields: HashSet<String> =
-        if locked_fields.contains("*") || command_fields.contains("*") {
-            command_fields
-        } else {
-            locked_fields
-                .intersection(&command_fields)
-                .cloned()
-                .collect()
-        };
-
-    if overlapping_fields.is_empty() {
-        Ok(CascadeConflictResult::NoConflict)
-    } else {
-        Ok(CascadeConflictResult::Conflict {
-            cascade_ids,
-            overlapping_fields,
-        })
-    }
 }
 
 #[cfg(test)]

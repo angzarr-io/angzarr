@@ -150,11 +150,10 @@ impl SagaCoordinatorService for SagaCoord {
         // Create context and orchestrate
         let ctx = self.factory.create(Arc::new(source));
 
-        let reaction_errors = orchestrate_saga(
+        let report = orchestrate_saga(
             ctx.as_ref(),
             self.executor.as_ref(),
             self.command_bus.as_deref(),
-            None, // fetcher unused in new model
             self.fact_executor.as_deref(),
             saga_name,
             &correlation_id,
@@ -167,9 +166,17 @@ impl SagaCoordinatorService for SagaCoord {
         .map_err(|e| super::orchestration_status("Saga", e))?;
 
         // Commands were delivered during orchestration; the response carries
-        // only CONTINUE-mode reaction errors, in its metadata.
+        // CONTINUE-mode reaction errors and, for a COMPENSATE caller, the
+        // reaction commands executed (so it can compensate them if another
+        // reaction fails), in its metadata.
         let mut response = Response::new(SagaResponse::default());
-        crate::orchestration::shared::attach_reaction_errors(&mut response, reaction_errors);
+        crate::orchestration::shared::attach_reaction_errors(&mut response, report.reaction_errors);
+        if cascade_error_mode == CascadeErrorMode::CascadeErrorCompensate {
+            crate::orchestration::shared::attach_executed_reactions(
+                &mut response,
+                &report.executed,
+            );
+        }
         Ok(response)
     }
 
@@ -207,16 +214,12 @@ impl SagaCoordinatorService for SagaCoord {
         let sync_mode = SyncMode::or_default_async(req.sync_mode);
 
         // Create context and call handle() directly (no command delivery)
-        // For speculative execution, pass empty sequences since we're not actually delivering commands
         let ctx = self.factory.create(Arc::new(source));
 
-        let response = ctx
-            .handle(std::collections::HashMap::new(), sync_mode)
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Saga handler failed");
-                Status::internal(format!("Saga handler failed: {}", e))
-            })?;
+        let response = ctx.handle(sync_mode).await.map_err(|e| {
+            error!(error = %e, "Saga handler failed");
+            Status::internal(format!("Saga handler failed: {}", e))
+        })?;
 
         Ok(Response::new(response))
     }

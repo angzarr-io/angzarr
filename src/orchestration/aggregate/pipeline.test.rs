@@ -6,14 +6,10 @@
 //! a core motivation for the split. These tests pin each helper's branching
 //! directly so mutations in them are caught.
 //!
-//! Exception: the deferred-MANUAL gate (D-7) is ALSO pinned at `execute_mode`
-//! WIRING level (see the "execute_mode wiring" section near the end).
-//! Helper-level tests alone leave the call-site mutants alive (gate call
-//! deleted / `needs_deferred_manual_check` forced false), under which a
-//! deferred MANUAL command with a genuine field conflict would silently merge
-//! with no DLQ — the exact hole D-7 closes — while every helper test stays
-//! green. `execute_mode` is reachable here because this module is a child of
-//! pipeline.rs (`use super::*`).
+//! The merge-strategy gates are ALSO pinned at `execute_mode` WIRING level
+//! (see the "execute_mode wiring" sections near the end): helper-level tests
+//! alone leave the call-site mutants alive. `execute_mode` is reachable here
+//! because this module is a child of pipeline.rs (`use super::*`).
 //!
 //! `use super::*` pulls in pipeline.rs's own items and its imports (traits,
 //! proto types like `CommandBook`/`EventBook`/`MergeStrategy`, `Status`, `Uuid`,
@@ -60,8 +56,8 @@ fn book_with_domain(domain: &str, correlation_id: &str) -> EventBook {
     }
 }
 
-/// An EventPage at `sequence`, committed unless `no_commit`/`cascade` say otherwise.
-fn make_event_page(sequence: u32, no_commit: bool, cascade: Option<&str>) -> EventPage {
+/// An EventPage at `sequence`.
+fn make_event_page(sequence: u32) -> EventPage {
     EventPage {
         header: Some(PageHeader {
             sync_mode: None,
@@ -72,8 +68,6 @@ fn make_event_page(sequence: u32, no_commit: bool, cascade: Option<&str>) -> Eve
             value: vec![],
         })),
         created_at: None,
-        no_commit,
-        cascade_id: cascade.map(String::from),
     }
 }
 
@@ -175,10 +169,10 @@ impl ClientLogic for StubReplay {
     }
 }
 
-/// A `ClientLogic` for driving `execute_mode` end-to-end (D-7 wiring tests):
+/// A `ClientLogic` for driving `execute_mode` end-to-end (wiring tests):
 /// `invoke` returns a canned events book (the command's "received" events) and
-/// `replay` delegates to `StubReplay` so the deferred-MANUAL field-overlap
-/// gate observes controllable state diffs on the REAL pipeline path.
+/// `replay` delegates to `StubReplay` so the field-overlap gates observe
+/// controllable state diffs on the REAL pipeline path.
 struct WiredLogic {
     replay: StubReplay,
     /// EventBook returned by `invoke` as `BusinessResponse::Events`.
@@ -207,10 +201,9 @@ impl ClientLogic for WiredLogic {
 }
 
 /// Configurable `AggregateContext` exposing what the helpers — and, for the
-/// D-7 wiring tests, the whole `execute_mode` pipeline — call.
+/// wiring tests, the whole `execute_mode` pipeline — call.
 #[derive(Default)]
 struct TestCtx {
-    cascade: Option<String>,
     /// Value returned by `check_deferred_idempotency`.
     deferred_cached: Option<EventBook>,
     /// Prior events returned by `load_prior_events_with_divergence`
@@ -243,6 +236,10 @@ struct TestCtx {
     /// requested sequences recorded.
     historical_events: Option<EventBook>,
     historical_requests: Arc<std::sync::Mutex<Vec<u32>>>,
+    /// Claims `check_deferred_idempotency` was asked about.
+    claims_looked_up: Arc<std::sync::Mutex<Vec<SourceInfo>>>,
+    /// The provenance claim each `persist_events` call carried.
+    persisted_claims: Arc<std::sync::Mutex<Vec<Option<SourceInfo>>>>,
 }
 
 #[async_trait]
@@ -293,9 +290,13 @@ impl AggregateContext for TestCtx {
         _root: Uuid,
         _correlation_id: &str,
         _external_id: Option<&str>,
-        _source_info: Option<&SourceInfo>,
+        source_info: Option<&SourceInfo>,
     ) -> Result<PersistOutcome, Status> {
         self.persist_calls.fetch_add(1, Ordering::SeqCst);
+        self.persisted_claims
+            .lock()
+            .unwrap()
+            .push(source_info.cloned());
         self.persist_outcome
             .clone()
             .ok_or_else(|| Status::unimplemented("persist_events not configured for this test"))
@@ -324,17 +325,14 @@ impl AggregateContext for TestCtx {
         self.unpublished_dlq_calls.fetch_add(1, Ordering::SeqCst);
     }
 
-    fn cascade_id(&self) -> Option<&str> {
-        self.cascade.as_deref()
-    }
-
     async fn check_deferred_idempotency(
         &self,
         _domain: &str,
         _edition: &str,
         _root: Uuid,
-        _deferred: &AngzarrDeferredSequence,
+        source: &SourceInfo,
     ) -> Result<Option<EventBook>, Status> {
+        self.claims_looked_up.lock().unwrap().push(source.clone());
         Ok(self.deferred_cached.clone())
     }
 
@@ -507,64 +505,6 @@ fn test_resolve_persist_outcome_duplicate_is_internal_error() {
 }
 
 // ============================================================================
-// apply_two_phase_transform
-// ============================================================================
-
-/// Non-cascade context: committed prior events pass through unchanged, the cover
-/// is preserved, and there are no other-cascade uncommitted events.
-#[tokio::test]
-async fn test_apply_two_phase_non_cascade_passthrough() {
-    let ctx = TestCtx::default(); // cascade_id() == None
-    let mut prior = book_with_domain("orders", "c1");
-    prior.pages = vec![make_event_page(0, false, None)];
-
-    let (out, locked) = apply_two_phase_transform(&ctx, &prior);
-
-    assert!(locked.is_empty(), "no cascade context → no locks");
-    assert_eq!(
-        out.cover
-            .expect("cover preserved (not a default book)")
-            .domain,
-        "orders"
-    );
-    assert_eq!(out.pages.len(), 1, "committed page passes through");
-}
-
-/// Cascade context with no prior events: the cascade branch runs but finds no
-/// uncommitted cascades, so the flag is false. Pins the `!is_empty()` polarity.
-#[tokio::test]
-async fn test_apply_two_phase_cascade_no_uncommitted_is_false() {
-    let ctx = TestCtx {
-        cascade: Some("cascade-A".to_string()),
-        ..Default::default()
-    };
-    let prior = book_with_domain("orders", "c1"); // no pages
-
-    let (_out, locked) = apply_two_phase_transform(&ctx, &prior);
-
-    assert!(locked.is_empty(), "empty prior → no locks");
-}
-
-/// Inside a cascade, only OTHER cascades' unresolved pages are locks: the
-/// command's own provisional pages and a resolved cascade lock nothing.
-#[tokio::test]
-async fn test_apply_two_phase_locks_only_unresolved_other_cascades() {
-    let ctx = TestCtx {
-        cascade: Some("own".to_string()),
-        ..Default::default()
-    };
-    let mut prior = book_with_domain("orders", "c1");
-    prior.pages = vec![
-        make_event_page(0, true, Some("own")),
-        make_event_page(1, true, Some("other")),
-    ];
-    let (out, locked) = apply_two_phase_transform(&ctx, &prior);
-    assert_eq!(locked, [1].into_iter().collect());
-    assert!(!super::super::two_phase::is_noop(&out.pages[0]));
-    assert!(super::super::two_phase::is_noop(&out.pages[1]));
-}
-
-// ============================================================================
 // publish_unless_noop
 // ============================================================================
 
@@ -654,10 +594,16 @@ async fn test_try_deferred_replay_non_deferred_is_none() {
     };
     let cmd = plain_command();
 
-    let result =
-        try_deferred_idempotency_replay(&ctx, &cmd, "dest", "angzarr", Uuid::new_v4(), "c")
-            .await
-            .unwrap();
+    let result = try_deferred_idempotency_replay(
+        &ctx,
+        extract_source_info(&cmd).unwrap().as_ref(),
+        "dest",
+        "angzarr",
+        Uuid::new_v4(),
+        "c",
+    )
+    .await
+    .unwrap();
 
     assert!(result.is_none());
     assert_eq!(
@@ -676,10 +622,16 @@ async fn test_try_deferred_replay_deferred_not_cached_is_none() {
     };
     let cmd = deferred_command(Some(cover("orders", "")), 1);
 
-    let result =
-        try_deferred_idempotency_replay(&ctx, &cmd, "dest", "angzarr", Uuid::new_v4(), "c")
-            .await
-            .unwrap();
+    let result = try_deferred_idempotency_replay(
+        &ctx,
+        extract_source_info(&cmd).unwrap().as_ref(),
+        "dest",
+        "angzarr",
+        Uuid::new_v4(),
+        "c",
+    )
+    .await
+    .unwrap();
 
     assert!(result.is_none());
 }
@@ -699,7 +651,7 @@ async fn test_try_deferred_replay_cached_returns_and_stamps_correlation() {
 
     let response = try_deferred_idempotency_replay(
         &ctx,
-        &cmd,
+        extract_source_info(&cmd).unwrap().as_ref(),
         "dest",
         "angzarr",
         Uuid::new_v4(),
@@ -737,10 +689,7 @@ fn window(expected: u32, actual: u32) -> SeqWindow {
 fn test_enforce_strict_non_deferred_rejects_with_state() {
     use prost::Message;
     let mut current = book_with_domain("dest", "");
-    current.pages = vec![
-        make_event_page(0, false, None),
-        make_event_page(1, false, None),
-    ];
+    current.pages = vec![make_event_page(0), make_event_page(1)];
     let err = enforce_strict_gate(MergeStrategy::MergeStrict, window(1, 2), &current)
         .expect_err("STRICT mismatch must reject");
     assert_eq!(err.code(), tonic::Code::FailedPrecondition);
@@ -798,29 +747,10 @@ fn test_storage_race_and_transient_retried_in_place() {
 }
 
 // ============================================================================
-// enforce_cascade_conflict_gate / enforce_commutative_gate
-// (thin wrappers over `merge`; pinned on deterministic paths — the conflict /
+// enforce_commutative_gate
+// (thin wrapper over `merge`; pinned on deterministic paths — the overlap /
 //  disjoint paths are covered by merge.test.rs)
 // ============================================================================
-
-/// With no uncommitted prior events there is no possible cascade conflict, so
-/// the gate proceeds (`Ok`). Pins the NoConflict → Ok mapping.
-#[tokio::test]
-async fn test_cascade_gate_no_uncommitted_is_ok() {
-    let business = NoReplay;
-    let mut prior = book_with_domain("orders", "c1");
-    prior.pages = vec![make_event_page(0, false, None)]; // committed only
-    let received = book_with_domain("orders", "c1");
-
-    let loaded = LoadedPrior {
-        raw: prior.clone(),
-        view: prior,
-        locked_sequences: Default::default(),
-    };
-    enforce_cascade_conflict_gate(&business, &loaded, &received)
-        .await
-        .expect("no uncommitted events → NoConflict → Ok");
-}
 
 /// When the aggregate can't replay (Unimplemented), the commutative check
 /// degrades to STRICT: the gate rejects with FAILED_PRECONDITION and the plain
@@ -862,22 +792,20 @@ async fn test_commutative_gate_replay_unimplemented_degrades_to_strict() {
 //   index 2 → state after command (prior + received, 2 pages here)
 // ============================================================================
 
-/// One committed prior event → the destination is non-empty (`actual == 1`),
-/// while the deferred command's `expected == 0`. Shared by the gate tests.
+/// One prior event → the destination is non-empty (`actual == 1`), while the
+/// command's `expected == 0`. Shared by the gate tests.
 fn non_empty_prior_and_command() -> (EventBook, EventBook) {
     let mut prior = book_with_domain("orders", "c1");
-    prior.pages = vec![make_event_page(0, false, None)];
+    prior.pages = vec![make_event_page(0)];
     let mut received = book_with_domain("orders", "c1");
-    received.pages = vec![make_event_page(1, false, None)];
+    received.pages = vec![make_event_page(1)];
     (prior, received)
 }
 
-/// (a) Deferred MANUAL, non-empty destination, but the command's fields are
-/// DISJOINT from the fields intervening events changed → the gate proceeds
-/// (Ok) and does NOT DLQ. This is the core of D-7: a saga command landing on a
-/// non-empty aggregate with no real conflict must merge, not be dead-lettered.
+/// (a) MANUAL, stale command whose fields are DISJOINT from the fields
+/// intervening events changed → the gate proceeds (Ok) and does NOT DLQ.
 #[tokio::test]
-async fn test_deferred_manual_gate_disjoint_proceeds_no_dlq() {
+async fn test_manual_gate_disjoint_proceeds_no_dlq() {
     let dlq = Arc::new(AtomicUsize::new(0));
     let ctx = TestCtx {
         dlq_calls: dlq.clone(),
@@ -917,11 +845,11 @@ async fn test_deferred_manual_gate_disjoint_proceeds_no_dlq() {
     );
 }
 
-/// (b) Deferred MANUAL, non-empty destination, and the command touches a field
-/// an intervening event ALSO changed → genuine conflict → the gate DLQs and
-/// aborts (non-retryable). Pins the Overlap arm.
+/// (b) MANUAL, and the command touches a field an intervening event ALSO
+/// changed → genuine conflict → the gate DLQs and aborts (non-retryable).
+/// Pins the Overlap arm.
 #[tokio::test]
-async fn test_deferred_manual_gate_overlap_dlqs_and_aborts() {
+async fn test_manual_gate_overlap_dlqs_and_aborts() {
     let dlq = Arc::new(AtomicUsize::new(0));
     let ctx = TestCtx {
         dlq_calls: dlq.clone(),
@@ -970,7 +898,7 @@ async fn test_deferred_manual_gate_overlap_dlqs_and_aborts() {
 /// undetermined. The gate conservatively DLQs + aborts, preserving MANUAL's
 /// "human decides" contract rather than silently merging. Pins the `Err` arm.
 #[tokio::test]
-async fn test_deferred_manual_gate_replay_unavailable_dlqs() {
+async fn test_manual_gate_replay_unavailable_dlqs() {
     let dlq = Arc::new(AtomicUsize::new(0));
     let ctx = TestCtx {
         dlq_calls: dlq.clone(),
@@ -1057,13 +985,10 @@ async fn test_deferred_command_skips_every_merge_strategy_check() {
         MergeStrategy::MergeAggregateHandles,
     ] {
         let mut prior = book_with_domain("dest", "");
-        prior.pages = vec![
-            make_event_page(0, false, None),
-            make_event_page(1, false, None),
-        ];
+        prior.pages = vec![make_event_page(0), make_event_page(1)];
         prior.next_sequence = 2;
         let mut received = book_with_domain("dest", "");
-        received.pages = vec![make_event_page(2, false, None)];
+        received.pages = vec![make_event_page(2)];
         let ctx = TestCtx {
             prior_events: Some(prior),
             persist_outcome: Some(PersistOutcome::Persisted(received.clone())),
@@ -1092,7 +1017,7 @@ async fn test_deferred_command_skips_every_merge_strategy_check() {
 #[tokio::test]
 async fn test_explicit_sequence_from_saga_is_validated_like_a_client_command() {
     let mut prior = book_with_domain("dest", "");
-    prior.pages = vec![make_event_page(0, false, None)];
+    prior.pages = vec![make_event_page(0)];
     prior.next_sequence = 1;
     let ctx = TestCtx {
         prior_events: Some(prior),
@@ -1173,13 +1098,10 @@ async fn run_client_command(
     states: [&'static str; 4],
 ) -> ClientRun {
     let mut prior = book_with_domain("dest", "");
-    prior.pages = vec![
-        make_event_page(0, false, None),
-        make_event_page(1, false, None),
-    ];
+    prior.pages = vec![make_event_page(0), make_event_page(1)];
     prior.next_sequence = 2;
     let mut received = book_with_domain("dest", "");
-    received.pages = vec![make_event_page(2, false, None)];
+    received.pages = vec![make_event_page(2)];
 
     let ctx = TestCtx {
         prior_events: Some(prior),
@@ -1307,7 +1229,7 @@ struct ShapeReplay;
 impl ClientLogic for ShapeReplay {
     async fn invoke(&self, _cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
         let mut received = book_with_domain("dest", "");
-        received.pages = vec![make_event_page(3, false, None)];
+        received.pages = vec![make_event_page(3)];
         Ok(BusinessResponse {
             result: Some(business_response::Result::Events(received)),
         })
@@ -1346,7 +1268,7 @@ async fn test_commutative_window_ignores_snapshot_newer_than_expected() {
     });
     prior.next_sequence = 3;
     let mut historical = book_with_domain("dest", "");
-    historical.pages = vec![make_event_page(0, false, None)];
+    historical.pages = vec![make_event_page(0)];
 
     let ctx = TestCtx {
         prior_events: Some(prior),
@@ -1385,7 +1307,7 @@ async fn test_commutative_window_ignores_snapshot_newer_than_expected() {
 #[tokio::test]
 async fn test_fanout_failure_after_persist_reaches_caller_without_republish() {
     let mut received = book_with_domain("dest", "");
-    received.pages = vec![make_event_page(0, false, None)];
+    received.pages = vec![make_event_page(0)];
     let ctx = TestCtx {
         prior_events: Some(book_with_domain("dest", "")),
         persist_outcome: Some(PersistOutcome::Persisted(received.clone())),
@@ -1446,7 +1368,7 @@ async fn test_noop_command_runs_no_fanout() {
 // Fact pipeline
 // ============================================================================
 
-fn fact_book(correlation_id: &str, cascade_id: Option<&str>) -> EventBook {
+fn fact_book(correlation_id: &str) -> EventBook {
     let mut book = book_with_domain("dest", correlation_id);
     book.pages = vec![EventPage {
         header: Some(PageHeader {
@@ -1463,8 +1385,6 @@ fn fact_book(correlation_id: &str, cascade_id: Option<&str>) -> EventBook {
             value: vec![],
         })),
         created_at: None,
-        no_commit: false,
-        cascade_id: cascade_id.map(String::from),
     }];
     book
 }
@@ -1541,7 +1461,7 @@ async fn test_fact_noop_is_not_published() {
         },
         ..Default::default()
     };
-    let response = execute_fact_pipeline(&ctx, None, fact_book("", None))
+    let response = execute_fact_pipeline(&ctx, None, fact_book(""))
         .await
         .unwrap();
     assert!(response.events.pages.is_empty());
@@ -1554,7 +1474,7 @@ async fn test_fact_noop_is_not_published() {
 #[tokio::test]
 async fn test_fact_publish_failure_does_not_fail_persisted_fact() {
     let mut persisted = book_with_domain("dest", "");
-    persisted.pages = vec![make_event_page(0, false, None)];
+    persisted.pages = vec![make_event_page(0)];
     let ctx = FactCtx {
         inner: TestCtx {
             persist_outcome: Some(PersistOutcome::Persisted(persisted)),
@@ -1563,7 +1483,7 @@ async fn test_fact_publish_failure_does_not_fail_persisted_fact() {
         },
         ..Default::default()
     };
-    execute_fact_pipeline(&ctx, None, fact_book("", None))
+    execute_fact_pipeline(&ctx, None, fact_book(""))
         .await
         .expect("persisted fact succeeds");
     assert_eq!(
@@ -1577,115 +1497,11 @@ async fn test_fact_publish_failure_does_not_fail_persisted_fact() {
 #[tokio::test]
 async fn test_fact_invalid_correlation_rejected() {
     let ctx = FactCtx::default();
-    let err = execute_fact_pipeline(&ctx, None, fact_book("bad id!", None))
+    let err = execute_fact_pipeline(&ctx, None, fact_book("bad id!"))
         .await
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     assert!(ctx.persisted.lock().unwrap().is_empty());
-}
-
-/// A cascade_id supplied by the fact's producer is not persisted: on a
-/// committed page it would read as that cascade's resolution.
-#[tokio::test]
-async fn test_fact_strips_producer_cascade_id() {
-    let ctx = FactCtx {
-        inner: TestCtx {
-            persist_outcome: Some(PersistOutcome::NoOp(EventBook::default())),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    execute_fact_pipeline(&ctx, None, fact_book("", Some("cascade-x")))
-        .await
-        .unwrap();
-    let persisted = ctx.persisted.lock().unwrap();
-    assert_eq!(persisted[0].pages.len(), 1);
-    assert_eq!(persisted[0].pages[0].cascade_id, None);
-    assert!(!persisted[0].pages[0].no_commit);
-}
-
-/// The fact handler sees the same 2PC view a command handler does: another
-/// cascade's unresolved page is a NoOp placeholder, not live state.
-#[tokio::test]
-async fn test_fact_handler_sees_two_phase_view() {
-    struct CaptureFact(std::sync::Mutex<Option<EventBook>>);
-    #[async_trait]
-    impl ClientLogic for CaptureFact {
-        async fn invoke(&self, _cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
-            unreachable!()
-        }
-        async fn invoke_fact(&self, ctx: FactContext) -> Result<EventBook, Status> {
-            *self.0.lock().unwrap() = ctx.prior_events.clone();
-            Ok(ctx.facts)
-        }
-    }
-
-    let mut prior = book_with_domain("dest", "");
-    prior.pages = vec![make_event_page(0, true, Some("other-cascade"))];
-    prior.next_sequence = 1;
-    let ctx = FactCtx {
-        inner: TestCtx {
-            prior_events: Some(prior),
-            persist_outcome: Some(PersistOutcome::NoOp(EventBook::default())),
-            ..Default::default()
-        },
-        ..Default::default()
-    };
-    let logic = CaptureFact(std::sync::Mutex::new(None));
-    execute_fact_pipeline(&ctx, Some(&logic), fact_book("", None))
-        .await
-        .unwrap();
-    let seen = logic.0.lock().unwrap().clone().unwrap();
-    assert!(super::super::two_phase::is_noop(&seen.pages[0]));
-    let persisted = ctx.persisted.lock().unwrap();
-    assert_eq!(
-        crate::proto_ext::EventPageExt::sequence_num(&persisted[0].pages[0]),
-        1,
-        "the fact lands after the hidden page"
-    );
-}
-
-/// Speculative execution hands the handler the 2PC view too.
-#[tokio::test]
-async fn test_speculative_handler_sees_two_phase_view() {
-    struct CaptureCommand(std::sync::Mutex<Option<EventBook>>);
-    #[async_trait]
-    impl ClientLogic for CaptureCommand {
-        async fn invoke(&self, cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
-            *self.0.lock().unwrap() = cmd.events.clone();
-            Ok(BusinessResponse {
-                result: Some(business_response::Result::Events(EventBook::default())),
-            })
-        }
-        async fn invoke_fact(&self, _ctx: FactContext) -> Result<EventBook, Status> {
-            unreachable!()
-        }
-    }
-
-    let mut historical = book_with_domain("dest", "");
-    historical.pages = vec![
-        make_event_page(0, false, None),
-        make_event_page(1, true, Some("other-cascade")),
-    ];
-    let ctx = TestCtx {
-        historical_events: Some(historical),
-        ..Default::default()
-    };
-    let logic = CaptureCommand(std::sync::Mutex::new(None));
-    execute_command_pipeline(
-        &ctx,
-        &logic,
-        explicit_command(MergeStrategy::MergeCommutative, 0),
-        PipelineMode::Speculative {
-            as_of_sequence: Some(1),
-            as_of_timestamp: None,
-        },
-    )
-    .await
-    .unwrap();
-    let seen = logic.0.lock().unwrap().clone().unwrap();
-    assert!(!super::super::two_phase::is_noop(&seen.pages[0]));
-    assert!(super::super::two_phase::is_noop(&seen.pages[1]));
 }
 
 /// CONTINUE-mode reaction errors from the fan-out reach the command response
@@ -1693,7 +1509,7 @@ async fn test_speculative_handler_sees_two_phase_view() {
 #[tokio::test]
 async fn test_reaction_errors_reach_the_command_response() {
     let mut received = book_with_domain("dest", "");
-    received.pages = vec![make_event_page(0, false, None)];
+    received.pages = vec![make_event_page(0)];
     let error = crate::proto::CascadeReactionError {
         component: "ChargeSaga".to_string(),
         code: tonic::Code::FailedPrecondition as i32,
@@ -1722,4 +1538,115 @@ async fn test_reaction_errors_reach_the_command_response() {
     .unwrap();
     assert_eq!(response.reaction_errors, vec![error]);
     assert_eq!(response.projections.len(), 1);
+}
+
+// ============================================================================
+// Compensation delivery (HandleCompensation)
+// ============================================================================
+
+/// A Compensate envelope for a deferred command to `dest` with provenance
+/// (source "order", source_seq 0, component "OrderFulfillment", index).
+fn compensate_delivery(command_index: u32) -> CommandBook {
+    let mut command = deferred_command(Some(cover("order", "")), 0);
+    if let Some(SequenceType::AngzarrDeferred(d)) = command.pages[0]
+        .header
+        .as_mut()
+        .and_then(|h| h.sequence_type.as_mut())
+    {
+        d.source_component = "OrderFulfillment".to_string();
+        d.command_index = command_index;
+    }
+    crate::orchestration::compensation::compensate_envelope(&command, None, "card declined")
+}
+
+/// Counts handler invocations and answers with one event.
+struct CountingCompensator {
+    invocations: AtomicUsize,
+}
+
+#[async_trait]
+impl ClientLogic for CountingCompensator {
+    async fn invoke(&self, _cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        let mut events = book_with_domain("dest", "");
+        events.pages = vec![make_event_page(0)];
+        Ok(BusinessResponse {
+            result: Some(business_response::Result::Events(events)),
+        })
+    }
+    async fn invoke_fact(&self, _ctx: FactContext) -> Result<EventBook, Status> {
+        unreachable!()
+    }
+}
+
+/// C-0467: a redelivered notification whose claim already has events does
+/// not invoke the compensation handler again and returns the first
+/// delivery's events.
+#[tokio::test]
+async fn test_compensation_redelivery_returns_first_events_without_handler() {
+    let mut first = book_with_domain("dest", "");
+    first.pages = vec![make_event_page(7)];
+    let ctx = TestCtx {
+        deferred_cached: Some(first.clone()),
+        ..Default::default()
+    };
+    let logic = CountingCompensator {
+        invocations: AtomicUsize::new(0),
+    };
+
+    let response = execute_compensation_pipeline(&ctx, &logic, compensate_delivery(0))
+        .await
+        .unwrap();
+
+    assert_eq!(logic.invocations.load(Ordering::SeqCst), 0);
+    assert_eq!(ctx.persist_calls.load(Ordering::SeqCst), 0);
+    let Some(business_response::Result::Events(events)) = response.result else {
+        panic!("expected the cached events");
+    };
+    assert_eq!(events.pages, first.pages);
+}
+
+/// The first delivery looks its claim up under the notification's kind and
+/// persists the handler's events under that same claim, so the next
+/// delivery finds them.
+#[tokio::test]
+async fn test_compensation_first_delivery_persists_under_its_kind() {
+    let ctx = TestCtx {
+        persist_outcome: Some(PersistOutcome::Persisted(book_with_domain("dest", ""))),
+        ..Default::default()
+    };
+    let logic = CountingCompensator {
+        invocations: AtomicUsize::new(0),
+    };
+
+    execute_compensation_pipeline(&ctx, &logic, compensate_delivery(3))
+        .await
+        .unwrap();
+
+    assert_eq!(logic.invocations.load(Ordering::SeqCst), 1);
+    let looked_up = ctx.claims_looked_up.lock().unwrap().clone();
+    assert_eq!(looked_up.len(), 1);
+    assert_eq!(
+        looked_up[0].kind,
+        crate::storage::ProvenanceKind::CompensateNotification
+    );
+    assert_eq!(looked_up[0].command_index, 3);
+    assert_eq!(looked_up[0].component, "OrderFulfillment");
+    let persisted = ctx.persisted_claims.lock().unwrap().clone();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].as_ref(), Some(&looked_up[0]));
+}
+
+/// HandleCompensation accepts only Notification delivery envelopes.
+#[tokio::test]
+async fn test_compensation_rejects_a_plain_command() {
+    let ctx = TestCtx::default();
+    let logic = CountingCompensator {
+        invocations: AtomicUsize::new(0),
+    };
+    let err = execute_compensation_pipeline(&ctx, &logic, plain_command())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(logic.invocations.load(Ordering::SeqCst), 0);
 }

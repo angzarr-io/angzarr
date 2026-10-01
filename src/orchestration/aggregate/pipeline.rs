@@ -16,17 +16,13 @@ use crate::proto_ext::{calculate_set_next_seq, EventBookExt};
 use crate::utils::response_builder::extract_events_from_response;
 use crate::utils::retry::{is_retryable_status, run_with_retry, RetryOutcome, RetryableOperation};
 
-use super::merge::{
-    check_cascade_conflict, check_commutative_overlap, window_base_from_prior,
-    CascadeConflictResult, CommutativeMergeResult,
-};
+use super::merge::{check_commutative_overlap, window_base_from_prior, CommutativeMergeResult};
 use super::parsing::{
     extract_angzarr_deferred, extract_command_sequence, extract_edition, extract_event_edition,
     extract_explicit_divergence, has_deferred_sequence, parse_command_cover, parse_event_cover,
     stamp_deferred_sequences,
 };
 use super::traits::{AggregateContext, ClientLogic, PersistOutcome};
-use super::two_phase::{transform_for_two_phase, TwoPhaseContext};
 use super::types::{FactContext, FactResponse, PipelineMode, TemporalQuery};
 
 /// Execute the aggregate command pipeline.
@@ -112,7 +108,7 @@ pub async fn execute_command_with_retry(
 // `execute_mode` is the framework's command decision core. Each stage that
 // carries its own branching is extracted here so the orchestrator reads as a
 // linear sequence of named phases (parse → idempotency → pre-validate → load →
-// 2PC → sequence gate → invoke → post-exec gates → persist → publish).
+// sequence gate → invoke → post-exec gates → persist → publish).
 // ============================================================================
 
 /// Capture source provenance from a deferred (saga-produced) command.
@@ -130,6 +126,33 @@ fn extract_source_info(
     }
 }
 
+/// The events already persisted under a provenance claim, with the
+/// in-flight correlation_id stamped on, or `None` when the claim is new (or
+/// there is no claim to look up).
+async fn cached_for_claim(
+    ctx: &dyn AggregateContext,
+    source_info: Option<&crate::storage::SourceInfo>,
+    domain: &str,
+    edition: &str,
+    root_uuid: Uuid,
+) -> Result<Option<EventBook>, Status> {
+    let Some(source_info) = source_info else {
+        return Ok(None);
+    };
+    let cached = ctx
+        .check_deferred_idempotency(domain, edition, root_uuid, source_info)
+        .await?;
+    if cached.is_some() {
+        tracing::debug!(
+            source_domain = %source_info.domain,
+            source_seq = source_info.seq,
+            kind = source_info.kind.as_str(),
+            "Deferred claim already processed, returning cached result"
+        );
+    }
+    Ok(cached)
+}
+
 /// For a deferred (saga-produced) command, return the cached result if it was
 /// already processed. `Ok(Some(_))` short-circuits the pipeline.
 ///
@@ -139,27 +162,17 @@ fn extract_source_info(
 /// return it, and PMs ignore events without one.
 async fn try_deferred_idempotency_replay(
     ctx: &dyn AggregateContext,
-    command_book: &CommandBook,
+    source_info: Option<&crate::storage::SourceInfo>,
     domain: &str,
     edition: &str,
     root_uuid: Uuid,
     correlation_id: &str,
 ) -> Result<Option<CommandResponse>, Status> {
-    let Some(deferred) = extract_angzarr_deferred(command_book) else {
-        return Ok(None);
-    };
-    let Some(mut existing_events) = ctx
-        .check_deferred_idempotency(domain, edition, root_uuid, deferred)
-        .await?
+    let Some(mut existing_events) =
+        cached_for_claim(ctx, source_info, domain, edition, root_uuid).await?
     else {
         return Ok(None);
     };
-
-    tracing::debug!(
-        source_domain = deferred.source.as_ref().map(|c| c.domain.as_str()),
-        source_seq = deferred.source_seq,
-        "Deferred command already processed, returning cached result"
-    );
 
     if let Some(ref mut cover) = existing_events.cover {
         if cover.correlation_id.is_empty() {
@@ -231,20 +244,8 @@ fn is_retryable_in_place(status: &Status) -> bool {
                 .starts_with(crate::orchestration::errmsg::SEQUENCE_MISMATCH_CLASS))
 }
 
-/// Prior events loaded for a handler call.
-struct LoadedPrior {
-    /// Upcast events before the 2PC view (uncommitted pages still flagged);
-    /// the cascade-conflict gate partitions on these.
-    raw: EventBook,
-    /// What the handler sees: own cascade visible, unresolved other cascades
-    /// and framework markers as NoOp, revoked pages as NoOp.
-    view: EventBook,
-    /// Sequences of other cascades' unresolved pages (fields they lock).
-    locked_sequences: std::collections::HashSet<u32>,
-}
-
-/// Load, upcast and 2PC-resolve prior events. Every pipeline mode (execute,
-/// speculative, fact) hands the handler this same view.
+/// Load and upcast prior events. Every pipeline mode (execute, speculative,
+/// fact, compensation) hands the handler this same view.
 async fn load_prior(
     ctx: &dyn AggregateContext,
     domain: &str,
@@ -252,39 +253,11 @@ async fn load_prior(
     root: Uuid,
     temporal: &TemporalQuery,
     explicit_divergence: Option<u32>,
-) -> Result<LoadedPrior, Status> {
+) -> Result<EventBook, Status> {
     let loaded = ctx
         .load_prior_events_with_divergence(domain, edition, root, temporal, explicit_divergence)
         .await?;
-    let raw = ctx.transform_events(domain, loaded).await?;
-    let (view, locked_sequences) = apply_two_phase_transform(ctx, &raw);
-    Ok(LoadedPrior {
-        raw,
-        view,
-        locked_sequences,
-    })
-}
-
-/// Apply the 2-phase-commit transform to prior events.
-///
-/// Returns the business-visible view (own cascade visible, other cascades
-/// hidden as NoOp) and, for a command running inside a cascade, the sequences
-/// of other cascades' unresolved pages — the fields those cascades lock.
-fn apply_two_phase_transform(
-    ctx: &dyn AggregateContext,
-    prior_events: &EventBook,
-) -> (EventBook, std::collections::HashSet<u32>) {
-    match ctx.cascade_id() {
-        Some(cascade_id) => {
-            let result =
-                transform_for_two_phase(prior_events, &TwoPhaseContext::for_handler(cascade_id));
-            (result.events, result.uncommitted_sequences)
-        }
-        None => {
-            let result = transform_for_two_phase(prior_events, &TwoPhaseContext::standard());
-            (result.events, Default::default())
-        }
-    }
+    ctx.transform_events(domain, loaded).await
 }
 
 /// Upfront merge-strategy gate, run only when a client command's `expected`
@@ -307,52 +280,6 @@ fn enforce_strict_gate(
         ));
     }
     Ok(())
-}
-
-/// Post-execution cascade-conflict gate.
-///
-/// Purely observational — never mutates events. A Conflict aborts; replay errors
-/// degrade gracefully (proceed optimistically) rather than wedge the pipeline.
-async fn enforce_cascade_conflict_gate(
-    business: &dyn ClientLogic,
-    prior: &LoadedPrior,
-    received_events: &EventBook,
-) -> Result<(), Status> {
-    match check_cascade_conflict(
-        business,
-        &prior.raw,
-        &prior.view,
-        &prior.locked_sequences,
-        received_events,
-    )
-    .await
-    {
-        Ok(CascadeConflictResult::Conflict {
-            cascade_ids,
-            overlapping_fields,
-        }) => {
-            tracing::warn!(
-                ?cascade_ids,
-                ?overlapping_fields,
-                "CASCADE: field conflict with uncommitted events"
-            );
-            Err(Status::aborted(format!(
-                "Cascade conflict: fields {:?} locked by cascades {:?}",
-                overlapping_fields, cascade_ids
-            )))
-        }
-        Ok(CascadeConflictResult::NoConflict) => {
-            tracing::debug!("CASCADE: no field conflicts with uncommitted events");
-            Ok(())
-        }
-        Err(e) => {
-            tracing::debug!(
-                error = %e,
-                "CASCADE: conflict detection unavailable, proceeding optimistically"
-            );
-            Ok(())
-        }
-    }
 }
 
 /// Post-execution COMMUTATIVE field-overlap gate.
@@ -400,9 +327,8 @@ async fn enforce_commutative_gate(
     }
 }
 
-/// The sequence window a conflict check runs over: the sequence the command
-/// was built against (`expected` — an explicit claim, or the origin-stamped
-/// `basis_seq` of a deferred command, 0 meaning the whole history) vs the
+/// The sequence window a conflict check runs over: the sequence a client
+/// command was built against (`expected`, its explicit claim) vs the
 /// aggregate's current head (`actual`).
 #[derive(Clone, Copy)]
 struct SeqWindow {
@@ -476,7 +402,7 @@ async fn enforce_manual_gate(
 }
 
 /// The events reproducing state@`expected` for the field-overlap gates, in
-/// the same view the handler saw (upcast, 2PC-resolved).
+/// the same view the handler saw (upcast).
 ///
 /// Usually derived from the already-loaded `prior` book; when its snapshot
 /// already covers `expected`, the historical book is loaded instead so the
@@ -500,8 +426,7 @@ async fn load_window_base(
             &TemporalQuery::AsOfSequence(expected - 1),
         )
         .await?;
-    let historical = ctx.transform_events(domain, historical).await?;
-    Ok(apply_two_phase_transform(ctx, &historical).0)
+    ctx.transform_events(domain, historical).await
 }
 
 /// Map a command's `PersistOutcome` to `(events, is_noop)`.
@@ -613,10 +538,10 @@ async fn execute_mode(
 /// 2. **Idempotency check** - For deferred commands (saga-produced), return cached result
 /// 3. **Pre-validate** - STRICT-only fast-path sequence check
 /// 4. **Load** - Fetch prior events from storage (with optional divergence point)
-/// 5. **Transform** - Apply upcasting and the 2PC view to prior events
+/// 5. **Transform** - Apply upcasting to prior events
 /// 6. **Strict gate** - STRICT rejects a stale sequence
 /// 7. **Invoke** - Call business logic with contextual command
-/// 8. **Post-execution gates** - cascade conflict; COMMUTATIVE / MANUAL field overlap
+/// 8. **Post-execution gates** - COMMUTATIVE / MANUAL field overlap
 /// 9. **Persist** - Store new events and optional snapshot
 /// 10. **Publish** - Publish to the event bus (retried in place, DLQ on exhaustion)
 /// 11. **Sync fan-out** - SIMPLE/CASCADE projectors, CASCADE sagas/PMs
@@ -657,7 +582,7 @@ async fn execute_attempt(
     let (domain, root_uuid) = parse_command_cover(&command_book)?;
     let edition = extract_edition(&command_book)?;
     let correlation_id = crate::orchestration::correlation::extract_correlation_id(&command_book)?;
-    let merge_strategy = command_book.merge_strategy();
+    let merge_strategy = command_book.effective_merge_strategy();
 
     let span = tracing::Span::current();
     span.record("domain", domain.as_str());
@@ -676,7 +601,7 @@ async fn execute_attempt(
     // already processed (idempotent replay).
     if let Some(response) = try_deferred_idempotency_replay(
         ctx,
-        &command_book,
+        source_info.as_ref(),
         &domain,
         &edition,
         root_uuid,
@@ -711,7 +636,7 @@ async fn execute_attempt(
             .await?;
     }
 
-    let loaded = load_prior(
+    let prior_events = load_prior(
         ctx,
         &domain,
         &edition,
@@ -720,7 +645,6 @@ async fn execute_attempt(
         explicit_divergence,
     )
     .await?;
-    let prior_events = loaded.view.clone();
 
     let actual = prior_events.next_sequence();
 
@@ -768,10 +692,6 @@ async fn execute_attempt(
 
     // Post-execution gates observe the fields the command actually touched by
     // replaying prior + received. They never modify `received_events`.
-    if !loaded.locked_sequences.is_empty() {
-        enforce_cascade_conflict_gate(business, &loaded, &received_events).await?;
-    }
-
     let window_base = if needs_commutative_check || needs_manual_check {
         Some(load_window_base(ctx, &domain, &edition, root_uuid, &prior_events, expected).await?)
     } else {
@@ -853,8 +773,7 @@ async fn speculative_mode(
         &temporal,
         explicit_divergence,
     )
-    .await?
-    .view;
+    .await?;
 
     let contextual_command = ContextualCommand {
         events: Some(prior_events),
@@ -875,11 +794,15 @@ async fn speculative_mode(
     })
 }
 
-/// Execute a compensation (rejection notification) against the aggregate.
+/// Execute a compensation delivery (a Notification envelope carrying a
+/// RejectionNotification or a Compensate) against the aggregate.
 ///
-/// Returns the raw `BusinessResponse` so the saga-side caller can inspect a
-/// revocation response. Events the handler emits are persisted, published and
-/// fanned out like a command's.
+/// Returns the raw `BusinessResponse` so the delivering coordinator can act
+/// on a revocation response. Events the handler emits are persisted under
+/// the envelope's provenance claim (kind + tuple), published and fanned out
+/// like a command's; the Notification itself is never written to the
+/// stream. A redelivered envelope whose claim already has events does not
+/// invoke the handler again and returns the first delivery's events.
 pub async fn execute_compensation_pipeline(
     ctx: &dyn AggregateContext,
     business: &dyn ClientLogic,
@@ -888,6 +811,20 @@ pub async fn execute_compensation_pipeline(
     let (domain, root_uuid) = parse_command_cover(&command_book)?;
     let edition = extract_edition(&command_book)?;
     let correlation_id = crate::orchestration::correlation::extract_correlation_id(&command_book)?;
+    let claim = crate::orchestration::compensation::envelope_source_info(&command_book)?;
+
+    if let Some(mut cached) =
+        cached_for_claim(ctx, claim.as_ref(), &domain, &edition, root_uuid).await?
+    {
+        if let Some(ref mut cover) = cached.cover {
+            if cover.correlation_id.is_empty() {
+                cover.correlation_id = correlation_id.clone();
+            }
+        }
+        return Ok(BusinessResponse {
+            result: Some(business_response::Result::Events(cached)),
+        });
+    }
 
     let prior_events = load_prior(
         ctx,
@@ -897,8 +834,7 @@ pub async fn execute_compensation_pipeline(
         &TemporalQuery::Current,
         None,
     )
-    .await?
-    .view;
+    .await?;
 
     let response = business
         .invoke(ContextualCommand {
@@ -918,7 +854,7 @@ pub async fn execute_compensation_pipeline(
                     root_uuid,
                     &correlation_id,
                     None,
-                    None,
+                    claim.as_ref(),
                 )
                 .await?;
             let (persisted, is_noop) = resolve_command_persist_outcome(outcome)?;
@@ -1031,8 +967,7 @@ pub async fn execute_fact_pipeline(
         &TemporalQuery::Current,
         None,
     )
-    .await?
-    .view;
+    .await?;
 
     let next_seq = prior_events.next_sequence();
 
@@ -1067,13 +1002,6 @@ pub async fn execute_fact_pipeline(
                 .created_at
                 .or_else(|| Some(prost_types::Timestamp::from(std::time::SystemTime::now()))),
             payload: page.payload,
-            // Facts are committed external realities. Cascade membership is
-            // the coordinator's to assign (persist_events stamps the active
-            // cascade); a cascade_id supplied by the fact's producer is not
-            // trusted, since a committed page carrying it would read as that
-            // cascade's resolution.
-            cascade_id: None,
-            no_commit: false,
         };
         final_pages.push(new_page);
         current_seq += 1;

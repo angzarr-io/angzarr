@@ -17,7 +17,7 @@ Feature: End-to-End Container Integration
   - Configuration validation: Helm values, env vars, secrets all work together.
     Same concern applies to any containerized deployment.
 
-  Why poker is used here (player domain specifically):
+  Why the blackjack example's player domain is used here:
   - Player aggregate is simple: RegisterPlayer → PlayerRegistered
   - Single command/event pair minimizes variables when debugging container issues
   - Easy to verify: "player exists with this name" is binary success/fail

@@ -273,8 +273,6 @@ async fn resolve_payloads_with_store<S: PayloadStore + ?Sized>(
                 header: page.header.clone(),
                 created_at: page.created_at,
                 payload: Some(Payload::Event(event)),
-                no_commit: page.no_commit,
-                cascade_id: page.cascade_id.clone(),
             });
             continue;
         }

@@ -377,7 +377,7 @@ fn decode_any_to_json_matches_decode_to_json() {
 // `EMBEDDED_DESCRIPTOR` (full set) is used by the in-process pool for
 // payload rendering — DLQ admin, event-store browsing, and the
 // upcoming GraphQL gateway all need to decode framework-internal
-// messages (Confirmation, Revocation, NoOp, AngzarrDeferredSequence,
+// messages (Notification, Compensate, AngzarrDeferredSequence,
 // PMState, etc.) on the wire.
 //
 // `EMBEDDED_DESCRIPTOR_PUBLIC` (new) is what gRPC reflection clients
@@ -385,7 +385,7 @@ fn decode_any_to_json_matches_decode_to_json() {
 // services on the binary surface (DlqAdminService and its transitive
 // imports). Framework "command-handler", "saga", "projector", "PM",
 // "query", "stream", "upcaster", "meta", "cloudevents", and the
-// internal `types.proto` (which defines Revocation/Confirmation/NoOp/
+// internal `types.proto` (which defines Notification/Compensate/
 // AngzarrDeferredSequence/PMState/...) are absent.
 //
 // Why split it: reflection clients enumerate every type they can see,
@@ -417,7 +417,7 @@ fn h33_public_descriptor_includes_dlq_admin() {
 
 /// The public descriptor set MUST NOT contain framework protos whose
 /// messages are internal (command/event-bus headers, deferred-sequence
-/// markers, two-phase confirmation/revocation, etc.).
+/// markers, compensation notifications, etc.).
 #[test]
 fn h33_public_descriptor_excludes_framework_internals() {
     let files = public_files();
