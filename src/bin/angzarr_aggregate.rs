@@ -205,11 +205,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
-    // Default snapshot policy (reads and writes enabled). Operators
-    // wanting to disable either flag build the SnapshotRepository
-    // explicitly via SnapshotRepository::with_flags(...).
-    let snapshot_repo = Arc::new(angzarr::repository::SnapshotRepository::new(
+    // Snapshot read/write policy from `storage.snapshots_enable`.
+    let snapshot_repo = Arc::new(angzarr::repository::SnapshotRepository::from_config(
         snapshot_store.clone(),
+        &config.storage.snapshots_enable,
     ));
 
     // C17: spawn the cascade reaper so C01's revoke-time backstops (#2

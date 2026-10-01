@@ -237,3 +237,32 @@ fn test_snapshots_enable_config_default() {
     assert!(config.read);
     assert!(config.write);
 }
+
+/// Store construction validates the whole registry: an event store is not
+/// built when another role is misconfigured (here, positions pointing at a
+/// snapshot-only Redis entry), so the misconfiguration fails at boot rather
+/// than when the position store is first needed.
+#[tokio::test]
+async fn test_store_construction_validates_whole_registry() {
+    let yaml = "\
+backends:
+  local: { type: sqlite, path: '' }
+  cache: { type: redis, uri: redis://x }
+events: { use: local }
+snapshots: { use: local }
+positions: { use: cache }
+";
+    let cfg: StorageRegistryConfig = serde_yaml::from_str(yaml).unwrap();
+    for result in [
+        crate::storage::init_event_store(&cfg).await.err(),
+        crate::storage::init_snapshot_store(&cfg).await.err(),
+        crate::storage::init_position_store_registry(&cfg)
+            .await
+            .err(),
+    ] {
+        let err = result
+            .expect("construction must fail validation")
+            .to_string();
+        assert!(err.contains("positions") && err.contains("redis"), "{err}");
+    }
+}
