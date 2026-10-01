@@ -1635,6 +1635,29 @@ async fn test_compensation_first_delivery_persists_under_its_kind() {
     let persisted = ctx.persisted_claims.lock().unwrap().clone();
     assert_eq!(persisted.len(), 1);
     assert_eq!(persisted[0].as_ref(), Some(&looked_up[0]));
+    assert_eq!(
+        ctx.fanout_calls.load(Ordering::SeqCst),
+        1,
+        "compensation events fan out like a command's"
+    );
+}
+
+/// A compensation whose events change nothing (NoOp) runs no fan-out.
+#[tokio::test]
+async fn test_compensation_noop_runs_no_fanout() {
+    let ctx = TestCtx {
+        persist_outcome: Some(PersistOutcome::NoOp(book_with_domain("dest", ""))),
+        ..Default::default()
+    };
+    let logic = CountingCompensator {
+        invocations: AtomicUsize::new(0),
+    };
+    execute_compensation_pipeline(&ctx, &logic, compensate_delivery(0))
+        .await
+        .unwrap();
+    assert_eq!(logic.invocations.load(Ordering::SeqCst), 1);
+    assert_eq!(ctx.fanout_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(ctx.publish_calls.load(Ordering::SeqCst), 0);
 }
 
 /// HandleCompensation accepts only Notification delivery envelopes.
