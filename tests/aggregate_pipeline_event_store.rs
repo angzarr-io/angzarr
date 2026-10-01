@@ -322,13 +322,12 @@ async fn pipeline_increments_sequence_across_two_commands() {
     assert_eq!(event_sequence_num(&persisted[1]), 1);
 }
 
-/// A stale command (sequence 0 when the aggregate is already at 1)
-/// must be rejected with `FailedPrecondition` -- the framework's
-/// sequence-conflict signal -- and must NOT add a second event at
-/// sequence 0. Mirrors the production single-sequence-check contract
-/// against a real store rather than a mock.
+/// A stale MERGE_STRICT command (sequence 0 when the aggregate is already
+/// at 1) is rejected with `FailedPrecondition` -- the retryable
+/// sequence-conflict signal -- and adds no event (merge_strategy.feature,
+/// STRICT). Against a real store rather than a mock.
 #[tokio::test]
-async fn pipeline_rejects_stale_sequence_against_sqlite_store() {
+async fn pipeline_rejects_stale_strict_command_against_sqlite_store() {
     let (service, business, store) = create_service_with_sqlite().await;
     let root = Uuid::new_v4();
 
@@ -341,15 +340,15 @@ async fn pipeline_rejects_stale_sequence_against_sqlite_store() {
         .await;
     assert!(first.is_ok());
 
-    // Stale command at sequence 0 -- the store already has an event
+    // Stale STRICT command at sequence 0 -- the store already has an event
     // at 0, so this must fail.
     business
-        .enqueue(event_book("orders", root, None, vec![event_page(0)]))
+        .enqueue(event_book("orders", root, None, vec![event_page(1)]))
         .await;
-    let stale = service
-        .handle_command(send(command_book("orders", root, 0, None)))
-        .await;
-    assert!(stale.is_err(), "stale-sequence command must be rejected");
+    let mut stale_command = command_book("orders", root, 0, None);
+    stale_command.pages[0].merge_strategy = MergeStrategy::MergeStrict as i32;
+    let stale = service.handle_command(send(stale_command)).await;
+    assert!(stale.is_err(), "stale STRICT command must be rejected");
     let status = stale.unwrap_err();
     assert_eq!(
         status.code(),
@@ -370,6 +369,36 @@ async fn pipeline_rejects_stale_sequence_against_sqlite_store() {
         "stale-sequence rejection must not add a second event; got {} events",
         persisted.len()
     );
+}
+
+/// A stale MERGE_COMMUTATIVE command whose fields do not overlap the
+/// events it did not see is merged: its event lands at the head
+/// (merge_strategy.feature C-0150). The test double's Replay returns a
+/// constant state, so the window and the command touch no common field.
+#[tokio::test]
+async fn pipeline_merges_stale_disjoint_commutative_command_against_sqlite_store() {
+    let (service, business, store) = create_service_with_sqlite().await;
+    let root = Uuid::new_v4();
+
+    business
+        .enqueue(event_book("orders", root, None, vec![event_page(0)]))
+        .await;
+    service
+        .handle_command(send(command_book("orders", root, 0, None)))
+        .await
+        .expect("first command persists");
+
+    business
+        .enqueue(event_book("orders", root, None, vec![event_page(1)]))
+        .await;
+    service
+        .handle_command(send(command_book("orders", root, 0, None)))
+        .await
+        .expect("a disjoint stale COMMUTATIVE command is merged");
+
+    let persisted = store.get("orders", "", root).await.expect("get");
+    assert_eq!(persisted.len(), 2, "the merged event lands at the head");
+    assert_eq!(event_sequence_num(&persisted[1]), 1);
 }
 
 /// A command with `cover.edition = "branch-a"` persists its event

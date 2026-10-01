@@ -5,7 +5,7 @@
 set shell := ["bash", "-c"]
 
 default:
-    @just --list
+    @{{just_executable()}} -f {{justfile()}} --list
 
 # Build all workspace crates
 build:
@@ -224,10 +224,10 @@ storage *ARGS:
     set -euo pipefail
     args="{{ARGS}}"
     if [[ "$args" == "test" ]] || [[ -z "$args" ]]; then
-        just _storage-all
+        {{just_executable()}} -f {{justfile()}} _storage-all
     else
         backend="${args%% *}"
-        just "_storage-${backend}"
+        {{just_executable()}} -f {{justfile()}} "_storage-${backend}"
     fi
 
 # Private: Run all storage backend tests
@@ -322,10 +322,10 @@ bus *ARGS:
     set -euo pipefail
     args="{{ARGS}}"
     if [[ "$args" == "test" ]] || [[ -z "$args" ]]; then
-        just _bus-all
+        {{just_executable()}} -f {{justfile()}} _bus-all
     else
         backend="${args%% *}"
-        just "_bus-${backend}"
+        {{just_executable()}} -f {{justfile()}} "_bus-${backend}"
     fi
 
 # Private: Run all bus backend tests (with container cleanup between runs)
@@ -584,7 +584,7 @@ mutants-core: gen-mutants-exclude
         -f src/handlers/core/saga.rs \
         -f src/handlers/core/process_manager.rs \
         -- {{MUTANTS_FEATURES}}
-    @just mutants-summary
+    @{{just_executable()}} -f {{justfile()}} mutants-summary
 
 # Alias for backwards compatibility
 mutants-handlers: mutants-core

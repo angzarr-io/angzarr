@@ -332,19 +332,35 @@ buf-push:
 [private]
 _go +ARGS:
     #!/usr/bin/env bash
-    if [ "${DEVCONTAINER:-}" = "true" ] || (command -v go &>/dev/null && command -v buf &>/dev/null); then
-        eval {{ARGS}}
+    if [ "${DEVCONTAINER:-}" = "true" ] || command -v go &>/dev/null; then
+        eval {{quote(ARGS)}}
     else
         {{CONTAINER_RUN}} --network=host \
             -v "{{TOP}}:/workspace:Z" \
             -w /workspace \
             {{REGISTRY}}/angzarr-go:latest \
-            sh -c {{ARGS}}
+            sh -c {{quote(ARGS)}}
+    fi
+
+# Run a shell command in the angzarr-base image (it ships buf), so buf
+# generation never needs a host buf.
+[private]
+_buf-sh +ARGS:
+    #!/usr/bin/env bash
+    if [ "${DEVCONTAINER:-}" = "true" ]; then
+        eval {{quote(ARGS)}}
+    else
+        {{CONTAINER_RUN}} --network=host \
+            -v "{{TOP}}:/workspace:Z" \
+            -w /workspace \
+            -e BUF_CACHE_DIR=/tmp/buf-cache \
+            {{REGISTRY}}/angzarr-base:latest \
+            sh -c {{quote(ARGS)}}
     fi
 
 # Generate gRPC-Gateway and OpenAPI code from protos
 gateway-gen:
-    just _go "cd gateway && buf generate"
+    just _buf-sh "cd gateway && buf generate"
 
 # Build gRPC-Gateway binary (for local testing)
 gateway-build: gateway-gen
@@ -569,6 +585,31 @@ bus *ARGS:
 test-contract:
     just _container-dind test-contract
 
+# Integration test binaries (SQLite, in-process gRPC, DLQ features,
+# aggregate/PM pipelines, snapshots, acceptance harness) — the CI
+# "Integration Tests" job.
+test-integration:
+    just _container-dind test-integration
+
+# Check that every recipe the GitHub workflows invoke exists.
+check-ci-recipes:
+    python3 "{{TOP}}/scripts/check_ci_recipes.py"
+
+# Every CI job, run locally the way CI runs it (mutation testing excepted:
+# `just mutants-ci` on a git.diff).
+ci-local: check-ci-recipes check-submodules-clean
+    just _container fmt
+    just _container lint
+    just _container test
+    just _container check-tests
+    just _container-dind storage postgres test
+    just _container-dind bus amqp test
+    just _container-dind test-dlq-postgres
+    just test-integration
+    just _container-dind cov-ci
+    just gateway-test
+    just helm-test
+
 # Run all local tests (no running K8s cluster required)
 # =============================================================================
 # Fast validation suite using in-memory backends (no containers needed).
@@ -597,6 +638,11 @@ test-local:
     @echo "=== Storage Contract Tests (SQLite) ==="
     @echo "═══════════════════════════════════════════════════════════════════"
     just storage sqlite test
+    @echo ""
+    @echo "═══════════════════════════════════════════════════════════════════"
+    @echo "=== Integration Tests ==="
+    @echo "═══════════════════════════════════════════════════════════════════"
+    just test-integration
     @echo ""
     @echo "═══════════════════════════════════════════════════════════════════"
     @echo "=== All Local Tests Complete ==="
