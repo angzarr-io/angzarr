@@ -920,6 +920,11 @@ secrets-init:
 skaffold-init:
     @uv run "{{TOP}}/scripts/configure_skaffold.py"
 
+# Render-test the angzarr Helm chart (helm template + assertions)
+helm-test:
+    bash "{{TOP}}/deploy/k8s/helm/angzarr/tests/test_status_envoy_security.sh"
+    bash "{{TOP}}/deploy/k8s/helm/angzarr/tests/test_sidecar_wiring.sh"
+
 # Build framework images (angzarr sidecars)
 framework-build: _skaffold-ready
     skaffold build

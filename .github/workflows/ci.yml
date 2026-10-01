@@ -409,6 +409,22 @@ jobs:
           path: mutants.out/
           retention-days: 7
 
+  # Helm chart render tests: rendered sidecar wiring and status surface.
+  helm-chart:
+    name: Helm chart
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      - name: Install helm
+        uses: azure/setup-helm@v4
+
+      - name: Chart render tests
+        run: just helm-test
+
   # =============================================================================
   # TEST GATE
   # =============================================================================
@@ -416,7 +432,7 @@ jobs:
   test-gate:
     name: Test Gate
     runs-on: ubuntu-latest
-    needs: [format, lint, test, integration, coverage]
+    needs: [format, lint, test, integration, coverage, helm-chart]
     if: always()
     outputs:
       passed: ${{ steps.check.outputs.passed }}
@@ -429,12 +445,14 @@ jobs:
           echo "Test: ${{ needs.test.result }}"
           echo "Integration: ${{ needs.integration.result }}"
           echo "Coverage: ${{ needs.coverage.result }}"
+          echo "Helm chart: ${{ needs.helm-chart.result }}"
 
           if [ "${{ needs.format.result }}" != "success" ] || \
              [ "${{ needs.lint.result }}" != "success" ] || \
              [ "${{ needs.test.result }}" != "success" ] || \
              [ "${{ needs.integration.result }}" != "success" ] || \
-             [ "${{ needs.coverage.result }}" != "success" ]; then
+             [ "${{ needs.coverage.result }}" != "success" ] || \
+             [ "${{ needs.helm-chart.result }}" != "success" ]; then
             echo "passed=false" >> $GITHUB_OUTPUT
             echo "::error::One or more tests failed"
             exit 1
@@ -527,9 +545,8 @@ jobs:
             "saga": "${{ env.IMAGE_PREFIX }}/angzarr-saga:${TAG}",
             "projector": "${{ env.IMAGE_PREFIX }}/angzarr-projector:${TAG}",
             "process-manager": "${{ env.IMAGE_PREFIX }}/angzarr-process-manager:${TAG}",
-            "stream": "${{ env.IMAGE_PREFIX }}/angzarr-stream:${TAG}",
-            "gateway": "${{ env.IMAGE_PREFIX }}/angzarr-grpc-gateway:${TAG}",
-            "log": "${{ env.IMAGE_PREFIX }}/angzarr-log:${TAG}"
+            "status": "${{ env.IMAGE_PREFIX }}/angzarr-status:${TAG}",
+            "gateway": "${{ env.IMAGE_PREFIX }}/angzarr-grpc-gateway:${TAG}"
           }
           EOF
           )

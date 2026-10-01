@@ -717,3 +717,38 @@ async fn test_watch_apply_of_unqualified_service_removes_it() {
     .await;
     assert!(names(&cache).await.is_empty());
 }
+
+// ============================================================================
+// PM subscriptions annotation
+// ============================================================================
+
+/// Kubernetes label values cannot hold commas, so a multi-domain PM lists
+/// its subscriptions in the `angzarr.io/subscriptions` annotation; it
+/// takes precedence over the label.
+#[test]
+fn test_extract_pm_reads_subscriptions_annotation() {
+    let mut svc = make_test_pm_service("pmg-checkout", Some("legacy"), 1310);
+    svc.metadata.annotations = Some(BTreeMap::from([(
+        SUBSCRIPTIONS_LABEL.to_string(),
+        "order,payment".to_string(),
+    )]));
+
+    let pm = K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").expect("pm");
+    assert_eq!(
+        pm.subscriptions,
+        vec!["order".to_string(), "payment".to_string()]
+    );
+}
+
+/// The annotation alone (no label) is enough to register the PM.
+#[test]
+fn test_extract_pm_annotation_without_label() {
+    let mut svc = make_test_pm_service("pmg-checkout", None, 1310);
+    svc.metadata.annotations = Some(BTreeMap::from([(
+        SUBSCRIPTIONS_LABEL.to_string(),
+        "order".to_string(),
+    )]));
+
+    let pm = K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").expect("pm");
+    assert_eq!(pm.subscriptions, vec!["order".to_string()]);
+}

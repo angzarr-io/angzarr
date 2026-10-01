@@ -22,18 +22,6 @@ images:
     repository: ghcr.io/angzarr-io/angzarr-process-manager
     pullPolicy: IfNotPresent
     tag: "latest"
-  log:
-    repository: ghcr.io/angzarr-io/angzarr-log
-    pullPolicy: IfNotPresent
-    tag: "latest"
-  stream:
-    repository: ghcr.io/angzarr-io/angzarr-stream
-    pullPolicy: IfNotPresent
-    tag: "latest"
-  upcaster:
-    repository: ghcr.io/angzarr-io/angzarr-upcaster
-    pullPolicy: IfNotPresent
-    tag: "latest"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -125,33 +113,6 @@ serviceDiscovery:
 
 # Infrastructure services (standalone, not sidecars)
 infrastructure:
-  # Log service - prints events to stdout for debugging
-  log:
-    enabled: false
-    replicas: 1
-    port: 50051           # Projector gRPC (receives events from sidecar)
-    resources:
-      limits:
-        cpu: 200m
-        memory: 256Mi
-      requests:
-        cpu: 50m
-        memory: 64Mi
-
-  # Event stream service - broadcasts events to registered subscribers
-  stream:
-    enabled: false
-    replicas: 1
-    port: 1340            # Stream gRPC
-    projectorPort: 1345   # Stream's internal projector port
-    resources:
-      limits:
-        cpu: 500m
-        memory: 512Mi
-      requests:
-        cpu: 100m
-        memory: 128Mi
-
   # Operations console - cluster-wide DLQ admin / health / event browser /
   # command injection / projection viewer / load metrics.
   # See plans/virtual-spinning-flute.md.
@@ -357,13 +318,27 @@ upcaster:
   # If not set, uses the same address as client logic (default and recommended)
   # address: "localhost:50053"
 
-# Command bus configuration (async command delivery)
-# When enabled, aggregates subscribe to a command topic for async commands
-# in addition to accepting gRPC commands directly.
-commandBus:
-  enabled: true
-  # Topic pattern: commands.{domain} (e.g., commands.player)
-  # Commands wrapped in EventBook format, extracted by aggregate handler
+# Sidecar configuration file, rendered verbatim as config.yaml into the
+# `<release>-sidecar-config` Secret and mounted at /etc/angzarr/config.yaml
+# (ANGZARR_CONFIG) in every angzarr sidecar and in angzarr-status.
+# Holds the settings that have no env-var form; ANGZARR__SECTION__KEY env
+# vars set by the chart still override it. Keys: dlq, limits,
+# saga_compensation, payload_offload, messaging.delivery, ...
+config:
+  dlq:
+    # Dead-letter destinations, tried in order (empty = dead letters are
+    # logged and dropped). Example:
+    #   - type: database
+    #     database:
+    #       storage_type: postgres
+    #       postgres:
+    #         uri: postgres://angzarr:...@angzarr-db-rw:5432/angzarr
+    targets: []
+    # Store angzarr-status reads dead letters from (unset = empty console):
+    #   audit:
+    #     storage_type: postgres
+    #     postgres:
+    #       uri: postgres://...
 
 # Messaging configuration
 messaging:

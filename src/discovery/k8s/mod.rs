@@ -67,8 +67,10 @@ const DOMAIN_LABEL: &str = "angzarr.io/domain";
 /// Label for the source domain a saga subscribes to (single value).
 const SOURCE_DOMAIN_LABEL: &str = "angzarr.io/source-domain";
 
-/// Label for the source domains a process manager subscribes to
-/// (comma-separated list).
+/// Annotation (preferred) or label naming the source domains a process
+/// manager subscribes to, comma-separated. Label values cannot contain
+/// commas, so a multi-domain PM must use the annotation; the label form
+/// serves single-domain PMs.
 const SUBSCRIPTIONS_LABEL: &str = "angzarr.io/subscriptions";
 
 /// Component values.
@@ -527,7 +529,13 @@ impl K8sServiceDiscovery {
     fn extract_pm_with_namespace(svc: &Service, namespace: &str) -> Option<PmService> {
         let service = Self::extract_service_with_namespace(svc, namespace)?;
         let labels = svc.metadata.labels.as_ref();
-        let raw = labels.and_then(|l| l.get(SUBSCRIPTIONS_LABEL)).cloned();
+        let raw = svc
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(SUBSCRIPTIONS_LABEL))
+            .or_else(|| labels.and_then(|l| l.get(SUBSCRIPTIONS_LABEL)))
+            .cloned();
         let Some(raw) = raw else {
             tracing::warn!(
                 service = %service.name,

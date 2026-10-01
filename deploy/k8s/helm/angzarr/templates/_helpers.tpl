@@ -148,3 +148,67 @@ capabilities:
     - SYS_PTRACE
   {{- end }}
 {{- end }}
+
+{{/*
+ANGZARR_SUBSCRIPTIONS value from an application's `topics` list.
+A topic is `{domain}.*` / `{domain}` (every event of the domain) or
+`{domain}.{EventType}`. Output: `domain;domain:Type;...`.
+Usage: {{ include "angzarr.subscriptions" .topics }}
+*/}}
+{{- define "angzarr.subscriptions" -}}
+{{- $subs := list -}}
+{{- range . -}}
+{{- $parts := splitn "." 2 . -}}
+{{- $domain := $parts._0 -}}
+{{- $type := $parts._1 | default "" -}}
+{{- if or (eq $type "") (eq $type "*") -}}
+{{- $subs = append $subs $domain -}}
+{{- else -}}
+{{- $subs = append $subs (printf "%s:%s" $domain $type) -}}
+{{- end -}}
+{{- end -}}
+{{- join ";" $subs -}}
+{{- end }}
+
+{{/*
+Distinct source domains of an application's `topics`, comma-separated.
+Usage: {{ include "angzarr.topic-domains" .topics }}
+*/}}
+{{- define "angzarr.topic-domains" -}}
+{{- $domains := list -}}
+{{- range . -}}
+{{- $domains = append $domains (splitn "." 2 .)._0 -}}
+{{- end -}}
+{{- join "," ($domains | uniq) -}}
+{{- end }}
+
+{{/*
+Sidecar configuration file: `.Values.config` rendered as config.yaml into
+a Secret (it may hold DLQ / storage credentials) and mounted into every
+angzarr container. ANGZARR__* env vars still override it.
+*/}}
+{{- define "angzarr.sidecar-config-name" -}}
+{{- printf "%s-sidecar-config" (include "angzarr.fullname" .) -}}
+{{- end }}
+
+{{- define "angzarr.sidecar-config-env" -}}
+- name: ANGZARR_CONFIG
+  value: /etc/angzarr/config.yaml
+{{- end }}
+
+{{- define "angzarr.sidecar-config-mount" -}}
+- name: sidecar-config
+  mountPath: /etc/angzarr/config.yaml
+  subPath: config.yaml
+  readOnly: true
+{{- end }}
+
+{{- define "angzarr.sidecar-config-volume" -}}
+- name: sidecar-config
+  secret:
+    secretName: {{ include "angzarr.sidecar-config-name" . }}
+{{- end }}
+
+{{- define "angzarr.sidecar-config-checksum" -}}
+checksum/sidecar-config: {{ toYaml .Values.config | sha256sum }}
+{{- end }}

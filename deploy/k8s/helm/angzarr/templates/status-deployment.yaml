@@ -35,6 +35,8 @@ spec:
       angzarr.io/service: status
   template:
     metadata:
+      annotations:
+        {{- include "angzarr.sidecar-config-checksum" . | nindent 8 }}
       labels:
         {{- include "angzarr.labels" . | nindent 8 }}
         app.kubernetes.io/component: infrastructure
@@ -72,9 +74,14 @@ spec:
               containerPort: {{ .Values.infrastructure.status.grpcPort }}
               protocol: TCP
           env:
-            # Override default port (50051) to 1390 per the plan.
+            # Bind all interfaces on 1390: kubelet probes and the Service
+            # reach the pod IP, not loopback.
+            - name: ANGZARR__TRANSPORT__TCP__HOST
+              value: "0.0.0.0"
             - name: ANGZARR__TRANSPORT__TCP__PORT
               value: {{ .Values.infrastructure.status.grpcPort | quote }}
+            # dlq.audit (the DLQ reader) comes from the sidecar config file.
+            {{- include "angzarr.sidecar-config-env" . | nindent 12 }}
             # H-32: surface the deployment replica count to the binary so the
             # SQLite audit writer can refuse to start when configured for
             # multi-replica HA. SQLite is single-writer; two pods writing the
@@ -91,12 +98,13 @@ spec:
             - name: ANGZARR_STATUS_DESCRIPTORS_DIR
               value: "/etc/angzarr/descriptors"
             {{- end }}
-          {{- if .Values.infrastructure.status.descriptors.configMapName }}
           volumeMounts:
+            {{- include "angzarr.sidecar-config-mount" . | nindent 12 }}
+            {{- if .Values.infrastructure.status.descriptors.configMapName }}
             - name: domain-descriptors
               mountPath: /etc/angzarr/descriptors
               readOnly: true
-          {{- end }}
+            {{- end }}
           # gRPC health checks via tonic-health. The HA contract is
           # explicit: liveness = "binary is up", NOT "downstream is up".
           # ClusterHealthService (Phase 2) handles downstream rollup.
@@ -165,8 +173,8 @@ spec:
             initialDelaySeconds: 2
             periodSeconds: 5
         {{- end }}
-      {{- if or .Values.infrastructure.status.rest.enabled .Values.infrastructure.status.descriptors.configMapName }}
       volumes:
+        {{- include "angzarr.sidecar-config-volume" . | nindent 8 }}
         {{- if .Values.infrastructure.status.rest.enabled }}
         - name: envoy-config
           configMap:
@@ -184,7 +192,6 @@ spec:
           configMap:
             name: {{ .Values.infrastructure.status.descriptors.configMapName }}
         {{- end }}
-      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
