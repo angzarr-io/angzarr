@@ -494,12 +494,9 @@ async fn test_apply_two_phase_non_cascade_passthrough() {
     let mut prior = book_with_domain("orders", "c1");
     prior.pages = vec![make_event_page(0, false, None)];
 
-    let (out, has_uncommitted) = apply_two_phase_transform(&ctx, &prior);
+    let (out, locked) = apply_two_phase_transform(&ctx, &prior);
 
-    assert!(
-        !has_uncommitted,
-        "no cascade context → no other-cascade work"
-    );
+    assert!(locked.is_empty(), "no cascade context → no locks");
     assert_eq!(
         out.cover
             .expect("cover preserved (not a default book)")
@@ -519,12 +516,28 @@ async fn test_apply_two_phase_cascade_no_uncommitted_is_false() {
     };
     let prior = book_with_domain("orders", "c1"); // no pages
 
-    let (_out, has_uncommitted) = apply_two_phase_transform(&ctx, &prior);
+    let (_out, locked) = apply_two_phase_transform(&ctx, &prior);
 
-    assert!(
-        !has_uncommitted,
-        "empty prior → uncommitted_cascade_ids empty → flag false"
-    );
+    assert!(locked.is_empty(), "empty prior → no locks");
+}
+
+/// Inside a cascade, only OTHER cascades' unresolved pages are locks: the
+/// command's own provisional pages and a resolved cascade lock nothing.
+#[tokio::test]
+async fn test_apply_two_phase_locks_only_unresolved_other_cascades() {
+    let ctx = TestCtx {
+        cascade: Some("own".to_string()),
+        ..Default::default()
+    };
+    let mut prior = book_with_domain("orders", "c1");
+    prior.pages = vec![
+        make_event_page(0, true, Some("own")),
+        make_event_page(1, true, Some("other")),
+    ];
+    let (out, locked) = apply_two_phase_transform(&ctx, &prior);
+    assert_eq!(locked, [1].into_iter().collect());
+    assert!(!super::super::two_phase::is_noop(&out.pages[0]));
+    assert!(super::super::two_phase::is_noop(&out.pages[1]));
 }
 
 // ============================================================================
@@ -787,7 +800,12 @@ async fn test_cascade_gate_no_uncommitted_is_ok() {
     prior.pages = vec![make_event_page(0, false, None)]; // committed only
     let received = book_with_domain("orders", "c1");
 
-    enforce_cascade_conflict_gate(&business, &prior, &received)
+    let loaded = LoadedPrior {
+        raw: prior.clone(),
+        view: prior,
+        locked_sequences: Default::default(),
+    };
+    enforce_cascade_conflict_gate(&business, &loaded, &received)
         .await
         .expect("no uncommitted events → NoConflict → Ok");
 }

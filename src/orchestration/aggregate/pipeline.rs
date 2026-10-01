@@ -254,8 +254,8 @@ struct LoadedPrior {
     /// What the handler sees: own cascade visible, unresolved other cascades
     /// and framework markers as NoOp, revoked pages as NoOp.
     view: EventBook,
-    /// Whether another cascade has unresolved pages on this aggregate.
-    other_cascades_in_flight: bool,
+    /// Sequences of other cascades' unresolved pages (fields they lock).
+    locked_sequences: std::collections::HashSet<u32>,
 }
 
 /// Load, upcast and 2PC-resolve prior events. Every pipeline mode (execute,
@@ -272,30 +272,33 @@ async fn load_prior(
         .load_prior_events_with_divergence(domain, edition, root, temporal, explicit_divergence)
         .await?;
     let raw = ctx.transform_events(domain, loaded).await?;
-    let (view, other_cascades_in_flight) = apply_two_phase_transform(ctx, &raw);
+    let (view, locked_sequences) = apply_two_phase_transform(ctx, &raw);
     Ok(LoadedPrior {
         raw,
         view,
-        other_cascades_in_flight,
+        locked_sequences,
     })
 }
 
 /// Apply the 2-phase-commit transform to prior events.
 ///
-/// Returns the business-visible view (own cascade visible, other cascades hidden
-/// as NoOp) and whether any *other* cascade has uncommitted events in flight.
+/// Returns the business-visible view (own cascade visible, other cascades
+/// hidden as NoOp) and, for a command running inside a cascade, the sequences
+/// of other cascades' unresolved pages — the fields those cascades lock.
 fn apply_two_phase_transform(
     ctx: &dyn AggregateContext,
     prior_events: &EventBook,
-) -> (EventBook, bool) {
-    if let Some(cascade_id) = ctx.cascade_id() {
-        let result =
-            transform_for_two_phase(prior_events, &TwoPhaseContext::for_handler(cascade_id));
-        let has_uncommitted = !result.uncommitted_cascade_ids.is_empty();
-        (result.events, has_uncommitted)
-    } else {
-        let result = transform_for_two_phase(prior_events, &TwoPhaseContext::standard());
-        (result.events, false)
+) -> (EventBook, std::collections::HashSet<u32>) {
+    match ctx.cascade_id() {
+        Some(cascade_id) => {
+            let result =
+                transform_for_two_phase(prior_events, &TwoPhaseContext::for_handler(cascade_id));
+            (result.events, result.uncommitted_sequences)
+        }
+        None => {
+            let result = transform_for_two_phase(prior_events, &TwoPhaseContext::standard());
+            (result.events, Default::default())
+        }
     }
 }
 
@@ -328,10 +331,18 @@ fn enforce_strict_gate(
 /// degrade gracefully (proceed optimistically) rather than wedge the pipeline.
 async fn enforce_cascade_conflict_gate(
     business: &dyn ClientLogic,
-    prior_events_with_uncommitted: &EventBook,
+    prior: &LoadedPrior,
     received_events: &EventBook,
 ) -> Result<(), Status> {
-    match check_cascade_conflict(business, prior_events_with_uncommitted, received_events).await {
+    match check_cascade_conflict(
+        business,
+        &prior.raw,
+        &prior.view,
+        &prior.locked_sequences,
+        received_events,
+    )
+    .await
+    {
         Ok(CascadeConflictResult::Conflict {
             cascade_ids,
             overlapping_fields,
@@ -717,11 +728,7 @@ async fn execute_attempt(
             .await?;
     }
 
-    let LoadedPrior {
-        raw: prior_events_with_uncommitted,
-        view: prior_events,
-        other_cascades_in_flight: has_uncommitted_other_cascades,
-    } = load_prior(
+    let loaded = load_prior(
         ctx,
         &domain,
         &edition,
@@ -730,6 +737,7 @@ async fn execute_attempt(
         explicit_divergence,
     )
     .await?;
+    let prior_events = loaded.view.clone();
 
     let actual = prior_events.next_sequence();
 
@@ -778,9 +786,8 @@ async fn execute_attempt(
 
     // Post-execution gates observe the fields the command actually touched by
     // replaying prior + received. They never modify `received_events`.
-    if has_uncommitted_other_cascades {
-        enforce_cascade_conflict_gate(business, &prior_events_with_uncommitted, &received_events)
-            .await?;
+    if !loaded.locked_sequences.is_empty() {
+        enforce_cascade_conflict_gate(business, &loaded, &received_events).await?;
     }
 
     let window_base = if needs_commutative_check || needs_manual_check {
