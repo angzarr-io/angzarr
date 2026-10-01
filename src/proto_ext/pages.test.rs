@@ -2,8 +2,8 @@
 //!
 //! Background (H-41): prost's `Name::type_url()` default implementation
 //! returns `"/{full_name}"` — proto3's "leading slash, no domain" canonical
-//! form. The pre-fix `decode_typed` accepted ONLY `type.googleapis.com/...`
-//! (per `TYPE_URL_PREFIX`), so an Any constructed by calling
+//! form. The pre-fix `decode_typed` accepted ONLY `type.googleapis.com/...`,
+//! so an Any constructed by calling
 //! `M::type_url()` on the same Rust message type would silently decode to
 //! `None`.
 //!

@@ -188,7 +188,8 @@ pub(crate) fn diff_state_fields(
 ) -> HashSet<String> {
     let all_fields = || ["*".to_string()].into_iter().collect::<HashSet<String>>();
 
-    if before.type_url != after.type_url {
+    let name = crate::proto_ext::type_url::fqn;
+    if name(&before.type_url) != name(&after.type_url) {
         return all_fields();
     }
 

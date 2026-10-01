@@ -355,3 +355,23 @@ fn test_wire_diff_multibyte_varint_then_more_fields() {
         Some(names(&["#1"]))
     );
 }
+
+/// Type URLs name a message by its full name whatever the prefix: two
+/// states of one type with different prefixes are compared field by field,
+/// not treated as a type change (all fields).
+#[test]
+fn test_same_type_under_different_prefixes_is_not_a_type_change() {
+    let before = prost_types::Any {
+        type_url: "type.googleapis.com/client.ClientState".to_string(),
+        value: base().encode_to_vec(),
+    };
+    let after = prost_types::Any {
+        type_url: "/client.ClientState".to_string(),
+        value: ClientState {
+            balance: base().balance + 1,
+            ..base()
+        }
+        .encode_to_vec(),
+    };
+    assert_eq!(diff_state_fields(&before, &after), names(&["#1"]));
+}

@@ -136,3 +136,26 @@ async fn memory_log_keeps_nothing() {
     log.append_close(&entry.key).await.unwrap();
     assert!(log.open_entries().await.unwrap().is_empty());
 }
+
+/// Records are recognized by message name whatever the type URL prefix.
+#[test]
+fn records_are_recognized_under_any_prefix() {
+    let entry = OutboxEntry::command(reserve_stock(0));
+    let record = EventStoreOutboxLog::page(
+        0,
+        "type.googleapis.com/io.angzarr.v1.CommandBook",
+        entry.book.encode_to_vec(),
+    );
+    let attempt = EventStoreOutboxLog::page(
+        1,
+        "type.googleapis.com/google.protobuf.StringValue",
+        "boom".to_string().encode_to_vec(),
+    );
+    let rebuilt = EventStoreOutboxLog::entry_from_pages(&[record.clone(), attempt]).unwrap();
+    assert_eq!(rebuilt.key, entry.key);
+    assert_eq!(rebuilt.attempts, 1);
+    assert_eq!(rebuilt.last_error, "boom");
+
+    let close = EventStoreOutboxLog::page(1, "google.protobuf.Empty", vec![]);
+    assert!(EventStoreOutboxLog::entry_from_pages(&[record, close]).is_none());
+}

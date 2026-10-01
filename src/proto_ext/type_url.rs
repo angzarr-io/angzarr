@@ -31,12 +31,6 @@
 /// proto name.
 pub const PREFIX: &str = "/";
 
-/// Suffix for notification types (used for routing).
-pub const NOTIFICATION_SUFFIX: &str = "Notification";
-
-/// Suffix for CloudEvents response types.
-pub const CLOUD_EVENTS_RESPONSE_SUFFIX: &str = "CloudEventsResponse";
-
 // Canonical type URLs for angzarr framework messages (PREFIX + FQN).
 /// Type URL for Notification messages.
 pub const NOTIFICATION: &str = "/io.angzarr.v1.Notification";
@@ -62,21 +56,6 @@ pub const COMMAND_BOOK: &str = "/io.angzarr.v1.CommandBook";
 /// ```
 pub fn for_type(message_type: &str) -> String {
     format!("{PREFIX}{message_type}")
-}
-
-/// Strip the canonical bare prefix from an angzarr-produced type URL,
-/// yielding the fully-qualified proto name.
-///
-/// # Example
-/// ```
-/// use angzarr::proto_ext::type_url;
-/// assert_eq!(
-///     type_url::strip_prefix("/io.angzarr.examples.v1.OrderCreated"),
-///     "io.angzarr.examples.v1.OrderCreated"
-/// );
-/// ```
-pub fn strip_prefix(type_url: &str) -> &str {
-    type_url.strip_prefix(PREFIX).unwrap_or(type_url)
 }
 
 /// Fully-qualified proto name carried by any type URL, regardless of its

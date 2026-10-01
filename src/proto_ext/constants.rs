@@ -28,8 +28,3 @@ pub const META_ANGZARR_DOMAIN: &str = "_angzarr";
 /// The canonical timeline is named "angzarr". Empty edition names are treated
 /// as equivalent to this value.
 pub const DEFAULT_EDITION: &str = "angzarr";
-
-/// Type URL prefix for googleapis.com protobuf Any messages.
-///
-/// Used by `decode_typed` to match type URLs in Event/Command payloads.
-pub const TYPE_URL_PREFIX: &str = "type.googleapis.com/";

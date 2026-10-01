@@ -40,6 +40,7 @@ fn test_config_for_test() {
 
 /// config_base_dir returns current dir when CONFIG_ENV_VAR is not set.
 #[test]
+#[serial_test::serial(angzarr_config_env)]
 fn test_config_base_dir_no_env() {
     // Ensure env var is not set for this test
     std::env::remove_var(CONFIG_ENV_VAR);
@@ -49,6 +50,7 @@ fn test_config_base_dir_no_env() {
 
 /// config_base_dir returns parent directory when CONFIG_ENV_VAR is set.
 #[test]
+#[serial_test::serial(angzarr_config_env)]
 fn test_config_base_dir_with_env() {
     // Set env var to a path with a parent
     let original = std::env::var(CONFIG_ENV_VAR).ok();

@@ -5,7 +5,6 @@
 //!
 //! Key behaviors verified:
 //! - for_type() builds correct canonical URLs
-//! - strip_prefix() extracts the message type from a canonical URL
 //! - fqn() extracts the FQN regardless of resolver prefix (recognition)
 
 use super::*;
@@ -19,22 +18,6 @@ fn test_for_type() {
     );
     // Round-trips with the framework constants.
     assert_eq!(for_type("io.angzarr.v1.Notification"), NOTIFICATION);
-}
-
-/// strip_prefix() removes the bare canonical prefix, passes through other URLs.
-#[test]
-fn test_strip_prefix() {
-    assert_eq!(
-        strip_prefix("/io.angzarr.examples.v1.OrderCreated"),
-        "io.angzarr.examples.v1.OrderCreated"
-    );
-    assert_eq!(strip_prefix(NOTIFICATION), "io.angzarr.v1.Notification");
-    // A URL without the bare prefix passes through unchanged — strip_prefix
-    // only peels angzarr's own canonical form, not arbitrary resolver hosts.
-    assert_eq!(
-        strip_prefix("type.googleapis.com/io.angzarr.v1.Notification"),
-        "type.googleapis.com/io.angzarr.v1.Notification"
-    );
 }
 
 /// fqn() yields the absolute proto name regardless of resolver prefix — the
