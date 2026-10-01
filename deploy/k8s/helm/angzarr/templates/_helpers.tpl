@@ -212,3 +212,12 @@ angzarr container. ANGZARR__* env vars still override it.
 {{- define "angzarr.sidecar-config-checksum" -}}
 checksum/sidecar-config: {{ toYaml .Values.config | sha256sum }}
 {{- end }}
+
+{{/*
+A process manager's domain (the event stream it owns), carried by the
+`angzarr.io/pm` label on its Deployment, pods and Service.
+Usage: {{ include "angzarr.pm-domain" . }} with a processManagers entry.
+*/}}
+{{- define "angzarr.pm-domain" -}}
+{{- required (printf "applications.processManagers[%s].domain is required (the PM's own event stream)" .name) .domain -}}
+{{- end }}

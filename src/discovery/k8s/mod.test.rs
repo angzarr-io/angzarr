@@ -155,6 +155,7 @@ fn make_test_pm_service(name: &str, subscriptions: Option<&str>, port: i32) -> S
         COMPONENT_LABEL.to_string(),
         COMPONENT_PROCESS_MANAGER.to_string(),
     );
+    labels.insert(PM_DOMAIN_LABEL.to_string(), "checkout".to_string());
     let annotations = subscriptions
         .map(|s| BTreeMap::from([(SUBSCRIPTIONS_ANNOTATION.to_string(), s.to_string())]));
     Service {
@@ -370,6 +371,7 @@ fn test_pm_watcher_path_uses_configured_namespace_not_metadata() {
         COMPONENT_LABEL.to_string(),
         COMPONENT_PROCESS_MANAGER.to_string(),
     );
+    labels.insert(PM_DOMAIN_LABEL.to_string(), "fulfillment".to_string());
     let svc = Service {
         metadata: ObjectMeta {
             name: Some("pmg-fulfillment".to_string()),
@@ -733,5 +735,27 @@ fn test_extract_pm_ignores_subscriptions_label() {
         .unwrap()
         .insert(SUBSCRIPTIONS_ANNOTATION.to_string(), "order".to_string());
 
+    assert!(K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").is_none());
+}
+
+/// The PM's domain (its own event stream) comes from the `angzarr.io/pm`
+/// label, independent of the Service name.
+#[test]
+fn test_extract_pm_domain_from_pm_label() {
+    let svc = make_test_pm_service("checkout-flow-pm", Some("order,payment"), 1310);
+    let pm = K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").expect("pm");
+    assert_eq!(pm.service.name, "checkout-flow-pm");
+    assert_eq!(pm.service.domain.as_deref(), Some("checkout"));
+}
+
+/// A PM Service without its domain label is not registered.
+#[test]
+fn test_extract_pm_missing_domain_label_skipped() {
+    let mut svc = make_test_pm_service("checkout-flow-pm", Some("order"), 1310);
+    svc.metadata
+        .labels
+        .as_mut()
+        .unwrap()
+        .remove(PM_DOMAIN_LABEL);
     assert!(K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").is_none());
 }

@@ -155,10 +155,7 @@ metadata:
   labels:
     {{- include "angzarr.labels" $ | nindent 4 }}
     app.kubernetes.io/component: process-manager
-    angzarr.io/pm: {{ .name }}
-    {{- if .domain }}
-    angzarr.io/domain: {{ .domain }}
-    {{- end }}
+    angzarr.io/pm: {{ include "angzarr.pm-domain" . }}
   annotations:
     angzarr.io/dns-name: "{{ include "angzarr.pm-service-name" (dict "name" .name) }}.{{ $.Release.Namespace }}.svc.cluster.local"
     # Domains this PM subscribes to; K8s discovery fans CASCADE events
@@ -176,7 +173,7 @@ spec:
   selector:
     {{- include "angzarr.selectorLabels" $ | nindent 4 }}
     app.kubernetes.io/component: process-manager
-    angzarr.io/pm: {{ .name }}
+    angzarr.io/pm: {{ include "angzarr.pm-domain" . }}
 {{- end }}
 
 {{- /* Headless service for service discovery (optional) */}}

@@ -23,7 +23,7 @@ applications:
       topics: ["order.OrderPlaced"]
       image: {repository: order-payment-saga, tag: test}
   processManagers:
-    - name: checkout
+    - name: checkout-flow
       domain: checkout
       port: 50081
       topics: ["order.*", "payment.PaymentSettled"]

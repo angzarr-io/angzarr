@@ -90,14 +90,14 @@ metadata:
   labels:
     {{- include "angzarr.labels" $ | nindent 4 }}
     app.kubernetes.io/component: process-manager
-    angzarr.io/pm: {{ .name }}
+    angzarr.io/pm: {{ include "angzarr.pm-domain" . }}
 spec:
   maxUnavailable: {{ $.Values.podDisruptionBudget.processManagerMaxUnavailable | default 1 }}
   selector:
     matchLabels:
       {{- include "angzarr.selectorLabels" $ | nindent 6 }}
       app.kubernetes.io/component: process-manager
-      angzarr.io/pm: {{ .name }}
+      angzarr.io/pm: {{ include "angzarr.pm-domain" . }}
 {{- end }}
 {{- end }}
 

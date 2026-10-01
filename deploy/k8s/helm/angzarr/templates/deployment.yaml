@@ -707,7 +707,7 @@ spec:
     matchLabels:
       {{- include "angzarr.selectorLabels" $ | nindent 6 }}
       app.kubernetes.io/component: process-manager
-      angzarr.io/pm: {{ .name }}
+      angzarr.io/pm: {{ include "angzarr.pm-domain" . }}
   template:
     metadata:
       annotations:
@@ -721,7 +721,7 @@ spec:
       labels:
         {{- include "angzarr.labels" $ | nindent 8 }}
         app.kubernetes.io/component: process-manager
-        angzarr.io/pm: {{ .name }}
+        angzarr.io/pm: {{ include "angzarr.pm-domain" . }}
     spec:
       {{- with $.Values.imagePullSecrets }}
       imagePullSecrets:

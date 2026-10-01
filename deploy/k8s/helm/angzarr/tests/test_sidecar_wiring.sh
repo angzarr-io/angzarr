@@ -116,13 +116,20 @@ check(saga_svc["metadata"]["labels"].get("angzarr.io/source-domain") == "order",
       "saga Service carries source-domain derived from topics")
 
 # --- process manager ------------------------------------------------------
-pm = container(find("Deployment", "checkout-pm"), "angzarr")
+pm = container(find("Deployment", "checkout-flow-pm"), "angzarr")
 pm_env = env(pm)
 check(pm_env.get("ANGZARR_COORDINATOR_PORT") == str(AGG_PORT),
       "PM coordinator listens on the chart's coordinator port")
 check(pm_env.get("ANGZARR_SUBSCRIPTIONS") == "order;payment:PaymentSettled",
       "PM subscriptions keep event types")
-pm_svc = find("Service", "checkout-pm")
+pm_svc = find("Service", "checkout-flow-pm")
+check(pm_svc["metadata"]["labels"].get("angzarr.io/pm") == "checkout",
+      "PM Service angzarr.io/pm label carries the PM's domain")
+check("angzarr.io/domain" not in pm_svc["metadata"]["labels"],
+      "angzarr.io/domain is reserved for aggregates")
+pm_deploy = find("Deployment", "checkout-flow-pm")
+check(pm_deploy["spec"]["selector"]["matchLabels"].get("angzarr.io/pm") == "checkout",
+      "PM Deployment selects pods by its domain")
 check(pm_svc["metadata"].get("annotations", {}).get("angzarr.io/subscriptions") == "order,payment",
       "PM Service lists its subscribed domains for discovery")
 grpc = service_port(pm_svc, "grpc")

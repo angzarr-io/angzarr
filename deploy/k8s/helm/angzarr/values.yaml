@@ -462,6 +462,21 @@ applications:
   #     enabled: false
   #     nodePort: null
 
+  # Process managers - correlate events across domains, own a domain stream
+  processManagers: []
+  # - name: checkout
+  #   image:
+  #     repository: checkout-pm
+  #     tag: "latest"
+  #   port: 50051
+  #   # The PM's own domain (its event stream); carried by the
+  #   # angzarr.io/pm label
+  #   domain: "checkout"
+  #   # Source domains/events it subscribes to
+  #   topics:
+  #     - "order.*"
+  #     - "payment.PaymentSettled"
+
 # Default resources for application containers
 applicationResources:
   limits:

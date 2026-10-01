@@ -10,7 +10,7 @@
 //! # Aggregate coordinator
 //! labels:
 //!   app.kubernetes.io/component: aggregate
-//!   angzarr.io/domain: cart
+//!   angzarr.io/domain: cart        # the aggregate's domain (its event stream)
 //!
 //! # Projector coordinator
 //! labels:
@@ -25,12 +25,18 @@
 //! # Process manager coordinator (multiple source domains)
 //! labels:
 //!   app.kubernetes.io/component: process-manager
+//!   angzarr.io/pm: checkout        # the PM's domain (its own event stream), not its name
 //! annotations:
 //!   angzarr.io/subscriptions: order,inventory,fulfillment
 //! ```
 //!
+//! `angzarr.io/domain` and `angzarr.io/pm` both name the stream a component
+//! owns (`ComponentOptions.domain`): the aggregate's domain and the process
+//! manager's domain respectively.
+//!
 //! Saga services that are missing the source-domain label are skipped with
-//! a warning — same for PM services missing subscriptions. The aggregate
+//! a warning — same for PM services missing their domain label or
+//! subscriptions annotation. The aggregate
 //! sidecar's `call_sync_sagas`/`call_sync_pms` paths can only route by
 //! source domain, so an unlabeled component can't be reached synchronously
 //! and would silently degrade CASCADE mode if registered without the data.
@@ -62,8 +68,12 @@ use super::{DiscoveredService, DiscoveryError};
 /// Label for component type.
 const COMPONENT_LABEL: &str = "app.kubernetes.io/component";
 
-/// Label for domain (aggregate and projector).
+/// Label carrying an aggregate's domain (also read for projectors).
 const DOMAIN_LABEL: &str = "angzarr.io/domain";
+
+/// Label carrying a process manager's domain — the event stream the PM
+/// owns (its correlation-keyed state), not its component name.
+const PM_DOMAIN_LABEL: &str = "angzarr.io/pm";
 
 /// Label for the source domain a saga subscribes to (single value).
 const SOURCE_DOMAIN_LABEL: &str = "angzarr.io/source-domain";
@@ -526,7 +536,22 @@ impl K8sServiceDiscovery {
     }
 
     fn extract_pm_with_namespace(svc: &Service, namespace: &str) -> Option<PmService> {
-        let service = Self::extract_service_with_namespace(svc, namespace)?;
+        let mut service = Self::extract_service_with_namespace(svc, namespace)?;
+        let pm_domain = svc
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(PM_DOMAIN_LABEL))
+            .filter(|d| !d.is_empty())
+            .cloned();
+        let Some(pm_domain) = pm_domain else {
+            tracing::warn!(
+                service = %service.name,
+                "PM service missing {PM_DOMAIN_LABEL} label (the PM's domain) — skipping registration"
+            );
+            return None;
+        };
+        service.domain = Some(pm_domain);
         let raw = svc
             .metadata
             .annotations
