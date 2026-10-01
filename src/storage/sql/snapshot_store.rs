@@ -185,7 +185,7 @@ macro_rules! impl_snapshot_store {
                 snapshot: crate::proto::Snapshot,
             ) -> crate::storage::Result<()> {
                 use prost::Message;
-                use sea_query::{Expr, Query};
+                use sea_query::{Cond, Expr, Query};
 
                 use crate::proto::SnapshotRetention;
                 use crate::storage::schema::Snapshots;
@@ -238,29 +238,36 @@ macro_rules! impl_snapshot_store {
                     .to_owned();
 
                 let sql = <$db_type>::build_insert(stmt);
-                sqlx::query(&sql).execute(&self.pool).await?;
 
-                // Step 2: Clean up old TRANSIENT snapshots (retention = 2)
-                // Keep PERSIST (1) and DEFAULT (0) snapshots
+                // Remove the older snapshots this one supersedes (see
+                // `storage::is_superseded`): DEFAULT and TRANSIENT.
+                let superseded = Expr::col(Snapshots::Retention).is_in([
+                    SnapshotRetention::RetentionDefault as i32,
+                    SnapshotRetention::RetentionTransient as i32,
+                ]);
                 let cleanup_stmt = Query::delete()
                     .from_table(Snapshots::Table)
-                    .and_where(
-                        $crate::storage::sql::snapshot_store::edition_predicate_expr(
-                            Snapshots::Edition,
-                            edition,
-                        ),
-                    )
-                    .and_where(Expr::col(Snapshots::Domain).eq(domain))
-                    .and_where(Expr::col(Snapshots::Root).eq(&root_str))
-                    .and_where(Expr::col(Snapshots::Sequence).lt(sequence))
-                    .and_where(
-                        Expr::col(Snapshots::Retention)
-                            .eq(SnapshotRetention::RetentionTransient as i32),
+                    .cond_where(
+                        Cond::all()
+                            .add(
+                                $crate::storage::sql::snapshot_store::edition_predicate_expr(
+                                    Snapshots::Edition,
+                                    edition,
+                                ),
+                            )
+                            .add(Expr::col(Snapshots::Domain).eq(domain))
+                            .add(Expr::col(Snapshots::Root).eq(&root_str))
+                            .add(Expr::col(Snapshots::Sequence).lt(sequence))
+                            .add(superseded),
                     )
                     .to_owned();
-
                 let cleanup_sql = <$db_type>::build_delete(cleanup_stmt);
-                sqlx::query(&cleanup_sql).execute(&self.pool).await?;
+
+                // The upsert and the prune commit together.
+                let mut tx = self.pool.begin().await?;
+                sqlx::query(&sql).execute(&mut *tx).await?;
+                sqlx::query(&cleanup_sql).execute(&mut *tx).await?;
+                tx.commit().await?;
 
                 Ok(())
             }

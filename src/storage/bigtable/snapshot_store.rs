@@ -4,25 +4,28 @@
 //! Column family: `snapshot`
 //! Columns: `data` (Snapshot), `retention` (retention type)
 //!
-//! Note: This implementation requires a Bigtable emulator or real Bigtable instance.
+//! A `put` writes the new snapshot row, then deletes the rows it supersedes
+//! (`storage::is_superseded`). Bigtable has no multi-row transactions, so an
+//! interrupted put can leave superseded rows behind; it never loses the new
+//! snapshot.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bigtable_rs::bigtable::{BigTable, BigTableConnection};
+use bigtable_rs::bigtable::{BigTable, BigTableConnection, RowCell};
 use bigtable_rs::google::bigtable::v2::mutation::SetCell;
-use bigtable_rs::google::bigtable::v2::row_filter::Filter;
+use bigtable_rs::google::bigtable::v2::row_filter::{Chain, Filter};
+use bigtable_rs::google::bigtable::v2::row_range::{EndKey, StartKey};
 use bigtable_rs::google::bigtable::v2::{
     MutateRowRequest, Mutation, ReadRowsRequest, RowFilter, RowRange, RowSet,
 };
 use prost::Message;
-use tokio::sync::Mutex;
 use tracing::{debug, info};
 use uuid::Uuid;
 
+use super::BigtableEventStore;
 use crate::proto::Snapshot;
-use crate::storage::{Result, SnapshotStore, StorageError};
+use crate::storage::{is_superseded, Result, SnapshotStore, StorageError};
 
 const COLUMN_FAMILY: &str = "snapshot";
 const COL_DATA: &[u8] = b"data";
@@ -30,7 +33,7 @@ const COL_RETENTION: &[u8] = b"retention";
 
 /// Bigtable implementation of SnapshotStore.
 pub struct BigtableSnapshotStore {
-    client: Arc<Mutex<BigTable>>,
+    client: BigTable,
     table_name: String,
 }
 
@@ -59,7 +62,7 @@ impl BigtableSnapshotStore {
             .map_err(|e| StorageError::Backend(format!("Bigtable connection failed: {}", e)))?
         };
 
-        let client = Arc::new(Mutex::new(connection.client()));
+        let client = connection.client();
         let table_name = table_name.into();
 
         info!(
@@ -80,7 +83,9 @@ impl BigtableSnapshotStore {
         format!(
             "{}#{}#{}#{:010}",
             crate::storage::helpers::pct_encode_component(domain),
-            crate::storage::helpers::pct_encode_component(edition),
+            crate::storage::helpers::pct_encode_component(
+                crate::storage::timeline::storage_edition(edition),
+            ),
             root,
             sequence
         )
@@ -92,7 +97,9 @@ impl BigtableSnapshotStore {
         format!(
             "{}#{}#{}#",
             crate::storage::helpers::pct_encode_component(domain),
-            crate::storage::helpers::pct_encode_component(edition),
+            crate::storage::helpers::pct_encode_component(
+                crate::storage::timeline::storage_edition(edition),
+            ),
             root
         )
         .into_bytes()
@@ -130,71 +137,86 @@ impl BigtableSnapshotStore {
             ),
         }
     }
+
+    fn table(&self) -> String {
+        self.client.get_full_table_name(&self.table_name)
+    }
+
+    /// Newest cell per column of the `snapshot` family.
+    fn latest_snapshot_cells() -> RowFilter {
+        RowFilter {
+            filter: Some(Filter::Chain(Chain {
+                filters: vec![
+                    RowFilter {
+                        filter: Some(Filter::FamilyNameRegexFilter(COLUMN_FAMILY.to_string())),
+                    },
+                    RowFilter {
+                        filter: Some(Filter::CellsPerColumnLimitFilter(1)),
+                    },
+                ],
+            })),
+        }
+    }
+
+    /// Snapshot rows of an aggregate with sequence `<= up_to` (all rows when
+    /// `None`), as `(sequence, cells)`.
+    async fn read_snapshot_rows(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        up_to: Option<u32>,
+    ) -> Result<Vec<(u32, Vec<RowCell>)>> {
+        let prefix = Self::row_key_prefix(domain, edition, root);
+        let end_key = match up_to {
+            Some(seq) => Some(EndKey::EndKeyClosed(Self::row_key(
+                domain, edition, root, seq,
+            ))),
+            None => {
+                let end = BigtableEventStore::prefix_end(&prefix);
+                (!end.is_empty()).then_some(EndKey::EndKeyOpen(end))
+            }
+        };
+        let rows = self
+            .client
+            .clone()
+            .read_rows(ReadRowsRequest {
+                table_name: self.table(),
+                rows: Some(RowSet {
+                    row_keys: vec![],
+                    row_ranges: vec![RowRange {
+                        start_key: Some(StartKey::StartKeyClosed(prefix)),
+                        end_key,
+                    }],
+                }),
+                filter: Some(Self::latest_snapshot_cells()),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|(key, cells)| Self::parse_row_key(&key).map(|(_, _, _, seq)| (seq, cells)))
+            .collect())
+    }
+
+    /// Decode the highest-sequence snapshot among `rows`.
+    fn newest(rows: Vec<(u32, Vec<RowCell>)>) -> Result<Option<Snapshot>> {
+        let Some((_, cells)) = rows.into_iter().max_by_key(|(seq, _)| *seq) else {
+            return Ok(None);
+        };
+        cells
+            .into_iter()
+            .find(|c| c.qualifier == COL_DATA)
+            .map(|cell| Snapshot::decode(cell.value.as_ref()).map_err(StorageError::ProtobufDecode))
+            .transpose()
+    }
 }
 
 #[async_trait]
 impl SnapshotStore for BigtableSnapshotStore {
     async fn get(&self, domain: &str, edition: &str, root: Uuid) -> Result<Option<Snapshot>> {
-        let prefix = Self::row_key_prefix(domain, edition, root);
-
-        let mut client = self.client.lock().await;
-        let table_name = client.get_full_table_name(&self.table_name);
-
-        // Read all snapshots and find the one with highest sequence
-        let request = ReadRowsRequest {
-            table_name,
-            rows: Some(RowSet {
-                row_keys: vec![],
-                row_ranges: vec![RowRange {
-                    start_key: Some(
-                        bigtable_rs::google::bigtable::v2::row_range::StartKey::StartKeyClosed(
-                            prefix.clone(),
-                        ),
-                    ),
-                    end_key: Some(
-                        bigtable_rs::google::bigtable::v2::row_range::EndKey::EndKeyOpen({
-                            let mut end = prefix;
-                            if let Some(last) = end.last_mut() {
-                                *last = last.saturating_add(1);
-                            }
-                            end
-                        }),
-                    ),
-                }],
-            }),
-            filter: Some(RowFilter {
-                filter: Some(Filter::FamilyNameRegexFilter(COLUMN_FAMILY.to_string())),
-            }),
-            ..Default::default()
-        };
-
-        let result = client
-            .read_rows(request)
-            .await
-            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
-
-        let mut best_snapshot: Option<(u32, Snapshot)> = None;
-
-        for (row_key, cells) in result {
-            if let Some((_, _, _, seq)) = Self::parse_row_key(&row_key) {
-                for cell in cells {
-                    if cell.qualifier == COL_DATA {
-                        let snapshot = Snapshot::decode(cell.value.as_ref())
-                            .map_err(StorageError::ProtobufDecode)?;
-
-                        match &best_snapshot {
-                            None => best_snapshot = Some((seq, snapshot)),
-                            Some((best_seq, _)) if seq > *best_seq => {
-                                best_snapshot = Some((seq, snapshot));
-                            }
-                            _ => {}
-                        }
-                    }
-                }
-            }
-        }
-
-        Ok(best_snapshot.map(|(_, s)| s))
+        Self::newest(self.read_snapshot_rows(domain, edition, root, None).await?)
     }
 
     async fn get_at_seq(
@@ -204,148 +226,91 @@ impl SnapshotStore for BigtableSnapshotStore {
         root: Uuid,
         seq: u32,
     ) -> Result<Option<Snapshot>> {
-        let row_key = Self::row_key(domain, edition, root, seq);
-
-        let mut client = self.client.lock().await;
-        let table_name = client.get_full_table_name(&self.table_name);
-
-        let request = ReadRowsRequest {
-            table_name,
-            rows: Some(RowSet {
-                row_keys: vec![row_key],
-                row_ranges: vec![],
-            }),
-            filter: Some(RowFilter {
-                filter: Some(Filter::FamilyNameRegexFilter(COLUMN_FAMILY.to_string())),
-            }),
-            ..Default::default()
-        };
-
-        let result = client
-            .read_rows(request)
-            .await
-            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
-
-        for (_, cells) in result {
-            for cell in cells {
-                if cell.qualifier == COL_DATA {
-                    let snapshot = Snapshot::decode(cell.value.as_ref())
-                        .map_err(StorageError::ProtobufDecode)?;
-                    return Ok(Some(snapshot));
-                }
-            }
-        }
-
-        Ok(None)
+        Self::newest(
+            self.read_snapshot_rows(domain, edition, root, Some(seq))
+                .await?,
+        )
     }
 
     async fn put(&self, domain: &str, edition: &str, root: Uuid, snapshot: Snapshot) -> Result<()> {
-        let row_key = Self::row_key(domain, edition, root, snapshot.sequence);
-
-        let mut mutations = vec![Self::build_set_cell(
-            COLUMN_FAMILY,
-            COL_DATA,
-            &snapshot.encode_to_vec(),
-        )];
-
-        // Store retention type as string
-        let retention_str = snapshot.retention.to_string();
-        mutations.push(Self::build_set_cell(
-            COLUMN_FAMILY,
-            COL_RETENTION,
-            retention_str.as_bytes(),
-        ));
-
-        let mut client = self.client.lock().await;
-        let table_name = client.get_full_table_name(&self.table_name);
-
-        let request = MutateRowRequest {
-            table_name,
-            row_key,
-            mutations,
-            ..Default::default()
-        };
-
-        client
-            .mutate_row(request)
+        let sequence = snapshot.sequence;
+        let mutations = vec![
+            Self::build_set_cell(COLUMN_FAMILY, COL_DATA, &snapshot.encode_to_vec()),
+            Self::build_set_cell(
+                COLUMN_FAMILY,
+                COL_RETENTION,
+                snapshot.retention.to_string().as_bytes(),
+            ),
+        ];
+        self.client
+            .clone()
+            .mutate_row(MutateRowRequest {
+                table_name: self.table(),
+                row_key: Self::row_key(domain, edition, root, sequence),
+                mutations,
+                ..Default::default()
+            })
             .await
             .map_err(|e| StorageError::Backend(format!("Bigtable mutate_row failed: {}", e)))?;
+
+        let older = match sequence.checked_sub(1) {
+            Some(up_to) => {
+                self.read_snapshot_rows(domain, edition, root, Some(up_to))
+                    .await?
+            }
+            None => Vec::new(),
+        };
+        let superseded: Vec<Vec<u8>> = older
+            .into_iter()
+            .filter_map(|(old_seq, cells)| {
+                let retention = cells
+                    .iter()
+                    .find(|c| c.qualifier == COL_RETENTION)
+                    .and_then(|c| std::str::from_utf8(&c.value).ok())
+                    .and_then(|v| v.parse::<i32>().ok())?;
+                is_superseded(old_seq, retention, sequence)
+                    .then(|| Self::row_key(domain, edition, root, old_seq))
+            })
+            .collect();
+        self.delete_rows(superseded).await?;
 
         debug!(
             domain = %domain,
             root = %root,
-            sequence = snapshot.sequence,
+            sequence = sequence,
             "Stored snapshot in Bigtable"
         );
-
         Ok(())
     }
 
     async fn delete(&self, domain: &str, edition: &str, root: Uuid) -> Result<()> {
-        let prefix = Self::row_key_prefix(domain, edition, root);
+        let keys = self
+            .read_snapshot_rows(domain, edition, root, None)
+            .await?
+            .into_iter()
+            .map(|(seq, _)| Self::row_key(domain, edition, root, seq))
+            .collect();
+        self.delete_rows(keys).await?;
+        debug!(domain = %domain, root = %root, "Deleted snapshots from Bigtable");
+        Ok(())
+    }
+}
 
-        let mut client = self.client.lock().await;
-        let table_name = client.get_full_table_name(&self.table_name);
-
-        // First, find all snapshot rows for this root
-        let request = ReadRowsRequest {
-            table_name: table_name.clone(),
-            rows: Some(RowSet {
-                row_keys: vec![],
-                row_ranges: vec![RowRange {
-                    start_key: Some(
-                        bigtable_rs::google::bigtable::v2::row_range::StartKey::StartKeyClosed(
-                            prefix.clone(),
-                        ),
-                    ),
-                    end_key: Some(
-                        bigtable_rs::google::bigtable::v2::row_range::EndKey::EndKeyOpen({
-                            let mut end = prefix;
-                            if let Some(last) = end.last_mut() {
-                                *last = last.saturating_add(1);
-                            }
-                            end
-                        }),
-                    ),
-                }],
-            }),
-            ..Default::default()
-        };
-
-        let result = client
-            .read_rows(request)
-            .await
-            .map_err(|e| StorageError::Backend(format!("Bigtable read_rows failed: {}", e)))?;
-
-        // Delete each row
-        for (row_key, _) in result {
-            let delete_mutation = Mutation {
-                mutation: Some(
-                    bigtable_rs::google::bigtable::v2::mutation::Mutation::DeleteFromRow(
-                        bigtable_rs::google::bigtable::v2::mutation::DeleteFromRow {},
-                    ),
-                ),
-            };
-
-            let delete_request = MutateRowRequest {
-                table_name: table_name.clone(),
-                row_key,
-                mutations: vec![delete_mutation],
-                ..Default::default()
-            };
-
-            client
-                .mutate_row(delete_request)
+impl BigtableSnapshotStore {
+    /// Delete whole rows by key.
+    async fn delete_rows(&self, keys: Vec<Vec<u8>>) -> Result<()> {
+        for row_key in keys {
+            self.client
+                .clone()
+                .mutate_row(MutateRowRequest {
+                    table_name: self.table(),
+                    row_key,
+                    mutations: vec![BigtableEventStore::build_delete_row()],
+                    ..Default::default()
+                })
                 .await
-                .map_err(|e| StorageError::Backend(format!("Bigtable mutate_row failed: {}", e)))?;
+                .map_err(|e| StorageError::Backend(format!("Bigtable delete row failed: {}", e)))?;
         }
-
-        debug!(
-            domain = %domain,
-            root = %root,
-            "Deleted snapshots from Bigtable"
-        );
-
         Ok(())
     }
 }

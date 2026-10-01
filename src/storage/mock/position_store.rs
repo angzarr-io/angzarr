@@ -5,7 +5,6 @@ use std::sync::RwLock;
 
 use async_trait::async_trait;
 
-use crate::storage::helpers::is_main_timeline;
 use crate::storage::{PositionStore, Result};
 
 /// Mock position store for testing.
@@ -31,11 +30,7 @@ impl MockPositionStore {
     /// Without this, a projector that checkpoints under `""` would not resume
     /// from a position written under `"angzarr"` (and vice versa).
     fn make_key(handler: &str, domain: &str, edition: &str, root: &[u8]) -> String {
-        let edition = if is_main_timeline(edition) {
-            ""
-        } else {
-            edition
-        };
+        let edition = crate::storage::timeline::storage_edition(edition);
         format!("{}:{}:{}:{}", handler, domain, edition, hex::encode(root))
     }
 }

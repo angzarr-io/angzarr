@@ -4,7 +4,6 @@
 //! behavior for sequence handling, timestamp parsing, and EventBook assembly.
 //!
 //! Key behaviors verified:
-//! - Sequence validation (optimistic concurrency control)
 //! - Timestamp parsing (RFC3339 format for event ordering)
 //! - Sequence extraction from EventPage
 
@@ -22,65 +21,6 @@ fn make_event_with_sequence(seq: u32) -> EventPage {
         created_at: None,
         ..Default::default()
     }
-}
-
-// ============================================================================
-// Sequence Resolution Tests
-// ============================================================================
-
-/// Valid sequence >= base_sequence is accepted.
-///
-/// This is the happy path: client provides correct sequence matching
-/// their view of aggregate state.
-#[test]
-fn test_resolve_sequence_explicit_valid() {
-    let event = make_event_with_sequence(5);
-    let result = resolve_sequence(&event, 3).unwrap();
-    assert_eq!(result, 5);
-}
-
-/// Sequence < base_sequence triggers SequenceConflict error.
-///
-/// Optimistic concurrency: if event's sequence is below what we expect,
-/// another writer updated the aggregate. Client must refetch and retry.
-#[test]
-fn test_resolve_sequence_explicit_conflict() {
-    let event = make_event_with_sequence(2);
-    let result = resolve_sequence(&event, 5);
-    assert!(matches!(
-        result,
-        Err(StorageError::SequenceConflict {
-            expected: 5,
-            actual: 2
-        })
-    ));
-}
-
-/// Sequence 0 is valid for new aggregates.
-///
-/// First event always has sequence 0. Verifies zero doesn't trigger
-/// any off-by-one edge cases.
-#[test]
-fn test_resolve_sequence_zero() {
-    let event = make_event_with_sequence(0);
-    let result = resolve_sequence(&event, 0).unwrap();
-    assert_eq!(result, 0);
-}
-
-/// H-21 regression: the prior signature took a `&mut u32 auto_sequence`
-/// that the body never read or wrote — auto-assign was advertised but
-/// dead. The new 2-arg signature documents the actual contract (caller
-/// always provides explicit sequence). This test pins the contract by
-/// exercising the new signature; if anyone reintroduces a third
-/// parameter without documenting auto-assign semantics, the call site
-/// here will break and force the discussion.
-#[test]
-fn test_resolve_sequence_signature_is_two_arg() {
-    let event = make_event_with_sequence(7);
-    // Compile-time pinning: any signature change forces this test to
-    // be revisited.
-    let result = resolve_sequence(&event, 7);
-    assert_eq!(result.unwrap(), 7);
 }
 
 // ============================================================================
@@ -194,24 +134,6 @@ fn test_is_main_timeline_named_edition() {
     assert!(!is_main_timeline("v2"));
     assert!(!is_main_timeline("draft-1"));
     assert!(!is_main_timeline("feature-branch"));
-}
-
-/// Fallback edition returns main timeline for named editions.
-///
-/// When a named edition has no events, queries fall back to the main timeline.
-#[test]
-fn test_fallback_edition_named() {
-    assert_eq!(fallback_edition("v2"), DEFAULT_EDITION);
-    assert_eq!(fallback_edition("draft"), DEFAULT_EDITION);
-}
-
-/// Fallback edition returns same edition for main timeline.
-///
-/// Main timeline has no fallback - it is the fallback target.
-#[test]
-fn test_fallback_edition_main_timeline() {
-    assert_eq!(fallback_edition(""), "");
-    assert_eq!(fallback_edition("angzarr"), "angzarr");
 }
 
 // ============================================================================

@@ -24,7 +24,7 @@ mod snapshot_store;
 
 pub use event_store::{AddMeta, AddOutcome, CascadeParticipant, EventStore, SourceInfo};
 pub use position_store::PositionStore;
-pub use snapshot_store::SnapshotStore;
+pub use snapshot_store::{is_superseded, SnapshotStore};
 
 // Re-export from submodules
 pub use config::{
@@ -38,8 +38,12 @@ pub use factory::{
 };
 
 // Implementation modules
+// All-or-nothing multi-unit writes for backends without multi-row transactions
+pub mod batch_write;
 #[cfg(feature = "bigtable")]
 pub mod bigtable;
+// Per-participant cascade resolution for backends that evaluate it in code
+pub mod cascade_resolution;
 #[cfg(feature = "dynamo")]
 pub mod dynamo;
 pub mod helpers;
@@ -56,6 +60,8 @@ pub mod schema;
 pub mod sqlite;
 // Unified SQL implementations (shared by postgres and sqlite)
 pub mod sql;
+// Backend-neutral timeline rules (edition spelling, composite reads, append windows)
+pub mod timeline;
 
 // Backend re-exports
 #[cfg(feature = "bigtable")]

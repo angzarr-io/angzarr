@@ -1459,7 +1459,7 @@ async fn reaper_published_revocation_carries_participant_edition() {
     store
         .add(
             "test",
-            "angzarr",
+            "branch-a",
             root,
             vec![make_test_event(0, true, Some(cascade_id), old_time)],
             &AddMeta {
@@ -1488,7 +1488,7 @@ async fn reaper_published_revocation_carries_participant_edition() {
         .as_ref()
         .expect("C01 #22: cover.edition must be Some, or gap-fill errors with MissingEdition");
     assert_eq!(
-        edition.name, "angzarr",
+        edition.name, "branch-a",
         "edition must match the participant's edition, not be hardcoded/blank"
     );
 }

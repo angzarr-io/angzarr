@@ -129,9 +129,10 @@ impl AddOutcome {
 /// Interface for event persistence.
 ///
 /// All domain-scoped operations take `domain` as their first parameter,
-/// followed by `edition`. The edition identifies the timeline: `"angzarr"`
-/// for the main timeline, or a named edition (e.g., `"v2"`) for diverged
-/// timelines.
+/// followed by `edition`. The edition identifies the timeline: `""` or
+/// `"angzarr"` (interchangeable) for the main timeline, or a named edition
+/// (e.g., `"v2"`) for diverged timelines. Every backend keys all spellings
+/// of the main timeline identically and reports it in its wire form, `""`.
 ///
 /// The `(domain, edition, root, sequence)` tuple forms the unique key
 /// for stored events.
@@ -146,9 +147,21 @@ impl AddOutcome {
 ///
 /// Pass `None` or empty string for non-idempotent operations.
 ///
+/// # Appends
+///
+/// Each `add` batch must continue its stream exactly (see
+/// `storage::timeline::AppendWindow`): the main timeline and editions with
+/// events continue at `max + 1`; an edition's first batch may start at any
+/// divergence point up to the main timeline's next sequence. Pages within a
+/// batch are consecutive. A violation, or losing a concurrent race for the
+/// same sequence, is `StorageError::SequenceConflict`.
+///
 /// Implementations:
 /// - `SqliteEventStore`: SQLite storage
 /// - `PostgresEventStore`: PostgreSQL storage
+/// - `BigtableEventStore`: Bigtable storage
+/// - `DynamoEventStore`: DynamoDB storage
+/// - `ImmudbEventStore`: ImmuDB storage
 /// - `MockEventStore`: In-memory mock for testing
 #[async_trait]
 pub trait EventStore: Send + Sync {
@@ -198,12 +211,8 @@ pub trait EventStore: Send + Sync {
     /// A named edition with NO events of its own AND no explicit divergence
     /// is "not diverged yet": it **inherits the entire main timeline** until
     /// it explicitly diverges (by writing its first event, or by a
-    /// `Some(N)` divergence here). This is uniform across every backend —
-    /// SQLite, PostgreSQL, ImmuDB, and the mock. (Postgres previously
-    /// returned zero rows in this case via a stored-procedure
-    /// `divergence = 0 → sequence < 0` bug; that path now runs through the
-    /// shared divergence logic in `storage::sql::event_store`, which
-    /// resolves the eventless case to "no cap".)
+    /// `Some(N)` divergence here). Every backend resolves this through
+    /// `storage::timeline::resolve_divergence`.
     ///
     /// # Example: Branch at sequence 3
     /// ```text
@@ -334,8 +343,8 @@ pub trait EventStore: Send + Sync {
     ///
     /// Returns the number of events deleted.
     /// Note: This is a destructive operation - events cannot be recovered.
-    /// Main timeline ('angzarr' or empty edition) protection must be enforced
-    /// by the caller.
+    /// The main timeline (`""` or `"angzarr"`) is refused with
+    /// `StorageError::MainTimelineProtected`.
     async fn delete_edition_events(&self, domain: &str, edition: &str) -> Result<u32>;
 
     // =========================================================================

@@ -12,7 +12,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::proto::Snapshot;
-use crate::storage::{Result, SnapshotStore};
+use crate::storage::{Result, SnapshotStore, SnapshotsEnableConfig};
 
 /// Repository for Snapshot operations.
 ///
@@ -55,6 +55,12 @@ impl SnapshotRepository {
         }
     }
 
+    /// Create a repository whose flags come from the `storage.snapshots_enable`
+    /// configuration.
+    pub fn from_config(store: Arc<dyn SnapshotStore>, config: &SnapshotsEnableConfig) -> Self {
+        Self::with_flags(store, config.read, config.write)
+    }
+
     /// Retrieve the latest snapshot for an aggregate.
     ///
     /// Returns `Ok(None)` when `read_enabled` is `false`, regardless of
@@ -67,9 +73,26 @@ impl SnapshotRepository {
         self.store.get(domain, edition, root).await
     }
 
+    /// Retrieve the stored snapshot with the highest sequence `<= seq`.
+    ///
+    /// Returns `Ok(None)` when `read_enabled` is `false` or no such snapshot
+    /// exists.
+    pub async fn get_at_seq(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        seq: u32,
+    ) -> Result<Option<Snapshot>> {
+        if !self.read_enabled {
+            return Ok(None);
+        }
+        self.store.get_at_seq(domain, edition, root, seq).await
+    }
+
     /// Store a snapshot for an aggregate.
     ///
-    /// Replaces any existing snapshot for this root.
+    /// The store keeps or prunes older snapshots per their retention.
     /// If `write_enabled` is `false`, this is a no-op.
     pub async fn put(
         &self,

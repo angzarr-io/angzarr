@@ -136,22 +136,19 @@ pub async fn init_position_store(
 }
 
 // ============================================================================
-// Registry-based resolution (storage-config refactor — additive, not yet wired)
+// Registry-based resolution
 // ============================================================================
 //
-// These resolve a `StorageRegistryConfig` role reference to a constructed store.
-// They will replace `init_storage` / `init_position_store` once `Config.storage`
-// is swapped from the legacy flat `StorageConfig` to `StorageRegistryConfig`;
-// until then they live alongside the inventory path and are unused
-// (#[allow(dead_code)]). postgres/sqlite/redis are fully wired; the remaining
-// backends return `NotImplemented` pending migration (immudb: cascade-column
-// rework per `stainable-anguished-cuddle`; composite: `CompositeEventStore`).
+// These resolve a `StorageRegistryConfig` role reference to a constructed
+// store; the binaries build their stores through them. Each validates the
+// whole registry first, so a misconfigured role fails at boot. ImmuDB and
+// composite backends return `NotImplemented`.
 
 /// Initialize the event store from the registry's `events` role reference.
-#[allow(dead_code)]
 pub async fn init_event_store(
     config: &StorageRegistryConfig,
 ) -> std::result::Result<Arc<dyn EventStore>, Box<dyn std::error::Error>> {
+    config.validate().map_err(StorageError::UnknownType)?;
     let backend = config
         .resolve(StorageRole::Event)
         .map_err(StorageError::UnknownType)?;
@@ -213,10 +210,10 @@ pub async fn init_event_store(
 }
 
 /// Initialize the snapshot store from the registry's `snapshots` role reference.
-#[allow(dead_code)]
 pub async fn init_snapshot_store(
     config: &StorageRegistryConfig,
 ) -> std::result::Result<Arc<dyn SnapshotStore>, Box<dyn std::error::Error>> {
+    config.validate().map_err(StorageError::UnknownType)?;
     let backend = config
         .resolve(StorageRole::Snapshot)
         .map_err(StorageError::UnknownType)?;
@@ -286,10 +283,10 @@ pub async fn init_snapshot_store(
 }
 
 /// Initialize the position store from the registry's `positions` role reference.
-#[allow(dead_code)]
 pub async fn init_position_store_registry(
     config: &StorageRegistryConfig,
 ) -> std::result::Result<Arc<dyn PositionStore>, Box<dyn std::error::Error>> {
+    config.validate().map_err(StorageError::UnknownType)?;
     let backend = config
         .resolve(StorageRole::Position)
         .map_err(StorageError::UnknownType)?;

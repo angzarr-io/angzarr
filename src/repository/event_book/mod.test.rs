@@ -1384,6 +1384,122 @@ mod mock_integration {
         assert_eq!(book.pages[0].sequence_num(), 0);
     }
 
+    /// Store events 0..=20, a PERSIST snapshot at 15 and a DEFAULT snapshot
+    /// at 20 (both kept). Each snapshot's created_at is its last event's
+    /// time.
+    async fn seed_two_snapshots(
+        event_store: &MockEventStore,
+        snapshot_store: &MockSnapshotStore,
+        domain: &str,
+        root: Uuid,
+    ) {
+        use crate::storage::EventStore;
+        event_store
+            .add(
+                domain,
+                "test",
+                root,
+                (0..=20).map(|seq| test_event(seq, "Event")).collect(),
+                &AddMeta::default(),
+            )
+            .await
+            .unwrap();
+        for (seq, retention) in [
+            (15, SnapshotRetention::RetentionPersist),
+            (20, SnapshotRetention::RetentionDefault),
+        ] {
+            let mut snapshot = test_snapshot_with_created_at(seq, 1704067200 + i64::from(seq));
+            snapshot.retention = retention as i32;
+            snapshot_store
+                .put(domain, "test", root, snapshot)
+                .await
+                .unwrap();
+        }
+    }
+
+    /// As-of-sequence reads start from the newest snapshot at or before the
+    /// target, not only from the latest snapshot: with snapshots at 15 and
+    /// 20, as-of 17 carries the snapshot at 15 and layers 16..=17.
+    #[tokio::test]
+    async fn test_get_temporal_by_sequence_uses_historical_snapshot() {
+        let (repo, event_store, snapshot_store) = setup_shared();
+        let domain = "test_domain";
+        let root = Uuid::new_v4();
+        seed_two_snapshots(&event_store, &snapshot_store, domain, root).await;
+
+        let book = repo
+            .get_temporal_by_sequence(domain, "test", root, 17)
+            .await
+            .unwrap();
+
+        assert_eq!(book.snapshot.as_ref().map(|s| s.sequence), Some(15));
+        assert_eq!(
+            book.pages
+                .iter()
+                .map(|p| p.sequence_num())
+                .collect::<Vec<_>>(),
+            vec![16, 17]
+        );
+    }
+
+    /// As-of-time reads start from the newest snapshot at or before the last
+    /// event visible at the target time: at T = event 18's time, the
+    /// snapshot at 15 is carried and 16..=18 layered.
+    #[tokio::test]
+    async fn test_get_temporal_by_time_uses_historical_snapshot() {
+        let (repo, event_store, snapshot_store) = setup_shared();
+        let domain = "test_domain";
+        let root = Uuid::new_v4();
+        seed_two_snapshots(&event_store, &snapshot_store, domain, root).await;
+
+        let book = repo
+            .get_temporal_by_time(
+                domain,
+                "test",
+                root,
+                &prost_types::Timestamp {
+                    seconds: 1704067218,
+                    nanos: 0,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(book.snapshot.as_ref().map(|s| s.sequence), Some(15));
+        assert_eq!(
+            book.pages
+                .iter()
+                .map(|p| p.sequence_num())
+                .collect::<Vec<_>>(),
+            vec![16, 17, 18]
+        );
+    }
+
+    /// With no event visible at the target time there is no state to carry.
+    #[tokio::test]
+    async fn test_get_temporal_by_time_before_first_event_is_empty() {
+        let (repo, event_store, snapshot_store) = setup_shared();
+        let domain = "test_domain";
+        let root = Uuid::new_v4();
+        seed_two_snapshots(&event_store, &snapshot_store, domain, root).await;
+
+        let book = repo
+            .get_temporal_by_time(
+                domain,
+                "test",
+                root,
+                &prost_types::Timestamp {
+                    seconds: 1704067100,
+                    nanos: 0,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert!(book.snapshot.is_none());
+        assert!(book.pages.is_empty());
+    }
+
     // ============================================================================
     // get_sequences Tests (Sparse Queries)
     // ============================================================================

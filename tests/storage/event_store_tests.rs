@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use angzarr::proto::{event_page, page_header::SequenceType, EventPage, PageHeader};
 use angzarr::proto_ext::EventPageExt;
-use angzarr::storage::{AddMeta, EventStore};
+use angzarr::storage::{AddMeta, AddOutcome, EventStore, StorageError};
 
 /// Create a test event with given sequence and type.
 pub fn make_event(seq: u32, event_type: &str) -> EventPage {
@@ -2379,12 +2379,8 @@ pub async fn test_get_until_timestamp_returns_all_when_recent<S: EventStore>(sto
 /// behavior: an event exactly AT `until` is included (inclusive `<=`); an
 /// event one nanosecond-granularity tick AFTER `until` is excluded.
 ///
-/// NOT part of `generate_event_store_core_tests!` — ImmuDB's `created_at`
-/// is a real `TIMESTAMP` column that only round-trips whole-second
-/// precision (see `immudb_timestamp_literal`), a pre-existing, documented
-/// floor unrelated to C10. Wiring this into the core list would fail
-/// there on that known precision limit, not a regression. SQLite and
-/// Postgres (full sub-second TEXT precision) call it directly.
+/// Every backend runs it: ImmuDB's whole-second `TIMESTAMP` column only
+/// narrows the candidates; the exact cut uses each page's own timestamp.
 pub async fn test_get_until_timestamp_nanosecond_boundary_precision<S: EventStore>(store: &S) {
     use prost_types::Timestamp;
 
@@ -3414,6 +3410,387 @@ pub async fn test_query_cascade_participants_multiple_aggregates<S: EventStore>(
     assert_eq!(participants.len(), 2, "should find two participants");
 }
 
+/// Per-participant cascade resolution: one participant's Revocation does not
+/// resolve the others. A cascade with participant A revoked and participant
+/// B still provisional stays stale, and only B is reported as unresolved.
+pub async fn test_query_stale_cascades_partially_revoked_remains_stale<S: EventStore>(store: &S) {
+    let domain = "test_cascade_partial";
+    let cascade_id = format!("cascade-partial-{}", Uuid::new_v4());
+    let revoked = Uuid::new_v4();
+    let pending = Uuid::new_v4();
+    let old = (chrono::Utc::now() - chrono::Duration::hours(2)).timestamp();
+
+    for root in [revoked, pending] {
+        store
+            .add(
+                domain,
+                "angzarr",
+                root,
+                vec![make_cascade_event(0, true, Some(&cascade_id), old)],
+                &AddMeta::default(),
+            )
+            .await
+            .expect("provisional add should succeed");
+    }
+    store
+        .add(
+            domain,
+            "angzarr",
+            revoked,
+            vec![make_cascade_event(
+                1,
+                false,
+                Some(&cascade_id),
+                chrono::Utc::now().timestamp(),
+            )],
+            &AddMeta::default(),
+        )
+        .await
+        .expect("revocation marker add should succeed");
+
+    let threshold = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+    let stale = store
+        .query_stale_cascades(&threshold)
+        .await
+        .expect("query_stale_cascades should succeed");
+    assert!(
+        stale.contains(&cascade_id),
+        "a cascade with an unresolved participant must stay stale; got {stale:?}"
+    );
+
+    let participants = store
+        .query_cascade_participants(&cascade_id)
+        .await
+        .expect("query_cascade_participants should succeed");
+    let roots: Vec<Uuid> = participants.iter().map(|p| p.root).collect();
+    assert_eq!(
+        roots,
+        vec![pending],
+        "only the unresolved participant must be reported"
+    );
+    assert_eq!(participants[0].sequences, vec![0]);
+}
+
+/// A stale threshold spelled with a non-UTC offset names an instant, not a
+/// string: a row created one second before it is stale even though the
+/// threshold's local wall-clock text sorts before the stored UTC text.
+pub async fn test_query_stale_cascades_threshold_offset_spelling<S: EventStore>(store: &S) {
+    let domain = "test_cascade_threshold_spelling";
+    let cascade_id = format!("cascade-spelling-{}", Uuid::new_v4());
+    let created = chrono::Utc::now() - chrono::Duration::hours(2);
+    store
+        .add(
+            domain,
+            "angzarr",
+            Uuid::new_v4(),
+            vec![make_cascade_event(
+                0,
+                true,
+                Some(&cascade_id),
+                created.timestamp(),
+            )],
+            &AddMeta::default(),
+        )
+        .await
+        .expect("provisional add should succeed");
+
+    let minus_two = chrono::FixedOffset::west_opt(2 * 3600).unwrap();
+    let threshold = (chrono::DateTime::from_timestamp(created.timestamp() + 1, 0).unwrap())
+        .with_timezone(&minus_two)
+        .to_rfc3339();
+    assert!(
+        threshold.ends_with("-02:00"),
+        "threshold must carry the offset"
+    );
+    let stale = store
+        .query_stale_cascades(&threshold)
+        .await
+        .expect("query_stale_cascades should succeed");
+    assert!(
+        stale.contains(&cascade_id),
+        "row created before the threshold instant must be stale; threshold={threshold}"
+    );
+}
+
+/// An aggregate history larger than one backend result page (DynamoDB pages
+/// at 1 MB) must be read completely by every read path, and the external-id
+/// probe must see claims written before the page boundary.
+pub async fn test_history_larger_than_one_result_page<S: EventStore>(store: &S) {
+    let domain = "test_large_history";
+    let root = Uuid::new_v4();
+    // 1200 x 1 KiB = 1.2 MB: past one DynamoDB page, with rows small enough
+    // for ImmuDB's single-statement inserts. Batches of 150 exceed one
+    // DynamoDB transaction (100 items).
+    const EVENTS: u32 = 1200;
+    const BATCH: u32 = 150;
+    const PAYLOAD: usize = 1024;
+
+    let event = |seq: u32| {
+        let mut page = make_event(seq, "Bulky");
+        if let Some(event_page::Payload::Event(ref mut any)) = page.payload {
+            any.value = vec![(seq % 251) as u8; PAYLOAD];
+        }
+        page
+    };
+
+    for batch_start in (0..EVENTS).step_by(BATCH as usize) {
+        let external_id = format!("bulk-{batch_start}");
+        store
+            .add(
+                domain,
+                "angzarr",
+                root,
+                (batch_start..batch_start + BATCH).map(event).collect(),
+                &AddMeta {
+                    external_id: Some(&external_id),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("bulky add should succeed");
+    }
+
+    let all = store
+        .get(domain, "angzarr", root)
+        .await
+        .expect("get should succeed");
+    let seqs: Vec<u32> = all.iter().map(|e| e.sequence_num()).collect();
+    assert_eq!(
+        seqs,
+        (0..EVENTS).collect::<Vec<_>>(),
+        "get must return every event"
+    );
+    for page in &all {
+        match &page.payload {
+            Some(event_page::Payload::Event(any)) => assert_eq!(
+                any.value,
+                vec![(page.sequence_num() % 251) as u8; PAYLOAD],
+                "payload must round-trip intact"
+            ),
+            other => panic!("unexpected payload {other:?}"),
+        }
+    }
+
+    let tail = store
+        .get_from(domain, "angzarr", root, 6)
+        .await
+        .expect("get_from should succeed");
+    assert_eq!(tail.len(), 1194, "get_from must return the whole tail");
+
+    let range = store
+        .get_from_to(domain, "angzarr", root, 1, 1199)
+        .await
+        .expect("get_from_to should succeed");
+    assert_eq!(range.len(), 1198, "get_from_to must return the whole range");
+
+    let duplicate = store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![event(EVENTS)],
+            &AddMeta {
+                external_id: Some("bulk-0"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("duplicate add should succeed");
+    assert_eq!(
+        duplicate,
+        AddOutcome::Duplicate {
+            first_sequence: 0,
+            last_sequence: BATCH - 1
+        },
+        "the external-id probe must find the first batch's claim"
+    );
+
+    assert_eq!(
+        store
+            .get_next_sequence(domain, "angzarr", root)
+            .await
+            .expect("get_next_sequence should succeed"),
+        EVENTS
+    );
+    assert!(
+        store
+            .list_roots(domain, "angzarr")
+            .await
+            .expect("list_roots should succeed")
+            .contains(&root),
+        "list_roots must see the aggregate"
+    );
+}
+
+/// Every batch must continue the stream exactly: a first sequence past the
+/// next free one, or a gap inside the batch, is a sequence conflict.
+pub async fn test_add_rejects_sequence_gaps<S: EventStore>(store: &S) {
+    let domain = "test_seq_gaps";
+    let root = Uuid::new_v4();
+
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 2),
+            &AddMeta::default(),
+        )
+        .await
+        .expect("initial add should succeed");
+
+    let skipped = store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(3, "Skipped")],
+            &AddMeta::default(),
+        )
+        .await;
+    assert!(
+        matches!(
+            skipped,
+            Err(StorageError::SequenceConflict {
+                expected: 2,
+                actual: 3
+            })
+        ),
+        "a first sequence past the next free one must conflict; got {skipped:?}"
+    );
+
+    let holed = store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(2, "A"), make_event(4, "B")],
+            &AddMeta::default(),
+        )
+        .await;
+    assert!(
+        matches!(
+            holed,
+            Err(StorageError::SequenceConflict {
+                expected: 3,
+                actual: 4
+            })
+        ),
+        "a gap inside the batch must conflict; got {holed:?}"
+    );
+
+    let events = store.get(domain, "angzarr", root).await.unwrap();
+    assert_eq!(
+        events.iter().map(|e| e.sequence_num()).collect::<Vec<_>>(),
+        vec![0, 1],
+        "rejected batches must write nothing"
+    );
+}
+
+/// A new edition may branch below the main timeline's head: its first event
+/// sits at the divergence point, and reads compose the main prefix with it.
+pub async fn test_edition_first_write_branches_below_main_head<S: EventStore>(store: &S) {
+    let domain = "test_branch_below_head";
+    let root = Uuid::new_v4();
+
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 5),
+            &AddMeta::default(),
+        )
+        .await
+        .expect("main add should succeed");
+
+    store
+        .add(
+            domain,
+            "branch",
+            root,
+            vec![make_event(2, "Branch2"), make_event(3, "Branch3")],
+            &AddMeta::default(),
+        )
+        .await
+        .expect("a branch may start at a divergence point below the main head");
+
+    let events = store.get(domain, "branch", root).await.unwrap();
+    let shape: Vec<(u32, String)> = events
+        .iter()
+        .map(|e| {
+            let type_url = match &e.payload {
+                Some(event_page::Payload::Event(any)) => any.type_url.clone(),
+                _ => String::new(),
+            };
+            (e.sequence_num(), type_url)
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            (0, "type.example/Event0".to_string()),
+            (1, "type.example/Event1".to_string()),
+            (2, "type.example/Branch2".to_string()),
+            (3, "type.example/Branch3".to_string()),
+        ],
+        "branch reads main[0,1] then its own events"
+    );
+    assert_eq!(
+        store
+            .get_next_sequence(domain, "branch", root)
+            .await
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        store
+            .get_next_sequence(domain, "angzarr", root)
+            .await
+            .unwrap(),
+        5,
+        "the branch must not move the main timeline"
+    );
+}
+
+/// A new edition cannot start past the main timeline's next sequence (that
+/// would leave a gap between the inherited prefix and the branch).
+pub async fn test_edition_first_write_past_main_head_rejected<S: EventStore>(store: &S) {
+    let domain = "test_branch_past_head";
+    let root = Uuid::new_v4();
+
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 3),
+            &AddMeta::default(),
+        )
+        .await
+        .expect("main add should succeed");
+
+    let result = store
+        .add(
+            domain,
+            "branch",
+            root,
+            vec![make_event(5, "TooFar")],
+            &AddMeta::default(),
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(StorageError::SequenceConflict {
+                expected: 3,
+                actual: 5
+            })
+        ),
+        "a branch must start at or below main's next sequence; got {result:?}"
+    );
+}
+
 // =============================================================================
 // Concurrent writes — sequence integrity under race
 // =============================================================================
@@ -3446,7 +3823,8 @@ pub async fn test_query_cascade_participants_multiple_aggregates<S: EventStore>(
 /// Each writer:
 ///   1. Reads `get_next_sequence` to pick the next available slot.
 ///   2. Constructs an event at that slot.
-///   3. Calls `add()`. On error (race lost), retries.
+///   3. Calls `add()`. A lost race must be `StorageError::SequenceConflict`
+///      (retryable), on which the writer retries; any other error fails.
 ///
 /// After all writers complete, the aggregate must have exactly N events at
 /// sequences `0..N`, and every sequence must contain the writer's unique
@@ -3472,10 +3850,10 @@ where
         handles.push(tokio::spawn(async move {
             for _attempt in 0..MAX_RETRIES {
                 // Read the next free sequence.
-                let next = match store.get_next_sequence(&domain, "test", root).await {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+                let next = store
+                    .get_next_sequence(&domain, "test", root)
+                    .await
+                    .expect("get_next_sequence must not fail under contention");
                 // Tag the event payload with this writer's id so an overwrite
                 // is detectable post-hoc by inspecting the stored payload.
                 let event_type = format!("Writer{}@Seq{}", writer_id, next);
@@ -3496,7 +3874,13 @@ where
                     .await
                 {
                     Ok(_) => return Some((writer_id, next, event_type)),
-                    Err(_) => continue, // race lost; retry
+                    // A lost race must surface as a retryable sequence
+                    // conflict; any other error (e.g. a raw unique-key
+                    // violation) fails the contract.
+                    Err(StorageError::SequenceConflict { .. }) => continue,
+                    Err(other) => panic!(
+                        "writer {writer_id}: a lost race must be SequenceConflict, got {other:?}"
+                    ),
                 }
             }
             None
@@ -3505,8 +3889,10 @@ where
 
     let mut successes: Vec<(u32, u32, String)> = Vec::new();
     for h in handles {
-        if let Ok(Some(record)) = h.await {
-            successes.push(record);
+        match h.await {
+            Ok(Some(record)) => successes.push(record),
+            Ok(None) => {}
+            Err(join_error) => std::panic::resume_unwind(join_error.into_panic()),
         }
     }
 
@@ -3638,6 +4024,7 @@ macro_rules! generate_event_store_core_tests {
             test_add_sequence_conflict,
             test_add_duplicate_sequence,
             test_add_rejects_duplicate_sequences,
+            test_add_rejects_sequence_gaps,
             // get tests
             test_get_all_events,
             test_get_empty_aggregate,
@@ -3685,6 +4072,8 @@ macro_rules! generate_event_store_core_tests {
             test_eventless_edition_inherits_main_timeline,
             test_edition_filtered_roots,
             test_edition_explicit_divergence_new_branch,
+            test_edition_first_write_branches_below_main_head,
+            test_edition_first_write_past_main_head_rejected,
             // main-timeline sentinel polarity tests (C-15)
             test_main_timeline_sentinel_write_empty_read_both,
             test_main_timeline_sentinel_write_angzarr_read_both,
@@ -3695,9 +4084,11 @@ macro_rules! generate_event_store_core_tests {
             // timestamp tests
             test_get_until_timestamp_filters,
             test_get_until_timestamp_returns_all_when_recent,
+            test_get_until_timestamp_nanosecond_boundary_precision,
             test_timestamp_preservation,
             // large scale tests
             test_large_aggregate_10k,
+            test_history_larger_than_one_result_page,
             // find_by_source / find_by_external_id tests (C-18 round trips)
             test_find_by_source_returns_match,
             test_find_by_source_no_match,
@@ -3737,6 +4128,8 @@ macro_rules! generate_event_store_cascade_tests {
             test_query_stale_cascades_finds_old_uncommitted,
             test_query_stale_cascades_ignores_resolved,
             test_query_stale_cascades_ignores_fresh,
+            test_query_stale_cascades_partially_revoked_remains_stale,
+            test_query_stale_cascades_threshold_offset_spelling,
             test_query_cascade_participants_finds_uncommitted,
             test_query_cascade_participants_ignores_committed,
             test_query_cascade_participants_multiple_aggregates,
@@ -3786,6 +4179,8 @@ fn event_store_contract_inventory_is_fully_wired() {
             include_str!("../storage_immudb.rs"),
             include_str!("../storage_redis.rs"),
             include_str!("../storage_mock.rs"),
+            include_str!("../storage_dynamo.rs"),
+            include_str!("../storage_bigtable.rs"),
         ],
         &[],
     );

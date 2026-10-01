@@ -4,17 +4,19 @@
 //! - PK: `{domain}#{edition}#{root}` (String)
 //! - SK: sequence number (Number)
 //! - snapshot: serialized Snapshot (Binary)
-//! - retention: retention type (String)
+//! - retention: retention type (Number)
 
 use async_trait::async_trait;
-use aws_sdk_dynamodb::types::AttributeValue;
+use aws_sdk_dynamodb::operation::query::builders::QueryFluentBuilder;
+use aws_sdk_dynamodb::types::{AttributeValue, Delete, Put, TransactWriteItem};
 use aws_sdk_dynamodb::Client;
 use prost::Message;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
-use crate::proto::{Snapshot, SnapshotRetention};
-use crate::storage::{Result, SnapshotStore, StorageError};
+use super::event_store::{Item, MAX_TRANSACTION_ITEMS};
+use crate::proto::Snapshot;
+use crate::storage::{is_superseded, Result, SnapshotStore, StorageError};
 
 /// DynamoDB implementation of SnapshotStore.
 pub struct DynamoSnapshotStore {
@@ -50,9 +52,22 @@ impl DynamoSnapshotStore {
         format!(
             "{}#{}#{}",
             crate::storage::helpers::pct_encode_component(domain),
-            crate::storage::helpers::pct_encode_component(edition),
+            crate::storage::helpers::pct_encode_component(
+                crate::storage::timeline::storage_edition(edition),
+            ),
             root
         )
+    }
+
+    /// All items of a Query, following `LastEvaluatedKey`.
+    async fn query_all(&self, query: QueryFluentBuilder) -> Result<Vec<Item>> {
+        query
+            .into_paginator()
+            .items()
+            .send()
+            .try_collect()
+            .await
+            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))
     }
 }
 
@@ -127,65 +142,76 @@ impl SnapshotStore for DynamoSnapshotStore {
     async fn put(&self, domain: &str, edition: &str, root: Uuid, snapshot: Snapshot) -> Result<()> {
         let pk = Self::pk(domain, edition, root);
         let seq = snapshot.sequence;
-        let retention = snapshot.retention;
-        let snapshot_bytes = snapshot.encode_to_vec();
 
-        // Store the new snapshot
         let mut item = std::collections::HashMap::new();
         item.insert("pk".to_string(), AttributeValue::S(pk.clone()));
         item.insert("seq".to_string(), AttributeValue::N(seq.to_string()));
         item.insert(
-            "snapshot".to_string(),
-            AttributeValue::B(snapshot_bytes.into()),
+            "retention".to_string(),
+            AttributeValue::N(snapshot.retention.to_string()),
         );
         item.insert(
-            "retention".to_string(),
-            AttributeValue::N(retention.to_string()),
+            "snapshot".to_string(),
+            AttributeValue::B(snapshot.encode_to_vec().into()),
         );
 
-        self.client
-            .put_item()
-            .table_name(&self.table_name)
-            .set_item(Some(item))
-            .send()
-            .await
-            .map_err(|e| StorageError::Backend(format!("DynamoDB put_item failed: {}", e)))?;
-
-        // Clean up old transient snapshots
-        let result = self
+        // Older snapshots this one supersedes.
+        let older = self
             .client
             .query()
             .table_name(&self.table_name)
             .key_condition_expression("pk = :pk AND seq < :seq")
             .expression_attribute_values(":pk", AttributeValue::S(pk.clone()))
             .expression_attribute_values(":seq", AttributeValue::N(seq.to_string()))
-            .send()
-            .await
-            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
+            .projection_expression("seq, #retention")
+            .expression_attribute_names("#retention", "retention");
+        let superseded: Vec<AttributeValue> = self
+            .query_all(older)
+            .await?
+            .into_iter()
+            .filter_map(|old| {
+                let old_seq = match old.get("seq") {
+                    Some(AttributeValue::N(n)) => n.parse::<u32>().ok()?,
+                    _ => return None,
+                };
+                let old_retention = match old.get("retention") {
+                    Some(AttributeValue::N(n)) => n.parse::<i32>().ok()?,
+                    _ => return None,
+                };
+                is_superseded(old_seq, old_retention, seq)
+                    .then(|| AttributeValue::N(old_seq.to_string()))
+            })
+            .collect();
 
-        if let Some(items) = result.items {
-            for item in items {
-                // Only delete TRANSIENT snapshots
-                if let Some(AttributeValue::N(ret_str)) = item.get("retention") {
-                    if let Ok(ret) = ret_str.parse::<i32>() {
-                        if ret == SnapshotRetention::RetentionTransient as i32 {
-                            if let Some(old_seq) = item.get("seq") {
-                                if let Err(e) = self
-                                    .client
-                                    .delete_item()
-                                    .table_name(&self.table_name)
-                                    .key("pk", AttributeValue::S(pk.clone()))
-                                    .key("seq", old_seq.clone())
-                                    .send()
-                                    .await
-                                {
-                                    warn!(error = %e, "Failed to delete old transient snapshot");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+        // The new snapshot and the deletes it implies commit together (one
+        // transaction of at most MAX_TRANSACTION_ITEMS actions; any further
+        // deletes follow in additional transactions).
+        let put = Put::builder()
+            .table_name(&self.table_name)
+            .set_item(Some(item))
+            .build()
+            .map_err(|e| StorageError::Backend(format!("DynamoDB put build failed: {}", e)))?;
+        let mut actions = vec![TransactWriteItem::builder().put(put).build()];
+        for old_seq in superseded {
+            let delete = Delete::builder()
+                .table_name(&self.table_name)
+                .key("pk", AttributeValue::S(pk.clone()))
+                .key("seq", old_seq)
+                .build()
+                .map_err(|e| {
+                    StorageError::Backend(format!("DynamoDB delete build failed: {}", e))
+                })?;
+            actions.push(TransactWriteItem::builder().delete(delete).build());
+        }
+        for chunk in actions.chunks(MAX_TRANSACTION_ITEMS) {
+            self.client
+                .transact_write_items()
+                .set_transact_items(Some(chunk.to_vec()))
+                .send()
+                .await
+                .map_err(|e| {
+                    StorageError::Backend(format!("DynamoDB snapshot write failed: {}", e))
+                })?;
         }
 
         debug!(domain = %domain, root = %root, seq = seq, "Stored snapshot in DynamoDB");
@@ -195,33 +221,25 @@ impl SnapshotStore for DynamoSnapshotStore {
     async fn delete(&self, domain: &str, edition: &str, root: Uuid) -> Result<()> {
         let pk = Self::pk(domain, edition, root);
 
-        // Query all snapshots for this root
-        let result = self
+        let all = self
             .client
             .query()
             .table_name(&self.table_name)
             .key_condition_expression("pk = :pk")
             .expression_attribute_values(":pk", AttributeValue::S(pk.clone()))
-            .projection_expression("pk, seq")
-            .send()
-            .await
-            .map_err(|e| StorageError::Backend(format!("DynamoDB query failed: {}", e)))?;
-
-        if let Some(items) = result.items {
-            for item in items {
-                if let Some(seq) = item.get("seq") {
-                    if let Err(e) = self
-                        .client
-                        .delete_item()
-                        .table_name(&self.table_name)
-                        .key("pk", AttributeValue::S(pk.clone()))
-                        .key("seq", seq.clone())
-                        .send()
-                        .await
-                    {
-                        warn!(error = %e, "Failed to delete snapshot from DynamoDB");
-                    }
-                }
+            .projection_expression("seq");
+        for item in self.query_all(all).await? {
+            if let Some(seq) = item.get("seq") {
+                self.client
+                    .delete_item()
+                    .table_name(&self.table_name)
+                    .key("pk", AttributeValue::S(pk.clone()))
+                    .key("seq", seq.clone())
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        StorageError::Backend(format!("DynamoDB delete_item failed: {}", e))
+                    })?;
             }
         }
 

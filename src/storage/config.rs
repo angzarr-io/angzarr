@@ -278,7 +278,6 @@ impl StorageRegistryConfig {
     /// that role, and that each `Composite` backend references a valid
     /// (event-capable) main and a valid (reclaim-capable) editions entry.
     /// Returns a human-readable message describing the first violation.
-    #[allow(dead_code)]
     pub fn validate(&self) -> std::result::Result<(), String> {
         let check =
             |role: StorageRole, name: &str, label: &str| -> std::result::Result<(), String> {

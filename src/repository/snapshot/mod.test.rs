@@ -259,3 +259,93 @@ async fn test_with_flags_write_disabled_still_deletes() {
          (snapshot regeneration / replay tooling depends on this)"
     );
 }
+
+// ============================================================================
+// get_at_seq and configuration
+// ============================================================================
+
+/// get_at_seq returns the newest stored snapshot at or before the sequence.
+#[tokio::test]
+async fn test_get_at_seq_returns_highest_at_or_below() {
+    let store = Arc::new(MockSnapshotStore::new());
+    let repo = SnapshotRepository::new(store);
+    let root = Uuid::new_v4();
+    let mut persisted = test_snapshot(15);
+    persisted.retention = SnapshotRetention::RetentionPersist as i32;
+    repo.put("orders", "test", root, persisted).await.unwrap();
+    repo.put("orders", "test", root, test_snapshot(20))
+        .await
+        .unwrap();
+
+    let at = |seq| repo.get_at_seq("orders", "test", root, seq);
+    assert_eq!(at(17).await.unwrap().map(|s| s.sequence), Some(15));
+    assert_eq!(at(20).await.unwrap().map(|s| s.sequence), Some(20));
+    assert_eq!(at(14).await.unwrap(), None);
+}
+
+/// read_enabled = false: get_at_seq returns None like get.
+#[tokio::test]
+async fn test_get_at_seq_honors_read_disabled() {
+    let store: Arc<dyn crate::storage::SnapshotStore> = Arc::new(MockSnapshotStore::new());
+    let root = Uuid::new_v4();
+    SnapshotRepository::new(store.clone())
+        .put("orders", "test", root, test_snapshot(5))
+        .await
+        .unwrap();
+
+    let reader = SnapshotRepository::with_flags(store, false, true);
+    assert_eq!(
+        reader.get_at_seq("orders", "test", root, 5).await.unwrap(),
+        None
+    );
+}
+
+/// from_config takes its read/write flags from `storage.snapshots_enable`.
+#[tokio::test]
+async fn test_from_config_applies_snapshot_enable_flags() {
+    let store: Arc<dyn crate::storage::SnapshotStore> = Arc::new(MockSnapshotStore::new());
+    let root = Uuid::new_v4();
+
+    let write_only = SnapshotRepository::from_config(
+        store.clone(),
+        &SnapshotsEnableConfig {
+            read: false,
+            write: true,
+        },
+    );
+    write_only
+        .put("orders", "test", root, test_snapshot(5))
+        .await
+        .unwrap();
+    assert_eq!(write_only.get("orders", "test", root).await.unwrap(), None);
+
+    let read_only = SnapshotRepository::from_config(
+        store,
+        &SnapshotsEnableConfig {
+            read: true,
+            write: false,
+        },
+    );
+    assert_eq!(
+        read_only
+            .get("orders", "test", root)
+            .await
+            .unwrap()
+            .map(|s| s.sequence),
+        Some(5),
+        "the write-only repository's put must have reached the store"
+    );
+    read_only
+        .put("orders", "test", root, test_snapshot(9))
+        .await
+        .unwrap();
+    assert_eq!(
+        read_only
+            .get("orders", "test", root)
+            .await
+            .unwrap()
+            .map(|s| s.sequence),
+        Some(5),
+        "the read-only repository must not write"
+    );
+}

@@ -24,6 +24,7 @@ use crate::storage::sql::event_store::{
     edition_from_db, edition_predicate_expr as edition_predicate, implicit_divergence,
     map_write_conflict, merge_composite_events, resolve_divergence,
 };
+use crate::storage::timeline::{validate_append, AppendWindow};
 use crate::storage::{
     AddMeta, AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo, StorageError,
 };
@@ -168,6 +169,27 @@ impl PostgresEventStore {
         }))
     }
 
+    /// Highest sequence stored for `edition` (`None` when it has no events),
+    /// read inside the caller's transaction.
+    async fn max_sequence(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        domain: &str,
+        edition: &str,
+        root_str: &str,
+    ) -> Result<Option<u32>> {
+        let query = Query::select()
+            .expr(Expr::col(Events::Sequence).max())
+            .from(Events::Table)
+            .and_where(edition_predicate(Events::Edition, edition))
+            .and_where(Expr::col(Events::Domain).eq(domain))
+            .and_where(Expr::col(Events::Root).eq(root_str))
+            .to_string(PostgresQueryBuilder);
+        let row = sqlx::query(&query).fetch_optional(&mut **tx).await?;
+        Ok(row
+            .and_then(|row| row.get::<Option<i32>, _>(0))
+            .map(|max| max as u32))
+    }
+
     /// Simple query for main timeline events (no composite logic needed).
     async fn query_main_timeline(
         &self,
@@ -233,29 +255,18 @@ impl EventStore for PostgresEventStore {
             }
         }
 
-        // Get the next sequence number once at the start of the transaction
-        let base_sequence = {
-            let query = Query::select()
-                .expr(Expr::col(Events::Sequence).max())
-                .from(Events::Table)
-                .and_where(edition_predicate(Events::Edition, edition))
-                .and_where(Expr::col(Events::Domain).eq(domain))
-                .and_where(Expr::col(Events::Root).eq(&root_str))
-                .to_string(PostgresQueryBuilder);
-
-            let row = sqlx::query(&query).fetch_optional(&mut *tx).await?;
-
-            match row {
-                Some(row) => {
-                    let max_seq: Option<i32> = row.get(0);
-                    max_seq.map(|s| s as u32 + 1).unwrap_or(0)
-                }
-                None => 0,
-            }
+        let stream_next = Self::max_sequence(&mut tx, domain, edition, &root_str)
+            .await?
+            .map(|max| max + 1);
+        let main_next = if stream_next.is_none() && !is_main_timeline(edition) {
+            Self::max_sequence(&mut tx, domain, "", &root_str)
+                .await?
+                .map_or(0, |max| max + 1)
+        } else {
+            stream_next.unwrap_or(0)
         };
-
-        let mut first_sequence = None;
-        let mut last_sequence = 0u32;
+        let window = AppendWindow::for_edition(edition, stream_next, main_next);
+        let (first_sequence, last_sequence) = validate_append(window, &events)?;
 
         // Prepare source tracking values. source_edition stored as NULL
         // when the source was on the main timeline ("" at the API).
@@ -279,17 +290,12 @@ impl EventStore for PostgresEventStore {
 
         for event in events {
             let event_data = event.encode_to_vec();
-            let sequence = crate::storage::helpers::resolve_sequence(&event, base_sequence)?;
+            let sequence = event_sequence(&event);
             let created_at = crate::storage::helpers::parse_timestamp(&event)?;
 
             // Extract cascade tracking fields from EventPage
             let committed = !event.no_commit;
             let cascade_id = event.cascade_id.clone();
-
-            if first_sequence.is_none() {
-                first_sequence = Some(sequence);
-            }
-            last_sequence = sequence;
 
             let query = Query::insert()
                 .into_table(Events::Table)
@@ -333,27 +339,23 @@ impl EventStore for PostgresEventStore {
                 ])
                 .to_string(PostgresQueryBuilder);
 
-            // #20: `add` is read-max-then-insert under READ COMMITTED with no
-            // row lock, so two writers can compute the same `base_sequence`
-            // and the loser's INSERT trips the `(domain, edition, root,
-            // sequence)` PRIMARY KEY (SQLSTATE 23505). Classify it as a
-            // `SequenceConflict` (→ retryable `failed_precondition`) via the
-            // shared classifier instead of letting it propagate through the
-            // blanket `From<sqlx::Error>` as `Database` (→ non-retryable
-            // `internal`), which turned a routine optimistic-concurrency loss
-            // into an operator-visible internal error and broke the pipeline's
-            // retry. The `tx` rolls back on this early return.
+            // `add` is read-max-then-insert under READ COMMITTED with no row
+            // lock, so two writers can validate against the same max and the
+            // loser's INSERT trips the `(domain, edition, root, sequence)`
+            // unique key (SQLSTATE 23505). That is an optimistic-concurrency
+            // loss, classified as a retryable `SequenceConflict` rather than
+            // a `Database` error. The `tx` rolls back on this early return.
             sqlx::query(&query)
                 .execute(&mut *tx)
                 .await
-                .map_err(|e| map_write_conflict(e, base_sequence, sequence))?;
+                .map_err(|e| map_write_conflict(e, window.max_first, sequence))?;
         }
 
         // Commit the transaction
         tx.commit().await?;
 
         Ok(AddOutcome::Added {
-            first_sequence: first_sequence.unwrap_or(0),
+            first_sequence,
             last_sequence,
         })
     }
@@ -773,6 +775,9 @@ impl EventStore for PostgresEventStore {
     }
 
     async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {
+        // `created_at` is stored as canonical RFC 3339 text; render the
+        // threshold the same way so the text comparison orders by instant.
+        let threshold = crate::storage::timeline::canonical_rfc3339(threshold)?;
         // Per-participant resolution (C-02): a cascade is stale iff it has
         // at least one (cascade_id, domain, edition, root) participant that
         // is past the threshold AND has no committed cascade row on that
@@ -800,7 +805,7 @@ impl EventStore for PostgresEventStore {
                      )";
 
         let rows = sqlx::query(raw)
-            .bind(threshold)
+            .bind(&threshold)
             .fetch_all(&self.pool)
             .await?;
 

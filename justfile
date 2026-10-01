@@ -496,9 +496,12 @@ mutants-purge-cache:
 # Usage:
 #   just storage test              # All backends
 #   just storage sqlite test       # SQLite only (no containers)
+#   just storage mock test         # Mock only (no containers)
 #   just storage postgres test     # PostgreSQL only (testcontainers)
 #   just storage redis test        # Redis only (testcontainers)
 #   just storage immudb test       # ImmuDB only (testcontainers)
+#   just storage dynamo test       # DynamoDB only (testcontainers, DynamoDB Local)
+#   just storage bigtable test     # Bigtable only (testcontainers, Bigtable emulator)
 # =============================================================================
 
 # Storage contract tests - run all backends or a specific one
@@ -509,9 +512,9 @@ storage *ARGS:
     if [[ "$args" == "test" ]] || [[ -z "$args" ]]; then
         # All backends - needs dind for testcontainers
         just _container-dind storage test
-    elif [[ "$args" == "sqlite test" ]]; then
-        # SQLite doesn't need containers
-        just _container storage sqlite test
+    elif [[ "$args" == "sqlite test" ]] || [[ "$args" == "mock test" ]]; then
+        # SQLite and Mock don't need containers
+        just _container storage $args
     else
         # Other backends need testcontainers
         just _container-dind storage $args
