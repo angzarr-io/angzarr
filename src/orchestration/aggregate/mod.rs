@@ -34,7 +34,7 @@
 //!
 //! - `grpc/`: the production context (storage, bus, service discovery)
 //! - `types`: Enums and structs (TemporalQuery, PipelineMode, FactContext, FactResponse)
-//! - `traits`: Trait definitions (AggregateContext, ClientLogic, AggregateContextFactory)
+//! - `traits`: Trait definitions (AggregateContext, ClientLogic)
 //! - `client`: gRPC client logic implementation (GrpcBusinessLogic)
 //! - `parsing`: Cover/sequence extraction and validation
 //! - `merge`: Commutative merge field-overlap detection
@@ -60,9 +60,7 @@ mod types;
 pub use types::{FactContext, FactResponse, PipelineMode, TemporalQuery};
 
 // Re-exports: traits
-pub use traits::{
-    AggregateContext, AggregateContextFactory, ClientLogic, PersistOutcome, SyncFanout,
-};
+pub use traits::{AggregateContext, ClientLogic, PersistOutcome, SyncFanout};
 
 // Re-exports: client
 pub use client::GrpcBusinessLogic;

@@ -36,8 +36,8 @@ use crate::storage::AddOutcome;
 
 use super::sync_policy::{should_call_sync_projectors, should_skip_post_persist};
 use super::{
-    is_noop, transform_for_two_phase, AggregateContext, AggregateContextFactory, ClientLogic,
-    PersistOutcome, SyncFanout, TemporalQuery, TwoPhaseContext,
+    is_noop, transform_for_two_phase, AggregateContext, PersistOutcome, SyncFanout, TemporalQuery,
+    TwoPhaseContext,
 };
 
 /// The cover persisted events are written under: the coordinator's resolved
@@ -1100,100 +1100,6 @@ pub async fn publish_aggregate_sequence_mismatch_dlq(
             error = %e,
             "Failed to publish to DLQ"
         );
-    }
-}
-
-/// Factory that produces `GrpcAggregateContext` for distributed mode.
-///
-/// One factory per aggregate domain, capturing storage and infrastructure.
-/// Used by the distributed coordinator sidecar.
-pub struct GrpcAggregateContextFactory {
-    domain: String,
-    event_store: Arc<dyn EventStore>,
-    snapshot_repo: Arc<SnapshotRepository>,
-    discovery: Arc<dyn ServiceDiscovery>,
-    event_bus: Arc<dyn EventBus>,
-    client_logic: Arc<dyn ClientLogic>,
-    upcaster: Option<Arc<Upcaster>>,
-    sync_mode: Option<crate::proto::SyncMode>,
-    dlq_publisher: Arc<dyn DeadLetterPublisher>,
-}
-
-impl GrpcAggregateContextFactory {
-    /// Create a new factory for the given domain.
-    ///
-    /// Caller controls snapshot policy by building the
-    /// `SnapshotRepository` themselves (`SnapshotRepository::new(store)`
-    /// for both-enabled default; `with_flags(...)` for explicit
-    /// configuration) and passing it in.
-    pub fn new(
-        domain: String,
-        event_store: Arc<dyn EventStore>,
-        snapshot_repo: Arc<SnapshotRepository>,
-        discovery: Arc<dyn ServiceDiscovery>,
-        event_bus: Arc<dyn EventBus>,
-        client_logic: Arc<dyn ClientLogic>,
-    ) -> Self {
-        Self {
-            domain,
-            event_store,
-            snapshot_repo,
-            discovery,
-            event_bus,
-            client_logic,
-            upcaster: None,
-            sync_mode: None,
-            dlq_publisher: Arc::new(NoopDeadLetterPublisher),
-        }
-    }
-
-    /// Set the upcaster for event version transformation.
-    pub fn with_upcaster(mut self, upcaster: Arc<Upcaster>) -> Self {
-        self.upcaster = Some(upcaster);
-        self
-    }
-
-    /// Set sync mode to call projectors synchronously.
-    pub fn with_sync_mode(mut self, mode: crate::proto::SyncMode) -> Self {
-        self.sync_mode = Some(mode);
-        self
-    }
-
-    /// Set the DLQ publisher for MERGE_MANUAL handling.
-    pub fn with_dlq_publisher(mut self, publisher: Arc<dyn DeadLetterPublisher>) -> Self {
-        self.dlq_publisher = publisher;
-        self
-    }
-}
-
-impl AggregateContextFactory for GrpcAggregateContextFactory {
-    fn create(&self) -> Arc<dyn AggregateContext> {
-        let mut ctx = GrpcAggregateContext::new(
-            self.event_store.clone(),
-            self.snapshot_repo.clone(),
-            self.discovery.clone(),
-            self.event_bus.clone(),
-        )
-        .with_dlq_publisher(self.dlq_publisher.clone())
-        .with_component_name(&self.domain);
-
-        if let Some(ref upcaster) = self.upcaster {
-            ctx = ctx.with_upcaster(upcaster.clone());
-        }
-
-        if let Some(mode) = self.sync_mode {
-            ctx = ctx.with_sync_mode(mode);
-        }
-
-        Arc::new(ctx)
-    }
-
-    fn domain(&self) -> &str {
-        &self.domain
-    }
-
-    fn client_logic(&self) -> Arc<dyn ClientLogic> {
-        self.client_logic.clone()
     }
 }
 

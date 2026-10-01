@@ -115,15 +115,6 @@ impl crate::orchestration::destination::DestinationFetcher for MockDestinationFe
     ) -> Result<Option<EventBook>, tonic::Status> {
         Ok(None)
     }
-
-    async fn fetch_by_root(
-        &self,
-        _domain: &str,
-        _root: &crate::proto::Uuid,
-        _edition: &str,
-    ) -> Result<Option<EventBook>, tonic::Status> {
-        Ok(None)
-    }
 }
 
 /// Mock command executor for testing.

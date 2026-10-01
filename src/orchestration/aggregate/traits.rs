@@ -3,8 +3,6 @@
 //! Defines the contracts for aggregate context (storage/persistence) and
 //! client logic (business rule invocation).
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use tonic::Status;
 use uuid::Uuid;
@@ -256,25 +254,4 @@ pub trait ClientLogic: Send + Sync {
             "Replay not implemented. Aggregate must implement replay() for MERGE_COMMUTATIVE field detection.",
         ))
     }
-}
-
-/// Factory for creating per-domain aggregate contexts.
-///
-/// Captures long-lived dependencies (storage, event bus, discovery) and produces
-/// a fresh `AggregateContext` for each command execution. Local and gRPC modes
-/// provide different implementations.
-///
-/// One factory per aggregate domain, matching the saga/PM pattern:
-/// - `SagaContextFactory` → one per saga
-/// - `PMContextFactory` → one per process manager
-/// - `AggregateContextFactory` → one per aggregate domain
-pub trait AggregateContextFactory: Send + Sync {
-    /// Create an aggregate context for command execution.
-    fn create(&self) -> Arc<dyn AggregateContext>;
-
-    /// The domain this factory handles.
-    fn domain(&self) -> &str;
-
-    /// The client logic for this domain's business rules.
-    fn client_logic(&self) -> Arc<dyn ClientLogic>;
 }
