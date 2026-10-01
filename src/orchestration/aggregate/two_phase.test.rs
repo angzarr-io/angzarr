@@ -508,3 +508,24 @@ fn conflict_detection_sees_all_uncommitted() {
     assert!(result.uncommitted_cascade_ids.contains("cascade-1"));
     assert!(result.uncommitted_cascade_ids.contains("cascade-2"));
 }
+
+/// Only unresolved pages of OTHER cascades are tracked as locks: the
+/// handler's own cascade, a confirmed cascade and a revoked cascade lock
+/// nothing.
+#[test]
+fn only_unresolved_other_cascade_pages_are_tracked() {
+    let events = make_event_book(vec![
+        make_event_page(1, true, "own"),
+        make_event_page(2, true, "confirmed"),
+        make_event_page(3, true, "revoked"),
+        make_event_page(4, true, "pending"),
+        make_confirmation(vec![2], "confirmed", 5),
+        make_revocation(vec![3], "revoked", "timeout", 6),
+    ]);
+    let result = transform_for_two_phase(&events, &TwoPhaseContext::for_handler("own"));
+    assert_eq!(result.uncommitted_sequences, [4].into_iter().collect());
+    assert_eq!(
+        result.uncommitted_cascade_ids,
+        ["pending".to_string()].into_iter().collect()
+    );
+}

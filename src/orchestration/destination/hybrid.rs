@@ -67,9 +67,8 @@ impl HybridDestinationFetcher {
 impl DestinationFetcher for HybridDestinationFetcher {
     async fn fetch(&self, cover: &Cover) -> Result<Option<EventBook>, Status> {
         if cover.domain == self.local_domain {
-            // O9: a malformed cover or a storage failure is an ERROR, not
-            // "no state" — mapping either to Ok(None) is what silently
-            // restarted PM workflows from empty on transient failures.
+            // A malformed cover or a storage failure is an error, not "no
+            // state": Ok(None) would make a PM restart a live workflow.
             let root = cover.root.as_ref().ok_or_else(|| {
                 Status::invalid_argument(crate::orchestration::errmsg::COVER_MISSING_ROOT)
             })?;
@@ -116,6 +115,43 @@ impl DestinationFetcher for HybridDestinationFetcher {
         }
     }
 
+    /// The PM's state lives in the local store under the correlation-derived
+    /// root (the same derivation the PM persist path uses) on the trigger's
+    /// edition — no correlation scan, so no arbitrary pick between editions.
+    /// An aggregate with neither events nor a snapshot is a new workflow.
+    async fn fetch_pm_state(
+        &self,
+        pm_domain: &str,
+        edition: &str,
+        correlation_id: &str,
+    ) -> Result<Option<EventBook>, Status> {
+        use crate::orchestration::shared::CorrelationRootExt;
+        if pm_domain != self.local_domain {
+            return self
+                .remote
+                .fetch_pm_state(pm_domain, edition, correlation_id)
+                .await;
+        }
+        let repo = EventBookRepository::new(
+            self.local_event_store.clone(),
+            self.local_snapshot_repo.clone(),
+        );
+        let mut book = repo
+            .get(pm_domain, edition, correlation_id.correlation_root())
+            .await
+            .map_err(|e| {
+                warn!(domain = %pm_domain, correlation_id = %correlation_id, error = %e, "Failed to fetch PM state");
+                Status::internal(e.to_string())
+            })?;
+        if book.pages.is_empty() && book.snapshot.is_none() {
+            return Ok(None);
+        }
+        if let Some(cover) = book.cover.as_mut() {
+            cover.correlation_id = correlation_id.to_string();
+        }
+        Ok(Some(book))
+    }
+
     async fn fetch_by_correlation(
         &self,
         domain: &str,
@@ -130,9 +166,8 @@ impl DestinationFetcher for HybridDestinationFetcher {
 
             // First find the aggregate by correlation_id.
             //
-            // O9: a storage failure here must propagate as Err. This is THE
-            // process-manager state read — collapsing it to Ok(None) makes
-            // the PM believe the workflow is brand new and restart it.
+            // A storage failure propagates as Err: as Ok(None) the PM would
+            // treat a live workflow as brand new.
             let books = self
                 .local_event_store
                 .get_by_correlation(correlation_id)
@@ -182,18 +217,13 @@ impl DestinationFetcher for HybridDestinationFetcher {
             // The first lookup is just to find the root UUID — we need to know which
             // aggregate instance has this correlation_id before we can do a proper fetch.
             //
-            // O9: at this point state for the workflow EXISTS. A book we
-            // cannot interpret (missing cover/root, unparseable root) is
-            // corrupt data, not absence — treating it as Ok(None) would
-            // restart a live workflow, so it is an internal error.
+            // State for the workflow exists here; a book we cannot interpret
+            // (missing cover/root, unparseable root) is corrupt data, not
+            // absence, so it is an internal error.
             let cover = book.cover.as_ref().ok_or_else(|| {
                 Status::internal(crate::orchestration::errmsg::EVENT_BOOK_MISSING_COVER)
             })?;
-            let edition = cover
-                .edition
-                .as_ref()
-                .map(|e| e.name.as_str())
-                .unwrap_or("main");
+            let edition = cover.edition().unwrap_or_default();
             let root = cover.root.as_ref().ok_or_else(|| {
                 Status::internal(crate::orchestration::errmsg::COVER_MISSING_ROOT)
             })?;

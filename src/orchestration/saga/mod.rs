@@ -25,7 +25,6 @@
 //!
 //! # Module Structure
 //!
-//! - `local/`: in-process saga handler calls
 //! - `grpc/`: remote gRPC saga client calls (distributed mode)
 
 pub mod grpc;
@@ -43,15 +42,15 @@ use crate::bus::CommandBus;
 use crate::dlq::trigger::{CodeDlqExt, DlqTrigger};
 use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher};
 use crate::proto::{
-    page_header::SequenceType, AngzarrDeferredSequence, CommandBook, Cover, EventBook, PageHeader,
-    SagaResponse, SyncMode,
+    page_header::SequenceType, AngzarrDeferredSequence, CascadeErrorMode, CommandBook, Cover,
+    EventBook, PageHeader, SagaResponse, SyncMode,
 };
 use crate::proto_ext::CoverExt;
 use crate::utils::retry::{run_with_retry, RetryOutcome, RetryableOperation};
 
-use super::command::{CommandExecutor, CommandOutcome};
+use super::command::{CommandExecutor, CommandOutcome, DeliveryPolicy};
 use super::destination::DestinationFetcher;
-use super::shared::fill_fact_correlation_id;
+use super::shared::{fill_fact_correlation_id, UndeliveredCommand};
 use super::FactExecutor;
 
 /// Validator for saga output domain routing.
@@ -124,8 +123,8 @@ pub trait SagaRetryContext: Send + Sync {
     /// Sagas use these via `stamp_command()` helper to stamp commands correctly.
     ///
     /// `sync_mode` is the flow mode inherited from `orchestrate_saga`'s caller.
-    /// Distributed (gRPC) impls stamp it onto the outgoing SagaHandleRequest
-    /// (H-17); in-process impls may ignore it.
+    /// Distributed (gRPC) impls stamp it onto the outgoing SagaHandleRequest;
+    /// in-process impls may ignore it.
     async fn handle(
         &self,
         destination_sequences: HashMap<String, u32>,
@@ -161,7 +160,7 @@ pub trait SagaRetryContext: Send + Sync {
     ///
     /// Returns `None` to disable DLQ publication. Production impls
     /// SHOULD return `Some(_)` so 4xx-class rejections and 5xx-class
-    /// retry-exhausted failures are operator-observable per R2-15.
+    /// retry-exhausted failures are operator-observable.
     /// Test fakes that don't exercise DLQ paths can keep the default.
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
         None
@@ -188,6 +187,10 @@ pub trait SagaRetryContext: Send + Sync {
 struct RetryExhaustionTracker {
     failed_commands: Vec<(CommandBook, String)>,
     attempts: u32,
+    /// Commands the destination rejected (non-retryable), across attempts.
+    rejected: Vec<UndeliveredCommand>,
+    /// Events produced by commands delivered so far, across attempts.
+    executed: Vec<EventBook>,
 }
 
 /// State for retryable saga command delivery.
@@ -209,21 +212,18 @@ struct SagaOperation<'a> {
     correlation_id: &'a str,
     /// Sync mode for command execution.
     /// ASYNC: commands published to bus (fire-and-forget), results via RejectionNotification.
-    /// CASCADE: commands executed synchronously with no bus publishing.
-    /// SIMPLE: commands executed synchronously with bus publishing.
+    /// Forwarded to each destination with the command.
     sync_mode: SyncMode,
     commands: Vec<CommandBook>,
-    /// Positions (within `commands`) that hit a Retryable outcome THIS
-    /// attempt. O11/F4: tracked per-INDEX, not per-domain — one invocation
-    /// may emit multiple commands to the same domain (that's why
-    /// `command_index` provenance exists), and a domain-keyed retry set
-    /// would re-execute a succeeded command (duplicate destination events)
-    /// or re-fire a Rejected one (duplicate compensation + DLQ entries)
-    /// whenever it shares a domain with a failed command.
+    /// Positions (within `commands`) that hit a Retryable outcome this
+    /// attempt. Tracked per index, not per domain: one invocation may emit
+    /// several commands to the same domain, and a succeeded or rejected
+    /// command must not be re-sent because a sibling in its domain failed.
     failed_indices: HashSet<usize>,
     /// Shared accumulator the builder reads on retry exhaustion to emit
     /// per-command DLQ entries. See [`RetryExhaustionTracker`].
     tracker: Arc<Mutex<RetryExhaustionTracker>>,
+    policy: DeliveryPolicy,
 }
 
 #[async_trait]
@@ -273,18 +273,11 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
                         }
                         Err(e) => {
                             error!(%domain, error = %e, "Failed to publish command to bus");
-                            // O8: a bus publish failure aborts the pass with
-                            // Fatal (infrastructure error — not retryable).
-                            // Fatal never populates the retry-exhaustion
-                            // tracker, so without this the failing command AND
-                            // every command after it (never attempted) would be
-                            // silently lost — `orchestrate_saga` still returns
-                            // Ok and the retry-exhausted DLQ path drains only
-                            // the tracker. Record `self.commands[idx..]` — the
-                            // failing command plus the un-attempted remainder —
-                            // so the DLQ captures them. Commands published
-                            // earlier this pass (`..idx`) are in flight and are
-                            // NOT re-recorded. Fatal semantics are preserved.
+                            // A bus publish failure ends the pass (Fatal). The
+                            // failing command and every command after it
+                            // (never attempted) are recorded as undelivered so
+                            // they are dead-lettered; commands published
+                            // earlier in the pass are in flight and are not.
                             let reason = format!("Command bus publish failed: {e}");
                             {
                                 let mut tracker = self.tracker.lock().await;
@@ -302,8 +295,11 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
 
             // SIMPLE/CASCADE mode: execute synchronously
             match self.executor.execute(command.clone(), self.sync_mode).await {
-                CommandOutcome::Success(_) => {
+                CommandOutcome::Success(response) => {
                     debug!(%domain, "Saga command executed successfully");
+                    if let Some(events) = response.events {
+                        self.tracker.lock().await.executed.push(events);
+                    }
                 }
                 CommandOutcome::Retryable { reason, .. } => {
                     warn!(%domain, error = %reason, "Sequence conflict, will retry with fresh state");
@@ -319,8 +315,21 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
                 }
                 CommandOutcome::Rejected { code, message } => {
                     error!(%domain, ?code, error = %message, "Saga command rejected (non-retryable)");
-                    self.context.on_command_rejected(&command, &message).await;
-                    publish_immediate_rejection_dlq(self.context, &command, code, &message).await;
+                    if self.policy.compensates() {
+                        self.context.on_command_rejected(&command, &message).await;
+                    }
+                    if self.policy.dead_letters() {
+                        publish_immediate_rejection_dlq(self.context, &command, code, &message)
+                            .await;
+                    }
+                    self.tracker.lock().await.rejected.push(UndeliveredCommand {
+                        command: command.clone(),
+                        code,
+                        reason: message.clone(),
+                    });
+                    if self.policy.stops_on_failure() {
+                        return RetryOutcome::Fatal(format!("{domain}: {message}"));
+                    }
                 }
             }
         }
@@ -340,30 +349,14 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
             SAGA_RETRY_TOTAL.add(1, &[name_attr(self.saga_name)]);
         }
 
-        // In the new model, sagas are NOT re-executed on retry.
-        // Commands are produced once with angzarr_deferred sequences.
-        // Retry happens at the delivery level (executor handles sequence stamping).
-        //
-        // O11: trim the retry set to only the commands that actually returned
-        // Retryable THIS attempt. Re-iterating the full command set each retry
-        // re-executes already-succeeded commands, republishing their
-        // destination events (duplicate event storms; cyclic topologies
-        // self-sustain). Idempotency (O1/D-5) is untouched — we simply stop
-        // dispatching commands that already succeeded (or were Rejected —
-        // re-dispatching those would re-fire on_command_rejected and emit
-        // duplicate immediate-rejection DLQ entries every retry).
-        //
-        // F4: filter by INDEX, not domain — one invocation may emit multiple
-        // commands to the same domain, and a succeeded/Rejected command must
-        // not ride along just because a sibling in its domain failed.
-        // Positions are relative to the CURRENT `self.commands`; the next
-        // `try_execute` pass repopulates `failed_indices` against the trimmed
-        // vec, so indices never go stale across attempts.
-        //
-        // `mem::take` hands ownership to the retain closure (avoiding a
-        // borrow conflict between `self.commands` and `self.failed_indices`)
-        // AND empties `failed_indices` for the next attempt — replacing the
-        // explicit clear the old code did here.
+        // The saga is not re-run on retry: its commands were produced once.
+        // Only the commands that returned Retryable this attempt are kept —
+        // re-sending a succeeded command republishes its destination events,
+        // and re-sending a rejected one repeats its compensation and dead
+        // letter. Positions are relative to the current `self.commands`, and
+        // the next `try_execute` repopulates `failed_indices` against the
+        // trimmed list. `mem::take` both moves the set into the closure and
+        // empties it for the next attempt.
         let failed_indices = std::mem::take(&mut self.failed_indices);
         let mut position = 0usize;
         self.commands.retain(|_| {
@@ -460,6 +453,7 @@ struct SagaRetryBuilder<'a> {
     sync_mode: SyncMode,
     commands: Vec<CommandBook>,
     backoff: ExponentialBuilder,
+    policy: DeliveryPolicy,
 }
 
 impl<'a> SagaRetryBuilder<'a> {
@@ -479,6 +473,7 @@ impl<'a> SagaRetryBuilder<'a> {
             sync_mode,
             commands: Vec::new(),
             backoff: ExponentialBuilder::default(),
+            policy: DeliveryPolicy::Background,
         }
     }
 
@@ -497,15 +492,25 @@ impl<'a> SagaRetryBuilder<'a> {
         self
     }
 
+    fn policy(mut self, policy: DeliveryPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
     /// Deliver saga commands with retry on sequence conflicts.
+    ///
+    /// Applies the delivery policy's compensation and dead-lettering, and
+    /// returns what was delivered and what could not be (rejected, or still
+    /// failing when retries ran out).
     #[tracing::instrument(name = "saga.retry", skip_all, fields(saga_name = %self.saga_name, correlation_id = %self.correlation_id))]
-    async fn execute(self) {
+    async fn execute(self) -> DeliveryOutcome {
         if self.commands.is_empty() {
-            return;
+            return DeliveryOutcome::default();
         }
 
         let tracker = Arc::new(Mutex::new(RetryExhaustionTracker::default()));
         let context = self.context;
+        let policy = self.policy;
         let tracker_for_builder = tracker.clone();
 
         let operation = SagaOperation {
@@ -518,13 +523,44 @@ impl<'a> SagaRetryBuilder<'a> {
             commands: self.commands,
             failed_indices: HashSet::new(),
             tracker,
+            policy,
         };
 
-        if let Err(e) = run_with_retry(operation, self.backoff).await {
-            error!(error = %e, "Saga execution failed after multiple retries");
-            publish_retry_exhausted_dlq(context, &tracker_for_builder).await;
+        let outcome = run_with_retry(operation, self.backoff).await;
+        let mut tracker = tracker_for_builder.lock().await;
+        let mut undelivered = std::mem::take(&mut tracker.rejected);
+        let executed = std::mem::take(&mut tracker.executed);
+        if let Err(e) = outcome {
+            error!(error = %e, "Saga command delivery failed after retries");
+            let exhausted: Vec<UndeliveredCommand> = tracker
+                .failed_commands
+                .iter()
+                .map(|(command, reason)| UndeliveredCommand {
+                    command: command.clone(),
+                    code: tonic::Code::Unavailable,
+                    reason: reason.clone(),
+                })
+                .collect();
+            drop(tracker);
+            if policy.dead_letters() {
+                publish_retry_exhausted_dlq(context, &tracker_for_builder).await;
+            }
+            undelivered.extend(exhausted);
+        }
+        DeliveryOutcome {
+            undelivered,
+            executed,
         }
     }
+}
+
+/// What a saga's command delivery achieved.
+#[derive(Default)]
+struct DeliveryOutcome {
+    /// Commands that could not be delivered.
+    undelivered: Vec<UndeliveredCommand>,
+    /// Events the delivered commands produced at their targets.
+    executed: Vec<EventBook>,
 }
 
 /// Saga orchestration with delivery-retry model.
@@ -540,13 +576,20 @@ impl<'a> SagaRetryBuilder<'a> {
 /// sequences (for command stamping). They should NOT rebuild destination state
 /// to make decisions. Use facts and let aggregates decide.
 ///
-/// `sync_mode` controls how commands are executed:
-/// - `Async`: Commands published to bus (fire-and-forget), results via RejectionNotification
-/// - `Simple`: Sync execution with bus publishing for downstream sagas
-/// - `Cascade`: Full sync chain, no bus publishing
+/// `sync_mode` is forwarded to each destination with the command. With
+/// `Async` and a command bus, commands are published to the bus instead of
+/// delivered directly.
 ///
 /// `command_bus` is required when `sync_mode == Async`. If None and sync_mode is Async,
 /// falls back to direct execution.
+///
+/// `error_mode` is the synchronous caller's `CascadeErrorMode` (`None` for
+/// bus-driven sagas, which have no caller): FAIL_FAST and COMPENSATE stop at
+/// the first undeliverable command and return `Err` (COMPENSATE routes it to
+/// its source for compensation first), CONTINUE delivers everything and then
+/// returns `Err` listing the failures, DEAD_LETTER dead-letters failures and
+/// returns `Ok`. Without a caller, failures are compensated and
+/// dead-lettered and the orchestration returns `Ok`.
 #[tracing::instrument(name = "saga.orchestrate", skip_all, fields(%saga_name, %correlation_id))]
 #[allow(clippy::too_many_arguments)]
 pub async fn orchestrate_saga(
@@ -560,7 +603,9 @@ pub async fn orchestrate_saga(
     output_domain_validator: Option<&OutputDomainValidator>,
     sync_mode: SyncMode,
     backoff: ExponentialBuilder,
-) -> Result<(), BusError> {
+    error_mode: Option<CascadeErrorMode>,
+) -> Result<Vec<crate::proto::CascadeReactionError>, BusError> {
+    let policy = DeliveryPolicy::from_mode(error_mode);
     // Phase 1: Fetch destination sequences for output domains
     // Saga uses these for command stamping via stamp_command() helper.
     let mut destination_sequences = HashMap::new();
@@ -592,7 +637,7 @@ pub async fn orchestrate_saga(
                         error!(
                             %domain,
                             error = %e,
-                            "Destination sequence fetch failed; failing saga orchestration (O9)"
+                            "Destination sequence fetch failed; failing saga orchestration"
                         );
                         return Err(BusError::Grpc(e));
                     }
@@ -731,15 +776,22 @@ pub async fn orchestrate_saga(
         }
     }
 
-    // Phase 4: Execute commands with retry
-    // Commands have angzarr_deferred set — the executor handles sequence stamping
-    // and retry on conflict at the delivery level.
-    SagaRetryBuilder::new(ctx, executor, saga_name, correlation_id, sync_mode)
+    // Phase 5: Deliver commands, retrying sequence conflicts per command.
+    let delivery = SagaRetryBuilder::new(ctx, executor, saga_name, correlation_id, sync_mode)
         .command_bus(command_bus)
         .commands(commands)
         .backoff(backoff)
+        .policy(policy)
         .execute()
         .await;
+    let reaction_errors = super::shared::settle_delivery(
+        policy,
+        saga_name,
+        &delivery.undelivered,
+        &delivery.executed,
+        fact_executor,
+    )
+    .await?;
 
     // Phase 6: Inject facts into target aggregates
     //
@@ -770,19 +822,16 @@ pub async fn orchestrate_saga(
             name: saga_name.to_string(),
             message: format!(
                 "Saga produced {} fact(s) (target domains: {:?}) but no \
-                 FactExecutor is wired — facts cannot be silently dropped \
-                 (H-15). Wire a FactExecutor or guarantee handle() returns \
-                 no events.",
+                 FactExecutor is wired — facts cannot be silently dropped. \
+                 Wire a FactExecutor or guarantee handle() returns no events.",
                 events.len(),
                 domains,
             ),
         });
     }
     if let Some(fact_exec) = fact_executor {
-        // O10: facts inherit the workflow correlation_id (like commands do in
-        // `SagaOperation::try_execute`) so downstream PMs don't skip them —
-        // an empty correlation on an injected fact means no correlated PM ever
-        // triggers on it.
+        // Facts inherit the workflow correlation_id, as commands do, so
+        // correlated PMs see them.
         fill_fact_correlation_id(&mut events, correlation_id);
         for fact in events {
             let domain = fact
@@ -793,7 +842,7 @@ pub async fn orchestrate_saga(
             debug!(%domain, "Injecting fact from saga");
 
             fact_exec
-                .inject(fact)
+                .inject(fact, super::FactDelivery::handled(sync_mode))
                 .await
                 .map_err(|e| BusError::SagaFailed {
                     name: saga_name.to_string(),
@@ -802,7 +851,7 @@ pub async fn orchestrate_saga(
         }
     }
 
-    Ok(())
+    Ok(reaction_errors)
 }
 
 #[cfg(test)]

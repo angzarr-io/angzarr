@@ -15,12 +15,11 @@
 //!
 //! # Correlation ID as PM Root
 //!
-//! The correlation_id serves double duty: it identifies both the cross-domain
-//! workflow AND the PM's aggregate root. This means:
-//!
-//! - `fetcher.fetch_by_correlation(pm_domain, correlation_id)` returns the PM's own state
-//! - All PM events are stored under `(pm_domain, correlation_id)` as root
-//! - Commands rejected route back via `angzarr_deferred.source.root = correlation_id`
+//! The correlation_id identifies both the cross-domain workflow and the PM's
+//! aggregate: the PM root is derived from it (`CorrelationRootExt`), and the
+//! PM's events live under that root on the trigger's edition
+//! (`DestinationFetcher::fetch_pm_state`). Commands the PM emits are
+//! attributed to the event that triggered it (`angzarr_deferred.source`).
 //!
 //! # Execution Flow
 //!
@@ -34,7 +33,6 @@
 //!
 //! # Module Structure
 //!
-//! - `local/`: in-process PM handler calls
 //! - `grpc/`: remote gRPC PM client calls (distributed mode)
 
 pub mod grpc;
@@ -53,18 +51,19 @@ use crate::bus::BusError;
 use crate::dlq::trigger::{CodeDlqExt, DlqTrigger};
 use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher};
 use crate::proto::{
-    page_header::SequenceType, AngzarrDeferredSequence, CommandBook, Cover, EventBook,
-    Notification, PageHeader, RevocationResponse, SyncMode, Uuid as ProtoUuid,
+    page_header::SequenceType, AngzarrDeferredSequence, CascadeErrorMode, CommandBook, EventBook,
+    Notification, PageHeader, RevocationResponse, SyncMode,
 };
 use crate::proto_ext::CoverExt;
 
-use super::command::{CommandExecutor, CommandOutcome};
+use super::command::{CommandExecutor, CommandOutcome, DeliveryPolicy};
 use super::destination::DestinationFetcher;
+use super::shared::UndeliveredCommand;
 use super::FactExecutor;
 use outbox::{CommandOutbox, OutboxEntry};
 
 /// Stable fingerprint for a PM event book, used to deduplicate persistence
-/// across outer-loop iterations (H-13).
+/// across outer-loop iterations.
 ///
 /// When `persist_pm_events` returns `Retryable` on book N (with books
 /// 1..N-1 already persisted successfully), the whole outer loop restarts:
@@ -108,10 +107,8 @@ impl BookFingerprint {
 ///
 /// Contains commands, PM events, and facts to inject to other aggregates.
 ///
-/// Audit #92 (2026-04-29): `process_events` is `Vec<EventBook>` —
-/// PMs can emit multiple PM-domain books per trigger; the coordinator
-/// merges / persists with full information rather than the client
-/// applying a first-non-empty-cover-wins reduction pre-emit.
+/// `process_events` is a list: a PM may emit several PM-domain books per
+/// trigger, and the coordinator persists each one.
 #[derive(Debug, Clone, Default)]
 pub struct ProcessManagerHandleResult {
     /// Commands to send to other aggregates.
@@ -137,7 +134,7 @@ pub trait ProcessManagerHandler: Send + Sync + 'static {
     ///
     /// Returns commands to execute, optional PM events to persist, and facts to inject.
     ///
-    /// # Idempotency Contract (H-13)
+    /// # Idempotency Contract
     ///
     /// PM handlers MUST be deterministic and idempotent on the input pair
     /// `(trigger, process_state)`. When a `Retryable` outcome causes the
@@ -172,8 +169,7 @@ pub trait ProcessManagerHandler: Send + Sync + 'static {
 
 /// Response from a process manager's handle phase.
 ///
-/// Audit #92: `process_events` is `Vec<EventBook>` — see
-/// `ProcessManagerHandleResult` doc.
+/// `process_events` is a list — see `ProcessManagerHandleResult`.
 pub struct PmHandleResponse {
     /// Commands to execute on aggregates.
     pub commands: Vec<CommandBook>,
@@ -205,6 +201,33 @@ pub trait ProcessManagerContext: Send + Sync {
         correlation_id: &str,
     ) -> CommandOutcome;
 
+    /// Persist PM events attributed to the trigger that produced them, so a
+    /// later delivery of the same trigger is recognised
+    /// ([`Self::trigger_handled`]). Defaults to an unattributed persist.
+    async fn persist_pm_events_for_trigger(
+        &self,
+        process_events: &EventBook,
+        correlation_id: &str,
+        trigger: &crate::storage::SourceInfo,
+    ) -> CommandOutcome {
+        let _ = trigger;
+        self.persist_pm_events(process_events, correlation_id).await
+    }
+
+    /// Whether this PM already persisted events for `trigger` on the
+    /// workflow's PM aggregate (`edition`, `correlation_id`): a redelivery,
+    /// or the bus copy of a trigger a CASCADE already ran synchronously.
+    /// Defaults to `false` (no trigger deduplication).
+    async fn trigger_handled(
+        &self,
+        trigger: &crate::storage::SourceInfo,
+        edition: &str,
+        correlation_id: &str,
+    ) -> Result<bool, tonic::Status> {
+        let _ = (trigger, edition, correlation_id);
+        Ok(false)
+    }
+
     /// Handle a rejected command produced by this PM.
     ///
     /// Called when a command produced by this PM is rejected by the target aggregate.
@@ -232,7 +255,7 @@ pub trait ProcessManagerContext: Send + Sync {
     /// Returns `None` to disable DLQ publication. Production impls
     /// SHOULD return `Some(_)` so 4xx-class command rejections,
     /// retry-exhausted persistence failures, and immediate persistence
-    /// rejections are operator-observable per R2-15. Test fakes that
+    /// rejections are operator-observable. Test fakes that
     /// don't exercise DLQ paths can keep the default.
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
         None
@@ -247,7 +270,7 @@ pub trait ProcessManagerContext: Send + Sync {
     }
 
     /// Outbox for at-least-once redelivery of commands that fail transiently
-    /// after the PM persist boundary (C04).
+    /// after the PM persist boundary.
     ///
     /// When `Some(_)`, a non-Decision `Retryable` outcome in
     /// `execute_pm_commands` is captured to the outbox and redelivered by the
@@ -307,21 +330,20 @@ async fn publish_pm_persist_dlq(
 /// Publish a dead letter for a PM command rejection at the dispatch loop.
 ///
 /// Covers both the `CommandOutcome::Rejected` site (where the destination
-/// aggregate or transport returned a permanent error) and the H-14
-/// Decision-mode degraded-from-Retryable site (where the PM lost its
-/// synchronous accept/reject contract).
+/// aggregate or transport returned a permanent error) and the Decision-mode
+/// site where a transient failure could not answer the synchronous
+/// accept/reject.
 ///
 /// `gate_on_classify = true` defensively skips publication when the
 /// code's `classify_for_dlq` says transient — the alignment between
 /// `is_retryable_status` and `classify_for_dlq` makes that case
 /// impossible today, but the gate guards against future drift. The
-/// H-14 path passes `false` since it doesn't carry a `tonic::Code` and
-/// is unconditionally a permanent failure from the PM's perspective.
+/// Decision path passes no code: it is a permanent failure from the PM's
+/// perspective.
 ///
-/// `is_transient` flags the dead letter for operators: `true` for the C04
-/// no-outbox transient-capture fallback (a transport blip that no drain loop
-/// will redeliver), `false` for permanent failures (Rejected, H-14 contract
-/// loss).
+/// `is_transient` flags the dead letter for operators: `true` for a
+/// transient failure captured without redelivery (no outbox), `false` for
+/// permanent failures (rejections, Decision-mode contract loss).
 async fn publish_pm_command_dlq(
     ctx: &dyn ProcessManagerContext,
     command: &CommandBook,
@@ -388,9 +410,16 @@ async fn publish_pm_command_dlq(
 /// 4. Execute commands with angzarr_deferred stamped for compensation routing
 /// 5. Inject facts into target aggregates
 ///
-/// `sync_mode` controls how commands are executed:
-/// - `Cascade`: Sync execution, no bus publishing
-/// - `Simple`: Standard execution with bus publishing
+/// `sync_mode` is forwarded to each command's destination unless the command
+/// header overrides it.
+///
+/// `error_mode` is the synchronous caller's `CascadeErrorMode` (`None` for
+/// bus-driven triggers): FAIL_FAST and COMPENSATE stop at the first failed
+/// command and return `Err` (COMPENSATE runs the PM's rejection handling
+/// first), CONTINUE runs every command and then returns `Err` listing the
+/// failures, DEAD_LETTER dead-letters failures and returns `Ok`. Without a
+/// caller, a rejection is compensated and dead-lettered and a transient
+/// failure goes to the command outbox.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(name = "pm.orchestrate", skip_all, fields(%pm_name, %pm_domain, %correlation_id))]
 pub async fn orchestrate_pm(
@@ -404,7 +433,9 @@ pub async fn orchestrate_pm(
     correlation_id: &str,
     sync_mode: SyncMode,
     backoff: ExponentialBuilder,
-) -> Result<(), BusError> {
+    error_mode: Option<CascadeErrorMode>,
+) -> Result<Vec<crate::proto::CascadeReactionError>, BusError> {
+    let policy = DeliveryPolicy::from_mode(error_mode);
     let trigger_domain = trigger
         .cover
         .as_ref()
@@ -416,44 +447,53 @@ pub async fn orchestrate_pm(
         "Processing event in process manager"
     );
 
+    // A trigger whose PM events are already recorded has been handled — a
+    // bus redelivery, or the bus copy of an event a CASCADE already ran
+    // through this PM synchronously. Commands it emitted are deduplicated at
+    // their destinations; re-running the handler would duplicate PM events.
+    let trigger_source = trigger_source_info(trigger, pm_name);
+    let pm_edition =
+        super::aggregate::edition_key(trigger.edition().unwrap_or_default()).to_string();
+    if let Some(source) = &trigger_source {
+        let handled = ctx
+            .trigger_handled(source, &pm_edition, correlation_id)
+            .await
+            .map_err(BusError::Grpc)?;
+        if handled {
+            debug!("PM trigger already handled; skipping");
+            return Ok(Vec::new());
+        }
+    }
+
     // Manual retry loop for PM event persistence. We retry from PM state fetch
     // because sequence conflicts mean another instance updated the PM state
     // concurrently — we need to re-read it before retrying.
     let mut delays = backoff.build();
     let mut attempt = 0u32;
 
-    // H-13: dedup guard for PM-domain writes across outer-loop iterations.
-    //
-    // When the outer loop restarts after a `Retryable` on book N (with books
-    // 1..N-1 already persisted), the PM handler is called again and an
-    // idempotent handler will re-emit the same earlier books. Without this
-    // guard `persist_pm_events` would be invoked again with the same
-    // content; nothing in the persister deduplicates by sequence range.
-    //
-    // Track which book fingerprints have been persisted successfully and
-    // skip any book whose fingerprint is already in the set on re-run.
+    // When the outer loop restarts after a `Retryable` on book N (books
+    // 1..N-1 already persisted), an idempotent handler re-emits the earlier
+    // books; their fingerprints are remembered so they are not persisted
+    // twice.
     let mut persisted: HashSet<BookFingerprint> = HashSet::new();
 
     loop {
-        // Load PM state by correlation_id.
-        // Why by correlation_id? The PM's aggregate root IS the correlation_id.
-        // This is a design choice: a PM instance is identified by the workflow
-        // it coordinates, not by an arbitrary UUID. This simplifies lookups and
-        // ensures all events for a workflow flow through one PM instance.
-        //
-        // O9: a fetch ERROR is NOT "no state". Only Ok(None) means a new
-        // workflow. Treating a transient gRPC/storage failure as None made
-        // the PM rebuild the workflow from empty — re-issuing commands and
-        // corrupting state. Fail this attempt instead; bus redelivery (the
-        // handler propagates errors) retries the trigger with state intact.
+        // The PM's state: the aggregate whose root derives from the
+        // correlation id, on the trigger's edition. Only Ok(None) means a new
+        // workflow; a fetch error fails this attempt (bus redelivery retries
+        // the trigger) instead of restarting a live workflow from empty.
         let pm_state = fetcher
-            .fetch_by_correlation(pm_domain, correlation_id)
+            .fetch_pm_state(
+                pm_domain,
+                super::aggregate::edition_key(trigger.edition().unwrap_or_default()),
+                correlation_id,
+            )
             .await
             .map_err(|e| {
                 error!(
                     error = %e,
                     "PM state fetch failed; failing PM attempt instead of \
-                     restarting workflow from empty (O9)"
+                     restarting workflow from empty"
                 );
                 BusError::Grpc(e)
             })?;
@@ -491,27 +531,30 @@ pub async fn orchestrate_pm(
         // sequence conflict, the aggregate saw a concurrent write — the PM will
         // receive a Notification and can decide whether to retry or compensate.
         //
-        // Audit #92: `process_events` is `Vec<EventBook>` — persist each
-        // book separately. Empty books are skipped.
+        // Each emitted book is persisted separately; empty books are skipped.
         let mut should_continue_outer = false;
         let mut should_return_err: Option<BusError> = None;
         for process_events in &response.process_events {
             if process_events.pages.is_empty() {
                 continue;
             }
-            // H-13: skip books we already persisted on a prior outer-loop
-            // iteration. Without this guard, when book N returned Retryable
-            // (causing restart) the prior books 1..N-1 would be persisted
-            // again — the persister has no sequence-range dedup of its own.
+            // Skip books already persisted on a prior outer-loop iteration.
             let fp = BookFingerprint::of(process_events);
             if persisted.contains(&fp) {
                 debug!(
                     fingerprint = ?fp,
-                    "Skipping already-persisted PM book on retry (H-13 dedup)"
+                    "Skipping already-persisted PM book on retry"
                 );
                 continue;
             }
-            match ctx.persist_pm_events(process_events, correlation_id).await {
+            let outcome = match &trigger_source {
+                Some(source) => {
+                    ctx.persist_pm_events_for_trigger(process_events, correlation_id, source)
+                        .await
+                }
+                None => ctx.persist_pm_events(process_events, correlation_id).await,
+            };
+            match outcome {
                 CommandOutcome::Success(_) => {
                     info!(
                         events = process_events.pages.len(),
@@ -538,8 +581,8 @@ pub async fn orchestrate_pm(
                             attempt,
                             &reason,
                         );
-                        // R2-15: persist retry-exhausted -> DLQ the
-                        // failed PM event book so operators can replay.
+                        // Retries exhausted: dead-letter the PM event book
+                        // so operators can replay it.
                         publish_pm_persist_dlq(ctx, process_events, &reason, attempt, true).await;
                         should_return_err = Some(BusError::Publish(reason));
                         break;
@@ -551,9 +594,8 @@ pub async fn orchestrate_pm(
                         attempt,
                         &format!("{code:?}: {message}"),
                     );
-                    // R2-15: persist immediate-rejection -> DLQ the
-                    // failed PM event book. retry_count=0 since no
-                    // attempts were spent on this rejection.
+                    // Immediate rejection: dead-letter the PM event book
+                    // (no retries were spent).
                     publish_pm_persist_dlq(ctx, process_events, &message, 0, false).await;
                     should_return_err = Some(BusError::Publish(message));
                     break;
@@ -583,33 +625,18 @@ pub async fn orchestrate_pm(
         // 2. The PM's job is to observe outcomes and react, not guarantee delivery
         // 3. Compensation is the PM's mechanism for handling failures
         //
-        // Compute PM source_seq for angzarr_deferred stamping:
-        // - If we just persisted process_events, use the max seq across
-        //   all books (audit #92: process_events is Vec<EventBook>)
-        // - Otherwise use max seq from pm_state (existing PM state)
-        // - Otherwise 0 (new PM with no events yet)
-        use crate::proto_ext::EventPageExt;
-        let pm_source_seq = response
-            .process_events
-            .iter()
-            .flat_map(|book| book.pages.iter().map(|p| p.sequence_num()))
-            .max()
-            .or_else(|| {
-                pm_state
-                    .as_ref()
-                    .map(|s| s.pages.iter().map(|p| p.sequence_num()).max().unwrap_or(0))
-            })
-            .unwrap_or(0);
-
-        execute_pm_commands(
+        let reaction_errors = execute_pm_commands(
             ctx,
             executor,
+            fact_executor,
             response.commands,
-            correlation_id,
-            pm_name,
-            pm_domain,
-            pm_source_seq,
+            PmCommandSource {
+                trigger,
+                correlation_id,
+                pm_name,
+            },
             sync_mode,
+            policy,
         )
         .await?;
 
@@ -623,12 +650,7 @@ pub async fn orchestrate_pm(
         // Fact injection failure fails the entire PM operation — facts are not
         // best-effort, they're part of the transaction.
         //
-        // H-15: silent-drop refused. If the PM emits any facts but no
-        // `FactExecutor` is wired, return an explicit error instead of
-        // silently discarding them. This prevents the bc1d3db4 regression
-        // class where a caller forgets to wire an executor and every fact
-        // is lost. The API can no longer swallow facts — callers must
-        // either pass an executor or guarantee an empty `facts` vec.
+        // Facts with no FactExecutor wired are an error, never a silent drop.
         if !response.facts.is_empty() && fact_executor.is_none() {
             let domains: Vec<&str> = response
                 .facts
@@ -643,17 +665,15 @@ pub async fn orchestrate_pm(
             return Err(BusError::Publish(format!(
                 "PM '{pm_name}' produced {} fact(s) (target domains: {:?}) \
                  but no FactExecutor is wired — facts cannot be silently \
-                 dropped (H-15). Wire a FactExecutor or guarantee handle() \
-                 returns no facts.",
+                 dropped. Wire a FactExecutor or guarantee handle() returns \
+                 no facts.",
                 response.facts.len(),
                 domains,
             )));
         }
         if let Some(fact_exec) = fact_executor {
-            // O10: injected facts must carry the workflow correlation_id, or
-            // downstream PMs skip them (empty correlation ⇒ no PM trigger).
-            // Commands are already backfilled in `execute_pm_commands`; facts
-            // were not, so backfill them here on the same shared rule.
+            // Facts carry the workflow correlation_id, as commands do, so
+            // correlated PMs see them.
             super::shared::fill_fact_correlation_id(&mut response.facts, correlation_id);
             for fact in response.facts {
                 let domain = fact
@@ -664,154 +684,117 @@ pub async fn orchestrate_pm(
                 debug!(%domain, "Injecting fact from PM");
 
                 fact_exec
-                    .inject(fact)
+                    .inject(fact, super::FactDelivery::handled(sync_mode))
                     .await
                     .map_err(|e| BusError::Publish(format!("PM fact injection failed: {e}")))?;
             }
         }
 
-        // Exit retry loop. PM events are persisted, commands are dispatched.
-        // The workflow continues asynchronously via Notifications.
-        break;
+        // PM events are persisted and commands dispatched; the workflow
+        // continues asynchronously.
+        return Ok(reaction_errors);
     }
-
-    Ok(())
 }
 
-/// Execute PM commands with angzarr_deferred stamped for compensation routing.
+/// The provenance recorded on a PM's events for the trigger that produced
+/// them: the triggering aggregate and its last sequence, under the PM's name.
+/// `None` when the trigger names no aggregate root.
+fn trigger_source_info(trigger: &EventBook, pm_name: &str) -> Option<crate::storage::SourceInfo> {
+    use crate::proto_ext::EventPageExt;
+    let cover = trigger.cover.as_ref()?;
+    let root = uuid::Uuid::from_slice(&cover.root.as_ref()?.value).ok()?;
+    let seq = trigger.pages.iter().map(|p| p.sequence_num()).max()?;
+    Some(crate::storage::SourceInfo::new(
+        super::aggregate::edition_key(cover.edition().unwrap_or_default()),
+        cover.domain.as_str(),
+        root,
+        seq,
+        pm_name,
+        0,
+    ))
+}
+
+/// What a PM's commands are attributed to.
+struct PmCommandSource<'a> {
+    /// The event book that triggered the PM.
+    trigger: &'a EventBook,
+    correlation_id: &'a str,
+    /// The PM's registered name (`source_component`).
+    pm_name: &'a str,
+}
+
+/// Stamp provenance on a PM's commands and deliver them.
 ///
-/// Stamps each command with `angzarr_deferred` pointing to the PM itself, so that
-/// if a command is rejected, the compensation Notification routes back to the
-/// PM through the standard aggregate coordinator infrastructure.
-///
-/// PMs are aggregates — they receive Notifications the same way aggregates do.
-///
-/// `sync_mode` controls how commands are executed:
-/// - `Cascade`: Sync execution, no bus publishing
-/// - `Simple`: Standard execution with bus publishing
-///
-/// `pm_source_seq` is the PM's max sequence after persisting its events. This
-/// identifies which PM state produced these commands, enabling idempotency checks.
-#[allow(clippy::too_many_arguments)]
+/// Provenance (`AngzarrDeferredSequence`) attributes each command to the
+/// event that triggered the PM, exactly as for a saga: `source` is the
+/// trigger's cover (edition included) and `source_seq` its last sequence,
+/// unless the handler set them; `source_component` is the PM's name and
+/// `command_index` the command's position. The idempotency key is therefore
+/// unique per triggering event — two triggers that emit commands without PM
+/// events can no longer share a key and have the second swallowed as a
+/// replay. A handler-stamped explicit sequence passes through untouched (the
+/// destination validates it). `basis_seq` keeps a handler-provided value;
+/// otherwise 0 (whole-history overlap window), since the PM path observes no
+/// destination heads.
 async fn execute_pm_commands(
     ctx: &dyn ProcessManagerContext,
     executor: &dyn CommandExecutor,
+    fact_executor: Option<&dyn FactExecutor>,
     mut commands: Vec<CommandBook>,
-    correlation_id: &str,
-    pm_name: &str,
-    pm_domain: &str,
-    pm_source_seq: u32,
+    source: PmCommandSource<'_>,
     sync_mode: SyncMode,
-) -> Result<(), BusError> {
-    use super::shared::{fill_correlation_id, CorrelationRootExt};
+    policy: DeliveryPolicy,
+) -> Result<Vec<crate::proto::CascadeReactionError>, BusError> {
+    use super::shared::fill_correlation_id;
+    use crate::proto_ext::EventPageExt;
+    let PmCommandSource {
+        trigger,
+        correlation_id,
+        pm_name,
+    } = source;
     fill_correlation_id(&mut commands, correlation_id);
 
-    // Build PM cover for angzarr_deferred — PM is the triggering aggregate
-    // PM root = correlation_id by design (PM is identified by the workflow it coordinates)
-    let pm_cover = Cover {
-        domain: pm_domain.to_string(),
-        root: Some(ProtoUuid {
-            // O7/D-11: derive the PM root from the correlation id via the one
-            // shared rule (already-UUID passes through; friendly id → UUIDv5).
-            // Pre-fix a non-UUID id collapsed to the NIL uuid, so every
-            // friendly-id workflow shared one root and rejection
-            // notifications routed to the wrong, shared aggregate. This MUST
-            // match the persist-side derivation in `persist_pm_event_book`.
-            value: correlation_id.correlation_root().as_bytes().to_vec(),
-        }),
-        correlation_id: correlation_id.to_string(),
-        edition: None,
-        ext: None,
-    };
+    let trigger_cover = trigger.cover.clone();
+    let trigger_seq = trigger
+        .pages
+        .iter()
+        .map(|p| p.sequence_num())
+        .max()
+        .unwrap_or(0);
 
-    // Stamp angzarr_deferred on commands for provenance and compensation routing.
-    //
-    // (source, source_seq, source_component, command_index) form the
-    // idempotency key. source + source_seq alone identify only the PM state
-    // that produced the commands — every command of one invocation shared
-    // the key and all but the first were swallowed as duplicates (O1).
-    //
-    // Stamping strategy (per spec):
-    // - PM handler stamped an explicit destination sequence → honor it
-    //   untouched (D-5): the command travels as a plain sequenced command
-    //   and the destination's optimistic-concurrency gate validates it,
-    //   rejecting on mismatch.
-    // - PM handler set angzarr_deferred → preserve its source/source_seq
-    //   (fill in PM cover if missing)
-    // - PM handler didn't set angzarr_deferred → use PM cover + pm_source_seq
-    // - source_component + command_index are framework provenance (the
-    //   PM's registered name and the command's position in this
-    //   invocation's output) — always stamped, never handler data.
-    // - basis_seq (D-7): unlike the saga orchestrator, the PM coordinator has
-    //   NO destination-sequence fetch phase in scope here (the PM handle path
-    //   sends `destination_sequences: Default::default()` — see
-    //   grpc/mod.rs), so the framework cannot fill an observed basis. A
-    //   handler-provided nonzero basis is preserved (it is the handler's own
-    //   observation claim, same fill-only-when-empty philosophy as the saga
-    //   side); otherwise 0 = legacy conservative whole-history overlap
-    //   window at the destination. Wiring a PM-side destination fetch (the
-    //   `fetcher` exists in `orchestrate_pm`) is a known deferred gap —
-    //   doing it after PM-event persistence would add a new post-persist
-    //   failure mode and deserves its own decision.
     for (command_index, cmd) in commands.iter_mut().enumerate() {
         for page in &mut cmd.pages {
-            // Preserve any per-command sync_mode the PM set on the header
-            // before we rewrite the sequence_type for angzarr_deferred
-            // stamping — the override would otherwise be lost.
+            // A per-command sync_mode override survives the header rewrite.
             let preserved_sync_mode = page.header.as_ref().and_then(|h| h.sync_mode);
-            match page.header.as_ref().and_then(|h| h.sequence_type.as_ref()) {
-                // D-5/O13: handler-stamped explicit destination sequence —
-                // honor it; the destination validates and rejects on mismatch.
-                Some(SequenceType::Sequence(_)) => {}
-                Some(SequenceType::AngzarrDeferred(existing)) => {
-                    page.header = Some(PageHeader {
-                        sync_mode: preserved_sync_mode,
-                        sequence_type: Some(SequenceType::AngzarrDeferred(
-                            AngzarrDeferredSequence {
-                                source: existing.source.clone().or_else(|| Some(pm_cover.clone())),
-                                source_seq: existing.source_seq,
-                                source_component: pm_name.to_string(),
-                                command_index: command_index as u32,
-                                // D-7: handler-provided basis preserved as-is
-                                // (nonzero = handler's observation claim; 0 =
-                                // no basis, and no framework map exists here
-                                // to fill it from — see stamping-strategy
-                                // note above).
-                                basis_seq: existing.basis_seq,
-                            },
-                        )),
-                    });
-                }
-                _ => {
-                    // PM handler didn't set angzarr_deferred - use defaults
-                    page.header = Some(PageHeader {
-                        sync_mode: preserved_sync_mode,
-                        sequence_type: Some(SequenceType::AngzarrDeferred(
-                            AngzarrDeferredSequence {
-                                source: Some(pm_cover.clone()),
-                                source_seq: pm_source_seq,
-                                source_component: pm_name.to_string(),
-                                command_index: command_index as u32,
-                                // D-7: no destination-sequence value is
-                                // available in this scope (deferred gap, see
-                                // stamping-strategy note above) → 0 = legacy
-                                // conservative whole-history overlap window.
-                                basis_seq: 0,
-                            },
-                        )),
-                    });
-                }
-            }
+            let deferred = match page.header.as_ref().and_then(|h| h.sequence_type.as_ref()) {
+                Some(SequenceType::Sequence(_)) => continue,
+                Some(SequenceType::AngzarrDeferred(existing)) => AngzarrDeferredSequence {
+                    source: existing.source.clone().or_else(|| trigger_cover.clone()),
+                    source_seq: existing.source_seq,
+                    source_component: pm_name.to_string(),
+                    command_index: command_index as u32,
+                    basis_seq: existing.basis_seq,
+                },
+                _ => AngzarrDeferredSequence {
+                    source: trigger_cover.clone(),
+                    source_seq: trigger_seq,
+                    source_component: pm_name.to_string(),
+                    command_index: command_index as u32,
+                    basis_seq: 0,
+                },
+            };
+            page.header = Some(PageHeader {
+                sync_mode: preserved_sync_mode,
+                sequence_type: Some(SequenceType::AngzarrDeferred(deferred)),
+            });
         }
     }
 
-    // H-14: when a per-command sync_mode override is Decision and the
-    // executor returns Retryable, the caller's await is blocked waiting
-    // for an accept/reject answer that will never arrive (the framework's
-    // delivery-retry path is asynchronous and Decision-mode callers do not
-    // observe it). Track whether any Decision-mode command degraded so we
-    // can surface a single Err at the end of the dispatch loop.
-    let mut decision_retryable_failure: Option<String> = None;
+    // A Decision-mode command that could not be answered synchronously is
+    // reported to the caller whatever the delivery policy.
+    let mut reported_failures: Vec<String> = Vec::new();
+    let mut undelivered: Vec<UndeliveredCommand> = Vec::new();
+    let mut executed: Vec<EventBook> = Vec::new();
 
     for command_book in commands {
         let cmd_domain = command_book
@@ -820,16 +803,11 @@ async fn execute_pm_commands(
             .map(|c| c.domain.clone())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Per-command sync_mode override: if the PM tagged its first page's
-        // header with a sync_mode (e.g. SYNC_MODE_DECISION when it needs
-        // the accept/reject answer synchronously), honour that; otherwise
-        // inherit the surrounding flow's sync_mode unchanged.
-        //
-        // `sync_mode` is an `optional` field, so presence distinguishes an
-        // explicit override (including ASYNC, the zero value) from none.
-        // Unknown ints are treated as absent and inherit rather than
-        // defaulting, so a garbled header can never demote a Cascade or
-        // Decision flow to fire-and-forget.
+        // A sync_mode on the command's first page header overrides the flow's
+        // mode for that command (e.g. DECISION when the PM needs the
+        // accept/reject answer synchronously). Presence matters — an explicit
+        // ASYNC overrides too; an unknown int inherits, so a garbled header
+        // can never demote a Cascade or Decision flow to fire-and-forget.
         let effective_sync_mode = command_book
             .pages
             .first()
@@ -844,7 +822,7 @@ async fn execute_pm_commands(
             "Executing PM command"
         );
 
-        match executor
+        let failure = match executor
             .execute(command_book.clone(), effective_sync_mode)
             .await
         {
@@ -854,108 +832,118 @@ async fn execute_pm_commands(
                     has_events = cmd_response.events.is_some(),
                     "PM command executed successfully"
                 );
-            }
-            CommandOutcome::Retryable { reason, .. } => {
-                if effective_sync_mode == SyncMode::Decision {
-                    // H-14: Decision contract requires synchronous
-                    // accept/reject. A Retryable transport outcome cannot
-                    // satisfy that contract — the framework has no
-                    // synchronous retry path here. Degrade to a rejection
-                    // with operator-readable reason so the PM's
-                    // compensation handler runs AND the orchestrator
-                    // surfaces an Err to the caller (no silent log-only).
-                    let degraded = format!(
-                        "retryable transport failure under SYNC_MODE_DECISION; \
-                         retry later (underlying: {reason})"
-                    );
-                    error!(
-                        domain = %cmd_domain,
-                        error = %degraded,
-                        "PM Decision-mode command Retryable (H-14 degraded)"
-                    );
-                    ctx.on_command_rejected(&command_book, &degraded, correlation_id)
-                        .await;
-                    // R2-15: H-14 is a permanent failure from the PM's
-                    // perspective (contract loss); DLQ unconditionally.
-                    // No tonic::Code is available here — the original
-                    // Retryable carried only a reason string — so pass
-                    // None to skip the classify gate. is_transient=false:
-                    // the contract loss, not the transport, is the failure.
-                    publish_pm_command_dlq(ctx, &command_book, None, &degraded, false).await;
-                    if decision_retryable_failure.is_none() {
-                        decision_retryable_failure = Some(degraded);
-                    }
-                } else {
-                    // C04: a non-Decision (fire-and-forget) command failed
-                    // transiently AFTER the PM persist boundary. It cannot be
-                    // retried in place — re-running the handler would duplicate
-                    // the already-persisted PM events — and it MUST NOT be
-                    // silently dropped (the pre-fix warn-only bug that stalled
-                    // workflows with no operator signal).
-                    //
-                    // Capture it to the command outbox for at-least-once
-                    // redelivery by the PM's drain loop. If no outbox is wired,
-                    // fall back to DLQ *capture* so the failure is at minimum
-                    // operator-visible (transient, no redelivery attempted).
-                    match ctx.command_outbox() {
-                        Some(ob) => {
-                            let entry = OutboxEntry::for_redelivery(&command_book, &reason);
-                            let key = entry.dedup_key.clone();
-                            if let Err(e) = ob.enqueue(entry).await {
-                                error!(
-                                    domain = %cmd_domain,
-                                    error = %e,
-                                    "failed to enqueue PM command to outbox; \
-                                     falling back to DLQ capture"
-                                );
-                                publish_pm_command_dlq(ctx, &command_book, None, &reason, true)
-                                    .await;
-                            } else {
-                                warn!(
-                                    domain = %cmd_domain,
-                                    dedup_key = %key,
-                                    error = %reason,
-                                    "PM command failed transiently post-persist; \
-                                     enqueued to outbox for at-least-once redelivery"
-                                );
-                            }
-                        }
-                        None => {
-                            error!(
-                                domain = %cmd_domain,
-                                error = %reason,
-                                "PM command failed transiently post-persist and no \
-                                 outbox is wired; capturing to DLQ (no redelivery)"
-                            );
-                            publish_pm_command_dlq(ctx, &command_book, None, &reason, true).await;
-                        }
-                    }
-                }
+                executed.extend(cmd_response.events);
+                None
             }
             CommandOutcome::Rejected { code, message } => {
                 error!(
                     domain = %cmd_domain,
                     ?code,
                     error = %message,
-                    "PM command rejected, invoking compensation"
+                    "PM command rejected"
                 );
-                ctx.on_command_rejected(&command_book, &message, correlation_id)
+                if policy.compensates() {
+                    ctx.on_command_rejected(&command_book, &message, correlation_id)
+                        .await;
+                }
+                if policy.dead_letters() {
+                    publish_pm_command_dlq(ctx, &command_book, Some(code), &message, false).await;
+                }
+                Some((code, message))
+            }
+            CommandOutcome::Retryable { reason, .. }
+                if effective_sync_mode == SyncMode::Decision =>
+            {
+                // A Decision-mode caller waits for accept/reject; a transient
+                // failure cannot answer it, so it is a rejection from the
+                // PM's point of view (compensated, dead-lettered, reported).
+                let degraded = format!(
+                    "retryable transport failure under SYNC_MODE_DECISION; \
+                     retry later (underlying: {reason})"
+                );
+                error!(domain = %cmd_domain, error = %degraded, "PM Decision-mode command Retryable");
+                ctx.on_command_rejected(&command_book, &degraded, correlation_id)
                     .await;
-                // R2-15: DLQ alongside compensation. Gate on
-                // classify_for_dlq for drift-protection (the alignment
-                // invariant says Rejected codes are Immediate, but the
-                // gate makes that explicit rather than implicit).
-                // is_transient=false: a Rejected outcome is a permanent
-                // rejection, not a transient transport failure.
-                publish_pm_command_dlq(ctx, &command_book, Some(code), &message, false).await;
+                publish_pm_command_dlq(ctx, &command_book, None, &degraded, false).await;
+                reported_failures.push(format!("{cmd_domain}: {degraded}"));
+                None
+            }
+            CommandOutcome::Retryable { reason, .. } => {
+                match policy {
+                    DeliveryPolicy::Background => {
+                        // The PM events are already persisted, so the command
+                        // cannot be re-produced by re-running the handler:
+                        // hand it to the outbox for at-least-once redelivery,
+                        // or failing that, capture it to the DLQ.
+                        enqueue_or_dead_letter(ctx, &command_book, &cmd_domain, &reason).await;
+                    }
+                    DeliveryPolicy::DeadLetter => {
+                        publish_pm_command_dlq(ctx, &command_book, None, &reason, true).await;
+                    }
+                    DeliveryPolicy::FailFast
+                    | DeliveryPolicy::Compensate
+                    | DeliveryPolicy::Continue => {}
+                }
+                Some((tonic::Code::Unavailable, reason))
+            }
+        };
+
+        if let Some((code, reason)) = failure {
+            undelivered.push(UndeliveredCommand {
+                command: command_book,
+                code,
+                reason,
+            });
+            if policy.stops_on_failure() {
+                break;
             }
         }
     }
 
-    if let Some(reason) = decision_retryable_failure {
-        return Err(BusError::Publish(reason));
+    if !reported_failures.is_empty() {
+        return Err(BusError::Publish(reported_failures.join("; ")));
     }
-    Ok(())
+    super::shared::settle_delivery(policy, pm_name, &undelivered, &executed, fact_executor).await
+}
+
+/// Hand a transiently-failed PM command to the outbox for redelivery, or
+/// capture it to the DLQ when no outbox is wired or enqueueing fails.
+async fn enqueue_or_dead_letter(
+    ctx: &dyn ProcessManagerContext,
+    command_book: &CommandBook,
+    cmd_domain: &str,
+    reason: &str,
+) {
+    match ctx.command_outbox() {
+        Some(outbox) => {
+            let entry = OutboxEntry::for_redelivery(command_book, reason);
+            let key = entry.dedup_key.clone();
+            if let Err(e) = outbox.enqueue(entry).await {
+                error!(
+                    domain = %cmd_domain,
+                    error = %e,
+                    "failed to enqueue PM command to outbox; falling back to DLQ capture"
+                );
+                publish_pm_command_dlq(ctx, command_book, None, reason, true).await;
+            } else {
+                warn!(
+                    domain = %cmd_domain,
+                    dedup_key = %key,
+                    error = %reason,
+                    "PM command failed transiently post-persist; enqueued to outbox"
+                );
+            }
+        }
+        None => {
+            error!(
+                domain = %cmd_domain,
+                error = %reason,
+                "PM command failed transiently post-persist and no outbox is wired; \
+                 capturing to DLQ"
+            );
+            publish_pm_command_dlq(ctx, command_book, None, reason, true).await;
+        }
+    }
 }
 
 #[cfg(test)]

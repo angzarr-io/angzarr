@@ -94,6 +94,7 @@ impl crate::orchestration::process_manager::ProcessManagerContext for MockPmCont
         CommandOutcome::Success(CommandResponse {
             events: None,
             projections: vec![],
+            ..Default::default()
         })
     }
 }
@@ -111,15 +112,6 @@ impl crate::orchestration::destination::DestinationFetcher for MockDestinationFe
         &self,
         _domain: &str,
         _correlation_id: &str,
-    ) -> Result<Option<EventBook>, tonic::Status> {
-        Ok(None)
-    }
-
-    async fn fetch_by_root(
-        &self,
-        _domain: &str,
-        _root: &crate::proto::Uuid,
-        _edition: &str,
     ) -> Result<Option<EventBook>, tonic::Status> {
         Ok(None)
     }
@@ -149,6 +141,7 @@ impl crate::orchestration::command::CommandExecutor for MockCommandExecutor {
         CommandOutcome::Success(CommandResponse {
             events: None,
             projections: vec![],
+            ..Default::default()
         })
     }
 }

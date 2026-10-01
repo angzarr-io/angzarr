@@ -83,8 +83,8 @@ fn matches_type_full_url_still_matches() {
     let target = Target::new("order", vec!["type.googleapis.com/example.OrderCreated"]);
     assert!(target.matches_type("type.googleapis.com/example.OrderCreated"));
     assert!(!target.matches_type("type.googleapis.com/example.UserCreated"));
-    // Dotted subscription requires full equality, so the bare short name
-    // (without the prefix) does NOT match.
+    // A dotted subscription is fully qualified, so a bare short name
+    // (no package) does NOT match.
     assert!(!target.matches_type("OrderCreated"));
 }
 
@@ -159,5 +159,31 @@ fn test_parse_subscriptions_mixed() {
     let subs = parse_subscriptions("order:OrderCreated;inventory");
     assert_eq!(subs.len(), 2);
     assert_eq!(subs[0].types, vec!["OrderCreated"]);
+    assert!(subs[1].types.is_empty());
+}
+
+/// A dotted subscription is a fully-qualified name: it matches the event's
+/// type URL whatever resolver prefix either side uses.
+#[test]
+fn matches_type_dotted_name_ignores_resolver_prefix() {
+    let target = Target::new("order", vec!["examples.OrderCreated"]);
+    assert!(target.matches_type("type.googleapis.com/examples.OrderCreated"));
+    assert!(target.matches_type("/examples.OrderCreated"));
+    assert!(target.matches_type("examples.OrderCreated"));
+    assert!(!target.matches_type("type.googleapis.com/other.OrderCreated"));
+    assert!(!target.matches_type("type.googleapis.com/examples.OrderCreatedV2"));
+
+    let prefixed = Target::new("order", vec!["type.googleapis.com/examples.OrderCreated"]);
+    assert!(prefixed.matches_type("/examples.OrderCreated"));
+}
+
+/// Whitespace in ANGZARR_SUBSCRIPTIONS is not part of a name.
+#[test]
+fn parse_subscriptions_trims_whitespace() {
+    let subs = parse_subscriptions(" order : OrderCreated , OrderShipped ; inventory ");
+    assert_eq!(subs.len(), 2);
+    assert_eq!(subs[0].domain, "order");
+    assert_eq!(subs[0].types, vec!["OrderCreated", "OrderShipped"]);
+    assert_eq!(subs[1].domain, "inventory");
     assert!(subs[1].types.is_empty());
 }

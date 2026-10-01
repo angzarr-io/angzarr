@@ -30,7 +30,7 @@ mod tests;
 use async_trait::async_trait;
 use tonic::Status;
 
-use crate::proto::{Cover, EventBook, Uuid as ProtoUuid};
+use crate::proto::{Cover, EventBook};
 
 /// Fetches aggregate state for saga/PM destination resolution.
 ///
@@ -47,25 +47,18 @@ pub trait DestinationFetcher: Send + Sync {
         correlation_id: &str,
     ) -> Result<Option<EventBook>, Status>;
 
-    /// Fetch state by root UUID within a specific domain.
-    /// Used by PM orchestration to find PM state by root instead of correlation_id.
-    async fn fetch_by_root(
+    /// A process manager's own state: the PM aggregate whose root derives from
+    /// `correlation_id`, on the trigger's `edition`.
+    ///
+    /// Implementations that hold the PM's store locally resolve it directly by
+    /// that root and edition; the default looks it up by correlation id.
+    async fn fetch_pm_state(
         &self,
-        domain: &str,
-        root: &ProtoUuid,
+        pm_domain: &str,
         edition: &str,
+        correlation_id: &str,
     ) -> Result<Option<EventBook>, Status> {
-        // Default implementation: construct a Cover and use fetch()
-        let cover = Cover {
-            domain: domain.to_string(),
-            root: Some(root.clone()),
-            edition: Some(crate::proto::Edition {
-                name: edition.to_string(),
-                divergences: vec![],
-            }),
-            correlation_id: String::new(),
-            ext: None,
-        };
-        self.fetch(&cover).await
+        let _ = edition;
+        self.fetch_by_correlation(pm_domain, correlation_id).await
     }
 }

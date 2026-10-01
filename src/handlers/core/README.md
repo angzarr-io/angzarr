@@ -4,12 +4,12 @@ Core angzarr sidecar event handlers.
 
 ## Purpose
 
-These handlers receive events from the AMQP message bus and forward them to client logic coordinators via gRPC. They are the bridge between the event bus infrastructure and user-defined client logic.
+These handlers receive events from the event bus and forward them to client logic via gRPC. They are the bridge between the event bus infrastructure and user-defined client logic.
 
 ## Architecture
 
 ```
-[AMQP Event Bus] --> [core handlers] --> [client logic Coordinators]
+[Event Bus] --> [core handlers] --> [client logic]
                           |
                           v
                     (gRPC calls)
@@ -17,16 +17,18 @@ These handlers receive events from the AMQP message bus and forward them to clie
 
 ## Modules
 
-- **projector.rs** - `ProjectorEventHandler`: Receives events from AMQP, forwards to ProjectorCoordinator services. Handles EventBook repair (fetching missing history) and publishes projector output back to AMQP for streaming.
+- **projector.rs** - `ProjectorEventHandler`: Receives events from the bus and calls the client's ProjectorService.
 
-- **saga.rs** - `SagaEventHandler`: Receives events from AMQP, forwards to SagaCoordinator services. Executes saga-produced commands via CommandHandlerCoordinator and handles compensation when commands are rejected.
+- **saga.rs** - `SagaEventHandler`: Receives events from the bus and runs `orchestrate_saga`: calls the client's SagaService, delivers its commands to their aggregates' coordinators, and routes rejections back for compensation.
+
+- **process_manager.rs** - `ProcessManagerEventHandler`: Receives correlated events from the bus and runs `orchestrate_pm`.
 
 ## Used By
 
 - `angzarr-projector` sidecar binary
 - `angzarr-saga` sidecar binary
+- `angzarr-process-manager` sidecar binary
 
 ## See Also
 
-- `handlers/projectors/` - Actual projector implementations (log, stream)
-- `services/command_handler.rs` - Command handler coordinator (receives commands, not events)
+- `services/aggregate.rs` - Command handler coordinator (receives commands, not events)

@@ -11,18 +11,17 @@ use crate::discovery::ServiceDiscovery;
 use crate::dlq::{DeadLetterPublisher, NoopDeadLetterPublisher};
 use crate::orchestration::aggregate::grpc::GrpcAggregateContext;
 use crate::orchestration::aggregate::{
-    execute_command_pipeline, execute_command_with_retry, execute_fact_pipeline,
-    parse_command_cover, AggregateContext, ClientLogic, GrpcBusinessLogic, PipelineMode,
-    TemporalQuery,
+    execute_command_pipeline, execute_command_with_retry, execute_compensation_pipeline,
+    execute_fact_pipeline, ClientLogic, GrpcBusinessLogic, PipelineMode,
 };
+use crate::orchestration::channels::ChannelCache;
 use crate::proto::{
-    business_response,
     command_handler_coordinator_service_server::CommandHandlerCoordinatorService,
-    command_handler_service_client::CommandHandlerServiceClient, BusinessResponse, CommandRequest,
-    CommandResponse, ContextualCommand, EventRequest, FactInjectionResponse,
+    command_handler_service_client::CommandHandlerServiceClient, BusinessResponse,
+    CascadeErrorMode, CommandRequest, CommandResponse, EventRequest, FactInjectionResponse,
     SpeculateCommandHandlerRequest,
 };
-use crate::proto_ext::{CoverExt, SyncModeExt};
+use crate::proto_ext::{CascadeErrorModeExt, CoverExt, SyncModeExt};
 use crate::repository::SnapshotRepository;
 use crate::services::upcaster::Upcaster;
 use crate::storage::EventStore;
@@ -54,6 +53,12 @@ pub struct AggregateService {
     /// (R2-15). Hard-fail boot on init error happens at the call site,
     /// not here.
     dlq_publisher: Arc<dyn DeadLetterPublisher>,
+    /// The domain this coordinator owns. When set, commands and facts for any
+    /// other domain are refused instead of being written into this store.
+    domain: Option<String>,
+    /// Channels to saga/PM coordinators for CASCADE fan-out, shared by every
+    /// command this service handles.
+    channels: Arc<ChannelCache>,
 }
 
 impl AggregateService {
@@ -80,6 +85,25 @@ impl AggregateService {
             upcaster: None,
             limits: ResourceLimits::default(),
             dlq_publisher: Arc::new(NoopDeadLetterPublisher),
+            domain: None,
+            channels: Arc::new(ChannelCache::new()),
+        }
+    }
+
+    /// Restrict this coordinator to one aggregate domain.
+    pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
+        self.domain = Some(domain.into());
+        self
+    }
+
+    /// Refuse a book addressed to a domain this coordinator does not own.
+    fn check_domain(&self, book_domain: &str) -> Result<(), Status> {
+        match &self.domain {
+            Some(own) if own != book_domain => Err(Status::invalid_argument(format!(
+                "{}{book_domain} (this coordinator serves {own})",
+                super::errmsg::DOMAIN_MISMATCH
+            ))),
+            _ => Ok(()),
         }
     }
 
@@ -125,6 +149,8 @@ impl AggregateService {
             upcaster: None,
             limits: ResourceLimits::default(),
             dlq_publisher: Arc::new(NoopDeadLetterPublisher),
+            domain: None,
+            channels: Arc::new(ChannelCache::new()),
         }
     }
 
@@ -136,7 +162,8 @@ impl AggregateService {
             self.discovery.clone(),
             self.event_bus.clone(),
         )
-        .with_dlq_publisher(self.dlq_publisher.clone());
+        .with_dlq_publisher(self.dlq_publisher.clone())
+        .with_channel_cache(self.channels.clone());
         if let Some(ref upcaster) = self.upcaster {
             ctx = ctx.with_upcaster(upcaster.clone());
         }
@@ -152,7 +179,8 @@ impl AggregateService {
             self.event_bus.clone(),
         )
         .with_sync_mode(sync_mode)
-        .with_dlq_publisher(self.dlq_publisher.clone());
+        .with_dlq_publisher(self.dlq_publisher.clone())
+        .with_channel_cache(self.channels.clone());
         if let Some(ref upcaster) = self.upcaster {
             ctx = ctx.with_upcaster(upcaster.clone());
         }
@@ -188,10 +216,14 @@ impl CommandHandlerCoordinatorService for AggregateService {
             Status::invalid_argument(super::errmsg::COMMAND_REQUEST_MISSING_COMMAND)
         })?;
 
-        // Validate command book before processing
         validate_command_book(&command_book, &self.limits)?;
+        self.check_domain(command_book.domain())?;
 
-        let mut ctx = self.create_context_for_sync_mode(sync_request.sync_mode);
+        let mut ctx = self
+            .create_context_for_sync_mode(sync_request.sync_mode)
+            .with_cascade_error_mode(CascadeErrorMode::or_default_fail_fast(
+                sync_request.cascade_error_mode,
+            ));
         if let Some(ref cascade_id) = sync_request.cascade_id {
             ctx = ctx.with_cascade_id(cascade_id);
         }
@@ -213,8 +245,8 @@ impl CommandHandlerCoordinatorService for AggregateService {
             Status::invalid_argument(super::errmsg::SPECULATE_AGG_MISSING_COMMAND)
         })?;
 
-        // Validate command book before processing
         validate_command_book(&command_book, &self.limits)?;
+        self.check_domain(command_book.domain())?;
 
         let (as_of_sequence, as_of_timestamp) = match speculate_req.point_in_time {
             Some(temporal) => match temporal.point_in_time {
@@ -257,49 +289,11 @@ impl CommandHandlerCoordinatorService for AggregateService {
         let command_book = sync_request.command.ok_or_else(|| {
             Status::invalid_argument(super::errmsg::COMMAND_REQUEST_MISSING_COMMAND)
         })?;
-        let (domain, root_uuid) = parse_command_cover(&command_book)?;
-        let edition = command_book.edition().unwrap_or_default().to_string();
-        let correlation_id =
-            crate::orchestration::correlation::extract_correlation_id(&command_book)?;
+        validate_command_book(&command_book, &self.limits)?;
+        self.check_domain(command_book.domain())?;
 
         let ctx = self.create_context_for_sync_mode(sync_request.sync_mode);
-
-        // Load prior events
-        let prior_events = ctx
-            .load_prior_events(&domain, &edition, root_uuid, &TemporalQuery::Current)
-            .await?;
-
-        // Transform events (upcasting)
-        let prior_events = ctx.transform_events(&domain, prior_events).await?;
-
-        // Invoke business logic
-        let contextual_command = ContextualCommand {
-            events: Some(prior_events.clone()),
-            command: Some(command_book),
-        };
-
-        let response = self.business.invoke(contextual_command).await?;
-
-        // If business returned events, persist them
-        if let Some(business_response::Result::Events(ref events)) = response.result {
-            if !events.pages.is_empty() {
-                ctx.persist_events(
-                    &prior_events,
-                    events,
-                    &domain,
-                    &edition,
-                    root_uuid,
-                    &correlation_id,
-                    None,
-                    None, // speculative path doesn't carry source provenance
-                )
-                .await?;
-
-                // Post-persist: publish to bus
-                ctx.post_persist(events).await?;
-            }
-        }
-
+        let response = execute_compensation_pipeline(&ctx, &*self.business, command_book).await?;
         Ok(Response::new(response))
     }
 
@@ -327,6 +321,7 @@ impl CommandHandlerCoordinatorService for AggregateService {
         let fact_events = sync_event_book
             .events
             .ok_or_else(|| Status::invalid_argument(super::errmsg::EVENT_REQUEST_MISSING_EVENTS))?;
+        self.check_domain(fact_events.domain())?;
 
         let ctx = self.create_context_for_sync_mode(sync_event_book.sync_mode);
 

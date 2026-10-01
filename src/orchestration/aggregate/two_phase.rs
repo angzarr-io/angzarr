@@ -50,9 +50,11 @@ impl TwoPhaseContext {
 pub struct TwoPhaseResult {
     /// Transformed event book for business logic.
     pub events: EventBook,
-    /// Sequences that are uncommitted (for conflict detection).
+    /// Sequences of unresolved pages belonging to another cascade — neither
+    /// confirmed, revoked, nor the current cascade's own. These are the pages
+    /// whose fields an in-flight cascade holds locked.
     pub uncommitted_sequences: HashSet<u32>,
-    /// Cascade IDs of uncommitted events (for conflict reporting).
+    /// Cascade IDs of those unresolved pages.
     pub uncommitted_cascade_ids: HashSet<String>,
 }
 
@@ -179,12 +181,6 @@ fn transform_event_page(
         return page.clone();
     }
 
-    // Uncommitted event - track for conflict detection
-    uncommitted_sequences.insert(sequence);
-    if let Some(cid) = &page.cascade_id {
-        uncommitted_cascade_ids.insert(cid.clone());
-    }
-
     // Revoked always wins (even if also confirmed - defensive)
     if revoked.contains(&sequence) {
         return make_noop_with_cascade(page, page.cascade_id.as_deref().unwrap_or(""), "revoked");
@@ -203,7 +199,11 @@ fn transform_event_page(
         }
     }
 
-    // Uncommitted from other cascade → NoOp
+    // Unresolved page of another cascade: hidden, and tracked as locked.
+    uncommitted_sequences.insert(sequence);
+    if let Some(cid) = &page.cascade_id {
+        uncommitted_cascade_ids.insert(cid.clone());
+    }
     make_noop_with_cascade(
         page,
         page.cascade_id.as_deref().unwrap_or(""),

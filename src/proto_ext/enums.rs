@@ -7,7 +7,7 @@
 //! unknown wire ints (a newer peer's value, or garbage) to the same
 //! defaults instead of erroring.
 
-use crate::proto::{MergeStrategy, SyncMode};
+use crate::proto::{CascadeErrorMode, MergeStrategy, SyncMode};
 
 /// Extension trait for [`SyncMode`] wire-value resolution.
 pub trait SyncModeExt {
@@ -32,6 +32,19 @@ pub trait MergeStrategyExt {
 impl MergeStrategyExt for MergeStrategy {
     fn or_default_commutative(raw: i32) -> MergeStrategy {
         MergeStrategy::try_from(raw).unwrap_or(MergeStrategy::MergeCommutative)
+    }
+}
+
+/// Extension trait for [`CascadeErrorMode`] wire-value resolution.
+pub trait CascadeErrorModeExt {
+    /// Resolve a wire `i32` to an effective [`CascadeErrorMode`]; unknown
+    /// ints resolve to [`CascadeErrorMode::CascadeErrorFailFast`].
+    fn or_default_fail_fast(raw: i32) -> CascadeErrorMode;
+}
+
+impl CascadeErrorModeExt for CascadeErrorMode {
+    fn or_default_fail_fast(raw: i32) -> CascadeErrorMode {
+        CascadeErrorMode::try_from(raw).unwrap_or(CascadeErrorMode::CascadeErrorFailFast)
     }
 }
 

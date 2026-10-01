@@ -70,7 +70,7 @@ async fn persist_publishes_pages_from_process_events() {
     let pm_root = Uuid::new_v4();
 
     let book = pm_book("pm", pm_root, "corr", &[0, 1, 2]);
-    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &book, "corr").await;
+    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &book, "corr", None, None).await;
     assert!(matches!(outcome, CommandOutcome::Success(_)));
 
     let published = bus.take_published().await;
@@ -97,13 +97,14 @@ async fn persist_sequence_conflict_maps_to_retryable() {
     // First persist claims sequence 0.
     let first = pm_book("pm", pm_root, "corr", &[0]);
     assert!(matches!(
-        persist_pm_event_book(&store, &bus_dyn, "pm", &first, "corr").await,
+        persist_pm_event_book(&store, &bus_dyn, "pm", &first, "corr", None, None).await,
         CommandOutcome::Success(_)
     ));
 
     // A "concurrent PM instance" persists at the same sequence.
     let conflicting = pm_book("pm", pm_root, "corr", &[0]);
-    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &conflicting, "corr").await;
+    let outcome =
+        persist_pm_event_book(&store, &bus_dyn, "pm", &conflicting, "corr", None, None).await;
     match outcome {
         CommandOutcome::Retryable { reason, .. } => {
             assert!(
@@ -126,7 +127,7 @@ async fn persist_publishes_book_with_cover_present() {
     let pm_root = Uuid::new_v4();
 
     let book = pm_book("pm-domain", pm_root, "corr", &[0]);
-    persist_pm_event_book(&store, &bus_dyn, "pm-domain", &book, "corr").await;
+    persist_pm_event_book(&store, &bus_dyn, "pm-domain", &book, "corr", None, None).await;
 
     let published = bus.take_published().await;
     let cover = published[0]
@@ -153,7 +154,7 @@ async fn persist_stamps_in_flight_correlation_id_on_cover() {
 
     // PM service returned a cover with NO correlation_id.
     let book = pm_book("pm", pm_root, "", &[0]);
-    persist_pm_event_book(&store, &bus_dyn, "pm", &book, "in-flight").await;
+    persist_pm_event_book(&store, &bus_dyn, "pm", &book, "in-flight", None, None).await;
 
     let published = bus.take_published().await;
     assert_eq!(
@@ -183,7 +184,8 @@ async fn persist_stores_under_correlation_derived_root_not_cover_root() {
     let cover_root = Uuid::new_v4();
 
     let book = pm_book("pm", cover_root, "friendly-flow-7", &[0]);
-    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &book, "friendly-flow-7").await;
+    let outcome =
+        persist_pm_event_book(&store, &bus_dyn, "pm", &book, "friendly-flow-7", None, None).await;
     assert!(matches!(outcome, CommandOutcome::Success(_)));
 
     let derived = "friendly-flow-7".correlation_root();
@@ -221,7 +223,7 @@ async fn persist_publishes_cover_with_correlation_derived_root() {
     let cover_root = Uuid::new_v4(); // differs from the derived root
 
     let book = pm_book("pm", cover_root, "friendly-flow-7", &[0]);
-    persist_pm_event_book(&store, &bus_dyn, "pm", &book, "friendly-flow-7").await;
+    persist_pm_event_book(&store, &bus_dyn, "pm", &book, "friendly-flow-7", None, None).await;
 
     let published = bus.take_published().await;
     assert_eq!(published.len(), 1);
@@ -268,7 +270,8 @@ async fn persist_add_meta_carries_correlation_id_and_ext() {
     let mut book = pm_book("pm", Uuid::new_v4(), "corr-meta", &[0]);
     book.cover.as_mut().unwrap().ext = Some(parent_ext.clone());
 
-    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &book, "corr-meta").await;
+    let outcome =
+        persist_pm_event_book(&store, &bus_dyn, "pm", &book, "corr-meta", None, None).await;
     assert!(matches!(outcome, CommandOutcome::Success(_)));
 
     let books = mock_store
@@ -300,7 +303,7 @@ async fn persist_returns_rejected_internal_when_store_add_fails() {
     let pm_root = Uuid::new_v4();
 
     let book = pm_book("pm", pm_root, "corr", &[0]);
-    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &book, "corr").await;
+    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &book, "corr", None, None).await;
     match outcome {
         CommandOutcome::Rejected { code, .. } => assert_eq!(code, tonic::Code::Internal),
         other => panic!("expected Rejected, got {other:?}"),
@@ -310,4 +313,124 @@ async fn persist_returns_rejected_internal_when_store_add_fails() {
         0,
         "no publish must occur when storage rejects the add"
     );
+}
+
+/// Captures dead letters.
+#[derive(Default)]
+struct CapturingDlq(tokio::sync::Mutex<Vec<crate::dlq::AngzarrDeadLetter>>);
+
+#[async_trait::async_trait]
+impl crate::dlq::DeadLetterPublisher for CapturingDlq {
+    async fn publish(
+        &self,
+        dead_letter: crate::dlq::AngzarrDeadLetter,
+    ) -> Result<(), crate::dlq::DlqError> {
+        self.0.lock().await.push(dead_letter);
+        Ok(())
+    }
+}
+
+/// PM events that are persisted but cannot be published are retried and
+/// then captured to the DLQ (transient) — the persist still succeeds.
+#[tokio::test(start_paused = true)]
+async fn persist_publish_failure_retries_then_dead_letters() {
+    let store: Arc<dyn EventStore> = Arc::new(MockEventStore::new());
+    let bus = Arc::new(MockEventBus::new());
+    bus.set_fail_on_publish(true).await;
+    let bus_dyn: Arc<dyn EventBus> = bus.clone();
+    let dlq = Arc::new(CapturingDlq::default());
+    let dlq_dyn: Arc<dyn crate::dlq::DeadLetterPublisher> = dlq.clone();
+
+    let book = pm_book("pm", Uuid::new_v4(), "corr", &[0]);
+    let start = tokio::time::Instant::now();
+    let outcome = persist_pm_event_book(
+        &store,
+        &bus_dyn,
+        "pm",
+        &book,
+        "corr",
+        Some((&dlq_dyn, "pm-flow")),
+        None,
+    )
+    .await;
+    assert!(matches!(outcome, CommandOutcome::Success(_)));
+    assert_eq!(
+        start.elapsed(),
+        std::time::Duration::from_millis(600),
+        "three attempts with 200ms then 400ms between them"
+    );
+    let captured = dlq.0.lock().await;
+    assert_eq!(captured.len(), 1);
+    assert_eq!(captured[0].source_component, "pm-flow");
+    assert_eq!(captured[0].source_component_type, "process_manager");
+    match &captured[0].rejection_details {
+        Some(crate::dlq::RejectionDetails::EventProcessingFailed(d)) => {
+            assert!(d.is_transient);
+            assert_eq!(d.retry_count, 3);
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+    match &captured[0].payload {
+        crate::dlq::DeadLetterPayload::Events(events) => {
+            assert_eq!(events.pages.len(), 1);
+            assert_eq!(events.cover.as_ref().unwrap().correlation_id, "corr");
+        }
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+/// A publish that succeeds is not dead-lettered.
+#[tokio::test]
+async fn persist_publish_success_is_not_dead_lettered() {
+    let store: Arc<dyn EventStore> = Arc::new(MockEventStore::new());
+    let bus_dyn: Arc<dyn EventBus> = Arc::new(MockEventBus::new());
+    let dlq = Arc::new(CapturingDlq::default());
+    let dlq_dyn: Arc<dyn crate::dlq::DeadLetterPublisher> = dlq.clone();
+    let book = pm_book("pm", Uuid::new_v4(), "corr", &[0]);
+    persist_pm_event_book(
+        &store,
+        &bus_dyn,
+        "pm",
+        &book,
+        "corr",
+        Some((&dlq_dyn, "pm-flow")),
+        None,
+    )
+    .await;
+    assert!(dlq.0.lock().await.is_empty());
+}
+
+/// PM events persisted for a trigger are found again by that trigger's
+/// provenance, which is what lets a second delivery be skipped.
+#[tokio::test]
+async fn persisted_trigger_is_recognised_by_its_provenance() {
+    use crate::orchestration::process_manager::ProcessManagerContext;
+    use crate::orchestration::shared::CorrelationRootExt;
+    let store: Arc<dyn EventStore> = Arc::new(MockEventStore::new());
+    let bus: Arc<dyn EventBus> = Arc::new(MockEventBus::new());
+    let trigger = crate::storage::SourceInfo::new("", "order", Uuid::new_v4(), 8, "pm-flow", 0);
+    let other = crate::storage::SourceInfo::new("", "order", trigger.root, 9, "pm-flow", 0);
+
+    let channel = tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy();
+    let ctx = super::GrpcPMContext::new(
+        Arc::new(tokio::sync::Mutex::new(
+            crate::proto::process_manager_service_client::ProcessManagerServiceClient::new(channel),
+        )),
+        store.clone(),
+        bus,
+        "pm".to_string(),
+        Arc::new(crate::dlq::NoopDeadLetterPublisher),
+        "pm-flow".to_string(),
+        Arc::new(crate::orchestration::process_manager::outbox::InMemoryCommandOutbox::new()),
+    );
+    assert!(!ctx.trigger_handled(&trigger, "", "corr").await.unwrap());
+
+    let book = pm_book("pm", "corr".correlation_root(), "corr", &[0]);
+    assert!(matches!(
+        ctx.persist_pm_events_for_trigger(&book, "corr", &trigger)
+            .await,
+        CommandOutcome::Success(_)
+    ));
+    assert!(ctx.trigger_handled(&trigger, "", "corr").await.unwrap());
+    assert!(!ctx.trigger_handled(&other, "", "corr").await.unwrap());
 }

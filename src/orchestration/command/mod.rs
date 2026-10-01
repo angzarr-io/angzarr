@@ -8,7 +8,7 @@ pub mod grpc;
 use async_trait::async_trait;
 use tonic::Code;
 
-use crate::proto::{CommandBook, CommandResponse, EventBook, SyncMode};
+use crate::proto::{CascadeErrorMode, CommandBook, CommandResponse, EventBook, SyncMode};
 
 /// Outcome of executing a single command.
 #[derive(Debug)]
@@ -37,9 +37,69 @@ pub enum CommandOutcome {
 pub trait CommandExecutor: Send + Sync {
     /// Execute a command and classify the result.
     ///
-    /// The `sync_mode` parameter controls:
-    /// - `Unspecified`: Async execution (commands go to bus, results via notification)
-    /// - `Simple`: Sync projectors only, sagas async, events published to bus
-    /// - `Cascade`: Full sync chain (projectors + sagas sync, no bus publishing)
+    /// `sync_mode` is forwarded to the destination aggregate:
+    /// - `Async`: the destination publishes and returns; downstream runs off the bus
+    /// - `Simple`: the destination also waits for sync projectors
+    /// - `Cascade`: the destination also runs sagas/PMs synchronously
+    /// - `Decision`: accept/reject only, downstream async
+    /// - `Isolated`: persist only, no downstream
     async fn execute(&self, command: CommandBook, sync_mode: SyncMode) -> CommandOutcome;
 }
+
+/// What happens when a saga- or PM-emitted command cannot be delivered.
+///
+/// Bus-driven sagas and PMs (`None` error mode) have no caller to report to: a
+/// rejection is compensated at the source and dead-lettered, and a command
+/// that exhausts its retries is dead-lettered. A synchronous caller (CASCADE)
+/// chooses with its `CascadeErrorMode`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeliveryPolicy {
+    /// Compensate + DLQ, then carry on; the orchestration succeeds.
+    Background,
+    /// Stop at the first failure and fail the orchestration.
+    FailFast,
+    /// Stop at the first failure, write Compensate markers to the targets
+    /// of the commands already delivered, and fail.
+    Compensate,
+    /// Deliver every command; the orchestration succeeds with the commands
+    /// that were delivered.
+    Continue,
+    /// Dead-letter failures and carry on; the orchestration succeeds.
+    DeadLetter,
+}
+
+impl DeliveryPolicy {
+    pub(crate) fn from_mode(mode: Option<CascadeErrorMode>) -> Self {
+        match mode {
+            None => DeliveryPolicy::Background,
+            Some(CascadeErrorMode::CascadeErrorFailFast) => DeliveryPolicy::FailFast,
+            Some(CascadeErrorMode::CascadeErrorCompensate) => DeliveryPolicy::Compensate,
+            Some(CascadeErrorMode::CascadeErrorContinue) => DeliveryPolicy::Continue,
+            Some(CascadeErrorMode::CascadeErrorDeadLetter) => DeliveryPolicy::DeadLetter,
+        }
+    }
+
+    /// Whether a failure ends delivery of the remaining commands.
+    pub(crate) fn stops_on_failure(self) -> bool {
+        matches!(self, DeliveryPolicy::FailFast | DeliveryPolicy::Compensate)
+    }
+
+    /// Whether a rejected command is routed back to its source for
+    /// compensation (the bus-driven rejection flow). COMPENSATE instead
+    /// writes Compensate markers for the commands already delivered.
+    pub(crate) fn compensates(self) -> bool {
+        matches!(self, DeliveryPolicy::Background)
+    }
+
+    /// Whether failed commands are dead-lettered.
+    pub(crate) fn dead_letters(self) -> bool {
+        matches!(
+            self,
+            DeliveryPolicy::Background | DeliveryPolicy::DeadLetter
+        )
+    }
+}
+
+#[cfg(test)]
+#[path = "mod.test.rs"]
+mod tests;

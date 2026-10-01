@@ -3,16 +3,23 @@
 //! Defines the contracts for aggregate context (storage/persistence) and
 //! client logic (business rule invocation).
 
-use std::sync::Arc;
-
 use async_trait::async_trait;
 use tonic::Status;
 use uuid::Uuid;
 
 use crate::proto::{
-    AngzarrDeferredSequence, BusinessResponse, CommandBook, ContextualCommand, EventBook,
-    Projection,
+    AngzarrDeferredSequence, BusinessResponse, CascadeReactionError, CommandBook,
+    ContextualCommand, EventBook, Projection,
 };
+
+/// What the synchronous downstream fan-out produced.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SyncFanout {
+    /// Sync projector results.
+    pub projections: Vec<Projection>,
+    /// Reactions that failed under CASCADE_ERROR_CONTINUE.
+    pub reaction_errors: Vec<CascadeReactionError>,
+}
 
 use super::types::{FactContext, TemporalQuery};
 
@@ -99,9 +106,21 @@ pub trait AggregateContext: Send + Sync {
         source_info: Option<&crate::storage::SourceInfo>,
     ) -> Result<PersistOutcome, Status>;
 
-    /// Publish to event bus AND call sync projectors via service discovery.
-    /// Returns projections from sync projectors.
-    async fn post_persist(&self, events: &EventBook) -> Result<Vec<Projection>, Status>;
+    /// Publish persisted events to the event bus.
+    ///
+    /// The pipeline retries this in place and dead-letters the book when it
+    /// keeps failing; it never re-runs the sync fan-out because of a publish
+    /// failure.
+    async fn publish(&self, events: &EventBook) -> Result<(), Status>;
+
+    /// Synchronous downstream fan-out: SIMPLE / CASCADE sync projectors, and
+    /// CASCADE sagas and PMs.
+    ///
+    /// Runs once, after publish. Its errors reach the caller (subject to the
+    /// request's `CascadeErrorMode`); the events stay persisted and published.
+    async fn sync_fanout(&self, _events: &EventBook) -> Result<SyncFanout, Status> {
+        Ok(SyncFanout::default())
+    }
 
     /// Optional: pre-validate sequence before loading events (gRPC fast-path).
     /// On mismatch, may return Status with EventBook in details.
@@ -235,25 +254,4 @@ pub trait ClientLogic: Send + Sync {
             "Replay not implemented. Aggregate must implement replay() for MERGE_COMMUTATIVE field detection.",
         ))
     }
-}
-
-/// Factory for creating per-domain aggregate contexts.
-///
-/// Captures long-lived dependencies (storage, event bus, discovery) and produces
-/// a fresh `AggregateContext` for each command execution. Local and gRPC modes
-/// provide different implementations.
-///
-/// One factory per aggregate domain, matching the saga/PM pattern:
-/// - `SagaContextFactory` → one per saga
-/// - `PMContextFactory` → one per process manager
-/// - `AggregateContextFactory` → one per aggregate domain
-pub trait AggregateContextFactory: Send + Sync {
-    /// Create an aggregate context for command execution.
-    fn create(&self) -> Arc<dyn AggregateContext>;
-
-    /// The domain this factory handles.
-    fn domain(&self) -> &str;
-
-    /// The client logic for this domain's business rules.
-    fn client_logic(&self) -> Arc<dyn ClientLogic>;
 }

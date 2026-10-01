@@ -9,16 +9,16 @@ use tonic::Status;
 use uuid::Uuid;
 
 use crate::proto::{
-    page_header::SequenceType, CommandBook, CommandResponse, ContextualCommand, EventBook,
-    MergeStrategy,
+    business_response, page_header::SequenceType, BusinessResponse, CommandBook, CommandResponse,
+    ContextualCommand, EventBook, MergeStrategy,
 };
-use crate::proto_ext::{calculate_set_next_seq, CoverExt, EventBookExt};
+use crate::proto_ext::{calculate_set_next_seq, EventBookExt};
 use crate::utils::response_builder::extract_events_from_response;
 use crate::utils::retry::{is_retryable_status, run_with_retry, RetryOutcome, RetryableOperation};
 
 use super::merge::{
-    check_cascade_conflict, check_commutative_overlap, CascadeConflictResult,
-    CommutativeMergeResult,
+    check_cascade_conflict, check_commutative_overlap, window_base_from_prior,
+    CascadeConflictResult, CommutativeMergeResult,
 };
 use super::parsing::{
     extract_angzarr_deferred, extract_command_sequence, extract_edition, extract_event_edition,
@@ -79,14 +79,13 @@ impl<'a> RetryableOperation for AggregateOperation<'a> {
     }
 
     async fn try_execute(&mut self) -> RetryOutcome<Self::Success, Self::Failure> {
-        match execute_mode(self.ctx, self.business, self.command_book.clone()).await {
+        match execute_attempt(self.ctx, self.business, self.command_book.clone()).await {
             Ok(response) => RetryOutcome::Success(response),
-            Err(status) => {
-                if is_retryable_status(&status) {
-                    RetryOutcome::Retryable(status)
-                } else {
-                    RetryOutcome::Fatal(status)
-                }
+            Err(AttemptError::BeforePersist(status)) if is_retryable_in_place(&status) => {
+                RetryOutcome::Retryable(status)
+            }
+            Err(AttemptError::BeforePersist(status) | AttemptError::AfterPersist(status)) => {
+                RetryOutcome::Fatal(status)
             }
         }
     }
@@ -122,38 +121,22 @@ pub async fn execute_command_with_retry(
 /// header into an explicit Sequence. Persist passes this to storage so a future
 /// redelivery's `check_deferred_idempotency` lookup can find these events by
 /// `(source.domain, source.root, source_seq, source_component, command_index)`.
-fn extract_source_info(command_book: &CommandBook) -> Option<crate::storage::SourceInfo> {
-    let deferred = extract_angzarr_deferred(command_book)?;
-    let source = deferred.source.as_ref()?;
-    if source.domain.is_empty() {
-        return None;
+fn extract_source_info(
+    command_book: &CommandBook,
+) -> Result<Option<crate::storage::SourceInfo>, Status> {
+    match extract_angzarr_deferred(command_book) {
+        Some(deferred) => super::parsing::deferred_source_info(deferred),
+        None => Ok(None),
     }
-    let root_proto = source.root.as_ref()?;
-    let source_root = Uuid::from_slice(&root_proto.value).ok()?;
-    let source_edition = source
-        .edition
-        .as_ref()
-        .map(|e| e.name.as_str())
-        .unwrap_or("");
-    Some(crate::storage::SourceInfo::new(
-        source_edition,
-        source.domain.as_str(),
-        source_root,
-        deferred.source_seq,
-        deferred.source_component.as_str(),
-        deferred.command_index,
-    ))
 }
 
 /// For a deferred (saga-produced) command, return the cached result if it was
 /// already processed. `Ok(Some(_))` short-circuits the pipeline.
 ///
-/// The cached EventBook is republished (`post_persist`) before returning: if the
-/// first attempt persisted events but failed to publish (bus temporarily
-/// unavailable), this ensures they eventually reach the bus on retry. The
-/// in-flight command's correlation_id is stamped onto the rebuilt book first
-/// because `build_event_book` hardcodes `correlation_id: ""` and PMs never fire
-/// on events with an empty correlation_id (C-04).
+/// The cached EventBook is republished before returning, so events whose
+/// first publish failed reach the bus on redelivery. The in-flight command's
+/// correlation_id is stamped onto the rebuilt book first: storage does not
+/// return it, and PMs ignore events without one.
 async fn try_deferred_idempotency_replay(
     ctx: &dyn AggregateContext,
     command_book: &CommandBook,
@@ -184,125 +167,166 @@ async fn try_deferred_idempotency_replay(
         }
     }
 
-    let projections = ctx.post_persist(&existing_events).await?;
+    ctx.publish(&existing_events).await?;
+    let fanout = ctx.sync_fanout(&existing_events).await?;
     Ok(Some(CommandResponse {
         events: Some(existing_events),
-        projections,
+        projections: fanout.projections,
+        reaction_errors: fanout.reaction_errors,
     }))
 }
 
 /// Whether coordinator-level pre-validation should run.
 ///
-/// Skipped for: `AGGREGATE_HANDLES` (aggregate owns concurrency), deferred
-/// commands (sequence unknown until load), and explicit divergence (expected is
-/// the branch point, not current aggregate state).
+/// Only STRICT rejects on a bare sequence mismatch, so only STRICT benefits
+/// from the cheap pre-load check. COMMUTATIVE and MANUAL must reach the
+/// post-execution field-overlap gate (a stale sequence alone is not a
+/// conflict for them), AGGREGATE_HANDLES owns its concurrency, deferred
+/// commands claim no write position, and an explicit divergence names a
+/// branch point rather than the current head.
 fn should_pre_validate(
     merge_strategy: MergeStrategy,
     is_deferred: bool,
     has_explicit_divergence: bool,
 ) -> bool {
-    merge_strategy != MergeStrategy::MergeAggregateHandles
-        && !is_deferred
-        && !has_explicit_divergence
+    merge_strategy == MergeStrategy::MergeStrict && !is_deferred && !has_explicit_divergence
+}
+
+/// FAILED_PRECONDITION for a sequence-mismatch outcome, carrying the
+/// aggregate's current EventBook in the status details so the caller can
+/// rebuild the command against fresh state without another fetch.
+///
+/// `prefix` is one of the `errmsg::SEQUENCE_MISMATCH*` constants; every one of
+/// them starts with `Sequence mismatch:`, which callers classify as retryable
+/// after a refresh.
+fn sequence_mismatch_status(
+    prefix: &str,
+    expected: u32,
+    actual: u32,
+    current: &EventBook,
+) -> Status {
+    use prost::Message;
+    Status::with_details(
+        tonic::Code::FailedPrecondition,
+        format!("{prefix}{expected}, aggregate at {actual}"),
+        current.encode_to_vec().into(),
+    )
+}
+
+/// Whether a failed pipeline attempt is worth re-running in place with the
+/// identical CommandBook.
+///
+/// A merge-gate rejection (`Sequence mismatch:` — STRICT mismatch,
+/// COMMUTATIVE overlap, replay-unavailable degrade) is decided by the
+/// command's own `expected` sequence, which an in-place re-run does not
+/// change, so it goes straight back to the caller to refresh and resubmit.
+/// Storage races at persist (`Sequence conflict:`) and transient
+/// infrastructure codes reload fresh state on the next attempt and can
+/// succeed.
+fn is_retryable_in_place(status: &Status) -> bool {
+    is_retryable_status(status)
+        && !(status.code() == tonic::Code::FailedPrecondition
+            && status
+                .message()
+                .starts_with(crate::orchestration::errmsg::SEQUENCE_MISMATCH_CLASS))
+}
+
+/// Prior events loaded for a handler call.
+struct LoadedPrior {
+    /// Upcast events before the 2PC view (uncommitted pages still flagged);
+    /// the cascade-conflict gate partitions on these.
+    raw: EventBook,
+    /// What the handler sees: own cascade visible, unresolved other cascades
+    /// and framework markers as NoOp, revoked pages as NoOp.
+    view: EventBook,
+    /// Sequences of other cascades' unresolved pages (fields they lock).
+    locked_sequences: std::collections::HashSet<u32>,
+}
+
+/// Load, upcast and 2PC-resolve prior events. Every pipeline mode (execute,
+/// speculative, fact) hands the handler this same view.
+async fn load_prior(
+    ctx: &dyn AggregateContext,
+    domain: &str,
+    edition: &str,
+    root: Uuid,
+    temporal: &TemporalQuery,
+    explicit_divergence: Option<u32>,
+) -> Result<LoadedPrior, Status> {
+    let loaded = ctx
+        .load_prior_events_with_divergence(domain, edition, root, temporal, explicit_divergence)
+        .await?;
+    let raw = ctx.transform_events(domain, loaded).await?;
+    let (view, locked_sequences) = apply_two_phase_transform(ctx, &raw);
+    Ok(LoadedPrior {
+        raw,
+        view,
+        locked_sequences,
+    })
 }
 
 /// Apply the 2-phase-commit transform to prior events.
 ///
-/// Returns the business-visible view (own cascade visible, other cascades hidden
-/// as NoOp) and whether any *other* cascade has uncommitted events in flight.
+/// Returns the business-visible view (own cascade visible, other cascades
+/// hidden as NoOp) and, for a command running inside a cascade, the sequences
+/// of other cascades' unresolved pages — the fields those cascades lock.
 fn apply_two_phase_transform(
     ctx: &dyn AggregateContext,
     prior_events: &EventBook,
-) -> (EventBook, bool) {
-    if let Some(cascade_id) = ctx.cascade_id() {
-        let result =
-            transform_for_two_phase(prior_events, &TwoPhaseContext::for_handler(cascade_id));
-        let has_uncommitted = !result.uncommitted_cascade_ids.is_empty();
-        (result.events, has_uncommitted)
-    } else {
-        let result = transform_for_two_phase(prior_events, &TwoPhaseContext::standard());
-        (result.events, false)
+) -> (EventBook, std::collections::HashSet<u32>) {
+    match ctx.cascade_id() {
+        Some(cascade_id) => {
+            let result =
+                transform_for_two_phase(prior_events, &TwoPhaseContext::for_handler(cascade_id));
+            (result.events, result.uncommitted_sequences)
+        }
+        None => {
+            let result = transform_for_two_phase(prior_events, &TwoPhaseContext::standard());
+            (result.events, Default::default())
+        }
     }
 }
 
-/// Enforce merge-strategy sequence validation. Only called on `expected !=
-/// actual`. `Ok(())` proceeds; `Err` aborts the command.
+/// Upfront merge-strategy gate, run only when a client command's `expected`
+/// differs from the head.
 ///
-/// STRICT is skipped for deferred commands (they never claim a destination
-/// sequence, so optimistic concurrency is meaningless and would loop forever);
-/// COMMUTATIVE defers to the post-execution field-overlap check; MANUAL routes
-/// to the DLQ for human review — except for deferred commands, which (like
-/// STRICT) never claim a sequence, so their DLQ decision is deferred to the
-/// post-execution field-overlap gate (`enforce_deferred_manual_gate`, D-7);
-/// AGGREGATE_HANDLES self-manages (H-18).
-async fn enforce_merge_strategy(
-    ctx: &dyn AggregateContext,
-    command_book: &CommandBook,
+/// STRICT rejects immediately. COMMUTATIVE and MANUAL decide after execution,
+/// once the handler's events reveal which fields the command touched.
+/// AGGREGATE_HANDLES self-manages.
+fn enforce_strict_gate(
     merge_strategy: MergeStrategy,
-    expected: u32,
-    actual: u32,
-    domain: &str,
-    is_deferred: bool,
+    window: SeqWindow,
+    current: &EventBook,
 ) -> Result<(), Status> {
-    match merge_strategy {
-        MergeStrategy::MergeStrict => {
-            // STRICT: FAILED_PRECONDITION (retryable) drives the update-and-retry
-            // loop, which reloads fresh state and retries.
-            if !is_deferred {
-                return Err(Status::failed_precondition(format!(
-                    "{}{expected}, aggregate at {actual}",
-                    crate::orchestration::errmsg::SEQUENCE_MISMATCH
-                )));
-            }
-        }
-        MergeStrategy::MergeCommutative => {
-            tracing::debug!(
-                expected,
-                actual,
-                "COMMUTATIVE: sequence mismatch, will check field overlap post-execution"
-            );
-        }
-        MergeStrategy::MergeManual => {
-            // MANUAL: a genuine sequence conflict routes to the DLQ for human
-            // review, returning ABORTED (non-retryable).
-            //
-            // Deferred (saga-produced) commands are the exception (D-7): they
-            // never claim a destination sequence — `expected` is the saga's
-            // observed basis (`basis_seq`; 0 legacy), so `expected != actual`
-            // fires whenever the destination advanced past that basis —
-            // which is NOT by itself a conflict. DLQ'ing them here would
-            // dead-letter every such deferred MANUAL command. Instead their
-            // DLQ decision is deferred to the post-execution field-overlap
-            // gate (`enforce_deferred_manual_gate`), which DLQs only on a
-            // genuine field conflict within `basis..actual`. (Mirrors the
-            // STRICT `!is_deferred` skip above.)
-            if !is_deferred {
-                ctx.send_to_dlq(command_book, expected, actual, domain)
-                    .await;
-                return Err(Status::aborted(format!(
-                    "{}{expected}, aggregate at {actual}{}",
-                    crate::orchestration::errmsg::SEQUENCE_MISMATCH,
-                    crate::orchestration::errmsg::SEQUENCE_MISMATCH_DLQ_SUFFIX
-                )));
-            }
-        }
-        MergeStrategy::MergeAggregateHandles => {
-            // No validation - aggregate handles it.
-        }
+    if merge_strategy == MergeStrategy::MergeStrict {
+        return Err(sequence_mismatch_status(
+            crate::orchestration::errmsg::SEQUENCE_MISMATCH,
+            window.expected,
+            window.actual,
+            current,
+        ));
     }
     Ok(())
 }
 
-/// Post-execution cascade-conflict gate (C-03).
+/// Post-execution cascade-conflict gate.
 ///
 /// Purely observational — never mutates events. A Conflict aborts; replay errors
 /// degrade gracefully (proceed optimistically) rather than wedge the pipeline.
 async fn enforce_cascade_conflict_gate(
     business: &dyn ClientLogic,
-    prior_events_with_uncommitted: &EventBook,
+    prior: &LoadedPrior,
     received_events: &EventBook,
 ) -> Result<(), Status> {
-    match check_cascade_conflict(business, prior_events_with_uncommitted, received_events).await {
+    match check_cascade_conflict(
+        business,
+        &prior.raw,
+        &prior.view,
+        &prior.locked_sequences,
+        received_events,
+    )
+    .await
+    {
         Ok(CascadeConflictResult::Conflict {
             cascade_ids,
             overlapping_fields,
@@ -331,18 +355,20 @@ async fn enforce_cascade_conflict_gate(
     }
 }
 
-/// Post-execution commutative field-overlap check.
+/// Post-execution COMMUTATIVE field-overlap gate.
 ///
-/// Disjoint fields proceed to persist; Overlap returns FAILED_PRECONDITION to
-/// discard-and-retry; replay errors degrade to STRICT behavior.
+/// Disjoint fields proceed to persist. An overlap is a genuine conflict:
+/// retryable FAILED_PRECONDITION carrying the current EventBook so the caller
+/// rebuilds against fresh state. When replay is unavailable the overlap cannot
+/// be computed and the gate answers as STRICT would.
 async fn enforce_commutative_gate(
     business: &dyn ClientLogic,
-    prior_events: &EventBook,
-    received_events: &EventBook,
-    expected: u32,
-    actual: u32,
+    books: OverlapBooks<'_>,
+    window: SeqWindow,
 ) -> Result<(), Status> {
-    match check_commutative_overlap(business, prior_events, received_events, expected).await {
+    let SeqWindow { expected, actual } = window;
+    let prior_events = books.prior;
+    match check_commutative_overlap(business, books.base, books.prior, books.received).await {
         Ok(CommutativeMergeResult::Disjoint) => {
             tracing::debug!(
                 expected,
@@ -351,83 +377,75 @@ async fn enforce_commutative_gate(
             );
             Ok(())
         }
-        Ok(CommutativeMergeResult::Overlap) => Err(Status::failed_precondition(format!(
-            "{}{expected}, aggregate at {actual}",
-            crate::orchestration::errmsg::SEQUENCE_MISMATCH_OVERLAP
-        ))),
+        Ok(CommutativeMergeResult::Overlap) => Err(sequence_mismatch_status(
+            crate::orchestration::errmsg::SEQUENCE_MISMATCH_OVERLAP,
+            expected,
+            actual,
+            prior_events,
+        )),
         Err(e) => {
             tracing::debug!(
                 expected,
                 actual,
                 error = %e,
-                "COMMUTATIVE: degrading to STRICT due to Replay failure"
+                "COMMUTATIVE: overlap undetermined (replay unavailable), answering as STRICT"
             );
-            Err(Status::failed_precondition(format!(
-                "{}{expected}, aggregate at {actual}",
-                crate::orchestration::errmsg::SEQUENCE_MISMATCH
-            )))
+            Err(sequence_mismatch_status(
+                crate::orchestration::errmsg::SEQUENCE_MISMATCH,
+                expected,
+                actual,
+                prior_events,
+            ))
         }
     }
 }
 
-/// The sequence window a deferred-command conflict check runs over: the
-/// command's origin-stamped basis (`expected` — the destination head the
-/// producing saga/PM observed at stamp time, carried in
-/// `AngzarrDeferredSequence.basis_seq`; 0 for legacy/unstamped commands,
-/// which degrades to the conservative whole-history window) vs the
-/// destination's current head (`actual`).
+/// The sequence window a conflict check runs over: the sequence the command
+/// was built against (`expected` — an explicit claim, or the origin-stamped
+/// `basis_seq` of a deferred command, 0 meaning the whole history) vs the
+/// aggregate's current head (`actual`).
+#[derive(Clone, Copy)]
 struct SeqWindow {
     expected: u32,
     actual: u32,
 }
 
-/// Post-execution field-overlap gate for deferred (saga-produced) MANUAL
-/// commands (D-7).
+/// The three books a field-overlap gate replays: state@expected (`base`),
+/// the current state (`prior`), and the command's new events (`received`).
+#[derive(Clone, Copy)]
+struct OverlapBooks<'a> {
+    base: &'a EventBook,
+    prior: &'a EventBook,
+    received: &'a EventBook,
+}
+
+/// Post-execution MANUAL gate.
 ///
-/// A deferred command never claims a destination sequence, so the upfront
-/// MANUAL sequence gate would DLQ *every* deferred command landing on a
-/// destination that advanced past its basis — even when the saga-produced
-/// events touch fields nothing has changed since. That over-DLQs harmless
-/// saga work. Instead we wait until after the handler runs, so
-/// `received_events` reveals which fields the command actually touched, and
-/// route to the DLQ only on a genuine field conflict.
-///
-/// `window.expected` is the origin-stamped `basis_seq` (the destination head
-/// the saga observed when it produced the command), so the overlap check
-/// diffs `state@basis` vs `state@actual` — a REAL concurrency window covering
-/// only writes that landed after the saga's observation. Legacy commands
-/// (`basis_seq == 0`) keep the conservative whole-history window.
-///
-/// Reuses the same `check_commutative_overlap` used by the COMMUTATIVE gate
-/// (deferred COMMUTATIVE commands run it with the same basis-derived
-/// `expected`), so deferred MANUAL and deferred COMMUTATIVE agree on what
-/// "overlap" means; they differ only in the mismatch outcome:
-/// - `Disjoint` → proceed with the merge (no conflict, no human review needed).
+/// A stale sequence alone is not a conflict: the gate waits until the handler
+/// has run, so `received_events` reveals which fields the command touched, and
+/// routes to the DLQ only when those fields overlap the fields changed in
+/// `expected..actual` — the same overlap test COMMUTATIVE uses. The outcomes:
+/// - `Disjoint` → proceed with the merge.
 /// - `Overlap` → DLQ + ABORTED (non-retryable) for human review.
-/// - Replay unavailable (`Err`) → conservatively DLQ + ABORTED, preserving the
-///   original MANUAL "human decides" contract when overlap cannot be computed
-///   (mirrors the COMMUTATIVE gate degrading to STRICT on the same failure).
-async fn enforce_deferred_manual_gate(
+/// - Replay unavailable → DLQ + ABORTED: when overlap cannot be computed the
+///   human decides.
+async fn enforce_manual_gate(
     ctx: &dyn AggregateContext,
     business: &dyn ClientLogic,
     command_book: &CommandBook,
-    prior_events: &EventBook,
-    received_events: &EventBook,
+    books: OverlapBooks<'_>,
     window: SeqWindow,
     domain: &str,
 ) -> Result<(), Status> {
     let SeqWindow { expected, actual } = window;
-    // Disjoint short-circuits with the merge; Overlap and an undetermined
-    // (replay-unavailable) result both fall through to the single DLQ+abort
-    // path below with a distinguishing reason for the log.
     let reason =
-        match check_commutative_overlap(business, prior_events, received_events, expected).await {
+        match check_commutative_overlap(business, books.base, books.prior, books.received).await {
             Ok(CommutativeMergeResult::Disjoint) => {
                 tracing::debug!(
-                expected,
-                actual,
-                "MANUAL(deferred): disjoint fields — no genuine conflict, proceeding with merge"
-            );
+                    expected,
+                    actual,
+                    "MANUAL: disjoint fields, no genuine conflict, proceeding with merge"
+                );
                 return Ok(());
             }
             Ok(CommutativeMergeResult::Overlap) => "field-overlap",
@@ -436,8 +454,7 @@ async fn enforce_deferred_manual_gate(
                     expected,
                     actual,
                     error = %e,
-                    "MANUAL(deferred): overlap undetermined (replay unavailable), \
-                     conservatively routing to DLQ"
+                    "MANUAL: overlap undetermined (replay unavailable), routing to DLQ"
                 );
                 "replay-unavailable"
             }
@@ -447,7 +464,7 @@ async fn enforce_deferred_manual_gate(
         expected,
         actual,
         reason,
-        "MANUAL(deferred): genuine conflict — routing to DLQ for human review"
+        "MANUAL: genuine conflict, routing to DLQ for human review"
     );
     ctx.send_to_dlq(command_book, expected, actual, domain)
         .await;
@@ -456,6 +473,35 @@ async fn enforce_deferred_manual_gate(
         crate::orchestration::errmsg::SEQUENCE_MISMATCH,
         crate::orchestration::errmsg::SEQUENCE_MISMATCH_DLQ_SUFFIX
     )))
+}
+
+/// The events reproducing state@`expected` for the field-overlap gates, in
+/// the same view the handler saw (upcast, 2PC-resolved).
+///
+/// Usually derived from the already-loaded `prior` book; when its snapshot
+/// already covers `expected`, the historical book is loaded instead so the
+/// window's intervening writes stay visible.
+async fn load_window_base(
+    ctx: &dyn AggregateContext,
+    domain: &str,
+    edition: &str,
+    root: Uuid,
+    prior: &EventBook,
+    expected: u32,
+) -> Result<EventBook, Status> {
+    if let Some(base) = window_base_from_prior(prior, expected) {
+        return Ok(base);
+    }
+    let historical = ctx
+        .load_prior_events(
+            domain,
+            edition,
+            root,
+            &TemporalQuery::AsOfSequence(expected - 1),
+        )
+        .await?;
+    let historical = ctx.transform_events(domain, historical).await?;
+    Ok(apply_two_phase_transform(ctx, &historical).0)
 }
 
 /// Map a command's `PersistOutcome` to `(events, is_noop)`.
@@ -472,56 +518,38 @@ fn resolve_command_persist_outcome(outcome: PersistOutcome) -> Result<(EventBook
     }
 }
 
-/// Attempts at post_persist for a successfully persisted book before
-/// capturing to the DLQ (B1). The bus backends retry internally per attempt,
-/// so this multiplies into roughly a dozen broker tries.
+/// Publish attempts for a successfully persisted book before capturing it to
+/// the DLQ. The bus backends retry internally per attempt.
 pub(crate) const POST_PERSIST_ATTEMPTS: u32 = 3;
-/// Base backoff between post_persist attempts (multiplied by attempt number).
+/// Base backoff between publish attempts (multiplied by attempt number).
 const POST_PERSIST_BACKOFF_MS: u64 = 200;
 
-/// Publish persisted events and run sync projectors, unless this was a NoOp.
+/// Publish persisted events, unless this was a NoOp.
 ///
-/// H-16: a `PersistOutcome::NoOp` book has `pages: vec![]`; publishing it would
-/// push a 0-page book to the bus and trip subscribers that pattern-match
-/// `pages.first()`. The caller still receives the (empty) book in the response
-/// so "command ran, nothing changed" stays observable. (The saga-redelivery
-/// republish path is separate — its book carries pages and is dispatched in
-/// `try_deferred_idempotency_replay`.)
+/// A NoOp book has no pages; publishing it would push an empty book to every
+/// subscriber. The caller still receives it in the response.
 ///
-/// B1 (the standing "persisted but never published" interleave bug): once
-/// persist has SUCCEEDED, a post_persist failure must NOT propagate as a
-/// retryable Status. The whole-pipeline retry would re-execute against state
-/// that now CONTAINS these events, classify the attempt as NoOp, skip publish
-/// per H-16, and return success — events durably stored, never on the bus.
-/// Instead, retry post_persist IN PLACE with the exact persisted book
-/// (downstream sequence/idempotency dedup makes a republish after a partially
-/// failed post_persist safe — the deferred replay path already republishes
-/// the same way). On exhaustion, capture the book to the DLQ for operator
-/// replay and return success: the command DID apply, and an error here would
-/// invite a duplicate business-level retry of an already-applied command.
-async fn publish_unless_noop(
-    ctx: &dyn AggregateContext,
-    persisted: &EventBook,
-    is_noop: bool,
-) -> Result<Vec<crate::proto::Projection>, Status> {
+/// Once persist has succeeded, a publish failure must not fail the attempt: a
+/// pipeline-level retry would re-run against state that now contains these
+/// events, classify the re-run as NoOp, and skip the publish — events stored,
+/// never published. Instead the exact persisted book is republished in place
+/// (subscribers dedup by sequence), and on exhaustion it is captured to the
+/// DLQ for operator replay. The command did apply, so the attempt succeeds.
+async fn publish_unless_noop(ctx: &dyn AggregateContext, persisted: &EventBook, is_noop: bool) {
     if is_noop {
-        tracing::debug!(
-            "Skipping post_persist for PersistOutcome::NoOp (H-16: empty EventBook must not reach the bus)"
-        );
-        return Ok(vec![]);
+        return;
     }
 
     let mut last_err: Option<Status> = None;
     for attempt in 1..=POST_PERSIST_ATTEMPTS {
-        match ctx.post_persist(persisted).await {
-            Ok(projections) => return Ok(projections),
+        match ctx.publish(persisted).await {
+            Ok(()) => return,
             Err(e) => {
                 tracing::warn!(
                     attempt,
                     max_attempts = POST_PERSIST_ATTEMPTS,
                     error = %e,
-                    "post_persist failed for PERSISTED events; retrying in \
-                     place (B1: a pipeline-level retry would mask this as NoOp)"
+                    "publish failed for persisted events; retrying in place"
                 );
                 last_err = Some(e);
                 if attempt < POST_PERSIST_ATTEMPTS {
@@ -536,13 +564,45 @@ async fn publish_unless_noop(
 
     let reason = last_err
         .map(|e| e.to_string())
-        .unwrap_or_else(|| "unknown post_persist failure".to_string());
+        .unwrap_or_else(|| "unknown publish failure".to_string());
     tracing::error!(
         reason = %reason,
-        "post_persist retries exhausted for persisted events; capturing to DLQ"
+        "publish retries exhausted for persisted events; capturing to DLQ"
     );
     ctx.dead_letter_unpublished(persisted, &reason).await;
-    Ok(vec![])
+}
+
+/// Where a failed pipeline attempt stopped.
+enum AttemptError {
+    /// Nothing was persisted; the attempt may be re-run.
+    BeforePersist(Status),
+    /// Events are persisted and published; only the sync fan-out failed.
+    /// Re-running would re-apply nothing and must not be attempted.
+    AfterPersist(Status),
+}
+
+impl AttemptError {
+    fn into_status(self) -> Status {
+        match self {
+            AttemptError::BeforePersist(status) | AttemptError::AfterPersist(status) => status,
+        }
+    }
+}
+
+impl From<Status> for AttemptError {
+    fn from(status: Status) -> Self {
+        AttemptError::BeforePersist(status)
+    }
+}
+
+async fn execute_mode(
+    ctx: &dyn AggregateContext,
+    business: &dyn ClientLogic,
+    command_book: CommandBook,
+) -> Result<CommandResponse, Status> {
+    execute_attempt(ctx, business, command_book)
+        .await
+        .map_err(AttemptError::into_status)
 }
 
 /// Execute an aggregate command in normal (non-speculative) mode.
@@ -551,53 +611,47 @@ async fn publish_unless_noop(
 ///
 /// 1. **Parse** - Extract domain, root UUID, edition, correlation ID
 /// 2. **Idempotency check** - For deferred commands (saga-produced), return cached result
-/// 3. **Pre-validate** - Fast-path sequence check (skipped for certain strategies)
+/// 3. **Pre-validate** - STRICT-only fast-path sequence check
 /// 4. **Load** - Fetch prior events from storage (with optional divergence point)
-/// 5. **Transform** - Apply upcasting to prior events
-/// 6. **Validate sequence** - Check expected vs actual based on merge strategy
+/// 5. **Transform** - Apply upcasting and the 2PC view to prior events
+/// 6. **Strict gate** - STRICT rejects a stale sequence
 /// 7. **Invoke** - Call business logic with contextual command
-/// 8. **Post-validate** - For COMMUTATIVE, check field overlap after execution
+/// 8. **Post-execution gates** - cascade conflict; COMMUTATIVE / MANUAL field overlap
 /// 9. **Persist** - Store new events and optional snapshot
-/// 10. **Post-persist** - Publish to event bus, run sync projectors
+/// 10. **Publish** - Publish to the event bus (retried in place, DLQ on exhaustion)
+/// 11. **Sync fan-out** - SIMPLE/CASCADE projectors, CASCADE sagas/PMs
 ///
 /// # Merge Strategies
 ///
 /// | Strategy | On Mismatch | Use Case |
 /// |----------|-------------|----------|
-/// | `STRICT` | Retry (FAILED_PRECONDITION) | Default, optimistic locking |
-/// | `COMMUTATIVE` | Check field overlap post-exec | Concurrent non-conflicting writes |
-/// | `MANUAL` | Send to DLQ (ABORTED) | Human review required |
-/// | `AGGREGATE_HANDLES` | Skip validation | Aggregate manages concurrency |
+/// | `COMMUTATIVE` (default) | Merge when fields are disjoint; overlap → FAILED_PRECONDITION (retryable) | Concurrent non-conflicting writes |
+/// | `STRICT` | FAILED_PRECONDITION (retryable after refresh) | Optimistic locking |
+/// | `MANUAL` | Merge when fields are disjoint; overlap → DLQ + ABORTED | Human review required |
+/// | `AGGREGATE_HANDLES` | No coordinator check | Aggregate manages concurrency |
 ///
-/// # Pre-Validation Bypass
-///
-/// Pre-validation is skipped when:
-/// - `AGGREGATE_HANDLES` strategy (aggregate manages its own concurrency)
-/// - Deferred sequences (saga commands stamped with actual sequence after load)
-/// - Explicit divergence (creating new edition branch from specific point)
+/// Every mismatch status carries the current EventBook in its details.
 ///
 /// # Deferred Sequence Handling
 ///
-/// Saga-produced commands use `AngzarrDeferred` sequences. The flow:
+/// Saga-produced commands use `AngzarrDeferred` sequences:
 /// 1. Check idempotency using source provenance (return cached if duplicate)
-/// 2. Extract the origin-stamped `basis_seq` as `expected` (D-7) — the
-///    destination head the saga observed; 0 legacy = whole-history window
-/// 3. Skip pre-validation (deferred commands claim no write position)
-/// 4. Load prior events to get actual sequence
-/// 5. Stamp actual sequence onto command pages (erases the deferred header,
-///    which is why basis/provenance are extracted in steps 1-2 first)
-/// 6. Proceed with normal execution; on `basis != actual` the post-execution
-///    gates check field overlap over `basis..actual` only
+/// 2. Load prior events to get the actual head
+/// 3. Stamp the actual sequence onto command pages (erases the deferred
+///    header, which is why provenance is extracted first)
+/// 4. No sequence or merge-strategy check runs: the command claims no
+///    sequence, so the idempotency key and the destination's invariants are
+///    its only guards
 #[tracing::instrument(
     name = "aggregate.execute",
     skip_all,
     fields(domain, edition, root_uuid, merge_strategy)
 )]
-async fn execute_mode(
+async fn execute_attempt(
     ctx: &dyn AggregateContext,
     business: &dyn ClientLogic,
     mut command_book: CommandBook,
-) -> Result<CommandResponse, Status> {
+) -> Result<CommandResponse, AttemptError> {
     use crate::proto_ext::CommandBookExt;
 
     let (domain, root_uuid) = parse_command_cover(&command_book)?;
@@ -616,7 +670,7 @@ async fn execute_mode(
 
     // Capture source provenance before `stamp_deferred_sequences` later rewrites
     // the angzarr_deferred header into an explicit Sequence.
-    let source_info = extract_source_info(&command_book);
+    let source_info = extract_source_info(&command_book)?;
 
     // For angzarr_deferred commands, return the cached result if this command was
     // already processed (idempotent replay).
@@ -651,40 +705,26 @@ async fn execute_mode(
         );
     }
 
-    // Pre-validate sequence (gRPC fast-path, no-op for local), unless the
-    // strategy/command shape makes it meaningless.
+    // STRICT fast path: reject a stale explicit sequence before loading state.
     if should_pre_validate(merge_strategy, is_deferred, explicit_divergence.is_some()) {
         ctx.pre_validate_sequence(&domain, &edition, root_uuid, expected)
             .await?;
     }
 
-    // Load prior events (with explicit divergence for new edition branches)
-    let prior_events = ctx
-        .load_prior_events_with_divergence(
-            &domain,
-            &edition,
-            root_uuid,
-            &TemporalQuery::Current,
-            explicit_divergence,
-        )
-        .await?;
+    let loaded = load_prior(
+        ctx,
+        &domain,
+        &edition,
+        root_uuid,
+        &TemporalQuery::Current,
+        explicit_divergence,
+    )
+    .await?;
+    let prior_events = loaded.view.clone();
 
-    // Transform events (upcasting)
-    let prior_events = ctx.transform_events(&domain, prior_events).await?;
-
-    // 2PC: the cascade-conflict gate (run post-`invoke`, so it can observe the
-    // fields the command actually touched — C-03) needs the *pre-transform*
-    // prior events (uncommitted pages still flagged) to partition committed vs
-    // uncommitted; the business handler instead sees the 2PC-transformed view
-    // (own cascade visible, others as NoOp). Keep both forms alive.
-    let prior_events_with_uncommitted = prior_events.clone();
-    let (prior_events, has_uncommitted_other_cascades) =
-        apply_two_phase_transform(ctx, &prior_events);
-
-    // Get actual sequence
     let actual = prior_events.next_sequence();
 
-    // For deferred sequences, stamp actual sequence onto command pages
+    // Deferred commands take the head as their write position.
     if is_deferred {
         stamp_deferred_sequences(&mut command_book, actual);
         tracing::debug!(
@@ -693,64 +733,26 @@ async fn execute_mode(
         );
     }
 
-    // Sequence validation based on merge strategy.
-    //
-    // For non-deferred commands `expected` is the explicit sequence the
-    // client claimed. For deferred (saga-produced) commands
-    // `extract_command_sequence` returns the origin-stamped `basis_seq` —
-    // the destination head the saga observed at stamp time (D-7) — so
-    // `expected != actual` fires exactly when the destination advanced
-    // PAST the saga's observation. Consequences for the deferred path:
-    //
-    // - basis == actual (no intervening writes): no mismatch → no gates
-    //   arm → the merge proceeds directly. This is the D-7 FAST PATH: the
-    //   saga translated against the exact current head, so there is no
-    //   concurrency window to check and no replay round-trips are spent.
-    // - basis < actual: the mismatch arms the post-execution gates with
-    //   window `basis..actual` — the field-overlap check diffs state@basis
-    //   vs state@actual, catching a saga that produced a command against
-    //   stale destination field state (H-18) without penalizing writes the
-    //   saga had already seen.
-    // - basis == 0 (legacy / unstamped): behaves exactly as before D-7
-    //   basis stamping — fires for any non-empty destination and the gates
-    //   run over the conservative whole-history window.
-    //
-    // Pre-H-18 the gate was `!is_deferred && expected != actual` which
-    // skipped COMMUTATIVE/MANUAL entirely for deferred commands; the
-    // cascade gate (C-03) only catches uncommitted-cascade overlaps,
-    // leaving committed-intervening overlap unchecked.
-    let sequence_mismatch = expected != actual;
-
-    // Track if we need post-execution commutative check
+    // `expected` is the sequence a client command was built against. A
+    // mismatch means writes landed after that observation: STRICT rejects
+    // here; COMMUTATIVE and MANUAL run the field-overlap gate over
+    // `expected..actual` once the handler shows which fields it touched.
+    // Deferred (saga/PM) commands claim no sequence and skip every check —
+    // their idempotency key dedupes redeliveries and the destination's own
+    // invariants are the only guard.
+    let window = SeqWindow { expected, actual };
+    let sequence_mismatch = !is_deferred && expected != actual;
     let needs_commutative_check =
         sequence_mismatch && merge_strategy == MergeStrategy::MergeCommutative;
-
-    // Track if we need the post-execution deferred-MANUAL field-overlap gate
-    // (D-7). A deferred MANUAL command can't use the upfront sequence gate
-    // (`expected` is the saga's observed basis, not a claimed write
-    // position), so `enforce_merge_strategy` lets it through and we DLQ only
-    // on a genuine field conflict — within `basis..actual` — after the
-    // handler reveals which fields the command touched.
-    let needs_deferred_manual_check =
-        sequence_mismatch && merge_strategy == MergeStrategy::MergeManual && is_deferred;
+    let needs_manual_check = sequence_mismatch && merge_strategy == MergeStrategy::MergeManual;
 
     if sequence_mismatch {
-        enforce_merge_strategy(
-            ctx,
-            &command_book,
-            merge_strategy,
-            expected,
-            actual,
-            &domain,
-            is_deferred,
-        )
-        .await?;
+        enforce_strict_gate(merge_strategy, window, &prior_events)?;
     }
 
-    // The deferred-MANUAL gate below routes the command to the DLQ on a genuine
-    // conflict, so keep a copy before `command_book` is moved into the handler
-    // call. Cloned only when that gate will actually run.
-    let deferred_manual_command = needs_deferred_manual_check.then(|| command_book.clone());
+    // The MANUAL gate dead-letters the command itself, so keep a copy before
+    // `command_book` moves into the handler call.
+    let manual_command = needs_manual_check.then(|| command_book.clone());
 
     // Invoke client logic
     let contextual_command = ContextualCommand {
@@ -764,43 +766,30 @@ async fn execute_mode(
     })?;
     let received_events = extract_events_from_response(response, &correlation_id)?;
 
-    // Post-execution cascade-conflict gate (C-03 fix). Runs AFTER the
-    // handler so `received_events` carries the events the command
-    // actually produced; `check_cascade_conflict` can now compute the
-    // command's touched fields by replaying `prior + received` and
-    // diffing against the pre-command state.
-    //
-    // The gate is purely observational: it must not modify
-    // `received_events`. A Conflict result returns Err immediately;
-    // NoConflict proceeds; Err (e.g., replay unimplemented) degrades
-    // gracefully — we'd rather risk an incorrect cascade merge than
-    // wedge the whole pipeline on a missing replay. (Same degradation
-    // pattern as the commutative check below.)
-    if has_uncommitted_other_cascades {
-        enforce_cascade_conflict_gate(business, &prior_events_with_uncommitted, &received_events)
-            .await?;
+    // Post-execution gates observe the fields the command actually touched by
+    // replaying prior + received. They never modify `received_events`.
+    if !loaded.locked_sequences.is_empty() {
+        enforce_cascade_conflict_gate(business, &loaded, &received_events).await?;
     }
 
-    // Post-execution commutative check: verify field overlap after we know what changed
-    if needs_commutative_check {
-        enforce_commutative_gate(business, &prior_events, &received_events, expected, actual)
-            .await?;
-    }
+    let window_base = if needs_commutative_check || needs_manual_check {
+        Some(load_window_base(ctx, &domain, &edition, root_uuid, &prior_events, expected).await?)
+    } else {
+        None
+    };
 
-    // Post-execution deferred-MANUAL gate (D-7): DLQ only on a genuine field
-    // conflict, not merely because the deferred command landed on a non-empty
-    // aggregate.
-    if let Some(command) = deferred_manual_command.as_ref() {
-        enforce_deferred_manual_gate(
-            ctx,
-            business,
-            command,
-            &prior_events,
-            &received_events,
-            SeqWindow { expected, actual },
-            &domain,
-        )
-        .await?;
+    if let Some(base) = window_base.as_ref() {
+        let books = OverlapBooks {
+            base,
+            prior: &prior_events,
+            received: &received_events,
+        };
+        if needs_commutative_check {
+            enforce_commutative_gate(business, books, window).await?;
+        }
+        if let Some(command) = manual_command.as_ref() {
+            enforce_manual_gate(ctx, business, command, books, window, &domain).await?;
+        }
     }
 
     // Persist (compares prior with received to detect new events/snapshot)
@@ -817,18 +806,26 @@ async fn execute_mode(
         )
         .await?;
 
-    // Distinguish Persisted (new events / snapshot change) from NoOp (no diff);
-    // the NoOp book must not reach the bus (H-16, see `publish_unless_noop`).
+    // Distinguish Persisted (new events / snapshot change) from NoOp (no
+    // diff); a NoOp book is never published (see `publish_unless_noop`).
     let (mut persisted, is_noop) = resolve_command_persist_outcome(outcome)?;
 
     // Set next_sequence on persisted EventBook for callers
     calculate_set_next_seq(&mut persisted);
 
-    let projections = publish_unless_noop(ctx, &persisted, is_noop).await?;
+    publish_unless_noop(ctx, &persisted, is_noop).await;
+    let fanout = if is_noop {
+        super::SyncFanout::default()
+    } else {
+        ctx.sync_fanout(&persisted)
+            .await
+            .map_err(AttemptError::AfterPersist)?
+    };
 
     Ok(CommandResponse {
         events: Some(persisted),
-        projections,
+        projections: fanout.projections,
+        reaction_errors: fanout.reaction_errors,
     })
 }
 
@@ -847,10 +844,17 @@ async fn speculative_mode(
     span.record("edition", edition.as_str());
     span.record("root_uuid", tracing::field::display(&root_uuid));
 
-    let prior_events = ctx
-        .load_prior_events(&domain, &edition, root_uuid, &temporal)
-        .await?;
-    let prior_events = ctx.transform_events(&domain, prior_events).await?;
+    let explicit_divergence = extract_explicit_divergence(&command_book, &domain);
+    let prior_events = load_prior(
+        ctx,
+        &domain,
+        &edition,
+        root_uuid,
+        &temporal,
+        explicit_divergence,
+    )
+    .await?
+    .view;
 
     let contextual_command = ContextualCommand {
         events: Some(prior_events),
@@ -867,8 +871,65 @@ async fn speculative_mode(
 
     Ok(CommandResponse {
         events: Some(speculative_events),
-        projections: vec![],
+        ..Default::default()
     })
+}
+
+/// Execute a compensation (rejection notification) against the aggregate.
+///
+/// Returns the raw `BusinessResponse` so the saga-side caller can inspect a
+/// revocation response. Events the handler emits are persisted, published and
+/// fanned out like a command's.
+pub async fn execute_compensation_pipeline(
+    ctx: &dyn AggregateContext,
+    business: &dyn ClientLogic,
+    command_book: CommandBook,
+) -> Result<BusinessResponse, Status> {
+    let (domain, root_uuid) = parse_command_cover(&command_book)?;
+    let edition = extract_edition(&command_book)?;
+    let correlation_id = crate::orchestration::correlation::extract_correlation_id(&command_book)?;
+
+    let prior_events = load_prior(
+        ctx,
+        &domain,
+        &edition,
+        root_uuid,
+        &TemporalQuery::Current,
+        None,
+    )
+    .await?
+    .view;
+
+    let response = business
+        .invoke(ContextualCommand {
+            events: Some(prior_events.clone()),
+            command: Some(command_book),
+        })
+        .await?;
+
+    if let Some(business_response::Result::Events(events)) = &response.result {
+        if !events.pages.is_empty() {
+            let outcome = ctx
+                .persist_events(
+                    &prior_events,
+                    events,
+                    &domain,
+                    &edition,
+                    root_uuid,
+                    &correlation_id,
+                    None,
+                    None,
+                )
+                .await?;
+            let (persisted, is_noop) = resolve_command_persist_outcome(outcome)?;
+            publish_unless_noop(ctx, &persisted, is_noop).await;
+            if !is_noop {
+                ctx.sync_fanout(&persisted).await?;
+            }
+        }
+    }
+
+    Ok(response)
 }
 
 /// Execute the fact injection pipeline.
@@ -902,7 +963,7 @@ pub async fn execute_fact_pipeline(
 ) -> Result<FactResponse, Status> {
     let (domain, root_uuid) = parse_event_cover(&fact_events)?;
     let edition = extract_event_edition(&fact_events)?;
-    let correlation_id = fact_events.correlation_id().to_string();
+    let correlation_id = crate::orchestration::correlation::extract_correlation_id(&fact_events)?;
 
     // Extract external_id from first page's header if it has external_deferred
     let external_id = fact_events
@@ -921,10 +982,9 @@ pub async fn execute_fact_pipeline(
     span.record("root_uuid", tracing::field::display(&root_uuid));
     span.record("external_id", external_id.as_str());
 
-    // Pre-handler idempotency check — symmetric with the saga path. On a
-    // webhook redelivery (same external_id under (domain, edition, root))
-    // return the cached events without invoking `business.invoke_fact`.
-    // Storage-level dedup at persist remains the safety net regardless.
+    // A redelivered external_id returns the events it produced the first
+    // time, republished, without invoking the handler again. Storage-level
+    // dedup at persist remains the safety net.
     if !external_id.is_empty() {
         if let Some(mut cached) = ctx
             .check_external_idempotency(&domain, &edition, root_uuid, &external_id)
@@ -934,21 +994,17 @@ pub async fn execute_fact_pipeline(
                 external_id = external_id.as_str(),
                 "Fact already processed (external_id pre-handler hit), returning cached result"
             );
-            // Stamp the in-flight fact's correlation_id onto the rebuilt
-            // EventBook before republishing — same rationale as the
-            // deferred-idempotency hit above (C-04). The rebuilt cover
-            // from `build_event_book` carries an empty correlation_id;
-            // PMs filter by correlation_id and miss redeliveries
-            // otherwise.
+            // The rebuilt cover carries no correlation_id; PMs filter on it.
             if let Some(ref mut cover) = cached.cover {
                 if cover.correlation_id.is_empty() {
                     cover.correlation_id = correlation_id.clone();
                 }
             }
-            let projections = ctx.post_persist(&cached).await?;
+            publish_unless_noop(ctx, &cached, cached.pages.is_empty()).await;
+            let fanout = ctx.sync_fanout(&cached).await?;
             return Ok(FactResponse {
                 events: cached,
-                projections,
+                projections: fanout.projections,
                 already_processed: true,
             });
         }
@@ -967,15 +1023,17 @@ pub async fn execute_fact_pipeline(
         ));
     }
 
-    // Load prior events to determine next sequence
-    let prior_events = ctx
-        .load_prior_events(&domain, &edition, root_uuid, &TemporalQuery::Current)
-        .await?;
+    let prior_events = load_prior(
+        ctx,
+        &domain,
+        &edition,
+        root_uuid,
+        &TemporalQuery::Current,
+        None,
+    )
+    .await?
+    .view;
 
-    // Transform events (upcasting)
-    let prior_events = ctx.transform_events(&domain, prior_events).await?;
-
-    // Get next available sequence
     let next_seq = prior_events.next_sequence();
 
     // Save cover before moving fact_events into business logic
@@ -993,13 +1051,9 @@ pub async fn execute_fact_pipeline(
     };
 
     // Assign real sequence numbers, replacing ExternalDeferredSequence markers.
-    // Timestamps default to "now" if not provided by the external source.
-    //
-    // NOTE: External facts from historical systems (replays, migrations) should provide
-    // their original timestamps. If `created_at` is missing, we default to current time
-    // which may misrepresent when the fact actually occurred. Temporal queries against
-    // such facts would return incorrect results. Callers injecting historical facts
-    // should always include the original timestamp.
+    // `created_at` defaults to now when the external source supplied none;
+    // historical imports must carry their original timestamps or temporal
+    // queries will place them at import time.
     let mut final_pages = Vec::with_capacity(processed_events.pages.len());
     let mut current_seq = next_seq;
 
@@ -1013,10 +1067,12 @@ pub async fn execute_fact_pipeline(
                 .created_at
                 .or_else(|| Some(prost_types::Timestamp::from(std::time::SystemTime::now()))),
             payload: page.payload,
-            // Facts are external realities — always immediately committed.
-            // If this runs inside a cascade, persist_events will override to
-            // no_commit=true and stamp the cascade_id.
-            cascade_id: page.cascade_id,
+            // Facts are committed external realities. Cascade membership is
+            // the coordinator's to assign (persist_events stamps the active
+            // cascade); a cascade_id supplied by the fact's producer is not
+            // trusted, since a committed page carrying it would read as that
+            // cascade's resolution.
+            cascade_id: None,
             no_commit: false,
         };
         final_pages.push(new_page);
@@ -1049,40 +1105,35 @@ pub async fn execute_fact_pipeline(
         )
         .await?;
 
-    match outcome {
-        PersistOutcome::Persisted(mut persisted) | PersistOutcome::NoOp(mut persisted) => {
-            // Set next_sequence
-            calculate_set_next_seq(&mut persisted);
-
-            // Post-persist: publish + sync projectors
-            let projections = ctx.post_persist(&persisted).await?;
-
-            Ok(FactResponse {
-                events: persisted,
-                projections,
-                already_processed: false,
-            })
-        }
+    let (mut persisted, is_noop) = match outcome {
+        PersistOutcome::Persisted(persisted) => (persisted, false),
+        PersistOutcome::NoOp(persisted) => (persisted, true),
         PersistOutcome::Duplicate { .. } => {
-            // The pre-handler `check_external_idempotency` short-circuits all
-            // duplicate fact deliveries before reaching persist, so the
-            // storage layer cannot return Duplicate for a fact in normal
-            // operation. The only way to land here is a TOCTOU race
-            // between two concurrent injections of the same external_id
-            // — both pre-checks miss, both call persist, second one's
-            // storage-level atomic dedup wins. Treat as an internal
-            // condition: storage-level dedup is the safety net, but the
-            // race-loser caller never sees the cached events through this
-            // code path. Logging surfaces the race for diagnostics.
+            // The pre-handler idempotency check normally answers duplicates;
+            // reaching storage-level dedup means two injections of the same
+            // external_id raced. The loser retries and reads the cached result.
             tracing::warn!(
                 external_id = %external_id,
                 "Fact pipeline reached PersistOutcome::Duplicate — concurrent fact race detected"
             );
-            Err(Status::aborted(
+            return Err(Status::aborted(
                 "concurrent fact injection — retry to read the cached result",
-            ))
+            ));
         }
-    }
+    };
+    calculate_set_next_seq(&mut persisted);
+    publish_unless_noop(ctx, &persisted, is_noop).await;
+    let projections = if is_noop {
+        vec![]
+    } else {
+        ctx.sync_fanout(&persisted).await?.projections
+    };
+
+    Ok(FactResponse {
+        events: persisted,
+        projections,
+        already_processed: false,
+    })
 }
 
 #[cfg(test)]

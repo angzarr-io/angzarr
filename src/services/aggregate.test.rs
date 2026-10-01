@@ -774,3 +774,115 @@ async fn test_create_context_for_sync_mode_invalid_defaults_to_async() {
     // Invalid value should default to Async
     let _ctx = service.create_context_for_sync_mode(999);
 }
+
+// ============================================================================
+// Domain ownership
+// ============================================================================
+
+/// A coordinator bound to a domain refuses commands, speculation,
+/// compensation and facts addressed to any other domain — otherwise they
+/// would be persisted into this domain's store.
+#[tokio::test]
+async fn test_domain_bound_service_refuses_foreign_domain() {
+    let (service, business) = create_test_service().await;
+    let service = service.with_domain("orders");
+    let root = Uuid::new_v4();
+    let command = |domain: &str| CommandRequest {
+        command: Some(make_command_book(domain, root, 0)),
+        sync_mode: SyncMode::Async as i32,
+        cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
+        cascade_id: None,
+    };
+
+    let err = service
+        .handle_command(Request::new(command("payments")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert!(err.message().contains("payments"));
+
+    let err = service
+        .handle_compensation(Request::new(command("payments")))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    let err = service
+        .handle_sync_speculative(Request::new(SpeculateCommandHandlerRequest {
+            command: Some(make_command_book("payments", root, 0)),
+            point_in_time: None,
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    let err = service
+        .handle_event(Request::new(EventRequest {
+            events: Some(make_event_book("payments", root, vec![make_fact_page()])),
+            sync_mode: SyncMode::Async as i32,
+            skip_handler: true,
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+
+    assert!(
+        business.invocations.lock().await.is_empty(),
+        "no foreign book reaches the handler"
+    );
+
+    // Its own domain is still served.
+    service
+        .handle_command(Request::new(command("orders")))
+        .await
+        .expect("own domain accepted");
+}
+
+/// Compensation goes through the same validation as commands.
+#[tokio::test]
+async fn test_handle_compensation_validates_command_book() {
+    let (service, _business) = create_test_service().await;
+    let mut book = make_command_book("orders", Uuid::new_v4(), 0);
+    book.cover.as_mut().unwrap().correlation_id = "bad id!".to_string();
+    let err = service
+        .handle_compensation(Request::new(CommandRequest {
+            command: Some(book),
+            sync_mode: SyncMode::Async as i32,
+            cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
+            cascade_id: None,
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+/// Compensation events are persisted and published like a command's.
+#[tokio::test]
+async fn test_handle_compensation_persists_and_publishes_events() {
+    let event_store = Arc::new(MockEventStore::new());
+    let bus = Arc::new(MockEventBus::new());
+    let business = Arc::new(MockClientLogic::new());
+    let service = AggregateService::with_business_logic(
+        event_store.clone(),
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        business.clone(),
+        bus.clone(),
+        Arc::new(StaticServiceDiscovery::new()),
+    );
+    let root = Uuid::new_v4();
+    business
+        .enqueue_events(make_event_book("orders", root, vec![make_event_page(0)]))
+        .await;
+    service
+        .handle_compensation(Request::new(CommandRequest {
+            command: Some(make_command_book("orders", root, 0)),
+            sync_mode: SyncMode::Async as i32,
+            cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
+            cascade_id: None,
+        }))
+        .await
+        .unwrap();
+    use crate::storage::EventStore;
+    assert_eq!(event_store.get("orders", "", root).await.unwrap().len(), 1);
+    assert_eq!(bus.published_count().await, 1);
+}

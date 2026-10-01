@@ -49,8 +49,9 @@ impl Target {
     /// - any configured type matches `event_type` on a token boundary
     ///
     /// Matching rules per configured type `t`:
-    /// - If `t` contains `.`, require exact equality with `event_type`
-    ///   (operators writing fully-qualified names get a precise match).
+    /// - If `t` contains `.`, it is a fully-qualified name: it must equal the
+    ///   event's fully-qualified name, whatever resolver prefix
+    ///   (`type.googleapis.com/`, `/`, none) either side carries.
     /// - Otherwise, take the last `.`/`/`-delimited token of `event_type`
     ///   and require equality with `t`. Short names like `"OrderCreated"`
     ///   match `"type.googleapis.com/example.OrderCreated"` but NOT
@@ -67,8 +68,9 @@ impl Target {
 /// Token-boundary match between a configured subscription type and an
 /// event's `type_url`. See [`Target::matches_type`] for the rules.
 fn matches_type_token(event_type: &str, subscription_type: &str) -> bool {
+    use crate::proto_ext::type_url::fqn;
     if subscription_type.contains('.') {
-        event_type == subscription_type
+        fqn(event_type) == fqn(subscription_type)
     } else {
         let last_token = event_type.rsplit(['.', '/']).next().unwrap_or(event_type);
         last_token == subscription_type
@@ -78,6 +80,7 @@ fn matches_type_token(event_type: &str, subscription_type: &str) -> bool {
 /// Parse subscriptions from environment variable.
 ///
 /// Format: `domain1:Type1,Type2;domain2:Type3` or `domain1;domain2` (all types).
+/// Whitespace around domains and types is ignored.
 ///
 /// # Example
 ///
@@ -102,15 +105,17 @@ pub fn parse_subscriptions(env_value: &str) -> Vec<Target> {
 
     env_value
         .split(';')
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|part| {
             if let Some((domain, types_str)) = part.split_once(':') {
                 let types: Vec<String> = types_str
                     .split(',')
+                    .map(str::trim)
                     .filter(|s| !s.is_empty())
                     .map(String::from)
                     .collect();
-                Target::new(domain, types)
+                Target::new(domain.trim(), types)
             } else {
                 Target::domain(part)
             }

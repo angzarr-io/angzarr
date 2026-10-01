@@ -15,10 +15,7 @@
 
 use super::*;
 // Direct imports from merge module for test utilities
-use super::merge::{
-    build_combined_events, build_events_up_to_sequence, diff_state_fields,
-    partition_by_commit_status,
-};
+use super::merge::{build_combined_events, build_events_up_to_sequence, diff_state_fields};
 use crate::proto::{
     command_page, event_page, page_header, AngzarrDeferredSequence, CommandBook, CommandPage,
     Cover, EventBook, ExternalDeferredSequence, MergeStrategy, PageHeader, Uuid as ProtoUuid,
@@ -864,99 +861,6 @@ fn test_diff_test_state_fields_field_removed() {
 // Cascade / Two-Phase Commit Tests
 // ============================================================================
 
-fn make_cascade_event_page(
-    sequence: u32,
-    no_commit: bool,
-    cascade_id: Option<&str>,
-) -> crate::proto::EventPage {
-    crate::proto::EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(page_header::SequenceType::Sequence(sequence)),
-        }),
-        payload: Some(event_page::Payload::Event(Any {
-            type_url: "test.Event".to_string(),
-            value: vec![],
-        })),
-        created_at: None,
-        no_commit,
-        cascade_id: cascade_id.map(|s| s.to_string()),
-    }
-}
-
-/// partition_by_commit_status separates committed from uncommitted events.
-///
-/// 2PC relies on this to identify which events are "locked" by in-flight
-/// cascades. Committed events are the stable base; uncommitted events
-/// are pending and may be confirmed or revoked.
-#[test]
-fn test_partition_all_committed() {
-    let root = Uuid::new_v4();
-    let mut book = make_event_book("test", root, None);
-    book.pages = vec![
-        make_cascade_event_page(1, false, None),
-        make_cascade_event_page(2, false, None),
-    ];
-
-    let (committed, uncommitted) = partition_by_commit_status(&book);
-    assert_eq!(committed.pages.len(), 2);
-    assert!(uncommitted.is_empty());
-}
-
-/// Uncommitted events from a cascade are correctly partitioned.
-///
-/// When a cascade writes events with no_commit=true, they must be
-/// separated so the conflict detection can identify locked fields.
-#[test]
-fn test_partition_with_uncommitted_cascade() {
-    let root = Uuid::new_v4();
-    let mut book = make_event_book("test", root, None);
-    book.pages = vec![
-        make_cascade_event_page(1, false, None),
-        make_cascade_event_page(2, true, Some("cascade-A")),
-        make_cascade_event_page(3, true, Some("cascade-A")),
-    ];
-
-    let (committed, uncommitted) = partition_by_commit_status(&book);
-    assert_eq!(committed.pages.len(), 1);
-    assert_eq!(uncommitted.len(), 2);
-    assert_eq!(uncommitted[0].cascade_id.as_deref(), Some("cascade-A"));
-}
-
-/// Mixed committed and uncommitted from multiple cascades.
-///
-/// Multiple cascades can have uncommitted events against the same aggregate.
-/// Partition must correctly separate all of them regardless of ordering.
-#[test]
-fn test_partition_multiple_cascades() {
-    let root = Uuid::new_v4();
-    let mut book = make_event_book("test", root, None);
-    book.pages = vec![
-        make_cascade_event_page(1, false, None),
-        make_cascade_event_page(2, true, Some("cascade-A")),
-        make_cascade_event_page(3, true, Some("cascade-B")),
-        make_cascade_event_page(4, false, None),
-    ];
-
-    let (committed, uncommitted) = partition_by_commit_status(&book);
-    assert_eq!(committed.pages.len(), 2, "should have 2 committed events");
-    assert_eq!(uncommitted.len(), 2, "should have 2 uncommitted events");
-}
-
-/// No uncommitted events means no cascade conflicts possible.
-///
-/// This is the fast path — when all events are committed, cascade
-/// conflict detection is a no-op.
-#[test]
-fn test_partition_empty_book() {
-    let root = Uuid::new_v4();
-    let book = make_event_book("test", root, None);
-
-    let (committed, uncommitted) = partition_by_commit_status(&book);
-    assert!(committed.pages.is_empty());
-    assert!(uncommitted.is_empty());
-}
-
 /// cascade_id accessor returns None for non-cascade contexts.
 ///
 /// The default implementation in AggregateContext trait returns None,
@@ -991,10 +895,7 @@ fn test_cascade_id_trait_default() {
         ) -> Result<super::traits::PersistOutcome, tonic::Status> {
             unimplemented!()
         }
-        async fn post_persist(
-            &self,
-            _: &EventBook,
-        ) -> Result<Vec<crate::proto::Projection>, tonic::Status> {
+        async fn publish(&self, _: &EventBook) -> Result<(), tonic::Status> {
             unimplemented!()
         }
     }
@@ -1003,5 +904,47 @@ fn test_cascade_id_trait_default() {
     assert!(
         ctx.cascade_id().is_none(),
         "default cascade_id should be None"
+    );
+}
+
+// ============================================================================
+// Main-timeline edition spellings
+// ============================================================================
+
+/// "", unset and "angzarr" name one timeline; the coordinator keys all of
+/// them as "" so history written under one spelling is read under another.
+#[test]
+fn test_main_timeline_spellings_share_one_key() {
+    use super::parsing::{edition_key, extract_edition, extract_event_edition};
+    assert_eq!(edition_key(""), "");
+    assert_eq!(edition_key("angzarr"), "");
+    assert_eq!(edition_key("branch-a"), "branch-a");
+
+    let with_edition = |name: Option<&str>| CommandBook {
+        cover: Some(Cover {
+            domain: "orders".into(),
+            edition: name.map(|n| crate::proto::Edition {
+                name: n.into(),
+                divergences: vec![],
+            }),
+            ..Default::default()
+        }),
+        pages: vec![],
+    };
+    for name in [None, Some(""), Some("angzarr")] {
+        assert_eq!(
+            extract_edition(&with_edition(name)).unwrap(),
+            "",
+            "{name:?}"
+        );
+        let events = EventBook {
+            cover: with_edition(name).cover,
+            ..Default::default()
+        };
+        assert_eq!(extract_event_edition(&events).unwrap(), "", "{name:?}");
+    }
+    assert_eq!(
+        extract_edition(&with_edition(Some("branch-a"))).unwrap(),
+        "branch-a"
     );
 }

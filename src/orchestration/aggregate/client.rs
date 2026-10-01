@@ -4,7 +4,6 @@
 //! aggregate business logic over TCP, UDS, or duplex channels.
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
 use tonic::Status;
 
 use crate::proto::{
@@ -18,23 +17,25 @@ use super::types::FactContext;
 /// client logic invocation via gRPC `AggregateClient`.
 ///
 /// Wraps a tonic `AggregateClient` channel (TCP, UDS, or duplex).
+///
+/// A tonic client multiplexes concurrent requests over its channel; each call
+/// works on a clone, so concurrent commands never queue behind one another.
 pub struct GrpcBusinessLogic {
-    client: Mutex<CommandHandlerServiceClient<tonic::transport::Channel>>,
+    client: CommandHandlerServiceClient<tonic::transport::Channel>,
 }
 
 impl GrpcBusinessLogic {
     /// Wrap a gRPC aggregate client as a `ClientLogic` implementation.
     pub fn new(client: CommandHandlerServiceClient<tonic::transport::Channel>) -> Self {
-        Self {
-            client: Mutex::new(client),
-        }
+        Self { client }
     }
 }
 
 #[async_trait]
 impl ClientLogic for GrpcBusinessLogic {
     async fn invoke(&self, cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
-        Ok(self.client.lock().await.handle(cmd).await?.into_inner())
+        let mut client = self.client.clone();
+        Ok(client.handle(cmd).await?.into_inner())
     }
 
     async fn invoke_fact(&self, ctx: FactContext) -> Result<EventBook, Status> {
@@ -42,13 +43,8 @@ impl ClientLogic for GrpcBusinessLogic {
             facts: Some(ctx.facts),
             prior_events: ctx.prior_events,
         };
-        Ok(self
-            .client
-            .lock()
-            .await
-            .handle_fact(request)
-            .await?
-            .into_inner())
+        let mut client = self.client.clone();
+        Ok(client.handle_fact(request).await?.into_inner())
     }
 
     async fn replay(&self, events: &EventBook) -> Result<prost_types::Any, Status> {
@@ -56,9 +52,14 @@ impl ClientLogic for GrpcBusinessLogic {
             events: events.pages.clone(),
             base_snapshot: events.snapshot.clone(),
         };
-        let response = self.client.lock().await.replay(request).await?.into_inner();
+        let mut client = self.client.clone();
+        let response = client.replay(request).await?.into_inner();
         response
             .state
             .ok_or_else(|| Status::internal(crate::orchestration::errmsg::REPLAY_MISSING_STATE))
     }
 }
+
+#[cfg(test)]
+#[path = "client.test.rs"]
+mod tests;

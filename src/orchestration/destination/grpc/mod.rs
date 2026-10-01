@@ -84,7 +84,7 @@ impl DestinationFetcher for GrpcDestinationFetcher {
             selection: None,
         };
 
-        let mut client = client.lock().await;
+        let mut client = client.lock().await.clone();
         let event_book = client
             .get_event_book(correlated_request(query, correlation_id))
             .await?
@@ -111,7 +111,7 @@ impl DestinationFetcher for GrpcDestinationFetcher {
             selection: None,
         };
 
-        let mut client = client.lock().await;
+        let mut client = client.lock().await.clone();
         // O9: an RPC error propagates via `?` — it must never collapse to
         // "no state". The EventQuery service reports an unknown correlation
         // as an empty book on a successful RPC, so success is Ok(Some(..)).

@@ -9,7 +9,6 @@
 pub mod advice;
 pub mod bus;
 pub mod cascade;
-pub mod client_traits;
 pub mod config;
 pub mod descriptor;
 pub mod discovery;

@@ -17,7 +17,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/meta.proto");
     println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/cloudevents.proto");
     println!("cargo:rerun-if-changed=proto/io/cloudevents/v1/cloudevents.proto");
-    println!("cargo:rerun-if-changed=proto/io/angzarr/status/v1/dlq_admin.proto");
+    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/status/v1/dlq_admin.proto");
     // Sererr proto schema lives in the `sererr/` submodule; rerun if it
     // changes upstream.
     println!("cargo:rerun-if-changed=sererr/proto/sererr/v1/sererr.proto");
@@ -55,7 +55,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 "angzarr-project/proto/io/angzarr/v1/meta.proto",
                 "angzarr-project/proto/io/angzarr/v1/cloudevents.proto",
                 "proto/io/cloudevents/v1/cloudevents.proto",
-                "proto/io/angzarr/status/v1/dlq_admin.proto",
+                "angzarr-project/proto/io/angzarr/status/v1/dlq_admin.proto",
             ],
             // Include paths: angzarr's own protos, our local protos,
             // AND sererr's proto root so types.proto can resolve
@@ -70,7 +70,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // upcaster, types) and exposes internal messages (Confirmation,
     // Revocation, NoOp, AngzarrDeferredSequence, ...) to anyone who
     // calls `grpcurl list`. For the reflection-exposed surface, we
-    // ship only `proto/io/angzarr/status/v1/dlq_admin.proto` and its
+    // ship only `io/angzarr/status/v1/dlq_admin.proto` and its
     // transitive imports.
     //
     // The in-process pool keeps loading the full set via

@@ -96,7 +96,7 @@ impl SagaRetryContext for GrpcSagaContext {
         sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         let correlation_id = self.source.correlation_id();
-        let mut client = self.saga_client.lock().await;
+        let mut client = self.saga_client.lock().await.clone();
         let request = build_saga_handle_request(&self.source, destination_sequences, sync_mode);
         let mut response = client
             .handle(correlated_request(request, correlation_id))
@@ -142,7 +142,7 @@ impl SagaRetryContext for GrpcSagaContext {
     async fn on_command_rejected(&self, command: &CommandBook, reason: &str) {
         if let Some(ref handler) = self.compensation_handler {
             let rejection_error = tonic::Status::internal(reason);
-            let mut handler = handler.lock().await;
+            let mut handler = handler.lock().await.clone();
             handle_command_rejection(
                 command,
                 &rejection_error,

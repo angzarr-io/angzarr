@@ -31,6 +31,8 @@ use tonic::{Request, Response};
 struct MockUpcasterService {
     call_count: AtomicU32,
     should_fail: bool,
+    /// Applied to the transformed pages before replying.
+    tamper: Option<fn(&mut Vec<EventPage>)>,
 }
 
 impl MockUpcasterService {
@@ -38,6 +40,14 @@ impl MockUpcasterService {
         Self {
             call_count: AtomicU32::new(0),
             should_fail: false,
+            tamper: None,
+        }
+    }
+
+    fn tampering(tamper: fn(&mut Vec<EventPage>)) -> Self {
+        Self {
+            tamper: Some(tamper),
+            ..Self::new()
         }
     }
 
@@ -45,6 +55,7 @@ impl MockUpcasterService {
         Self {
             call_count: AtomicU32::new(0),
             should_fail: true,
+            tamper: None,
         }
     }
 }
@@ -64,7 +75,7 @@ impl UpcasterService for MockUpcasterService {
         let req = request.into_inner();
 
         // Transform events: rename V1 type_urls to V2
-        let transformed: Vec<EventPage> = req
+        let mut transformed: Vec<EventPage> = req
             .events
             .into_iter()
             .map(|mut page| {
@@ -82,6 +93,9 @@ impl UpcasterService for MockUpcasterService {
             })
             .collect();
 
+        if let Some(tamper) = self.tamper {
+            tamper(&mut transformed);
+        }
         Ok(Response::new(UpcastResponse {
             events: transformed,
         }))
@@ -288,4 +302,42 @@ async fn test_upcaster_from_channel() {
         _ => panic!("Expected event payload"),
     };
     assert_eq!(event.type_url, "example.EventV2");
+}
+
+// ============================================================================
+// Response validation
+// ============================================================================
+
+/// The upcaster may rewrite payloads only. A reply that drops, adds or
+/// renumbers pages would corrupt the prior
+/// events the aggregate computes its next sequence and persist diff from.
+#[tokio::test]
+async fn test_upcaster_reply_that_changes_the_stream_is_rejected() {
+    let tampers: [fn(&mut Vec<EventPage>); 3] = [
+        |pages| {
+            pages.pop();
+        },
+        |pages| pages.push(make_test_event(9, "example.Extra", vec![])),
+        |pages| {
+            pages[0].header = Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::Sequence(7)),
+            })
+        },
+    ];
+    for tamper in tampers {
+        let addr = start_mock_server(MockUpcasterService::tampering(tamper)).await;
+        let upcaster = Upcaster::from_address(&addr.to_string()).await.unwrap();
+        let events = vec![
+            make_test_event(0, "example.EventV1", vec![1]),
+            make_test_event(1, "example.EventV1", vec![2]),
+        ];
+        let err = upcaster.upcast("orders", events).await.unwrap_err();
+        assert_eq!(err.code(), tonic::Code::Internal);
+        assert!(
+            err.message().contains("changed the event stream"),
+            "{}",
+            err.message()
+        );
+    }
 }
