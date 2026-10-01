@@ -48,14 +48,23 @@ fn assert_conflict(result: Result<(u32, u32)>, expected: u32, actual: u32) {
 // storage_edition
 // ---------------------------------------------------------------------------
 
-/// Both API spellings of the main timeline map to one stored spelling, so a
+/// Both API spellings of the main timeline map to the canonical name, so a
 /// key-addressed backend writing under `""` and reading under `"angzarr"`
 /// (or the reverse) addresses the same rows.
 #[test]
-fn storage_edition_maps_both_main_spellings_to_empty() {
+fn storage_edition_maps_both_main_spellings_to_canonical_name() {
     assert_eq!(storage_edition(""), MAIN_TIMELINE_STORAGE_EDITION);
     assert_eq!(storage_edition("angzarr"), MAIN_TIMELINE_STORAGE_EDITION);
-    assert_eq!(MAIN_TIMELINE_STORAGE_EDITION, "");
+    assert_eq!(MAIN_TIMELINE_STORAGE_EDITION, "angzarr");
+}
+
+/// Storage reports the main timeline in its wire form and named editions by
+/// name.
+#[test]
+fn reported_edition_uses_wire_form_for_main_timeline() {
+    assert_eq!(reported_edition("angzarr"), "");
+    assert_eq!(reported_edition(""), "");
+    assert_eq!(reported_edition("v2"), "v2");
 }
 
 /// Named editions are stored under their own name.

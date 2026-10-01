@@ -23,7 +23,7 @@ use crate::storage::sql::event_store::{
     implicit_divergence, map_write_conflict, merge_composite_events, resolve_divergence,
 };
 use crate::storage::timeline::{
-    storage_edition, validate_append, AppendWindow, MAIN_TIMELINE_STORAGE_EDITION,
+    reported_edition, storage_edition, validate_append, AppendWindow, MAIN_TIMELINE_STORAGE_EDITION,
 };
 use crate::storage::{AddMeta, AddOutcome, EventStore, Result, SourceInfo, StorageError};
 
@@ -721,7 +721,9 @@ impl EventStore for ImmudbEventStore {
             let root = Uuid::parse_str(&root_str)?;
             let event = EventPage::decode(event_data.as_slice())?;
 
-            let entry = books_map.entry((domain, edition, root)).or_default();
+            let entry = books_map
+                .entry((domain, reported_edition(&edition).to_string(), root))
+                .or_default();
             entry.pages.push(event);
             if entry.ext.is_none() && !ext_bytes.is_empty() {
                 entry.ext = Some(prost_types::Any::decode(ext_bytes.as_slice())?);

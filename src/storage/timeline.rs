@@ -4,10 +4,10 @@
 //! or WHETHER a write is accepted live here, once, so the backends cannot
 //! drift apart:
 //!
-//! - [`storage_edition`]: the one spelling of the main timeline that every
-//!   key-addressed backend (Bigtable, DynamoDB, ImmuDB, Redis, Mock) stores
-//!   and looks up. The SQL backends store the same timeline as SQL NULL and
-//!   surface it as `""`, so all backends agree on `""` at the API boundary.
+//! - [`storage_edition`] / [`reported_edition`]: the main timeline is keyed
+//!   under its canonical name (`"angzarr"`) by every key-addressed backend
+//!   (Bigtable, DynamoDB, ImmuDB, Redis, Mock) and reported in its wire form
+//!   (`""`), as the SQL backends (which store SQL NULL) already do.
 //! - [`resolve_divergence`] / [`implicit_divergence`] /
 //!   [`merge_composite_events`]: the composite (main-prefix + edition) read.
 //! - [`AppendWindow`] / [`validate_append`]: which sequences an `add` may
@@ -17,12 +17,13 @@
 //!   stored text form (text-column backends) or as an instant (the rest).
 
 use crate::proto::EventPage;
+use crate::proto_ext::constants::DEFAULT_EDITION;
 use crate::storage::helpers::{event_sequence, is_main_timeline};
 use crate::storage::{Result, StorageError};
 
-/// Edition string under which the main timeline is stored by key-addressed
-/// backends.
-pub const MAIN_TIMELINE_STORAGE_EDITION: &str = "";
+/// Canonical name of the main timeline, under which key-addressed backends
+/// store it. `""` (its wire form) names the same timeline.
+pub const MAIN_TIMELINE_STORAGE_EDITION: &str = DEFAULT_EDITION;
 
 /// Canonical storage spelling of an edition.
 ///
@@ -34,6 +35,16 @@ pub const MAIN_TIMELINE_STORAGE_EDITION: &str = "";
 pub fn storage_edition(edition: &str) -> &str {
     if is_main_timeline(edition) {
         MAIN_TIMELINE_STORAGE_EDITION
+    } else {
+        edition
+    }
+}
+
+/// Wire form of an edition read back from storage: the main timeline is
+/// reported as `""` (unset on the wire), named editions as their name.
+pub fn reported_edition(edition: &str) -> &str {
+    if is_main_timeline(edition) {
+        ""
     } else {
         edition
     }

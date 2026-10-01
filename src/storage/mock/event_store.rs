@@ -18,7 +18,7 @@ use crate::storage::cascade_resolution::{stale_cascade_ids, unresolved_participa
 use crate::storage::helpers::{assemble_event_books, is_main_timeline, BookParts};
 use crate::storage::timeline::{
     guard_edition_delete, implicit_divergence, merge_composite_events, parse_rfc3339_utc,
-    resolve_divergence, storage_edition, validate_append, AppendWindow,
+    reported_edition, resolve_divergence, storage_edition, validate_append, AppendWindow,
     MAIN_TIMELINE_STORAGE_EDITION,
 };
 use crate::storage::{
@@ -341,7 +341,7 @@ impl EventStore for MockEventStore {
             for stored in events {
                 if stored.correlation_id == correlation_id {
                     let entry = books_map
-                        .entry((domain.clone(), edition.clone(), *root))
+                        .entry((domain.clone(), reported_edition(edition).to_string(), *root))
                         .or_default();
                     entry.pages.push(stored.page.clone());
                     if entry.ext.is_none() {

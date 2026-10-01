@@ -37,8 +37,8 @@ pub(crate) use crate::storage::timeline::{
     implicit_divergence, merge_composite_events, resolve_divergence,
 };
 
-/// Inverse of [`edition_to_db_value`]: SQL NULL surfaces as the empty-string
-/// sentinel at the API boundary. Event-store specific (unlike the encode
+/// Inverse of [`edition_to_db_value`]: SQL NULL surfaces as the main
+/// timeline's wire form, `""`. Event-store specific (unlike the encode
 /// side, `SnapshotStore` never reads the edition column back out), so it
 /// lives here rather than in `snapshot_store`.
 pub(crate) fn edition_from_db(value: Option<String>) -> String {

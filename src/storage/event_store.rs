@@ -131,8 +131,8 @@ impl AddOutcome {
 /// All domain-scoped operations take `domain` as their first parameter,
 /// followed by `edition`. The edition identifies the timeline: `""` or
 /// `"angzarr"` (interchangeable) for the main timeline, or a named edition
-/// (e.g., `"v2"`) for diverged timelines. Every backend stores the main
-/// timeline under one spelling and reports it as `""`.
+/// (e.g., `"v2"`) for diverged timelines. Every backend keys all spellings
+/// of the main timeline identically and reports it in its wire form, `""`.
 ///
 /// The `(domain, edition, root, sequence)` tuple forms the unique key
 /// for stored events.

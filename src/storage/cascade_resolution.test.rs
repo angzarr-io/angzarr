@@ -17,7 +17,7 @@ fn row(cascade: &str, domain: &str, root: Uuid, seq: u32, committed: bool, t: i6
     CascadeRow {
         cascade_id: cascade.to_string(),
         domain: domain.to_string(),
-        edition: String::new(),
+        edition: "angzarr".to_string(),
         root,
         sequence: seq,
         committed,
@@ -105,7 +105,7 @@ fn timestampless_rows_are_not_stale() {
 fn main_timeline_spellings_resolve_each_other() {
     let root = Uuid::new_v4();
     let mut provisional = row("c1", "order", root, 0, false, 0);
-    provisional.edition = "angzarr".to_string();
+    provisional.edition = String::new();
     let marker = row("c1", "order", root, 1, true, 5);
     let rows = vec![provisional, marker];
     assert!(stale_cascade_ids(&rows, at(10)).is_empty());

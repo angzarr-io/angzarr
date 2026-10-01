@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use crate::storage::timeline::storage_edition;
+use crate::storage::timeline::{reported_edition, storage_edition};
 use crate::storage::CascadeParticipant;
 
 /// One event row that carries a cascade id.
@@ -79,7 +79,7 @@ pub fn stale_cascade_ids(rows: &[CascadeRow], threshold: DateTime<Utc>) -> Vec<S
 
 /// Unresolved participants of `cascade_id` with the sequences of their
 /// provisional rows (ascending). Participants are ordered by
-/// `(domain, edition, root)`.
+/// `(domain, edition, root)`; the main timeline is reported as `""`.
 pub fn unresolved_participants(rows: &[CascadeRow], cascade_id: &str) -> Vec<CascadeParticipant> {
     let resolved = resolved_participants(rows);
     let mut grouped: BTreeMap<(String, String, Uuid), Vec<u32>> = BTreeMap::new();
@@ -91,7 +91,7 @@ pub fn unresolved_participants(rows: &[CascadeRow], cascade_id: &str) -> Vec<Cas
         grouped
             .entry((
                 row.domain.clone(),
-                storage_edition(&row.edition).to_string(),
+                reported_edition(&row.edition).to_string(),
                 row.root,
             ))
             .or_default()

@@ -42,8 +42,9 @@ use crate::storage::batch_write::{write_all_or_undo, UnitWriter};
 use crate::storage::cascade_resolution::{stale_cascade_ids, unresolved_participants, CascadeRow};
 use crate::storage::helpers::{is_main_timeline, BookParts};
 use crate::storage::timeline::{
-    guard_edition_delete, merge_composite_events, parse_rfc3339_utc, resolve_divergence,
-    storage_edition, validate_append, AppendWindow, MAIN_TIMELINE_STORAGE_EDITION,
+    guard_edition_delete, merge_composite_events, parse_rfc3339_utc, reported_edition,
+    resolve_divergence, storage_edition, validate_append, AppendWindow,
+    MAIN_TIMELINE_STORAGE_EDITION,
 };
 use crate::storage::{
     AddMeta, AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo, StorageError,
@@ -1039,7 +1040,9 @@ impl EventStore for BigtableEventStore {
                 continue;
             };
             let event = EventPage::decode(data.as_ref()).map_err(StorageError::ProtobufDecode)?;
-            let entry = events_by_root.entry((domain, edition, root)).or_default();
+            let entry = events_by_root
+                .entry((domain, reported_edition(&edition).to_string(), root))
+                .or_default();
             entry.pages.push(event);
             if entry.ext.is_none() {
                 if let Some(bytes) = cells.get(COL_EXT) {
