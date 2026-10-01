@@ -11,7 +11,7 @@ use aws_sdk_sns::Client as SnsClient;
 use aws_sdk_sqs::Client as SqsClient;
 use prost::Message;
 use tokio::sync::RwLock;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 use uuid::Uuid;
 
 use crate::bus::error::{BusError, Result};
@@ -401,13 +401,12 @@ impl EventBus for SnsSqsEventBus {
             )
         })?;
 
-        // Determine which domains to subscribe to
-        let domains: Vec<String> = if self.config.domains.is_empty() {
-            warn!("No domains specified. Subscribe-side filtering will be used.");
-            vec!["events".to_string()]
-        } else {
-            self.config.domains.clone()
-        };
+        // One topic per domain: an all-domains subscriber has no topic to
+        // attach to, so it must name its domains.
+        if self.config.domains.is_empty() {
+            return Err(BusError::AllDomainsUnsupported(subscription_id.clone()));
+        }
+        let domains: Vec<String> = self.config.domains.clone();
 
         // Set up queues and subscriptions for each domain
         for domain in &domains {
@@ -448,13 +447,7 @@ impl EventBus for SnsSqsEventBus {
         name: &str,
         domain_filter: Option<&str>,
     ) -> Result<Arc<dyn EventBus>> {
-        let mut config = match domain_filter {
-            Some(d) => SnsSqsConfig::subscriber(name, vec![d.to_string()]),
-            None => SnsSqsConfig::subscriber_all(name),
-        };
-        // Inherit region and endpoint from parent config
-        config.region = self.config.region.clone();
-        config.endpoint_url = self.config.endpoint_url.clone();
+        let config = self.config.subscriber_config(name, domain_filter);
         let bus = SnsSqsEventBus::new(config).await?;
         Ok(Arc::new(bus))
     }

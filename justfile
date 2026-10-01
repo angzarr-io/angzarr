@@ -459,6 +459,12 @@ cognitive:
 test:
     just _container test
 
+# Run unit tests with extra backend features compiled in, so feature-gated
+# bus/storage unit tests run too. FEATURES is comma-separated, e.g.
+#   just test-features amqp,kafka,pubsub,sns-sqs
+test-features FEATURES:
+    just _container test-features {{FEATURES}}
+
 # Pre-commit gate: fmt + lint + test in a SINGLE container invocation.
 # Avoids the inter-container `.cargo-lock` race that bites when lefthook
 # runs `just fmt`, `just lint`, `just test` as three separate host

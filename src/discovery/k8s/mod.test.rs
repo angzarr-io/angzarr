@@ -572,3 +572,148 @@ fn test_next_reconnect_delay_first_call_with_observed_returns_min_delay() {
     let delay = next_reconnect_delay(true, &mut iter, &builder);
     assert_eq!(delay, Duration::from_millis(100));
 }
+
+// ============================================================================
+// apply_watch_event: deletes and relists evict
+// ============================================================================
+
+fn extract_any(svc: &Service) -> Option<(String, DiscoveredService)> {
+    K8sServiceDiscovery::extract_service_with_namespace(svc, "test-ns").map(|d| (d.name.clone(), d))
+}
+
+/// Saga extraction requires the source-domain label; used to model a
+/// Service that stops qualifying.
+fn extract_saga(svc: &Service) -> Option<(String, SagaService)> {
+    K8sServiceDiscovery::extract_saga_with_namespace(svc, "test-ns")
+        .map(|s| (s.service.name.clone(), s))
+}
+
+async fn names<T>(cache: &RwLock<HashMap<String, T>>) -> Vec<String> {
+    let mut v: Vec<String> = cache.read().await.keys().cloned().collect();
+    v.sort();
+    v
+}
+
+/// A Delete event evicts the Service so it is no longer routed to.
+#[tokio::test]
+async fn test_watch_delete_evicts_service() {
+    let cache = RwLock::new(HashMap::new());
+    let relist = Mutex::new(None);
+    let svc = make_test_service(
+        "orders-projector",
+        COMPONENT_PROJECTOR,
+        Some("orders"),
+        1310,
+    );
+
+    apply_watch_event(
+        "projector",
+        &cache,
+        &relist,
+        Event::Apply(svc.clone()),
+        extract_any,
+    )
+    .await;
+    assert_eq!(names(&cache).await, vec!["orders-projector"]);
+
+    apply_watch_event(
+        "projector",
+        &cache,
+        &relist,
+        Event::Delete(svc),
+        extract_any,
+    )
+    .await;
+    assert!(names(&cache).await.is_empty());
+}
+
+/// A relist after a disconnected watch replaces the cache: a Service
+/// deleted while disconnected (absent from the relist) is evicted, and
+/// the cache keeps serving the old entries until the relist completes.
+#[tokio::test]
+async fn test_watch_relist_replaces_cache_on_init_done() {
+    let cache = RwLock::new(HashMap::new());
+    let relist = Mutex::new(None);
+    let kept = make_test_service("a-projector", COMPONENT_PROJECTOR, Some("a"), 1310);
+    let gone = make_test_service("b-projector", COMPONENT_PROJECTOR, Some("b"), 1310);
+    for svc in [kept.clone(), gone] {
+        apply_watch_event("projector", &cache, &relist, Event::Apply(svc), extract_any).await;
+    }
+
+    apply_watch_event("projector", &cache, &relist, Event::Init, extract_any).await;
+    apply_watch_event(
+        "projector",
+        &cache,
+        &relist,
+        Event::InitApply(kept),
+        extract_any,
+    )
+    .await;
+    assert_eq!(
+        names(&cache).await,
+        vec!["a-projector", "b-projector"],
+        "cache unchanged until the relist completes"
+    );
+
+    apply_watch_event("projector", &cache, &relist, Event::InitDone, extract_any).await;
+    assert_eq!(names(&cache).await, vec!["a-projector"]);
+}
+
+/// A Delete that arrives during a relist is not resurrected by InitDone.
+#[tokio::test]
+async fn test_watch_delete_during_relist_is_not_resurrected() {
+    let cache = RwLock::new(HashMap::new());
+    let relist = Mutex::new(None);
+    let svc = make_test_service("a-projector", COMPONENT_PROJECTOR, Some("a"), 1310);
+
+    apply_watch_event("projector", &cache, &relist, Event::Init, extract_any).await;
+    apply_watch_event(
+        "projector",
+        &cache,
+        &relist,
+        Event::InitApply(svc.clone()),
+        extract_any,
+    )
+    .await;
+    apply_watch_event(
+        "projector",
+        &cache,
+        &relist,
+        Event::Delete(svc),
+        extract_any,
+    )
+    .await;
+    apply_watch_event("projector", &cache, &relist, Event::InitDone, extract_any).await;
+
+    assert!(names(&cache).await.is_empty());
+}
+
+/// An update that removes a required label (here the saga source-domain)
+/// drops the Service instead of leaving the stale entry routed.
+#[tokio::test]
+async fn test_watch_apply_of_unqualified_service_removes_it() {
+    let cache = RwLock::new(HashMap::new());
+    let relist = Mutex::new(None);
+
+    let labelled = make_test_saga_service("saga-x", Some("orders"), 1310);
+    apply_watch_event(
+        "saga",
+        &cache,
+        &relist,
+        Event::Apply(labelled),
+        extract_saga,
+    )
+    .await;
+    assert_eq!(names(&cache).await, vec!["saga-x"]);
+
+    let unlabelled = make_test_saga_service("saga-x", None, 1310);
+    apply_watch_event(
+        "saga",
+        &cache,
+        &relist,
+        Event::Apply(unlabelled),
+        extract_saga,
+    )
+    .await;
+    assert!(names(&cache).await.is_empty());
+}

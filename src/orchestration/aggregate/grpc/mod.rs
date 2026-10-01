@@ -26,6 +26,7 @@ use crate::repository::EventBookRepository;
 use crate::repository::SnapshotRepository;
 use crate::services::upcaster::Upcaster;
 use crate::storage::{EventStore, StorageError};
+use crate::transport::GrpcMessageLimits;
 use crate::utils::single_sequence_check::sequence_mismatch_error_with_state;
 
 use crate::storage::AddOutcome;
@@ -270,7 +271,7 @@ impl GrpcAggregateContext {
                     Status::unavailable(format!("Cannot connect to saga {}: {e}", endpoint.name))
                 })?;
 
-            let mut client = SagaCoordinatorServiceClient::new(channel);
+            let mut client = SagaCoordinatorServiceClient::new(channel).with_message_limits();
 
             let request = correlated_request(
                 SagaHandleRequest {
@@ -334,7 +335,8 @@ impl GrpcAggregateContext {
                     Status::unavailable(format!("Cannot connect to PM {}: {e}", endpoint.name))
                 })?;
 
-            let mut client = ProcessManagerCoordinatorServiceClient::new(channel);
+            let mut client =
+                ProcessManagerCoordinatorServiceClient::new(channel).with_message_limits();
 
             let request = correlated_request(
                 ProcessManagerCoordinatorRequest {

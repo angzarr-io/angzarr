@@ -71,18 +71,13 @@ inventory::submit! {
                     EventBusMode::Publisher => {
                         PubSubConfig::publisher(&project_id).with_topic_prefix(&topic_prefix)
                     }
-                    EventBusMode::Subscriber { queue, domain } => {
-                        PubSubConfig::subscriber(&project_id, queue, vec![domain])
+                    EventBusMode::Subscriber { queue, domains } => {
+                        PubSubConfig::subscriber(&project_id, queue, domains)
                             .with_topic_prefix(&topic_prefix)
                     }
                     EventBusMode::SubscriberAll { queue } => {
-                        let domains = domains.unwrap_or_default();
-                        if domains.is_empty() {
-                            PubSubConfig::subscriber_all(&project_id, queue)
-                        } else {
-                            PubSubConfig::subscriber(&project_id, queue, domains)
-                        }
-                        .with_topic_prefix(&topic_prefix)
+                        PubSubConfig::subscriber(&project_id, queue, domains.unwrap_or_default())
+                            .with_topic_prefix(&topic_prefix)
                     }
                 };
 

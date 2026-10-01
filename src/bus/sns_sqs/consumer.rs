@@ -4,13 +4,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use aws_sdk_sqs::types::MessageAttributeValue;
+use aws_sdk_sqs::types::{MessageAttributeValue, MessageSystemAttributeName};
 use aws_sdk_sqs::Client as SqsClient;
-use backon::{BackoffBuilder, ExponentialBuilder};
+use backon::BackoffBuilder;
 use prost::Message;
 use tokio::sync::RwLock;
 use tracing::{debug, error, info, Instrument};
 
+use crate::bus::ordering::FailedGroups;
 use crate::bus::traits::{domain_matches_any, EventHandler};
 use crate::proto::EventBook;
 
@@ -73,6 +74,14 @@ impl SqsProcessResult {
     pub fn should_delete(&self) -> bool {
         !matches!(self, Self::HandlerFailed)
     }
+}
+
+/// FIFO message group of a received message, when SQS returned it.
+pub(crate) fn message_group_id(message: &aws_sdk_sqs::types::Message) -> Option<&str> {
+    message
+        .attributes()
+        .and_then(|a| a.get(&MessageSystemAttributeName::MessageGroupId))
+        .map(String::as_str)
 }
 
 /// Delete an SQS message from the queue.
@@ -191,10 +200,7 @@ pub(crate) async fn consume_sqs_queue(
     info!(queue_url = %queue_url, domain = %domain, "Starting SQS consumer");
 
     // Exponential backoff with jitter for error recovery
-    let backoff_builder = ExponentialBuilder::default()
-        .with_min_delay(Duration::from_millis(100))
-        .with_max_delay(Duration::from_secs(30))
-        .with_jitter();
+    let backoff_builder = crate::bus::reconnect_backoff();
     let mut backoff_iter = backoff_builder.build();
 
     loop {
@@ -204,6 +210,7 @@ pub(crate) async fn consume_sqs_queue(
             .max_number_of_messages(max_messages)
             .wait_time_seconds(wait_time_secs)
             .message_attribute_names("All")
+            .message_system_attribute_names(MessageSystemAttributeName::MessageGroupId)
             .send()
             .await
         {
@@ -211,15 +218,25 @@ pub(crate) async fn consume_sqs_queue(
                 // Reset backoff on successful receive
                 backoff_iter = backoff_builder.build();
 
+                let mut failed_groups = FailedGroups::default();
                 for message in output.messages() {
+                    let group = message_group_id(message);
+                    if failed_groups.is_blocked(group) {
+                        // Returns after its visibility timeout, behind the
+                        // failed message of the same group.
+                        continue;
+                    }
+
                     let result = process_sqs_message(message, &handlers, &filter_domains).await;
 
                     if result.should_delete() {
                         if let Some(receipt) = message.receipt_handle() {
                             delete_sqs_message(&sqs, &queue_url, receipt).await;
                         }
+                    } else {
+                        // HandlerFailed: let visibility timeout expire for retry
+                        failed_groups.record_failure(group);
                     }
-                    // HandlerFailed: let visibility timeout expire for retry
                 }
             }
             Err(e) => {

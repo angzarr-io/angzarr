@@ -86,7 +86,7 @@ async fn init_event_bus_rejects_arbitrary_unknown_type() {
         },
         EventBusMode::Subscriber {
             queue: "q".to_string(),
-            domain: "orders".to_string(),
+            domains: vec!["orders".to_string()],
         },
     ] {
         let result = init_event_bus(&config, mode.clone()).await;

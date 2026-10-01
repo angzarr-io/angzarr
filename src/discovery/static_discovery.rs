@@ -27,6 +27,7 @@ use crate::proto::command_handler_coordinator_service_client::CommandHandlerCoor
 use crate::proto::event_query_service_client::EventQueryServiceClient;
 use crate::proto::projector_coordinator_service_client::ProjectorCoordinatorServiceClient;
 use crate::proto_ext::WILDCARD_DOMAIN;
+use crate::transport::GrpcMessageLimits;
 
 use super::{DiscoveredService, DiscoveryError};
 
@@ -261,16 +262,54 @@ impl StaticServiceDiscovery {
             .insert(name.to_string(), pm_service);
     }
 
+    /// Make the registered aggregates exactly `services`, dropping cached
+    /// clients for addresses no longer registered. Used by K8s discovery,
+    /// whose watcher caches are the source of truth.
+    #[cfg_attr(not(feature = "k8s"), allow(dead_code))]
+    pub(crate) async fn replace_aggregates(
+        &self,
+        services: impl IntoIterator<Item = DiscoveredService>,
+    ) {
+        let registry: HashMap<String, DiscoveredService> =
+            services.into_iter().map(|s| (s.name.clone(), s)).collect();
+        let urls: std::collections::HashSet<String> =
+            registry.values().map(DiscoveredService::grpc_url).collect();
+        *self.aggregates.write().await = registry;
+        self.aggregate_clients
+            .write()
+            .await
+            .retain(|url, _| urls.contains(url));
+        self.event_query_clients
+            .write()
+            .await
+            .retain(|url, _| urls.contains(url));
+    }
+
+    /// Make the registered projectors exactly `services`, dropping cached
+    /// clients for addresses no longer registered.
+    #[cfg_attr(not(feature = "k8s"), allow(dead_code))]
+    pub(crate) async fn replace_projectors(
+        &self,
+        services: impl IntoIterator<Item = DiscoveredService>,
+    ) {
+        let registry: HashMap<String, DiscoveredService> =
+            services.into_iter().map(|s| (s.name.clone(), s)).collect();
+        let urls: std::collections::HashSet<String> =
+            registry.values().map(DiscoveredService::grpc_url).collect();
+        *self.projectors.write().await = registry;
+        self.projector_clients
+            .write()
+            .await
+            .retain(|url, _| urls.contains(url));
+    }
+
     async fn get_or_create_aggregate_client(
         &self,
         service: &DiscoveredService,
     ) -> Result<CommandHandlerCoordinatorServiceClient<Channel>, DiscoveryError> {
-        get_or_create_client(
-            &self.aggregate_clients,
-            service,
-            "aggregate",
-            CommandHandlerCoordinatorServiceClient::new,
-        )
+        get_or_create_client(&self.aggregate_clients, service, "aggregate", |c| {
+            CommandHandlerCoordinatorServiceClient::new(c).with_message_limits()
+        })
         .await
     }
 
@@ -278,12 +317,9 @@ impl StaticServiceDiscovery {
         &self,
         service: &DiscoveredService,
     ) -> Result<EventQueryServiceClient<Channel>, DiscoveryError> {
-        get_or_create_client(
-            &self.event_query_clients,
-            service,
-            "event_query",
-            EventQueryServiceClient::new,
-        )
+        get_or_create_client(&self.event_query_clients, service, "event_query", |c| {
+            EventQueryServiceClient::new(c).with_message_limits()
+        })
         .await
     }
 
@@ -291,12 +327,9 @@ impl StaticServiceDiscovery {
         &self,
         service: &DiscoveredService,
     ) -> Result<ProjectorCoordinatorServiceClient<Channel>, DiscoveryError> {
-        get_or_create_client(
-            &self.projector_clients,
-            service,
-            "projector",
-            ProjectorCoordinatorServiceClient::new,
-        )
+        get_or_create_client(&self.projector_clients, service, "projector", |c| {
+            ProjectorCoordinatorServiceClient::new(c).with_message_limits()
+        })
         .await
     }
 }

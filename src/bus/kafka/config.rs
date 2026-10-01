@@ -78,6 +78,18 @@ impl KafkaEventBusConfig {
         }
     }
 
+    /// Derive a subscriber config that shares this config's brokers, topic
+    /// prefix and security settings, so a subscriber created from a
+    /// publisher reads the topics that publisher writes over the same
+    /// authenticated connection. `None` subscribes to every domain.
+    pub fn subscriber_config(&self, group_id: &str, domain: Option<&str>) -> Self {
+        Self {
+            group_id: Some(group_id.to_string()),
+            domains: domain.map(|d| vec![d.to_string()]),
+            ..self.clone()
+        }
+    }
+
     /// Add SASL authentication.
     pub fn with_sasl(
         mut self,

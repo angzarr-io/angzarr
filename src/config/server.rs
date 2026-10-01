@@ -1,4 +1,4 @@
-//! Server and networking configuration types.
+//! Sidecar target and service-file configuration types.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -7,32 +7,6 @@ use serde::Deserialize;
 
 use crate::storage::StorageRegistryConfig;
 use crate::transport::TransportConfig;
-
-/// Server configuration.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct ServerConfig {
-    /// Port for command handler gRPC service.
-    pub ch_port: u16,
-    /// Port for event query gRPC service.
-    pub event_query_port: u16,
-    /// Host to bind to.
-    ///
-    /// Default is `127.0.0.1` (localhost only) for security.
-    /// Set to `0.0.0.0` explicitly to bind to all interfaces.
-    pub host: String,
-}
-
-impl Default for ServerConfig {
-    fn default() -> Self {
-        Self {
-            ch_port: 1313,
-            event_query_port: 1314,
-            // Default to localhost for security - external access requires explicit config
-            host: "127.0.0.1".to_string(),
-        }
-    }
-}
 
 /// Sidecar service configuration.
 ///

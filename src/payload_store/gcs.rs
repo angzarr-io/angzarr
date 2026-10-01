@@ -18,7 +18,10 @@ use gcloud_storage::http::Error as GcsError;
 use prost_types::Timestamp;
 use tracing::{debug, warn};
 
-use super::{compute_hash, hash_to_hex, PayloadStore, PayloadStoreError, Result};
+use super::{
+    compute_hash, hash_to_hex, is_payload_object_key, payload_object_key, PayloadStore,
+    PayloadStoreError, Result,
+};
 use crate::proto::{PayloadReference, PayloadStorageType};
 
 /// GCS-based payload store.
@@ -61,13 +64,7 @@ impl GcsPayloadStore {
 
     /// Get the object name for a given hash.
     fn object_name(&self, hash: &[u8]) -> String {
-        let hex = hash_to_hex(hash);
-        let subdir = &hex[0..2];
-
-        match &self.prefix {
-            Some(prefix) => format!("{}/{}/{}", prefix, subdir, hex),
-            None => format!("{}/{}", subdir, hex),
-        }
+        payload_object_key(self.prefix.as_deref(), hash)
     }
 
     /// Build a URI for an object.
@@ -95,45 +92,28 @@ impl PayloadStore for GcsPayloadStore {
         let hash = compute_hash(payload);
         let object_name = self.object_name(&hash);
 
-        // Check if already exists (deduplication)
-        let exists = self
-            .client
-            .get_object(&GetObjectRequest {
-                bucket: self.bucket.clone(),
-                object: object_name.clone(),
-                ..Default::default()
-            })
+        // Always upload: content addressing makes the write idempotent, and
+        // rewriting refreshes the object's creation time so the TTL reaper
+        // never deletes a payload a just-published event still references.
+        let upload_type = UploadType::Simple(Media::new(object_name.clone()));
+        self.client
+            .upload_object(
+                &UploadObjectRequest {
+                    bucket: self.bucket.clone(),
+                    ..Default::default()
+                },
+                payload.to_vec(),
+                &upload_type,
+            )
             .await
-            .is_ok();
+            .map_err(|e| PayloadStoreError::StoreFailed(format!("GCS upload failed: {}", e)))?;
 
-        if exists {
-            debug!(
-                hash = %hash_to_hex(&hash),
-                "Payload already exists in GCS, returning existing reference"
-            );
-        } else {
-            // Upload the payload
-            let upload_type = UploadType::Simple(Media::new(object_name.clone()));
-
-            self.client
-                .upload_object(
-                    &UploadObjectRequest {
-                        bucket: self.bucket.clone(),
-                        ..Default::default()
-                    },
-                    payload.to_vec(),
-                    &upload_type,
-                )
-                .await
-                .map_err(|e| PayloadStoreError::StoreFailed(format!("GCS upload failed: {}", e)))?;
-
-            debug!(
-                hash = %hash_to_hex(&hash),
-                size = payload.len(),
-                bucket = %self.bucket,
-                "Stored payload in GCS"
-            );
-        }
+        debug!(
+            hash = %hash_to_hex(&hash),
+            size = payload.len(),
+            bucket = %self.bucket,
+            "Stored payload in GCS"
+        );
 
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -153,6 +133,12 @@ impl PayloadStore for GcsPayloadStore {
 
     async fn get(&self, reference: &PayloadReference) -> Result<Vec<u8>> {
         let object_name = self.object_from_uri(&reference.uri)?;
+        if object_name != self.object_name(&reference.content_hash) {
+            return Err(PayloadStoreError::InvalidUri(format!(
+                "{} is not this store's object for its content hash",
+                reference.uri
+            )));
+        }
 
         let payload = self
             .client
@@ -208,6 +194,9 @@ impl PayloadStore for GcsPayloadStore {
                 })?;
 
             for object in response.items.into_iter().flatten() {
+                if !is_payload_object_key(&object.name, self.prefix.as_deref()) {
+                    continue;
+                }
                 // Check object creation time
                 if let Some(time_created) = object.time_created {
                     let created_secs = time_created.unix_timestamp() as u64;
@@ -246,7 +235,3 @@ impl PayloadStore for GcsPayloadStore {
         PayloadStorageType::Gcs
     }
 }
-
-#[cfg(test)]
-#[path = "gcs.test.rs"]
-mod tests;

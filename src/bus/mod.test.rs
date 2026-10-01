@@ -277,3 +277,31 @@ mod offloading_wrapper {
         ));
     }
 }
+
+// ============================================================================
+// reconnect_backoff
+// ============================================================================
+
+/// The reconnect backoff keeps producing delays past the builder's default
+/// three attempts and grows toward the 30 s cap, so a long broker outage
+/// is retried with an exponential (not fixed) schedule.
+#[test]
+fn reconnect_backoff_never_runs_dry_and_grows_to_cap() {
+    use backon::BackoffBuilder;
+    use std::time::Duration;
+
+    let delays: Vec<Duration> = reconnect_backoff().build().take(20).collect();
+    assert_eq!(
+        delays.len(),
+        20,
+        "backoff must not stop after a few attempts"
+    );
+    assert!(delays[0] >= Duration::from_millis(100) && delays[0] < Duration::from_millis(250));
+    // Jitter adds up to one extra delay; the base never exceeds 30 s.
+    assert!(delays.iter().all(|d| *d <= Duration::from_secs(60)));
+    assert!(
+        delays[19] >= Duration::from_secs(30),
+        "reaches the cap: {:?}",
+        delays[19]
+    );
+}

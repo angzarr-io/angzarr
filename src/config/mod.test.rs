@@ -20,7 +20,6 @@ use super::*;
 #[test]
 fn test_config_default() {
     let config = Config::default();
-    assert_eq!(config.server.ch_port, 1313);
     assert!(config.messaging.is_none());
     assert!(config.target.is_none());
 }
@@ -31,7 +30,7 @@ fn test_config_default() {
 #[test]
 fn test_config_for_test() {
     let config = Config::for_test();
-    assert_eq!(config.server.host, "127.0.0.1");
+    assert_eq!(config.transport.tcp.host, "127.0.0.1");
 }
 
 // ============================================================================
@@ -125,39 +124,33 @@ fn test_target_command_env_var_constant() {
 // Config Default Tests
 // ============================================================================
 
-/// Default config has no client logic endpoints.
+/// Default saga compensation config is the documented default (system
+/// revocation event on fallback into the default fallback domain).
 #[test]
-fn test_config_default_no_client_logic() {
+fn test_config_default_saga_compensation() {
     let config = Config::default();
-    assert!(config.client_logic.is_none());
+    assert_eq!(
+        config.saga_compensation.fallback_domain,
+        DEFAULT_SAGA_FALLBACK_DOMAIN
+    );
+    assert!(config.saga_compensation.fallback_emit_system_revocation);
 }
 
-/// Default config has no projectors.
-#[test]
-fn test_config_default_no_projectors() {
-    let config = Config::default();
-    assert!(config.projectors.is_none());
-}
+// ============================================================================
+// Unknown sections
+// ============================================================================
 
-/// Default config has no sagas.
+/// Removed or misspelled sections are reported; known ones are not.
 #[test]
-fn test_config_default_no_sagas() {
-    let config = Config::default();
-    assert!(config.sagas.is_none());
-}
-
-/// Default config has no process managers.
-#[test]
-fn test_config_default_no_process_managers() {
-    let config = Config::default();
-    assert!(config.process_managers.is_none());
-}
-
-/// Default config has no saga compensation config.
-#[test]
-fn test_config_default_no_saga_compensation() {
-    let config = Config::default();
-    assert!(config.saga_compensation.is_none());
+fn test_unknown_sections_reports_only_unknown_keys() {
+    let keys: Vec<String> = ["storage", "server", "limits", "messagng", "dlq"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        unknown_sections(&keys),
+        vec!["messagng".to_string(), "server".to_string()]
+    );
 }
 
 // ---------------------------------------------------------------------------

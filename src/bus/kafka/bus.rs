@@ -336,14 +336,7 @@ impl EventBus for KafkaEventBus {
         name: &str,
         domain_filter: Option<&str>,
     ) -> Result<Arc<dyn EventBus>> {
-        let config = match domain_filter {
-            Some(d) => KafkaEventBusConfig::subscriber(
-                &self.config.bootstrap_servers,
-                name,
-                vec![d.to_string()],
-            ),
-            None => KafkaEventBusConfig::subscriber_all(&self.config.bootstrap_servers, name),
-        };
+        let config = self.config.subscriber_config(name, domain_filter);
         let bus = KafkaEventBus::new(config).await?;
         Ok(Arc::new(bus))
     }

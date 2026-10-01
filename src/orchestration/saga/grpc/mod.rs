@@ -148,6 +148,7 @@ impl SagaRetryContext for GrpcSagaContext {
                 &rejection_error,
                 &mut handler,
                 &self.publisher,
+                &self.dlq_publisher,
                 &self.compensation_config,
             )
             .await;
@@ -176,6 +177,7 @@ async fn handle_command_rejection(
     rejection_error: &tonic::Status,
     handler: &mut CommandHandlerCoordinatorServiceClient<tonic::transport::Channel>,
     publisher: &Arc<dyn EventBus>,
+    dlq: &Arc<dyn DeadLetterPublisher>,
     config: &SagaCompensationConfig,
 ) {
     let rejection_reason = rejection_error.message().to_string();
@@ -249,6 +251,7 @@ async fn handle_command_rejection(
         &context,
         config,
         publisher,
+        dlq,
         source_domain,
         &triggering_domain,
     )

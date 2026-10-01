@@ -277,3 +277,64 @@ fn test_default_grpc_message_size_constant() {
     // 10 * 1024 = 10240 KB = 10 MB
     assert_eq!(DEFAULT_GRPC_MESSAGE_SIZE_KB, 10 * 1024);
 }
+
+// ============================================================================
+// prepare_uds_socket
+// ============================================================================
+
+/// A missing socket directory is created owner-only.
+#[test]
+fn test_prepare_uds_socket_creates_private_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().join("sockets");
+    let path = dir.join("svc.sock");
+
+    let guard = prepare_uds_socket(&path).unwrap();
+
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+    assert_eq!(guard.path(), path.as_path());
+}
+
+/// An existing directory (possibly shared) keeps its permissions.
+#[test]
+fn test_prepare_uds_socket_leaves_existing_dir_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::TempDir::new().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let _guard = prepare_uds_socket(&temp.path().join("svc.sock")).unwrap();
+
+    let mode = std::fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755);
+}
+
+/// A stale socket from a previous run is removed so bind succeeds.
+#[test]
+fn test_prepare_uds_socket_removes_stale_socket() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let path = temp.path().join("svc.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    drop(listener);
+    assert!(path.exists());
+
+    let _guard = prepare_uds_socket(&path).unwrap();
+
+    assert!(!path.exists());
+    std::os::unix::net::UnixListener::bind(&path).expect("rebind after cleanup");
+}
+
+/// A regular file at the socket path (misconfiguration) is an error and is
+/// never deleted.
+#[test]
+fn test_prepare_uds_socket_refuses_to_delete_regular_file() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let path = temp.path().join("important.db");
+    std::fs::write(&path, b"data").unwrap();
+
+    let err = prepare_uds_socket(&path).err().expect("must refuse");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&path).unwrap(), b"data");
+}

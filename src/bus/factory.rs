@@ -72,7 +72,7 @@ pub async fn init_event_bus(
 /// * `store` - Optional payload store for offloading. If `None`, no wrapping occurs.
 /// * `threshold` - Optional size threshold to trigger offloading.
 ///   If `None`, uses the bus's `max_message_size()`.
-pub fn wrap_with_offloading<S: crate::payload_store::PayloadStore + 'static>(
+pub fn wrap_with_offloading<S: crate::payload_store::PayloadStore + ?Sized + 'static>(
     bus: Arc<dyn EventBus>,
     store: Option<Arc<S>>,
     threshold: Option<usize>,

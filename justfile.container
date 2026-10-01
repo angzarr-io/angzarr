@@ -55,6 +55,10 @@ lint:
 test:
     cargo test --lib --features "test-utils"
 
+# Run unit tests with extra (comma-separated) backend features.
+test-features FEATURES:
+    cargo test --lib --features "test-utils,{{FEATURES}}"
+
 # Run all checks (build + test + lint + fmt)
 check-all: build test lint fmt
 

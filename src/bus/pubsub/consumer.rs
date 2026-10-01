@@ -1,5 +1,6 @@
 //! Pub/Sub consumer helpers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gcloud_pubsub::client::Client;
@@ -31,6 +32,7 @@ pub(super) enum ProcessResult {
 pub(super) async fn process_message_payload(
     data: &[u8],
     domain: &str,
+    attributes: &HashMap<String, String>,
     handlers: &Arc<RwLock<Vec<Box<dyn EventHandler>>>>,
     filter_domains: &[String],
 ) -> ProcessResult {
@@ -55,6 +57,10 @@ pub(super) async fn process_message_payload(
 
     // Dispatch to handlers
     let consume_span = tracing::info_span!("bus.consume", domain = %domain);
+    #[cfg(feature = "otel")]
+    super::otel::pubsub_extract_trace_context(attributes, &consume_span);
+    #[cfg(not(feature = "otel"))]
+    let _ = attributes;
     let success = crate::bus::dispatch::dispatch_to_handlers_with_domain(handlers, &book, domain)
         .instrument(consume_span)
         .await;

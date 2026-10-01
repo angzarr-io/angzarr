@@ -17,6 +17,9 @@ pub mod errmsg {
     pub const UNKNOWN_TYPE: &str = "Unknown messaging type: ";
     pub const MISSING_TYPE: &str =
         "No messaging transport configured; set messaging.type to one of: amqp, kafka, pubsub, sns-sqs";
+    pub const ALL_DOMAINS_UNSUPPORTED: &str =
+        "All-domain subscriptions are unsupported on this transport (one topic per domain); \
+         list the source domains in ANGZARR_SUBSCRIPTIONS or messaging.<backend>.domains: ";
 }
 
 /// Errors that can occur during bus operations.
@@ -52,4 +55,11 @@ pub enum BusError {
     /// than a message naming a phantom `"channel"` backend.
     #[error("{}", errmsg::MISSING_TYPE)]
     MissingType,
+
+    /// A subscriber asked for every domain on a transport that publishes
+    /// each domain to its own topic (Pub/Sub, SNS/SQS) and therefore has
+    /// nothing to attach an all-domains subscription to. Carries the
+    /// subscriber's queue name.
+    #[error("{}{}", errmsg::ALL_DOMAINS_UNSUPPORTED, .0)]
+    AllDomainsUnsupported(String),
 }

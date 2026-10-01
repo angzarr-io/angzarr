@@ -67,6 +67,17 @@ impl PayloadStore for FilesystemPayloadStore {
 
         // Check if already exists (deduplication)
         if path.exists() {
+            // Refresh the modification time: the TTL reaper ages payloads by
+            // mtime, and this payload is referenced again from now on.
+            let existing = path.clone();
+            tokio::task::spawn_blocking(move || {
+                std::fs::File::options()
+                    .write(true)
+                    .open(&existing)?
+                    .set_modified(SystemTime::now())
+            })
+            .await
+            .map_err(|e| PayloadStoreError::StoreFailed(e.to_string()))??;
             debug!(
                 hash = %hash_to_hex(&hash),
                 "Payload already exists, returning existing reference"
@@ -77,8 +88,9 @@ impl PayloadStore for FilesystemPayloadStore {
                 fs::create_dir_all(parent).await?;
             }
 
-            // Write atomically using temp file + rename
-            let temp_path = path.with_extension("tmp");
+            // Write atomically using a writer-unique temp file + rename, so
+            // concurrent writers of the same payload never share a temp file.
+            let temp_path = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
             fs::write(&temp_path, payload).await?;
             fs::rename(&temp_path, &path).await?;
 
@@ -107,6 +119,14 @@ impl PayloadStore for FilesystemPayloadStore {
 
     async fn get(&self, reference: &PayloadReference) -> Result<Vec<u8>> {
         let path = self.path_from_uri(&reference.uri)?;
+        // Read only this store's file for the reference's content hash; a
+        // reference naming any other path is refused.
+        if path != self.path_for_hash(&reference.content_hash) {
+            return Err(PayloadStoreError::InvalidUri(format!(
+                "{} is not this store's file for its content hash",
+                reference.uri
+            )));
+        }
 
         if !path.exists() {
             return Err(PayloadStoreError::NotFound(reference.uri.clone()));

@@ -14,6 +14,7 @@ use crate::proto::EventBook;
 
 // Core modules
 pub mod config;
+pub mod delivery;
 pub mod error;
 pub mod factory;
 pub mod traits;
@@ -34,6 +35,7 @@ pub mod kafka;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
 pub mod offloading;
+pub mod ordering;
 #[cfg(feature = "pubsub")]
 pub mod pubsub;
 #[cfg(feature = "sns-sqs")]
@@ -41,8 +43,10 @@ pub mod sns_sqs;
 
 // Re-export core types from submodules
 pub use config::{
-    AmqpBusConfig, EventBusMode, KafkaConfig, MessagingConfig, PubSubBusConfig, SnsSqsBusConfig,
+    AmqpBusConfig, DeliveryConfig, EventBusMode, KafkaConfig, MessagingConfig, PubSubBusConfig,
+    SnsSqsBusConfig,
 };
+pub use delivery::{DeadLetteringHandler, TargetFilterHandler};
 
 pub use error::{errmsg, BusError, Result};
 
@@ -130,6 +134,21 @@ impl<T: EventBus> EventBus for Instrumented<T> {
     fn max_message_size(&self) -> Option<usize> {
         self.inner().max_message_size()
     }
+}
+
+/// Backoff between consumer reconnect / receive attempts: 100 ms doubling
+/// to 30 s, with jitter, never giving up. The iterator never runs dry, so
+/// callers never fall back to a fixed delay after a few failures.
+#[cfg_attr(
+    not(any(feature = "amqp", feature = "pubsub", feature = "sns-sqs")),
+    allow(dead_code)
+)]
+pub(crate) fn reconnect_backoff() -> backon::ExponentialBuilder {
+    backon::ExponentialBuilder::default()
+        .with_min_delay(std::time::Duration::from_millis(100))
+        .with_max_delay(std::time::Duration::from_secs(30))
+        .with_jitter()
+        .without_max_times()
 }
 
 #[cfg(test)]

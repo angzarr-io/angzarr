@@ -20,6 +20,7 @@ use crate::proto::{
 };
 use crate::proto_ext::{correlated_request, CoverExt};
 use crate::services::gap_fill::{GapFiller, NoOpPositionStore, RemoteEventSource};
+use crate::transport::GrpcMessageLimits;
 
 /// Connected projector client.
 struct ProjectorConnection {
@@ -65,7 +66,7 @@ impl ProjectorCoord {
     /// Register a projector endpoint.
     pub async fn add_projector(&self, config: ServiceEndpoint) -> Result<(), String> {
         let channel = connect_channel(&config.address).await?;
-        let client = ProjectorServiceClient::new(channel);
+        let client = ProjectorServiceClient::new(channel).with_message_limits();
 
         info!(
             projector = %config.name,

@@ -30,8 +30,8 @@
 //! - TARGET_COMMAND: Optional command to spawn PM (embedded mode)
 //! - ANGZARR_SUBSCRIPTIONS: Event subscriptions (format: "domain:Type1,Type2;domain2")
 //! - ANGZARR_STATIC_ENDPOINTS: Static endpoints for multi-domain routing
-//! - MESSAGING_TYPE: amqp or kafka
-//! - ANGZARR_COORDINATOR_PORT: Port for CASCADE mode coordinator (default: 1360)
+//! - ANGZARR__MESSAGING__TYPE: amqp, kafka, pubsub or sns-sqs
+//! - ANGZARR_COORDINATOR_PORT: TCP port for the CASCADE coordinator (default: 1360)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -51,19 +51,23 @@ use angzarr::orchestration::process_manager::grpc::GrpcPMContextFactory;
 use angzarr::orchestration::process_manager::outbox::{
     drain_once, CommandOutbox, DrainStats, InMemoryCommandOutbox,
 };
+use angzarr::payload_store::{init_payload_offload, with_offload};
 use angzarr::proto::process_manager_coordinator_service_server::ProcessManagerCoordinatorServiceServer;
 use angzarr::proto::process_manager_service_client::ProcessManagerServiceClient;
 use angzarr::services::PmCoord;
 use angzarr::storage::{init_event_store, init_snapshot_store};
-use angzarr::transport::{connect_to_address, grpc_trace_layer, max_grpc_message_size};
+use angzarr::transport::{
+    connect_to_address, grpc_trace_layer, max_grpc_message_size, serve_with_transport,
+    GrpcMessageLimits,
+};
 use angzarr::utils::retry::connection_backoff;
-use angzarr::utils::sidecar::{bootstrap_sidecar, connect_endpoints};
+use angzarr::utils::sidecar::{
+    bootstrap_sidecar, connect_endpoints, coordinator_transport, start_subscriber,
+    COORDINATOR_PORT_ENV_VAR,
+};
 
 /// Environment variable for subscription configuration.
 const SUBSCRIPTIONS_ENV_VAR: &str = "ANGZARR_SUBSCRIPTIONS";
-
-/// Environment variable for coordinator port (CASCADE mode).
-const COORDINATOR_PORT_ENV_VAR: &str = "ANGZARR_COORDINATOR_PORT";
 
 /// Default coordinator port for CASCADE mode.
 const DEFAULT_COORDINATOR_PORT: u16 = 1360;
@@ -79,6 +83,9 @@ const OUTBOX_MAX_ATTEMPTS: u32 = 5;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Install rustls crypto provider before any TLS operations
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let bootstrap = bootstrap_sidecar("process-manager").await?;
 
     let messaging = bootstrap
@@ -119,17 +126,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let snapshot_store = init_snapshot_store(&bootstrap.config.storage).await?;
     info!("PM storage initialized for direct state persistence");
 
-    // Initialize event bus (publisher) for PM state events.
-    //
-    // C02: previously hand-rolled `match messaging_type { "amqp" => ..., _ =>
-    // MockEventBus }` here. Because `MockEventBus::publish` always returns
-    // `Ok`, any non-AMQP messaging type (kafka, pubsub, sns-sqs, or a typo)
-    // silently discarded every PM state event with nothing but a `warn!`.
-    // Routed through the same self-registering factory the subscriber below
-    // already uses, so unresolved types hard-fail at startup instead.
+    // Event bus publisher for PM state events, from the self-registering bus
+    // factory; an unset or unknown messaging type fails boot.
+    let offload = init_payload_offload(&bootstrap.config.payload_offload).await?;
     let event_bus: Arc<dyn EventBus> = init_event_bus(messaging, EventBusMode::Publisher)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+    let event_bus = with_offload(event_bus, offload.as_ref());
 
     // Connect to process manager service
     let pm_addr = bootstrap.address.clone();
@@ -137,7 +140,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let addr = pm_addr.clone();
         async move {
             let channel = connect_to_address(&addr).await.map_err(|e| e.to_string())?;
-            Ok::<_, String>(ProcessManagerServiceClient::new(channel))
+            Ok::<_, String>(ProcessManagerServiceClient::new(channel).with_message_limits())
         }
     })
     .retry(connection_backoff())
@@ -222,8 +225,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         hybrid_fetcher.clone(),
         command_executor.clone(),
     )
-    .with_fact_executor(Some(fact_executor.clone()))
-    .with_targets(subscriptions);
+    .with_fact_executor(Some(fact_executor.clone()));
 
     // C04: background drain loop — redeliver outbox entries at-least-once via
     // the command executor (the transport-backed dispatch C13 formalizes), and
@@ -264,35 +266,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     // Start bus subscriber (ASYNC mode)
     // =========================================================================
-    let queue_name = format!("process-manager-{}", bootstrap.domain);
-    let subscriber_mode = EventBusMode::SubscriberAll {
-        queue: queue_name.clone(),
-    };
-    let subscriber = angzarr::bus::init_event_bus(messaging, subscriber_mode)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
-
-    subscriber
-        .subscribe(Box::new(handler))
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-
-    subscriber
-        .start_consuming()
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-
-    info!(queue = %queue_name, "Bus subscriber started (ASYNC mode)");
+    let _subscriber = start_subscriber(
+        messaging,
+        format!("process-manager-{}", bootstrap.domain),
+        subscriptions,
+        Box::new(handler),
+        dlq_publisher.clone(),
+        offload.as_ref(),
+        &bootstrap.domain,
+        "process_manager",
+    )
+    .await?;
 
     // =========================================================================
     // Start gRPC coordinator server (CASCADE mode)
     // =========================================================================
-    let coordinator_port: u16 = std::env::var(COORDINATOR_PORT_ENV_VAR)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_COORDINATOR_PORT);
-
-    let coordinator_addr = format!("0.0.0.0:{}", coordinator_port);
+    let coordinator = coordinator_transport(
+        &bootstrap.config.transport,
+        std::env::var(COORDINATOR_PORT_ENV_VAR).ok().as_deref(),
+        DEFAULT_COORDINATOR_PORT,
+    )?;
 
     // Create PM coordinator service for CASCADE mode
     let pm_coord = PmCoord::new(pm_factory, hybrid_fetcher, command_executor)
@@ -315,22 +308,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .max_encoding_message_size(msg_size),
         );
 
-    let addr: std::net::SocketAddr = coordinator_addr.parse()?;
     info!(
-        address = %addr,
         pm = %bootstrap.domain,
-        "PM coordinator server starting (CASCADE mode)"
+        "Coordinator server starting (CASCADE mode)"
     );
 
-    // Run both subscriber and coordinator server until shutdown
-    coordinator_server
-        .serve_with_shutdown(addr, async {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("Failed to install CTRL+C handler");
-            info!("Shutdown signal received");
-        })
-        .await?;
+    // Serves until SIGTERM/SIGINT, then drains and flushes telemetry.
+    serve_with_transport(
+        coordinator_server,
+        &coordinator,
+        "process-manager",
+        Some(&bootstrap.domain),
+    )
+    .await?;
 
     Ok(())
 }
