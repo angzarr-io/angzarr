@@ -86,7 +86,8 @@ func shouldSkipPackage(pkg string) bool {
 		"google.",
 		"grpc.",
 		"buf.",
-		"angzarr.", // Skip framework types, only want business types
+		"angzarr.",    // Framework types (legacy package), only want business types
+		"io.angzarr.", // Framework types (io.angzarr.v1, io.angzarr.status.v1)
 	}
 	for _, prefix := range skipPrefixes {
 		if strings.HasPrefix(pkg, prefix) {
@@ -119,6 +120,7 @@ func extractMessageTypes(msg protoreflect.MessageDescriptor) []DiscoveredType {
 			Type:     fieldTypeString(f),
 			Repeated: f.Cardinality() == protoreflect.Repeated && !f.IsMap(),
 			Optional: f.HasOptionalKeyword(),
+			Enum:     f.Kind() == protoreflect.EnumKind,
 		})
 	}
 

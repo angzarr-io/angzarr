@@ -22,6 +22,8 @@ type FieldDef struct {
 	Type     string
 	Repeated bool
 	Optional bool
+	// Enum is true when Type names a proto enum rather than a message.
+	Enum bool
 }
 
 // isEventName checks if name looks like an event (past tense)

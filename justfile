@@ -376,6 +376,10 @@ gateway-gen:
 gateway-build: gateway-gen
     just _go "cd gateway && go build -o /tmp/angzarr-grpc-gateway ."
 
+# Generate, vet and test the gRPC-Gateway (routing, discovery, REST wiring)
+gateway-test: gateway-gen
+    just _go "cd gateway && go vet ./... && go test ./... && bash test_dlq_admin_generated.sh"
+
 # Run gRPC-Gateway locally (connects to local coordinator)
 gateway-dev: gateway-gen
     just _go "cd gateway && go run . --grpc-target=localhost:1310"

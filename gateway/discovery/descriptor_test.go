@@ -18,6 +18,9 @@ func TestShouldSkipPackage(t *testing.T) {
 		{"grpc.health.v1", true},
 		{"buf.validate", true},
 		{"angzarr.coordinator", true},
+		{"io.angzarr.v1", true},
+		{"io.angzarr.status.v1", true},
+		{"io.example.orders", false},
 
 		{"examples.player", false},
 		{"myapp.orders", false},
@@ -510,5 +513,49 @@ func TestExtractTypesFromDescriptorSet_NestedMessages(t *testing.T) {
 	}
 	if !names["examples.Outer.Inner"] {
 		t.Error("missing examples.Outer.Inner")
+	}
+}
+
+// Enum-typed fields are marked so the schema renders them as strings
+// rather than as references to a message definition.
+func TestExtractTypesFromDescriptorSet_MarksEnumFields(t *testing.T) {
+	enumType := descriptorpb.FieldDescriptorProto_TYPE_ENUM
+	stringType := descriptorpb.FieldDescriptorProto_TYPE_STRING
+	labelOptional := descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL
+	one, two := int32(1), int32(2)
+
+	fds := &descriptorpb.FileDescriptorSet{
+		File: []*descriptorpb.FileDescriptorProto{{
+			Name:    proto.String("order.proto"),
+			Package: proto.String("examples.order"),
+			Syntax:  proto.String("proto3"),
+			EnumType: []*descriptorpb.EnumDescriptorProto{{
+				Name: proto.String("Status"),
+				Value: []*descriptorpb.EnumValueDescriptorProto{
+					{Name: proto.String("STATUS_OPEN"), Number: proto.Int32(0)},
+				},
+			}},
+			MessageType: []*descriptorpb.DescriptorProto{{
+				Name: proto.String("OrderUpdated"),
+				Field: []*descriptorpb.FieldDescriptorProto{
+					{Name: proto.String("status"), JsonName: proto.String("status"), Number: &one,
+						Type: &enumType, TypeName: proto.String(".examples.order.Status"), Label: &labelOptional},
+					{Name: proto.String("note"), JsonName: proto.String("note"), Number: &two,
+						Type: &stringType, Label: &labelOptional},
+				},
+			}},
+		}},
+	}
+
+	types, err := ExtractTypesFromDescriptorSet(fds)
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+	fields := types[0].Fields
+	if !fields[0].Enum || fields[0].Type != "examples.order.Status" {
+		t.Errorf("status field = %+v, want enum examples.order.Status", fields[0])
+	}
+	if fields[1].Enum {
+		t.Errorf("note field marked as enum")
 	}
 }

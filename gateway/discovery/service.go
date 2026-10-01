@@ -16,7 +16,7 @@ type Service struct {
 }
 
 // NewService creates a discovery service from a descriptor file.
-// If descriptorPath is empty, checks DISCOVERY_DESCRIPTOR_FILE env var.
+// If descriptorPath is empty, reads the DESCRIPTOR_PATH env var.
 func NewService(baseSpec []byte, descriptorPath string) (*Service, error) {
 	s := &Service{
 		baseSpec:    baseSpec,

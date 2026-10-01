@@ -167,6 +167,13 @@ for d in docs:
                 or k in ("ANGZARR__STORAGE__TYPE", "ANGZARR__STORAGE__POSTGRES__URI")]
         check(not dead, f"{name} sets no env for nonexistent config keys {dead}")
 
+# --- gateway --------------------------------------------------------------
+gw = env(container(find("Deployment", "angzarr-grpc-gateway"), "gateway"))
+check(gw.get("AGGREGATE_TARGET_TEMPLATE") == "{domain}-aggregate.default.svc.cluster.local:1310",
+      "gateway routes each domain to its aggregate Service")
+check(gw.get("STATUS_TARGET") == "angzarr-status.default.svc.cluster.local:1390",
+      "gateway sends DLQ admin routes to angzarr-status")
+
 # --- RBAC -----------------------------------------------------------------
 role = find("Role", "angzarr-coordinator")
 svc_rules = [r for r in role["rules"] if "services" in r["resources"]]

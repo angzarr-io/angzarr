@@ -210,8 +210,12 @@ infrastructure:
       repository: ghcr.io/angzarr-io/angzarr-grpc-gateway
       tag: latest
       pullPolicy: IfNotPresent
-    # Target gRPC coordinator (aggregate service)
-    grpcTarget: ""  # e.g., "angzarr-player:1310"
+    # Per-domain aggregate target; {domain} is replaced by the request's
+    # domain. Empty = {domain}-aggregate.<namespace>.svc.cluster.local:<aggregatePort>.
+    aggregateTargetTemplate: ""
+    # Optional single target for requests without a domain
+    # (e.g. GET /v1/query/aggregates). Empty = such requests are rejected.
+    grpcTarget: ""
     # ConfigMap containing types.bin for proto type discovery
     # Create with: kubectl create configmap gateway-descriptor --from-file=types.bin=examples/types.bin
     descriptorConfigMap: "gateway-descriptor"

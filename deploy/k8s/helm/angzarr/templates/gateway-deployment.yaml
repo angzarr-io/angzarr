@@ -45,8 +45,20 @@ spec:
               containerPort: {{ .Values.infrastructure.gateway.port }}
               protocol: TCP
           env:
+            # Each /v1/ch/{domain} and /v1/query/{domain} request goes to
+            # that domain's aggregate Service.
+            - name: AGGREGATE_TARGET_TEMPLATE
+              value: {{ .Values.infrastructure.gateway.aggregateTargetTemplate | default (printf "{domain}-aggregate.%s.svc.cluster.local:%v" .Release.Namespace .Values.service.aggregatePort) | quote }}
+            {{- with .Values.infrastructure.gateway.grpcTarget }}
+            # Single target for requests that name no domain.
             - name: GRPC_TARGET
-              value: {{ .Values.infrastructure.gateway.grpcTarget | quote }}
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.infrastructure.status.enabled }}
+            # DLQ admin routes (/api/dlq) go to angzarr-status.
+            - name: STATUS_TARGET
+              value: "{{ include "angzarr.fullname" . }}-status.{{ .Release.Namespace }}.svc.cluster.local:{{ .Values.infrastructure.status.grpcPort }}"
+            {{- end }}
             {{- if .Values.infrastructure.gateway.descriptorConfigMap }}
             - name: DESCRIPTOR_PATH
               value: "/config/types.bin"
