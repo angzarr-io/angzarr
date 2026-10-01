@@ -312,16 +312,15 @@ impl EventBookRepository {
         Ok(book)
     }
 
-    /// Load an EventBook as-of a timestamp (no snapshots).
     /// Load an EventBook as-of a wall-clock timestamp.
     ///
     /// Returns the framework's reconstructed state at `until`:
-    /// - If a snapshot exists with `snapshot.created_at <= until`,
-    ///   uses it and layers events with `seq > snapshot.sequence`
-    ///   AND `created_at <= until`. The snapshot represents state
-    ///   at its persist time; the layered events bring state from
-    ///   the snapshot's moment up to `until`.
-    /// - A snapshot newer than `until` is ignored — using it would
+    /// - The candidate snapshot is the newest one at or before the last
+    ///   event visible at `until` (`get_at_seq`). If its
+    ///   `created_at <= until`, it is used and events with
+    ///   `seq > snapshot.sequence` AND `created_at <= until` are layered
+    ///   on top.
+    /// - A snapshot persisted after `until` is ignored — using it would
     ///   produce future state.
     /// - A snapshot with no `created_at` (persisted before
     ///   R2-SNAP-6) is ignored as well, since its temporal
@@ -362,22 +361,27 @@ impl EventBookRepository {
             },
         )?;
 
-        let snapshot_to_carry = self
-            .snapshot_repo
-            .get(domain, edition, root)
-            .await?
-            .and_then(|snap| {
-                // Snapshots with no created_at have unknown temporal
-                // position — refuse to use them for temporal-by-time.
-                let ts = snap.created_at.as_ref()?;
-                let snap_dt = chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)?;
-                (snap_dt <= until_dt).then_some(snap)
-            });
-
         let events = self
             .event_store
             .get_until_timestamp(domain, edition, root, until)
             .await?;
+
+        // The newest snapshot that does not reach past the last event
+        // visible at `until`.
+        let snapshot_to_carry = match events.iter().map(|e| e.sequence_num()).max() {
+            Some(last_visible) => self
+                .snapshot_repo
+                .get_at_seq(domain, edition, root, last_visible)
+                .await?
+                .and_then(|snap| {
+                    // Snapshots with no created_at have unknown temporal
+                    // position — refuse to use them for temporal-by-time.
+                    let ts = snap.created_at.as_ref()?;
+                    let snap_dt = chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)?;
+                    (snap_dt <= until_dt).then_some(snap)
+                }),
+            None => None,
+        };
 
         // When a snapshot is used, drop the prefix it represents.
         let pages = if let Some(ref snap) = snapshot_to_carry {
@@ -413,10 +417,11 @@ impl EventBookRepository {
     /// Load an EventBook as-of a sequence number.
     ///
     /// Returns the framework's reconstructed state at `sequence`:
-    /// - If a snapshot exists with `snapshot.sequence <= sequence`,
-    ///   uses it and layers events `snapshot.sequence + 1 .. sequence + 1`
-    ///   on top (same state a full replay would produce, but
-    ///   skipping the prefix the snapshot already represents).
+    /// - If a snapshot exists with `snapshot.sequence <= sequence` (the
+    ///   newest such one, via `get_at_seq`), uses it and layers events
+    ///   `snapshot.sequence + 1 .. sequence + 1` on top (same state a full
+    ///   replay would produce, but skipping the prefix the snapshot already
+    ///   represents).
     /// - Otherwise replays from 0 through `sequence` inclusive.
     ///
     /// A snapshot newer than `sequence` is ignored — using it would
@@ -434,8 +439,12 @@ impl EventBookRepository {
         root: Uuid,
         sequence: u32,
     ) -> Result<EventBook> {
-        // Probe snapshot via the repo (returns None when reads are disabled).
-        let snapshot = self.snapshot_repo.get(domain, edition, root).await?;
+        // The newest snapshot at or before `sequence` (None when reads are
+        // disabled or none exists).
+        let snapshot = self
+            .snapshot_repo
+            .get_at_seq(domain, edition, root, sequence)
+            .await?;
 
         let (snapshot_to_carry, events) = match snapshot {
             Some(snap) if snap.sequence <= sequence => {
