@@ -91,23 +91,3 @@ pub enum Positions {
     #[iden = "updated_at"]
     UpdatedAt,
 }
-
-/// Editions table schema.
-///
-/// Stores metadata for diverged timelines. Each edition forks the main
-/// timeline at a divergence point (sequence number or timestamp) and
-/// continues independently.
-#[derive(Iden)]
-pub enum Editions {
-    Table,
-    #[iden = "name"]
-    Name,
-    #[iden = "divergence_point_type"]
-    DivergencePointType,
-    #[iden = "divergence_point_value"]
-    DivergencePointValue,
-    #[iden = "description"]
-    Description,
-    #[iden = "created_at"]
-    CreatedAt,
-}
