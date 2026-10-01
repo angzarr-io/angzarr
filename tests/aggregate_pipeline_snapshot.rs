@@ -434,3 +434,58 @@ async fn pipeline_loads_prior_snapshot_on_subsequent_command() {
         "loaded snapshot bytes mismatch -- did not round-trip via SQLite"
     );
 }
+
+/// snapshot_retention.feature C-0451/C-0452/C-0454 end to end: the
+/// retention a handler sets is persisted unchanged, a later snapshot prunes
+/// an older RETENTION_DEFAULT one, and a RETENTION_PERSIST one survives.
+#[tokio::test]
+async fn pipeline_persists_handler_retention_and_prunes_default() {
+    let rig = create_rig().await;
+    let root = Uuid::new_v4();
+    let with_retention = |seq: u32, retention: SnapshotRetention| Snapshot {
+        retention: retention as i32,
+        ..snapshot_at(seq, vec![seq as u8 + 1])
+    };
+
+    for (seq, retention) in [
+        (0, SnapshotRetention::RetentionPersist),
+        (1, SnapshotRetention::RetentionDefault),
+        (2, SnapshotRetention::RetentionDefault),
+    ] {
+        rig.business
+            .enqueue(event_book_with_snapshot(
+                "orders",
+                root,
+                None,
+                vec![event_page(seq)],
+                Some(with_retention(seq, retention)),
+            ))
+            .await;
+        rig.service
+            .handle_command(send(command_book("orders", root, seq, None)))
+            .await
+            .expect("command persists");
+    }
+
+    let newest = rig
+        .snapshot_store
+        .get("orders", "", root)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(newest.sequence, 2);
+    assert_eq!(newest.retention, SnapshotRetention::RetentionDefault as i32);
+
+    let at_one = rig
+        .snapshot_store
+        .get_at_seq("orders", "", root, 1)
+        .await
+        .unwrap()
+        .expect("the persistent snapshot remains");
+    assert_eq!(at_one.sequence, 0, "the DEFAULT snapshot at 1 was pruned");
+    assert_eq!(
+        at_one.retention,
+        SnapshotRetention::RetentionPersist as i32,
+        "the handler's retention is persisted unchanged"
+    );
+}
