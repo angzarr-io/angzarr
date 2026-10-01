@@ -71,7 +71,8 @@ pub async fn persist_pm_event_book(
     // (and collapsed every missing/invalid root onto one shared NIL
     // aggregate). The correlation id is the authoritative PM root by design.
     let pm_root = correlation_id.correlation_root();
-    let edition = process_events.edition().unwrap_or_default();
+    let edition =
+        crate::orchestration::aggregate::edition_key(process_events.edition().unwrap_or_default());
 
     // Persist directly to event store (bypasses command pipeline)
     if let Err(e) = event_store

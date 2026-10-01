@@ -457,7 +457,7 @@ pub async fn orchestrate_pm(
         let pm_state = fetcher
             .fetch_pm_state(
                 pm_domain,
-                trigger.edition().unwrap_or_default(),
+                super::aggregate::edition_key(trigger.edition().unwrap_or_default()),
                 correlation_id,
             )
             .await

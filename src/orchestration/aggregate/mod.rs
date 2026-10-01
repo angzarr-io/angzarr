@@ -68,7 +68,7 @@ pub use traits::{
 pub use client::GrpcBusinessLogic;
 
 // Re-exports: parsing
-pub use parsing::{extract_command_sequence, parse_command_cover, parse_event_cover};
+pub use parsing::{edition_key, extract_command_sequence, parse_command_cover, parse_event_cover};
 
 // Re-exports: pipeline
 pub use pipeline::{

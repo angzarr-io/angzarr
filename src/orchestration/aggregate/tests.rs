@@ -906,3 +906,45 @@ fn test_cascade_id_trait_default() {
         "default cascade_id should be None"
     );
 }
+
+// ============================================================================
+// Main-timeline edition spellings
+// ============================================================================
+
+/// "", unset and "angzarr" name one timeline; the coordinator keys all of
+/// them as "" so history written under one spelling is read under another.
+#[test]
+fn test_main_timeline_spellings_share_one_key() {
+    use super::parsing::{edition_key, extract_edition, extract_event_edition};
+    assert_eq!(edition_key(""), "");
+    assert_eq!(edition_key("angzarr"), "");
+    assert_eq!(edition_key("branch-a"), "branch-a");
+
+    let with_edition = |name: Option<&str>| CommandBook {
+        cover: Some(Cover {
+            domain: "orders".into(),
+            edition: name.map(|n| crate::proto::Edition {
+                name: n.into(),
+                divergences: vec![],
+            }),
+            ..Default::default()
+        }),
+        pages: vec![],
+    };
+    for name in [None, Some(""), Some("angzarr")] {
+        assert_eq!(
+            extract_edition(&with_edition(name)).unwrap(),
+            "",
+            "{name:?}"
+        );
+        let events = EventBook {
+            cover: with_edition(name).cover,
+            ..Default::default()
+        };
+        assert_eq!(extract_event_edition(&events).unwrap(), "", "{name:?}");
+    }
+    assert_eq!(
+        extract_edition(&with_edition(Some("branch-a"))).unwrap(),
+        "branch-a"
+    );
+}
