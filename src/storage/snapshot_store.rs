@@ -6,38 +6,20 @@ use uuid::Uuid;
 use super::Result;
 use crate::proto::{Snapshot, SnapshotRetention};
 
-/// Width of the sequence window within which `RETENTION_DEFAULT` snapshots
-/// supersede each other: the newest DEFAULT snapshot of each window of this
-/// many sequences is kept, older ones in the same window are pruned.
-pub const DEFAULT_RETENTION_WINDOW: u32 = 16;
-
-/// First sequence of the [`DEFAULT_RETENTION_WINDOW`] that contains
-/// `sequence`.
-pub fn default_retention_window_start(sequence: u32) -> u32 {
-    sequence - sequence % DEFAULT_RETENTION_WINDOW
-}
-
 /// Whether storing a snapshot at `new_sequence` prunes an existing snapshot
 /// at `old_sequence` with retention `old_retention`.
 ///
-/// Only strictly older snapshots are pruned:
-/// - `RETENTION_TRANSIENT`: always (deleted when a newer snapshot is
-///   written).
-/// - `RETENTION_DEFAULT`: when it lies in the same
-///   [`DEFAULT_RETENTION_WINDOW`] as the new snapshot — so one DEFAULT
-///   snapshot per window persists and the rest are treated as transient.
-/// - `RETENTION_PERSIST` and unknown values: never.
+/// Only strictly older snapshots are pruned, so the newest snapshot is
+/// never deleted:
+/// - `RETENTION_DEFAULT` and `RETENTION_TRANSIENT`: pruned by any newer
+///   snapshot of the same aggregate.
+/// - `RETENTION_PERSIST` and unknown values: never pruned.
 pub fn is_superseded(old_sequence: u32, old_retention: i32, new_sequence: u32) -> bool {
-    if old_sequence >= new_sequence {
-        return false;
-    }
-    match SnapshotRetention::try_from(old_retention) {
-        Ok(SnapshotRetention::RetentionTransient) => true,
-        Ok(SnapshotRetention::RetentionDefault) => {
-            old_sequence >= default_retention_window_start(new_sequence)
-        }
-        Ok(SnapshotRetention::RetentionPersist) | Err(_) => false,
-    }
+    old_sequence < new_sequence
+        && matches!(
+            SnapshotRetention::try_from(old_retention),
+            Ok(SnapshotRetention::RetentionDefault | SnapshotRetention::RetentionTransient)
+        )
 }
 
 /// Interface for snapshot persistence.

@@ -24,9 +24,7 @@ mod snapshot_store;
 
 pub use event_store::{AddMeta, AddOutcome, CascadeParticipant, EventStore, SourceInfo};
 pub use position_store::PositionStore;
-pub use snapshot_store::{
-    default_retention_window_start, is_superseded, SnapshotStore, DEFAULT_RETENTION_WINDOW,
-};
+pub use snapshot_store::{is_superseded, SnapshotStore};
 
 // Re-export from submodules
 pub use config::{

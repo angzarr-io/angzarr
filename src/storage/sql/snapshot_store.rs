@@ -240,24 +240,11 @@ macro_rules! impl_snapshot_store {
                 let sql = <$db_type>::build_insert(stmt);
 
                 // Remove the older snapshots this one supersedes (see
-                // `storage::is_superseded`): TRANSIENT always, DEFAULT within
-                // the new snapshot's retention window.
-                let superseded = Cond::any()
-                    .add(
-                        Expr::col(Snapshots::Retention)
-                            .eq(SnapshotRetention::RetentionTransient as i32),
-                    )
-                    .add(
-                        Cond::all()
-                            .add(
-                                Expr::col(Snapshots::Retention)
-                                    .eq(SnapshotRetention::RetentionDefault as i32),
-                            )
-                            .add(
-                                Expr::col(Snapshots::Sequence)
-                                    .gte(crate::storage::default_retention_window_start(sequence)),
-                            ),
-                    );
+                // `storage::is_superseded`): DEFAULT and TRANSIENT.
+                let superseded = Expr::col(Snapshots::Retention).is_in([
+                    SnapshotRetention::RetentionDefault as i32,
+                    SnapshotRetention::RetentionTransient as i32,
+                ]);
                 let cleanup_stmt = Query::delete()
                     .from_table(Snapshots::Table)
                     .cond_where(

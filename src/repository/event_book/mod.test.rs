@@ -1384,9 +1384,9 @@ mod mock_integration {
         assert_eq!(book.pages[0].sequence_num(), 0);
     }
 
-    /// Store events 0..=20 and DEFAULT snapshots at 15 and 20 (different
-    /// retention windows, so both are kept). Each snapshot's created_at is
-    /// its last event's time.
+    /// Store events 0..=20, a PERSIST snapshot at 15 and a DEFAULT snapshot
+    /// at 20 (both kept). Each snapshot's created_at is its last event's
+    /// time.
     async fn seed_two_snapshots(
         event_store: &MockEventStore,
         snapshot_store: &MockSnapshotStore,
@@ -1404,14 +1404,14 @@ mod mock_integration {
             )
             .await
             .unwrap();
-        for seq in [15, 20] {
+        for (seq, retention) in [
+            (15, SnapshotRetention::RetentionPersist),
+            (20, SnapshotRetention::RetentionDefault),
+        ] {
+            let mut snapshot = test_snapshot_with_created_at(seq, 1704067200 + i64::from(seq));
+            snapshot.retention = retention as i32;
             snapshot_store
-                .put(
-                    domain,
-                    "test",
-                    root,
-                    test_snapshot_with_created_at(seq, 1704067200 + i64::from(seq)),
-                )
+                .put(domain, "test", root, snapshot)
                 .await
                 .unwrap();
         }

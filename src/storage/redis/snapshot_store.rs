@@ -23,8 +23,7 @@
 //!
 //! ## Storage growth
 //!
-//! TRANSIENT snapshots are pruned by the next put; DEFAULT snapshots are
-//! kept at one per `storage::DEFAULT_RETENTION_WINDOW` sequences; PERSIST
+//! DEFAULT and TRANSIENT snapshots are pruned by the next put; PERSIST
 //! snapshots are never pruned by this store.
 
 use async_trait::async_trait;

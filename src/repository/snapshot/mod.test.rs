@@ -270,9 +270,9 @@ async fn test_get_at_seq_returns_highest_at_or_below() {
     let store = Arc::new(MockSnapshotStore::new());
     let repo = SnapshotRepository::new(store);
     let root = Uuid::new_v4();
-    repo.put("orders", "test", root, test_snapshot(15))
-        .await
-        .unwrap();
+    let mut persisted = test_snapshot(15);
+    persisted.retention = SnapshotRetention::RetentionPersist as i32;
+    repo.put("orders", "test", root, persisted).await.unwrap();
     repo.put("orders", "test", root, test_snapshot(20))
         .await
         .unwrap();

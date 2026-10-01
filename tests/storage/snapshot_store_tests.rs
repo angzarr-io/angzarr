@@ -369,16 +369,19 @@ pub async fn test_retention_persist<S: SnapshotStore>(store: &S) {
 }
 
 /// `get_at_seq(N)` must return the stored snapshot with the highest
-/// sequence `<= N`, even when a newer snapshot has been stored.
-///
-/// Uses DEFAULT retention (ordinary writes) at sequences in different
-/// retention windows, so neither supersedes the other.
+/// sequence `<= N`, even when a newer snapshot has been stored. The older
+/// snapshot is PERSIST so the newer one does not prune it.
 pub async fn test_get_at_seq_returns_historical_snapshot<S: SnapshotStore>(store: &S) {
     let domain = "test_snap_historical";
     let root = Uuid::new_v4();
 
     store
-        .put(domain, "test", root, make_snapshot(15))
+        .put(
+            domain,
+            "test",
+            root,
+            make_snapshot_with_retention(15, SnapshotRetention::RetentionPersist),
+        )
         .await
         .expect("put @ 15 should succeed");
     store
@@ -400,20 +403,29 @@ pub async fn test_get_at_seq_returns_historical_snapshot<S: SnapshotStore>(store
     assert_eq!(at(14).await, None, "nothing at or before 14");
 }
 
-/// DEFAULT retention keeps the newest snapshot of each 16-sequence window:
-/// a newer DEFAULT snapshot in the same window prunes the older one, while
-/// one in a later window leaves it in place. Storage stays bounded at one
-/// DEFAULT snapshot per window instead of one per put.
-pub async fn test_retention_default_keeps_newest_per_window<S: SnapshotStore>(store: &S) {
-    let domain = "test_snap_default_window";
+/// DEFAULT retention behaves like TRANSIENT: a newer snapshot prunes older
+/// DEFAULT snapshots, while PERSIST snapshots and the newest snapshot stay.
+pub async fn test_retention_default_pruned_by_newer<S: SnapshotStore>(store: &S) {
+    let domain = "test_snap_default_pruned";
     let root = Uuid::new_v4();
 
-    for seq in [3, 9, 15, 16, 21, 30] {
-        store
-            .put(domain, "test", root, make_snapshot(seq))
-            .await
-            .expect("put should succeed");
-    }
+    store
+        .put(domain, "test", root, make_snapshot(3))
+        .await
+        .expect("put should succeed");
+    store
+        .put(
+            domain,
+            "test",
+            root,
+            make_snapshot_with_retention(5, SnapshotRetention::RetentionPersist),
+        )
+        .await
+        .expect("put should succeed");
+    store
+        .put(domain, "test", root, make_snapshot(9))
+        .await
+        .expect("put should succeed");
 
     let at = |seq: u32| async move {
         store
@@ -422,23 +434,13 @@ pub async fn test_retention_default_keeps_newest_per_window<S: SnapshotStore>(st
             .expect("get_at_seq should succeed")
             .map(|s| s.sequence)
     };
-    assert_eq!(at(3).await, None, "3 was superseded by 9 in window 0..16");
-    assert_eq!(at(14).await, None, "9 was superseded by 15 in window 0..16");
     assert_eq!(
-        at(15).await,
-        Some(15),
-        "15 is window 0's newest and is kept"
+        at(4).await,
+        None,
+        "DEFAULT 3 was pruned by the newer snapshots"
     );
-    assert_eq!(at(29).await, Some(15), "16 and 21 were superseded by 30");
-    assert_eq!(at(30).await, Some(30));
-    assert_eq!(
-        store
-            .get(domain, "test", root)
-            .await
-            .unwrap()
-            .map(|s| s.sequence),
-        Some(30)
-    );
+    assert_eq!(at(8).await, Some(5), "PERSIST 5 is kept");
+    assert_eq!(at(9).await, Some(9), "the newest snapshot is kept");
 }
 
 /// A TRANSIENT snapshot is pruned as soon as a newer snapshot is stored.
@@ -704,8 +706,8 @@ macro_rules! run_snapshot_store_tests {
         test_get_at_seq_returns_historical_snapshot($store).await;
         println!("  test_get_at_seq_returns_historical_snapshot: PASSED");
 
-        test_retention_default_keeps_newest_per_window($store).await;
-        println!("  test_retention_default_keeps_newest_per_window: PASSED");
+        test_retention_default_pruned_by_newer($store).await;
+        println!("  test_retention_default_pruned_by_newer: PASSED");
 
         test_retention_transient_pruned_by_newer($store).await;
         println!("  test_retention_transient_pruned_by_newer: PASSED");
