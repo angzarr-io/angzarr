@@ -62,7 +62,7 @@ impl GrpcCommandExecutor {
             tonic::Status::not_found(format!("{}: {}", errmsg::NO_AGGREGATE_FOR_DOMAIN, domain))
         })?;
 
-        let mut client = client.lock().await;
+        let mut client = client.lock().await.clone();
         let sync_command = CommandRequest {
             command: Some(command_book),
             sync_mode: sync_mode.into(),

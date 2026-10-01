@@ -213,7 +213,7 @@ impl ProcessManagerContext for GrpcPMContext {
             destination_sequences: Default::default(),
         };
 
-        let mut client = self.client.lock().await;
+        let mut client = self.client.lock().await.clone();
         let response = client
             .handle(correlated_request(request, correlation_id))
             .await?

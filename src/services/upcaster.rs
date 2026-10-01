@@ -153,7 +153,7 @@ impl Upcaster {
             "", // No correlation context for upcasting
         );
 
-        let mut client = client.lock().await;
+        let mut client = client.lock().await.clone();
         let response = client.upcast(request).await?;
 
         Ok(response.into_inner().events)

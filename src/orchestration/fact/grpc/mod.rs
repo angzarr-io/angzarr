@@ -59,7 +59,7 @@ impl FactExecutor for GrpcFactExecutor {
                     domain: domain.clone(),
                 })?;
 
-        let mut client = client.lock().await;
+        let mut client = client.lock().await.clone();
         let event_request = EventRequest {
             events: Some(fact),
             sync_mode: SyncMode::Async.into(),
