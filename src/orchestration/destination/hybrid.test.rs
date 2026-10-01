@@ -411,3 +411,102 @@ fn test_hybrid_fetcher_stores_local_domain() {
 
     assert_eq!(fetcher.local_domain, "my-local-domain");
 }
+
+// ============================================================================
+// fetch_pm_state: root + edition, no correlation scan
+// ============================================================================
+
+fn pm_page(seq: u32, marker: &str) -> crate::proto::EventPage {
+    crate::proto::EventPage {
+        header: Some(crate::proto::PageHeader {
+            sync_mode: None,
+            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(seq)),
+        }),
+        payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
+            type_url: marker.to_string(),
+            value: vec![],
+        })),
+        ..Default::default()
+    }
+}
+
+/// PM state is the aggregate at the correlation-derived root on the
+/// trigger's edition; a same-correlation book on another edition is never
+/// picked instead.
+#[tokio::test]
+async fn test_fetch_pm_state_reads_trigger_edition_at_correlation_root() {
+    use crate::orchestration::shared::CorrelationRootExt;
+    use crate::storage::{AddMeta, EventStore};
+    let (fetcher, store) =
+        create_hybrid_fetcher_with_store("pm-flow", Arc::new(MockRemoteFetcher::new()));
+    let root = "corr-pm".correlation_root();
+    let meta = AddMeta {
+        correlation_id: "corr-pm",
+        ..Default::default()
+    };
+    store
+        .add("pm-flow", "", root, vec![pm_page(0, "main.Event")], &meta)
+        .await
+        .unwrap();
+    store
+        .add(
+            "pm-flow",
+            "branch",
+            root,
+            vec![pm_page(0, "branch.Event")],
+            &meta,
+        )
+        .await
+        .unwrap();
+
+    for (edition, expected) in [("branch", "branch.Event"), ("", "main.Event")] {
+        let book = fetcher
+            .fetch_pm_state("pm-flow", edition, "corr-pm")
+            .await
+            .unwrap()
+            .expect("state exists");
+        let crate::proto::event_page::Payload::Event(any) =
+            book.pages.last().unwrap().payload.as_ref().unwrap()
+        else {
+            panic!("event payload expected");
+        };
+        assert_eq!(any.type_url, expected, "edition {edition:?}");
+        assert_eq!(book.cover.unwrap().correlation_id, "corr-pm");
+    }
+}
+
+/// A workflow with no PM events is new: Ok(None), not an empty book.
+#[tokio::test]
+async fn test_fetch_pm_state_unknown_workflow_is_none() {
+    let fetcher = create_hybrid_fetcher("pm-flow", Arc::new(MockRemoteFetcher::new()));
+    assert!(fetcher
+        .fetch_pm_state("pm-flow", "", "never-seen")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// Another domain's state is the remote fetcher's to answer.
+#[tokio::test]
+async fn test_fetch_pm_state_other_domain_delegates_to_remote() {
+    let remote_book = make_event_book("order", Uuid::new_v4(), "corr-x");
+    let remote =
+        Arc::new(MockRemoteFetcher::new().with_fetch_by_correlation_response(remote_book.clone()));
+    let fetcher = create_hybrid_fetcher("pm-flow", remote);
+    assert_eq!(
+        fetcher.fetch_pm_state("order", "", "corr-x").await.unwrap(),
+        Some(remote_book)
+    );
+}
+
+/// A storage failure is an error, never "new workflow" (O9).
+#[tokio::test]
+async fn test_fetch_pm_state_storage_failure_is_err() {
+    let (fetcher, store) =
+        create_hybrid_fetcher_with_store("pm-flow", Arc::new(MockRemoteFetcher::new()));
+    store.set_fail_on_get(true).await;
+    assert!(fetcher
+        .fetch_pm_state("pm-flow", "", "corr-pm")
+        .await
+        .is_err());
+}

@@ -15,12 +15,11 @@
 //!
 //! # Correlation ID as PM Root
 //!
-//! The correlation_id serves double duty: it identifies both the cross-domain
-//! workflow AND the PM's aggregate root. This means:
-//!
-//! - `fetcher.fetch_by_correlation(pm_domain, correlation_id)` returns the PM's own state
-//! - All PM events are stored under `(pm_domain, correlation_id)` as root
-//! - Commands rejected route back via `angzarr_deferred.source.root = correlation_id`
+//! The correlation_id identifies both the cross-domain workflow and the PM's
+//! aggregate: the PM root is derived from it (`CorrelationRootExt`), and the
+//! PM's events live under that root on the trigger's edition
+//! (`DestinationFetcher::fetch_pm_state`). Commands the PM emits are
+//! attributed to the event that triggered it (`angzarr_deferred.source`).
 //!
 //! # Execution Flow
 //!
@@ -34,7 +33,6 @@
 //!
 //! # Module Structure
 //!
-//! - `local/`: in-process PM handler calls
 //! - `grpc/`: remote gRPC PM client calls (distributed mode)
 
 pub mod grpc;
@@ -53,8 +51,8 @@ use crate::bus::BusError;
 use crate::dlq::trigger::{CodeDlqExt, DlqTrigger};
 use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher};
 use crate::proto::{
-    page_header::SequenceType, AngzarrDeferredSequence, CascadeErrorMode, CommandBook, Cover,
-    EventBook, Notification, PageHeader, RevocationResponse, SyncMode, Uuid as ProtoUuid,
+    page_header::SequenceType, AngzarrDeferredSequence, CascadeErrorMode, CommandBook, EventBook,
+    Notification, PageHeader, RevocationResponse, SyncMode,
 };
 use crate::proto_ext::CoverExt;
 
@@ -456,7 +454,11 @@ pub async fn orchestrate_pm(
         // corrupting state. Fail this attempt instead; bus redelivery (the
         // handler propagates errors) retries the trigger with state intact.
         let pm_state = fetcher
-            .fetch_by_correlation(pm_domain, correlation_id)
+            .fetch_pm_state(
+                pm_domain,
+                trigger.edition().unwrap_or_default(),
+                correlation_id,
+            )
             .await
             .map_err(|e| {
                 error!(
@@ -592,32 +594,15 @@ pub async fn orchestrate_pm(
         // 2. The PM's job is to observe outcomes and react, not guarantee delivery
         // 3. Compensation is the PM's mechanism for handling failures
         //
-        // Compute PM source_seq for angzarr_deferred stamping:
-        // - If we just persisted process_events, use the max seq across
-        //   all books (audit #92: process_events is Vec<EventBook>)
-        // - Otherwise use max seq from pm_state (existing PM state)
-        // - Otherwise 0 (new PM with no events yet)
-        use crate::proto_ext::EventPageExt;
-        let pm_source_seq = response
-            .process_events
-            .iter()
-            .flat_map(|book| book.pages.iter().map(|p| p.sequence_num()))
-            .max()
-            .or_else(|| {
-                pm_state
-                    .as_ref()
-                    .map(|s| s.pages.iter().map(|p| p.sequence_num()).max().unwrap_or(0))
-            })
-            .unwrap_or(0);
-
         execute_pm_commands(
             ctx,
             executor,
             response.commands,
-            correlation_id,
-            pm_name,
-            pm_domain,
-            pm_source_seq,
+            PmCommandSource {
+                trigger,
+                correlation_id,
+                pm_name,
+            },
             sync_mode,
             policy,
         )
@@ -688,131 +673,78 @@ pub async fn orchestrate_pm(
     Ok(())
 }
 
-/// Execute PM commands with angzarr_deferred stamped for compensation routing.
+/// What a PM's commands are attributed to.
+struct PmCommandSource<'a> {
+    /// The event book that triggered the PM.
+    trigger: &'a EventBook,
+    correlation_id: &'a str,
+    /// The PM's registered name (`source_component`).
+    pm_name: &'a str,
+}
+
+/// Stamp provenance on a PM's commands and deliver them.
 ///
-/// Stamps each command with `angzarr_deferred` pointing to the PM itself, so that
-/// if a command is rejected, the compensation Notification routes back to the
-/// PM through the standard aggregate coordinator infrastructure.
-///
-/// PMs are aggregates — they receive Notifications the same way aggregates do.
-///
-/// `sync_mode` controls how commands are executed:
-/// - `Cascade`: Sync execution, no bus publishing
-/// - `Simple`: Standard execution with bus publishing
-///
-/// `pm_source_seq` is the PM's max sequence after persisting its events. This
-/// identifies which PM state produced these commands, enabling idempotency checks.
-#[allow(clippy::too_many_arguments)]
+/// Provenance (`AngzarrDeferredSequence`) attributes each command to the
+/// event that triggered the PM, exactly as for a saga: `source` is the
+/// trigger's cover (edition included) and `source_seq` its last sequence,
+/// unless the handler set them; `source_component` is the PM's name and
+/// `command_index` the command's position. The idempotency key is therefore
+/// unique per triggering event — two triggers that emit commands without PM
+/// events can no longer share a key and have the second swallowed as a
+/// replay. A handler-stamped explicit sequence passes through untouched (the
+/// destination validates it). `basis_seq` keeps a handler-provided value;
+/// otherwise 0 (whole-history overlap window), since the PM path observes no
+/// destination heads.
 async fn execute_pm_commands(
     ctx: &dyn ProcessManagerContext,
     executor: &dyn CommandExecutor,
     mut commands: Vec<CommandBook>,
-    correlation_id: &str,
-    pm_name: &str,
-    pm_domain: &str,
-    pm_source_seq: u32,
+    source: PmCommandSource<'_>,
     sync_mode: SyncMode,
     policy: DeliveryPolicy,
 ) -> Result<(), BusError> {
-    use super::shared::{fill_correlation_id, CorrelationRootExt};
+    use super::shared::fill_correlation_id;
+    use crate::proto_ext::EventPageExt;
+    let PmCommandSource {
+        trigger,
+        correlation_id,
+        pm_name,
+    } = source;
     fill_correlation_id(&mut commands, correlation_id);
 
-    // Build PM cover for angzarr_deferred — PM is the triggering aggregate
-    // PM root = correlation_id by design (PM is identified by the workflow it coordinates)
-    let pm_cover = Cover {
-        domain: pm_domain.to_string(),
-        root: Some(ProtoUuid {
-            // O7/D-11: derive the PM root from the correlation id via the one
-            // shared rule (already-UUID passes through; friendly id → UUIDv5).
-            // Pre-fix a non-UUID id collapsed to the NIL uuid, so every
-            // friendly-id workflow shared one root and rejection
-            // notifications routed to the wrong, shared aggregate. This MUST
-            // match the persist-side derivation in `persist_pm_event_book`.
-            value: correlation_id.correlation_root().as_bytes().to_vec(),
-        }),
-        correlation_id: correlation_id.to_string(),
-        edition: None,
-        ext: None,
-    };
+    let trigger_cover = trigger.cover.clone();
+    let trigger_seq = trigger
+        .pages
+        .iter()
+        .map(|p| p.sequence_num())
+        .max()
+        .unwrap_or(0);
 
-    // Stamp angzarr_deferred on commands for provenance and compensation routing.
-    //
-    // (source, source_seq, source_component, command_index) form the
-    // idempotency key. source + source_seq alone identify only the PM state
-    // that produced the commands — every command of one invocation shared
-    // the key and all but the first were swallowed as duplicates (O1).
-    //
-    // Stamping strategy (per spec):
-    // - PM handler stamped an explicit destination sequence → honor it
-    //   untouched (D-5): the command travels as a plain sequenced command
-    //   and the destination's optimistic-concurrency gate validates it,
-    //   rejecting on mismatch.
-    // - PM handler set angzarr_deferred → preserve its source/source_seq
-    //   (fill in PM cover if missing)
-    // - PM handler didn't set angzarr_deferred → use PM cover + pm_source_seq
-    // - source_component + command_index are framework provenance (the
-    //   PM's registered name and the command's position in this
-    //   invocation's output) — always stamped, never handler data.
-    // - basis_seq (D-7): unlike the saga orchestrator, the PM coordinator has
-    //   NO destination-sequence fetch phase in scope here (the PM handle path
-    //   sends `destination_sequences: Default::default()` — see
-    //   grpc/mod.rs), so the framework cannot fill an observed basis. A
-    //   handler-provided nonzero basis is preserved (it is the handler's own
-    //   observation claim, same fill-only-when-empty philosophy as the saga
-    //   side); otherwise 0 = legacy conservative whole-history overlap
-    //   window at the destination. Wiring a PM-side destination fetch (the
-    //   `fetcher` exists in `orchestrate_pm`) is a known deferred gap —
-    //   doing it after PM-event persistence would add a new post-persist
-    //   failure mode and deserves its own decision.
     for (command_index, cmd) in commands.iter_mut().enumerate() {
         for page in &mut cmd.pages {
-            // Preserve any per-command sync_mode the PM set on the header
-            // before we rewrite the sequence_type for angzarr_deferred
-            // stamping — the override would otherwise be lost.
+            // A per-command sync_mode override survives the header rewrite.
             let preserved_sync_mode = page.header.as_ref().and_then(|h| h.sync_mode);
-            match page.header.as_ref().and_then(|h| h.sequence_type.as_ref()) {
-                // D-5/O13: handler-stamped explicit destination sequence —
-                // honor it; the destination validates and rejects on mismatch.
-                Some(SequenceType::Sequence(_)) => {}
-                Some(SequenceType::AngzarrDeferred(existing)) => {
-                    page.header = Some(PageHeader {
-                        sync_mode: preserved_sync_mode,
-                        sequence_type: Some(SequenceType::AngzarrDeferred(
-                            AngzarrDeferredSequence {
-                                source: existing.source.clone().or_else(|| Some(pm_cover.clone())),
-                                source_seq: existing.source_seq,
-                                source_component: pm_name.to_string(),
-                                command_index: command_index as u32,
-                                // D-7: handler-provided basis preserved as-is
-                                // (nonzero = handler's observation claim; 0 =
-                                // no basis, and no framework map exists here
-                                // to fill it from — see stamping-strategy
-                                // note above).
-                                basis_seq: existing.basis_seq,
-                            },
-                        )),
-                    });
-                }
-                _ => {
-                    // PM handler didn't set angzarr_deferred - use defaults
-                    page.header = Some(PageHeader {
-                        sync_mode: preserved_sync_mode,
-                        sequence_type: Some(SequenceType::AngzarrDeferred(
-                            AngzarrDeferredSequence {
-                                source: Some(pm_cover.clone()),
-                                source_seq: pm_source_seq,
-                                source_component: pm_name.to_string(),
-                                command_index: command_index as u32,
-                                // D-7: no destination-sequence value is
-                                // available in this scope (deferred gap, see
-                                // stamping-strategy note above) → 0 = legacy
-                                // conservative whole-history overlap window.
-                                basis_seq: 0,
-                            },
-                        )),
-                    });
-                }
-            }
+            let deferred = match page.header.as_ref().and_then(|h| h.sequence_type.as_ref()) {
+                Some(SequenceType::Sequence(_)) => continue,
+                Some(SequenceType::AngzarrDeferred(existing)) => AngzarrDeferredSequence {
+                    source: existing.source.clone().or_else(|| trigger_cover.clone()),
+                    source_seq: existing.source_seq,
+                    source_component: pm_name.to_string(),
+                    command_index: command_index as u32,
+                    basis_seq: existing.basis_seq,
+                },
+                _ => AngzarrDeferredSequence {
+                    source: trigger_cover.clone(),
+                    source_seq: trigger_seq,
+                    source_component: pm_name.to_string(),
+                    command_index: command_index as u32,
+                    basis_seq: 0,
+                },
+            };
+            page.header = Some(PageHeader {
+                sync_mode: preserved_sync_mode,
+                sequence_type: Some(SequenceType::AngzarrDeferred(deferred)),
+            });
         }
     }
 

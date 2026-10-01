@@ -47,6 +47,21 @@ pub trait DestinationFetcher: Send + Sync {
         correlation_id: &str,
     ) -> Result<Option<EventBook>, Status>;
 
+    /// A process manager's own state: the PM aggregate whose root derives from
+    /// `correlation_id`, on the trigger's `edition`.
+    ///
+    /// Implementations that hold the PM's store locally resolve it directly by
+    /// that root and edition; the default looks it up by correlation id.
+    async fn fetch_pm_state(
+        &self,
+        pm_domain: &str,
+        edition: &str,
+        correlation_id: &str,
+    ) -> Result<Option<EventBook>, Status> {
+        let _ = edition;
+        self.fetch_by_correlation(pm_domain, correlation_id).await
+    }
+
     /// Fetch state by root UUID within a specific domain.
     /// Used by PM orchestration to find PM state by root instead of correlation_id.
     async fn fetch_by_root(

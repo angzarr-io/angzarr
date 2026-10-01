@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use backon::ExponentialBuilder;
 
-use crate::proto::{CommandResponse, SyncMode};
+use crate::proto::{CommandResponse, Cover, SyncMode, Uuid as ProtoUuid};
 
 // ============================================================================
 // Test Doubles
@@ -1614,10 +1614,10 @@ async fn test_pm_stamps_component_and_command_index() {
         let source = deferred
             .source
             .as_ref()
-            .expect("default arm must stamp the PM's own cover for rejection routing");
+            .expect("default arm must stamp the trigger's cover");
         assert_eq!(
-            source.domain, "fulfillment-pm",
-            "rejections route back to the PM's domain"
+            source.domain, "order",
+            "commands are attributed to the triggering event's aggregate"
         );
     }
 }
@@ -1749,67 +1749,93 @@ async fn test_pm_preserves_handler_stamped_deferred_source_and_seq() {
 }
 
 // ============================================================================
-// O7 / D-11: PM stamps a correlation-derived provenance root
+// PM command provenance names the triggering event
 // ============================================================================
-//
-// `execute_pm_commands` builds the PM cover whose `root` is stamped onto every
-// command's angzarr_deferred.source so rejections route back to the PM
-// aggregate. Pre-fix that root was `parse_str(correlation_id).unwrap_or(NIL)`
-// — any friendly (non-UUID) correlation id collapsed to the NIL uuid, so ALL
-// friendly-id workflows shared one root and rejection notifications routed to
-// the wrong, shared aggregate. The fix derives the root via the one shared
-// rule (`CorrelationRootExt::correlation_root`), identical to the persist
-// path, so stamp-site and persist-site roots always agree.
 
-/// O7/D-11: for a friendly (non-UUID) correlation id, the PM stamps its
-/// provenance root as `correlation_root(id)` — the UUIDv5 derivation — NOT the
-/// NIL uuid. This is the exact bug: friendly-id workflows must each get a
-/// distinct provenance root instead of sharing NIL.
-#[tokio::test]
-async fn test_pm_stamps_correlation_derived_root_for_friendly_id() {
-    use crate::orchestration::shared::CorrelationRootExt;
+fn trigger_at(domain: &str, root: u8, seq: u32, edition: &str) -> EventBook {
+    EventBook {
+        cover: Some(Cover {
+            domain: domain.to_string(),
+            root: Some(ProtoUuid {
+                value: vec![root; 16],
+            }),
+            correlation_id: "corr-1".to_string(),
+            edition: Some(crate::proto::Edition {
+                name: edition.to_string(),
+                divergences: vec![],
+            }),
+            ext: None,
+        }),
+        pages: vec![event_page_with_seq(seq)],
+        ..Default::default()
+    }
+}
 
+async fn stamped_for(trigger: &EventBook) -> AngzarrDeferredSequence {
     let ctx = PmEmittingHeaders {
         headers: vec![None],
     };
     let executor = BookCapturingExecutor::new();
-
-    let result = orchestrate_pm(
+    orchestrate_pm(
         &ctx,
         &NoOpFetcher,
         &executor,
         None,
-        &trigger_event(),
+        trigger,
         "pmg-fulfillment",
         "fulfillment-pm",
-        "order-42", // friendly (non-UUID) correlation id
+        "corr-1",
         SyncMode::Async,
         fast_backoff(),
         None,
     )
-    .await;
-    assert!(result.is_ok(), "orchestrate_pm should succeed");
-
+    .await
+    .unwrap();
     let captured = executor.seen.lock().await;
-    let deferred = captured_deferred(&captured[0]);
-    let source = deferred
-        .source
-        .as_ref()
-        .expect("default arm must stamp the PM's own cover");
-    let root = source.root.as_ref().expect("PM cover must carry a root");
+    captured_deferred(&captured[0]).clone()
+}
 
-    let expected = "order-42".correlation_root();
-    assert_eq!(
-        root.value,
-        expected.as_bytes().to_vec(),
-        "PM provenance root must equal the shared correlation→root derivation \
-         so a rejection routes back to the persisted PM aggregate"
-    );
-    assert_ne!(
-        root.value,
-        uuid::Uuid::nil().as_bytes().to_vec(),
-        "a friendly-id correlation must NOT collapse to the NIL root (O7)"
-    );
+/// Two triggers that make the PM emit commands without recording PM events
+/// must produce different idempotency keys; the PM's own (unchanged)
+/// sequence used to give both the same key, so the destination swallowed
+/// the second trigger's commands as replays.
+#[tokio::test]
+async fn test_pm_commands_from_distinct_triggers_have_distinct_keys() {
+    let first = stamped_for(&trigger_at("order", 1, 4, "")).await;
+    let second = stamped_for(&trigger_at("order", 1, 5, "")).await;
+    let other_root = stamped_for(&trigger_at("order", 2, 4, "")).await;
+    let key = |d: &AngzarrDeferredSequence| {
+        (
+            d.source
+                .as_ref()
+                .and_then(|c| c.root.clone())
+                .map(|r| r.value),
+            d.source_seq,
+            d.source_component.clone(),
+            d.command_index,
+        )
+    };
+    assert_ne!(key(&first), key(&second));
+    assert_ne!(key(&first), key(&other_root));
+    assert_eq!(first.source_seq, 4);
+    assert_eq!(first.source_component, "pmg-fulfillment");
+}
+
+/// The same trigger redelivered stamps the same key, so the destination
+/// recognises the replay.
+#[tokio::test]
+async fn test_pm_redelivered_trigger_has_same_key() {
+    let trigger = trigger_at("order", 7, 3, "");
+    assert_eq!(stamped_for(&trigger).await, stamped_for(&trigger).await);
+}
+
+/// Provenance keeps the trigger's edition, so a branch timeline's command is
+/// attributed to (and compensated on) that branch, not the main timeline.
+#[tokio::test]
+async fn test_pm_provenance_carries_trigger_edition() {
+    let deferred = stamped_for(&trigger_at("order", 1, 4, "branch-a")).await;
+    let source = deferred.source.expect("trigger cover stamped");
+    assert_eq!(source.edition.map(|e| e.name), Some("branch-a".to_string()));
 }
 
 // ============================================================================
@@ -2321,9 +2347,9 @@ async fn pm_compensate_rejection_compensates_stops_and_reports() {
 }
 
 #[tokio::test]
-async fn pm_continue_rejection_delivers_all_then_reports() {
+async fn pm_continue_rejection_delivers_all_and_succeeds() {
     let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
-    pm_aborted(&run.result);
+    run.result.unwrap();
     assert_eq!(run.executions, 2);
     assert_eq!(run.compensations, 0);
     assert_eq!(run.dead_letters, 0);

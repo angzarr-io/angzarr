@@ -26,6 +26,11 @@ use crate::storage::EventStore;
 use super::outbox::{CommandOutbox, InMemoryCommandOutbox};
 use super::{PMContextFactory, PmHandleResponse, ProcessManagerContext};
 
+/// Publish attempts for persisted PM events before dead-lettering them.
+const PUBLISH_ATTEMPTS: u32 = 3;
+/// Base backoff between PM publish attempts (multiplied by attempt number).
+const PUBLISH_BACKOFF_MS: u64 = 200;
+
 /// Persist a PM event book to the event store and publish the
 /// re-read result on the event bus.
 ///
@@ -47,14 +52,16 @@ use super::{PMContextFactory, PmHandleResponse, ProcessManagerContext};
 ///   `event_store.add` errors (storage I/O, serialization). The caller
 ///   classifies this as immediate-Rejected per R2-15 (it does NOT count
 ///   toward the retry budget). The bus publish step never fails the
-///   persist outcome -- a failed publish is logged but the events ARE
-///   durably persisted.
+///   persist outcome: the events ARE durably persisted. A publish that
+///   keeps failing after `POST_PERSIST_ATTEMPTS` is captured to
+///   `unpublished` (publisher, component name) for operator replay.
 pub async fn persist_pm_event_book(
     event_store: &Arc<dyn EventStore>,
     event_bus: &Arc<dyn EventBus>,
     pm_domain: &str,
     process_events: &EventBook,
     correlation_id: &str,
+    unpublished: Option<(&Arc<dyn DeadLetterPublisher>, &str)>,
 ) -> CommandOutcome {
     // O7/D-11: the PM aggregate root is derived from the correlation id via
     // the one shared rule — identical to the stamping site in
@@ -137,12 +144,39 @@ pub async fn persist_pm_event_book(
         pages: process_events.pages.clone(),
         ..Default::default()
     };
-    if let Err(e) = event_bus.publish(Arc::new(publish_book)).await {
-        error!(
-            domain = %pm_domain,
-            error = %e,
-            "Failed to publish PM events"
+    let publish_book = Arc::new(publish_book);
+    let mut last_error = None;
+    for attempt in 1..=PUBLISH_ATTEMPTS {
+        match event_bus.publish(Arc::clone(&publish_book)).await {
+            Ok(_) => {
+                last_error = None;
+                break;
+            }
+            Err(e) => {
+                error!(domain = %pm_domain, attempt, error = %e, "Failed to publish PM events");
+                last_error = Some(e.to_string());
+                if attempt < PUBLISH_ATTEMPTS {
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        PUBLISH_BACKOFF_MS * u64::from(attempt),
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+    if let (Some(reason), Some((publisher, component))) = (last_error, unpublished) {
+        let dead_letter = crate::dlq::AngzarrDeadLetter::from_event_processing_failure(
+            &publish_book,
+            &reason,
+            PUBLISH_ATTEMPTS,
+            true,
+            Vec::new(),
+            component,
+            "process_manager",
         );
+        if let Err(e) = publisher.publish(dead_letter).await {
+            error!(domain = %pm_domain, error = %e, "PM events persisted but neither published nor dead-lettered");
+        }
     }
 
     CommandOutcome::Success(CommandResponse::default())
@@ -251,6 +285,7 @@ impl ProcessManagerContext for GrpcPMContext {
             &self.pm_domain,
             process_events,
             correlation_id,
+            Some((&self.dlq_publisher, &self.component_name)),
         )
         .await
     }
