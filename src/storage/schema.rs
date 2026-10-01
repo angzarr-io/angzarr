@@ -38,6 +38,8 @@ pub enum Events {
     SourceComponent,
     #[iden = "source_command_index"]
     SourceCommandIndex,
+    #[iden = "source_kind"]
+    SourceKind,
     // Parent-aggregate routing cover (Cover.ext), serialized google.protobuf.Any.
     #[iden = "ext"]
     Ext,

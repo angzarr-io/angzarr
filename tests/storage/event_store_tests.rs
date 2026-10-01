@@ -2678,6 +2678,7 @@ pub async fn test_find_by_source_returns_match<S: EventStore>(store: &S) {
         seq: 5,
         component: "saga-orders-test".to_string(),
         command_index: 0,
+        kind: angzarr::storage::ProvenanceKind::Command,
     };
 
     store
@@ -2717,6 +2718,7 @@ pub async fn test_find_by_source_no_match<S: EventStore>(store: &S) {
         seq: 5,
         component: "saga-orders-test".to_string(),
         command_index: 0,
+        kind: angzarr::storage::ProvenanceKind::Command,
     };
 
     store
@@ -2881,6 +2883,7 @@ pub async fn test_find_by_source_round_trip<S: EventStore>(store: &S) {
         seq: 42,
         component: "saga-orders-test".to_string(),
         command_index: 1,
+        kind: angzarr::storage::ProvenanceKind::Command,
     };
 
     store
@@ -2974,6 +2977,7 @@ pub async fn test_find_by_source_round_trip_main_timeline_source<S: EventStore>(
         seq: 3,
         component: "saga-orders-test".to_string(),
         command_index: 0,
+        kind: angzarr::storage::ProvenanceKind::Command,
     };
 
     store
@@ -3001,6 +3005,91 @@ pub async fn test_find_by_source_round_trip_main_timeline_source<S: EventStore>(
     );
 }
 
+/// The deferred-idempotency key includes what the provenance tuple is
+/// attached to: a command, a rejection-notification or a
+/// compensate-notification. A Compensate notification carries the provenance
+/// tuple of the command it undoes and must never be dropped as a duplicate
+/// of that command (compensation_delivery.feature C-0473).
+pub async fn test_find_by_source_distinguishes_provenance_kind<S: EventStore>(store: &S) {
+    use angzarr::storage::ProvenanceKind;
+    let domain = "test_find_src_kind";
+    let root = Uuid::new_v4();
+    let command_claim = angzarr::storage::SourceInfo::new(
+        "angzarr",
+        "orders",
+        Uuid::new_v4(),
+        3,
+        "OrderFulfillment",
+        0,
+    );
+    let compensate_claim = command_claim
+        .clone()
+        .with_kind(ProvenanceKind::CompensateNotification);
+    let rejection_claim = command_claim
+        .clone()
+        .with_kind(ProvenanceKind::RejectionNotification);
+
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(0, "StockReserved")],
+            &AddMeta {
+                source_info: Some(&command_claim),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("command's events should persist");
+
+    for claim in [&compensate_claim, &rejection_claim] {
+        let premature = store
+            .find_by_source(domain, "angzarr", root, claim)
+            .await
+            .expect("find_by_source should succeed");
+        assert!(
+            premature.is_none(),
+            "a {:?} claim matched the command's claim with the same tuple",
+            claim.kind
+        );
+    }
+
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(1, "StockReleased")],
+            &AddMeta {
+                source_info: Some(&compensate_claim),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("compensation's events should persist");
+
+    let command_pages = store
+        .find_by_source(domain, "angzarr", root, &command_claim)
+        .await
+        .expect("find_by_source should succeed")
+        .expect("command claim should be found");
+    let compensate_pages = store
+        .find_by_source(domain, "angzarr", root, &compensate_claim)
+        .await
+        .expect("find_by_source should succeed")
+        .expect("compensate claim should be found");
+    assert_eq!(command_pages.len(), 1);
+    assert_eq!(command_pages[0].sequence_num(), 0);
+    assert_eq!(compensate_pages.len(), 1);
+    assert_eq!(compensate_pages[0].sequence_num(), 1);
+    assert!(store
+        .find_by_source(domain, "angzarr", root, &rejection_claim)
+        .await
+        .expect("find_by_source should succeed")
+        .is_none());
+}
+
 /// O1 collision regression at the storage contract level: two commands of ONE
 /// invocation — identical (source edition/domain/root/seq), differing only in
 /// command_index — persist as DISTINCT idempotency claims and each lookup
@@ -3019,6 +3108,7 @@ pub async fn test_find_by_source_distinguishes_invocation_commands<S: EventStore
         seq: 7,
         component: "pm-fulfillment".to_string(),
         command_index: 0,
+        kind: angzarr::storage::ProvenanceKind::Command,
     };
     let claim_second = angzarr::storage::SourceInfo {
         command_index: 1,
@@ -3666,6 +3756,7 @@ macro_rules! generate_event_store_core_tests {
             test_find_by_source_round_trip,
             test_find_by_source_round_trip_main_timeline_source,
             test_find_by_source_distinguishes_invocation_commands,
+            test_find_by_source_distinguishes_provenance_kind,
             test_find_by_external_id_round_trip,
             test_find_by_external_id_no_match,
             test_find_by_external_id_empty_returns_none,

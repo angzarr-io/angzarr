@@ -920,6 +920,7 @@ async fn test_find_by_source_returns_matching_events() {
         seq: 5,
         component: "saga-orders-inventory".to_string(),
         command_index: 1,
+        kind: crate::storage::ProvenanceKind::Command,
     };
 
     let event = EventPage {
@@ -973,6 +974,7 @@ async fn test_find_by_source_returns_none_for_mismatch() {
         seq: 5,
         component: "saga-orders-inventory".to_string(),
         command_index: 1,
+        kind: crate::storage::ProvenanceKind::Command,
     };
 
     let event = EventPage {
@@ -1011,6 +1013,7 @@ async fn test_find_by_source_returns_none_for_mismatch() {
         seq: 99, // Different sequence
         component: "saga-orders-inventory".to_string(),
         command_index: 1,
+        kind: crate::storage::ProvenanceKind::Command,
     };
 
     let result = store
@@ -1033,6 +1036,7 @@ async fn test_find_by_source_empty_source_returns_none() {
         seq: 0,
         component: String::new(),
         command_index: 0,
+        kind: crate::storage::ProvenanceKind::Command,
     };
 
     let result = store
@@ -1057,6 +1061,7 @@ async fn test_find_by_source_checks_all_fields() {
         seq: 5,
         component: "saga-orders-inventory".to_string(),
         command_index: 1,
+        kind: crate::storage::ProvenanceKind::Command,
     };
 
     let event = EventPage {

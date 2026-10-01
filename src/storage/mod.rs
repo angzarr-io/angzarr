@@ -22,7 +22,7 @@ mod event_store;
 mod position_store;
 mod snapshot_store;
 
-pub use event_store::{AddMeta, AddOutcome, EventStore, SourceInfo};
+pub use event_store::{AddMeta, AddOutcome, EventStore, ProvenanceKind, SourceInfo};
 pub use position_store::PositionStore;
 pub use snapshot_store::{is_superseded, SnapshotStore};
 

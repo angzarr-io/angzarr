@@ -55,6 +55,7 @@ const COL_SOURCE_ROOT: &[u8] = b"source_root";
 const COL_SOURCE_SEQ: &[u8] = b"source_seq";
 const COL_SOURCE_COMPONENT: &[u8] = b"source_component";
 const COL_SOURCE_COMMAND_INDEX: &[u8] = b"source_command_index";
+const COL_SOURCE_KIND: &[u8] = b"source_kind";
 
 /// One row's sequence and newest cell value per column qualifier.
 type AggregateRowSnapshot = (u32, HashMap<Vec<u8>, Vec<u8>>);
@@ -265,6 +266,7 @@ impl BigtableEventStore {
                 (COL_SOURCE_SEQ, info.seq.to_string()),
                 (COL_SOURCE_COMPONENT, info.component.clone()),
                 (COL_SOURCE_COMMAND_INDEX, info.command_index.to_string()),
+                (COL_SOURCE_KIND, info.kind.as_str().to_string()),
             ] {
                 mutations.push(Self::build_set_cell(
                     COLUMN_FAMILY,
@@ -563,6 +565,12 @@ impl BigtableEventStore {
                 COL_SOURCE_COMMAND_INDEX,
                 source_info.command_index.to_string().as_bytes(),
                 source_info.command_index == 0,
+            )
+            // Rows written before the kind column existed are commands.
+            && optional_is(
+                COL_SOURCE_KIND,
+                source_info.kind.as_str().as_bytes(),
+                source_info.kind == crate::storage::ProvenanceKind::Command,
             )
     }
 }

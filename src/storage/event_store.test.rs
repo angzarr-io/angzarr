@@ -303,3 +303,37 @@ async fn default_get_with_divergence_returns_not_implemented_for_implicit_branch
         result
     );
 }
+
+/// Each provenance kind has its own stored spelling; they never collide.
+#[test]
+fn provenance_kind_spellings_are_distinct() {
+    use super::ProvenanceKind;
+    assert_eq!(ProvenanceKind::Command.as_str(), "command");
+    assert_eq!(
+        ProvenanceKind::RejectionNotification.as_str(),
+        "rejection-notification"
+    );
+    assert_eq!(
+        ProvenanceKind::CompensateNotification.as_str(),
+        "compensate-notification"
+    );
+    assert_eq!(ProvenanceKind::default(), ProvenanceKind::Command);
+}
+
+/// `with_kind` changes only the kind; `new` builds a command claim.
+#[test]
+fn source_info_with_kind_keeps_the_tuple() {
+    use super::ProvenanceKind;
+    let root = Uuid::new_v4();
+    let command = SourceInfo::new("angzarr", "orders", root, 4, "Fulfillment", 2);
+    assert_eq!(command.kind, ProvenanceKind::Command);
+    let compensate = command
+        .clone()
+        .with_kind(ProvenanceKind::CompensateNotification);
+    assert_eq!(compensate.kind, ProvenanceKind::CompensateNotification);
+    assert_eq!(compensate.domain, "orders");
+    assert_eq!(compensate.root, root);
+    assert_eq!(compensate.seq, 4);
+    assert_eq!(compensate.component, "Fulfillment");
+    assert_eq!(compensate.command_index, 2);
+}

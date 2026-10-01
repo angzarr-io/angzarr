@@ -191,6 +191,10 @@ impl DynamoEventStore {
                 "source_command_index".to_string(),
                 AttributeValue::N(info.command_index.to_string()),
             );
+            item.insert(
+                "source_kind".to_string(),
+                AttributeValue::S(info.kind.as_str().to_string()),
+            );
         }
 
         // Parent-routing cover (Cover.ext), replicated per row.
@@ -778,10 +782,16 @@ impl EventStore for DynamoEventStore {
         } else {
             "source_command_index = :sidx"
         };
+        // Rows written before the kind attribute existed are commands.
+        let kind_clause = if source_info.kind == crate::storage::ProvenanceKind::Command {
+            "(attribute_not_exists(source_kind) OR source_kind = :skind)"
+        } else {
+            "source_kind = :skind"
+        };
         let filter = format!(
             "source_edition = :sed AND source_domain = :sdo \
              AND source_root = :sro AND source_seq = :sseq \
-             AND {component_clause} AND {index_clause}"
+             AND {component_clause} AND {index_clause} AND {kind_clause}"
         );
         let items = self
             .query_partition_filtered(
@@ -799,6 +809,10 @@ impl EventStore for DynamoEventStore {
                     (
                         ":sidx",
                         AttributeValue::N(source_info.command_index.to_string()),
+                    ),
+                    (
+                        ":skind",
+                        AttributeValue::S(source_info.kind.as_str().to_string()),
                     ),
                 ],
             )

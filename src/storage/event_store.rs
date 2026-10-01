@@ -8,16 +8,46 @@ use prost_types::Any;
 use super::Result;
 use crate::proto::EventPage;
 
+/// What a deferred provenance tuple is attached to.
+///
+/// The deferred-idempotency key is (kind, source, source_seq,
+/// source_component, command_index): a Notification delivery envelope
+/// carries the provenance tuple of the command it concerns, so the kind keeps
+/// a notification from being deduplicated against that command (or a
+/// rejection notification against a compensate notification).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ProvenanceKind {
+    /// A deferred (saga/PM-emitted) command.
+    #[default]
+    Command,
+    /// A Notification delivery envelope carrying a RejectionNotification.
+    RejectionNotification,
+    /// A Notification delivery envelope carrying a Compensate.
+    CompensateNotification,
+}
+
+impl ProvenanceKind {
+    /// The stored spelling of the kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProvenanceKind::Command => "command",
+            ProvenanceKind::RejectionNotification => "rejection-notification",
+            ProvenanceKind::CompensateNotification => "compensate-notification",
+        }
+    }
+}
+
 /// Source tracking info for saga-produced events.
 ///
 /// Used for idempotency: if events exist with matching source info,
-/// the saga command was already processed.
+/// the saga command (or notification) was already processed.
 ///
-/// The full key is (edition, domain, root, seq, component, command_index).
-/// The first four identify only the triggering event; component and
-/// command_index identify which emission of that trigger this is — one
-/// invocation emitting several commands at the same destination (or two
-/// components reacting to the same event) must not share a key (O1).
+/// The full key is (kind, edition, domain, root, seq, component,
+/// command_index). edition/domain/root/seq identify only the triggering
+/// event; component and command_index identify which emission of that
+/// trigger this is — one invocation emitting several commands at the same
+/// destination (or two components reacting to the same event) must not share
+/// a key (O1); kind separates a command from the notifications about it.
 #[derive(Debug, Clone, Default)]
 pub struct SourceInfo {
     /// Source edition (usually "angzarr")
@@ -29,14 +59,15 @@ pub struct SourceInfo {
     /// Source event sequence that triggered the saga
     pub seq: u32,
     /// Registered name of the producing component (saga/PM).
-    /// Empty on pre-upgrade rows/messages.
     pub component: String,
     /// Position of the command within the invocation's emitted command list.
     pub command_index: u32,
+    /// What the provenance tuple is attached to.
+    pub kind: ProvenanceKind,
 }
 
 impl SourceInfo {
-    /// Create new source info from saga origin.
+    /// Create new source info for a deferred command.
     pub fn new(
         edition: impl Into<String>,
         domain: impl Into<String>,
@@ -52,7 +83,14 @@ impl SourceInfo {
             seq,
             component: component.into(),
             command_index,
+            kind: ProvenanceKind::Command,
         }
+    }
+
+    /// The same provenance tuple attached to a different kind.
+    pub fn with_kind(mut self, kind: ProvenanceKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Check if this source info is empty/unset.

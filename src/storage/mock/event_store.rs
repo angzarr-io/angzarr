@@ -372,6 +372,7 @@ impl EventStore for MockEventStore {
                                 && stored.seq == source_info.seq
                                 && stored.component == source_info.component
                                 && stored.command_index == source_info.command_index
+                                && stored.kind == source_info.kind
                         })
                     })
                     .map(|e| e.page.clone())

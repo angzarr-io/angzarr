@@ -456,6 +456,7 @@ impl EventStore for ImmudbEventStore {
                 source_seq_lit,
                 source_component_lit,
                 source_command_index_lit,
+                source_kind_lit,
             ) = if let Some(info) = source_info.filter(|s| !s.is_empty()) {
                 (
                     format!("'{}'", storage_edition(&info.edition).replace('\'', "''")),
@@ -464,9 +465,11 @@ impl EventStore for ImmudbEventStore {
                     info.seq.to_string(),
                     format!("'{}'", info.component.replace('\'', "''")),
                     info.command_index.to_string(),
+                    format!("'{}'", info.kind.as_str()),
                 )
             } else {
                 (
+                    "NULL".to_string(),
                     "NULL".to_string(),
                     "NULL".to_string(),
                     "NULL".to_string(),
@@ -477,8 +480,8 @@ impl EventStore for ImmudbEventStore {
             };
 
             let query = format!(
-                "INSERT INTO events (edition, domain, root, sequence, created_at, event_data, correlation_id, external_id, source_edition, source_domain, source_root, source_seq, source_component, source_command_index, ext) \
-                 VALUES ('{}', '{}', '{}', {}, CAST('{}' AS TIMESTAMP), {}, '{}', {}, {}, {}, {}, {}, {}, {}, {})",
+                "INSERT INTO events (edition, domain, root, sequence, created_at, event_data, correlation_id, external_id, source_edition, source_domain, source_root, source_seq, source_component, source_command_index, source_kind, ext) \
+                 VALUES ('{}', '{}', '{}', {}, CAST('{}' AS TIMESTAMP), {}, '{}', {}, {}, {}, {}, {}, {}, {}, {}, {})",
                 edition.replace('\'', "''"),
                 domain.replace('\'', "''"),
                 root_str.replace('\'', "''"),
@@ -493,6 +496,7 @@ impl EventStore for ImmudbEventStore {
                 source_seq_lit,
                 source_component_lit,
                 source_command_index_lit,
+                source_kind_lit,
                 cover_ext_lit,
             );
 
@@ -827,6 +831,7 @@ impl EventStore for ImmudbEventStore {
             .and_where(Expr::col(Events::SourceSeq).eq(source_info.seq as i32))
             .and_where(Expr::col(Events::SourceComponent).eq(source_info.component.as_str()))
             .and_where(Expr::col(Events::SourceCommandIndex).eq(source_info.command_index as i32))
+            .and_where(Expr::col(Events::SourceKind).eq(source_info.kind.as_str()))
             .order_by(Events::Sequence, Order::Asc)
             .to_string(PostgresQueryBuilder);
 
