@@ -4,15 +4,9 @@
 //! timeline's edition component is [`MAIN_TIMELINE_STORAGE_EDITION`].
 //! Column family: `event`
 //! Columns: `data` (EventPage), `created_at` (RFC 3339), `correlation_id`,
-//!          `committed` (cascade status), `cascade_id` (cascade identifier),
 //!          `ext`, `external_id`, `source_*`
 //!
-//! Cascade index table (separate table for cascade queries):
-//! Row key format: `{cascade_id}#{domain}#{edition}#{root}#{sequence:010}`
-//! Column family: `ref`
-//! Columns: `committed`, `created_at`
-//!
-//! Tables must be pre-created with the `event` and `ref` column families.
+//! The table must be pre-created with the `event` column family.
 //!
 //! Bigtable mutates one row atomically. A multi-event `add` writes one row
 //! per event, each conditioned on the row being absent, and removes the rows
@@ -39,23 +33,17 @@ use uuid::Uuid;
 use crate::proto::{Cover, Edition, EventBook, EventPage, Uuid as ProtoUuid};
 use crate::proto_ext::EventPageExt;
 use crate::storage::batch_write::{write_all_or_undo, UnitWriter};
-use crate::storage::cascade_resolution::{stale_cascade_ids, unresolved_participants, CascadeRow};
 use crate::storage::helpers::{is_main_timeline, BookParts};
 use crate::storage::timeline::{
-    guard_edition_delete, merge_composite_events, parse_rfc3339_utc, reported_edition,
-    resolve_divergence, storage_edition, validate_append, AppendWindow,
-    MAIN_TIMELINE_STORAGE_EDITION,
+    guard_edition_delete, merge_composite_events, reported_edition, resolve_divergence,
+    storage_edition, validate_append, AppendWindow, MAIN_TIMELINE_STORAGE_EDITION,
 };
-use crate::storage::{
-    AddMeta, AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo, StorageError,
-};
+use crate::storage::{AddMeta, AddOutcome, EventStore, Result, SourceInfo, StorageError};
 
 const COLUMN_FAMILY: &str = "event";
 const COL_DATA: &[u8] = b"data";
 const COL_CREATED_AT: &[u8] = b"created_at";
 const COL_CORRELATION_ID: &[u8] = b"correlation_id";
-const COL_COMMITTED: &[u8] = b"committed";
-const COL_CASCADE_ID: &[u8] = b"cascade_id";
 // Parent-aggregate routing cover (Cover.ext), serialized google.protobuf.Any.
 const COL_EXT: &[u8] = b"ext";
 // External id and source info are persisted per row; lookups scan the
@@ -68,9 +56,6 @@ const COL_SOURCE_SEQ: &[u8] = b"source_seq";
 const COL_SOURCE_COMPONENT: &[u8] = b"source_component";
 const COL_SOURCE_COMMAND_INDEX: &[u8] = b"source_command_index";
 
-/// Column family for cascade index table.
-const CASCADE_INDEX_FAMILY: &str = "ref";
-
 /// One row's sequence and newest cell value per column qualifier.
 type AggregateRowSnapshot = (u32, HashMap<Vec<u8>, Vec<u8>>);
 
@@ -82,38 +67,14 @@ pub struct BigtableEventStore {
     /// requests are not serialized behind a lock.
     client: BigTable,
     table_name: String,
-    /// Cascade index table name for efficient cascade queries.
-    cascade_index_table: String,
 }
 
 impl BigtableEventStore {
     /// Create a new Bigtable event store.
-    ///
-    /// The cascade index table defaults to `{table_name}_cascade_index`.
     pub async fn new(
         project_id: &str,
         instance_id: &str,
         table_name: impl Into<String>,
-        emulator_host: Option<&str>,
-    ) -> Result<Self> {
-        let table_name = table_name.into();
-        let cascade_index_table = format!("{}_cascade_index", table_name);
-        Self::with_cascade_table(
-            project_id,
-            instance_id,
-            table_name,
-            cascade_index_table,
-            emulator_host,
-        )
-        .await
-    }
-
-    /// Create a new Bigtable event store with explicit cascade index table name.
-    pub async fn with_cascade_table(
-        project_id: &str,
-        instance_id: &str,
-        table_name: impl Into<String>,
-        cascade_index_table: impl Into<String>,
         emulator_host: Option<&str>,
     ) -> Result<Self> {
         let connection = if let Some(host) = emulator_host {
@@ -135,21 +96,15 @@ impl BigtableEventStore {
 
         let client = connection.client();
         let table_name = table_name.into();
-        let cascade_index_table = cascade_index_table.into();
 
         info!(
             project = %project_id,
             instance = %instance_id,
             table = %table_name,
-            cascade_index = %cascade_index_table,
             "Connected to Bigtable for events"
         );
 
-        Ok(Self {
-            client,
-            table_name,
-            cascade_index_table,
-        })
+        Ok(Self { client, table_name })
     }
 
     /// Build the row key for an event.
@@ -319,20 +274,6 @@ impl BigtableEventStore {
             }
         }
 
-        mutations.push(Self::build_set_cell(
-            COLUMN_FAMILY,
-            COL_COMMITTED,
-            if !event.no_commit { b"true" } else { b"false" },
-        ));
-
-        if let Some(ref cid) = event.cascade_id {
-            mutations.push(Self::build_set_cell(
-                COLUMN_FAMILY,
-                COL_CASCADE_ID,
-                cid.as_bytes(),
-            ));
-        }
-
         if let Some(any) = ext {
             mutations.push(Self::build_set_cell(
                 COLUMN_FAMILY,
@@ -342,83 +283,6 @@ impl BigtableEventStore {
         }
 
         mutations
-    }
-
-    /// Build row key for cascade index table.
-    ///
-    /// `cascade_id`, `domain`, and `edition` are percent-encoded; the
-    /// edition is stored in its canonical spelling.
-    pub fn cascade_index_row_key(
-        cascade_id: &str,
-        domain: &str,
-        edition: &str,
-        root: Uuid,
-        sequence: u32,
-    ) -> Vec<u8> {
-        let mut key = format!(
-            "{}#",
-            crate::storage::helpers::pct_encode_component(cascade_id)
-        )
-        .into_bytes();
-        key.extend_from_slice(&Self::row_key(domain, edition, root, sequence));
-        key
-    }
-
-    /// Parse cascade index row key into (cascade_id, domain, edition, root, sequence).
-    pub fn parse_cascade_index_key(key: &[u8]) -> Option<(String, String, String, Uuid, u32)> {
-        let key_str = String::from_utf8(key.to_vec()).ok()?;
-        let parts: Vec<&str> = key_str.splitn(5, '#').collect();
-
-        if parts.len() != 5 {
-            return None;
-        }
-
-        let cascade_id = crate::storage::helpers::pct_decode_component(parts[0])?;
-        let domain = crate::storage::helpers::pct_decode_component(parts[1])?;
-        let edition = crate::storage::helpers::pct_decode_component(parts[2])?;
-        let root = Uuid::parse_str(parts[3]).ok()?;
-        let sequence = parts[4].parse::<u32>().ok()?;
-
-        Some((cascade_id, domain, edition, root, sequence))
-    }
-
-    /// Build mutations for cascade index entry.
-    pub fn build_cascade_index_mutations(event: &EventPage) -> Vec<Mutation> {
-        let mut mutations = vec![Self::build_set_cell(
-            CASCADE_INDEX_FAMILY,
-            COL_COMMITTED,
-            if !event.no_commit { b"true" } else { b"false" },
-        )];
-
-        mutations.push(Self::build_set_cell(
-            CASCADE_INDEX_FAMILY,
-            COL_CREATED_AT,
-            Self::created_at_text(event).as_bytes(),
-        ));
-
-        mutations
-    }
-
-    /// Build a cascade row from a cascade-index row.
-    pub fn cascade_row_from_index(key: &[u8], cells: &[RowCell]) -> Option<CascadeRow> {
-        let (cascade_id, domain, edition, root, sequence) = Self::parse_cascade_index_key(key)?;
-        let committed = cells
-            .iter()
-            .any(|c| c.qualifier == COL_COMMITTED && c.value == b"true");
-        let created_at = cells
-            .iter()
-            .find(|c| c.qualifier == COL_CREATED_AT)
-            .and_then(|c| std::str::from_utf8(&c.value).ok())
-            .and_then(|ts| parse_rfc3339_utc(ts).ok());
-        Some(CascadeRow {
-            cascade_id,
-            domain,
-            edition,
-            root,
-            sequence,
-            committed,
-            created_at,
-        })
     }
 
     /// The first key after every key that starts with `prefix`.
@@ -506,10 +370,6 @@ impl BigtableEventStore {
 
     fn events_table(&self) -> String {
         self.client.get_full_table_name(&self.table_name)
-    }
-
-    fn cascade_table(&self) -> String {
-        self.client.get_full_table_name(&self.cascade_index_table)
     }
 
     /// Decode the `data` cells of `rows`, ascending by sequence.
@@ -707,19 +567,17 @@ impl BigtableEventStore {
     }
 }
 
-/// One event row of an `add` batch plus its cascade-index entry.
+/// One event row of an `add` batch.
 struct EventRow {
     key: Vec<u8>,
     sequence: u32,
     mutations: Vec<Mutation>,
-    cascade_index: Option<(Vec<u8>, Vec<Mutation>)>,
 }
 
 /// Writes an `add` batch one conditional row at a time.
 struct RowWriter {
     client: BigTable,
     events_table: String,
-    cascade_table: String,
     expected: u32,
 }
 
@@ -770,34 +628,10 @@ impl UnitWriter for RowWriter {
             });
         }
 
-        if let Some((index_key, index_mutations)) = &row.cascade_index {
-            let indexed = self
-                .client
-                .clone()
-                .mutate_row(MutateRowRequest {
-                    table_name: self.cascade_table.clone(),
-                    row_key: index_key.clone(),
-                    mutations: index_mutations.clone(),
-                    ..Default::default()
-                })
-                .await;
-            if let Err(e) = indexed {
-                // The event row and its index entry form one unit: drop the
-                // event row so a retry starts from a clean slate.
-                self.delete_row(&self.events_table, &row.key).await?;
-                return Err(StorageError::Backend(format!(
-                    "Bigtable cascade index mutate_row failed: {}",
-                    e
-                )));
-            }
-        }
         Ok(())
     }
 
     async fn undo(&self, row: &EventRow) -> Result<()> {
-        if let Some((index_key, _)) = &row.cascade_index {
-            self.delete_row(&self.cascade_table, index_key).await?;
-        }
         self.delete_row(&self.events_table, &row.key).await
     }
 }
@@ -867,19 +701,12 @@ impl EventStore for BigtableEventStore {
                         meta.source_info,
                         meta.ext,
                     ),
-                    cascade_index: event.cascade_id.as_ref().map(|cid| {
-                        (
-                            Self::cascade_index_row_key(cid, domain, edition, root, sequence),
-                            Self::build_cascade_index_mutations(event),
-                        )
-                    }),
                 }
             })
             .collect();
         let writer = RowWriter {
             client: self.client.clone(),
             events_table: self.events_table(),
-            cascade_table: self.cascade_table(),
             expected: window.max_first,
         };
         write_all_or_undo(&writer, &rows).await?;
@@ -1097,9 +924,7 @@ impl EventStore for BigtableEventStore {
                         filters: vec![
                             Self::latest_in_family(COLUMN_FAMILY),
                             RowFilter {
-                                filter: Some(Filter::ColumnQualifierRegexFilter(
-                                    b"data|cascade_id".to_vec(),
-                                )),
+                                filter: Some(Filter::ColumnQualifierRegexFilter(b"data".to_vec())),
                             },
                         ],
                     })),
@@ -1111,19 +936,10 @@ impl EventStore for BigtableEventStore {
         let writer = RowWriter {
             client: self.client.clone(),
             events_table: self.events_table(),
-            cascade_table: self.cascade_table(),
             expected: 0,
         };
         let mut deleted_count = 0u32;
-        for (row_key, cells) in rows {
-            if let Some((_, _, root, sequence)) = Self::parse_row_key(&row_key) {
-                if let Some(cid) = cells.iter().find(|c| c.qualifier == COL_CASCADE_ID) {
-                    let cid = String::from_utf8_lossy(&cid.value);
-                    let index_key =
-                        Self::cascade_index_row_key(&cid, domain, edition, root, sequence);
-                    writer.delete_row(&writer.cascade_table, &index_key).await?;
-                }
-            }
+        for (row_key, _) in rows {
             writer.delete_row(&writer.events_table, &row_key).await?;
             deleted_count += 1;
         }
@@ -1168,48 +984,5 @@ impl EventStore for BigtableEventStore {
                 .get(COL_EXTERNAL_ID)
                 .is_some_and(|v| v.as_slice() == external_id.as_bytes())
         })
-    }
-
-    async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {
-        let threshold = parse_rfc3339_utc(threshold)?;
-        let rows = self
-            .read_rows(ReadRowsRequest {
-                table_name: self.cascade_table(),
-                filter: Some(Self::latest_in_family(CASCADE_INDEX_FAMILY)),
-                ..Default::default()
-            })
-            .await?;
-        let cascade_rows: Vec<CascadeRow> = rows
-            .iter()
-            .filter_map(|(key, cells)| Self::cascade_row_from_index(key, cells))
-            .collect();
-        Ok(stale_cascade_ids(&cascade_rows, threshold))
-    }
-
-    async fn query_cascade_participants(
-        &self,
-        cascade_id: &str,
-    ) -> Result<Vec<CascadeParticipant>> {
-        let prefix = format!(
-            "{}#",
-            crate::storage::helpers::pct_encode_component(cascade_id)
-        )
-        .into_bytes();
-        let rows = self
-            .read_rows(ReadRowsRequest {
-                table_name: self.cascade_table(),
-                rows: Some(RowSet {
-                    row_keys: vec![],
-                    row_ranges: vec![Self::prefix_range(&prefix)],
-                }),
-                filter: Some(Self::latest_in_family(CASCADE_INDEX_FAMILY)),
-                ..Default::default()
-            })
-            .await?;
-        let cascade_rows: Vec<CascadeRow> = rows
-            .iter()
-            .filter_map(|(key, cells)| Self::cascade_row_from_index(key, cells))
-            .collect();
-        Ok(unresolved_participants(&cascade_rows, cascade_id))
     }
 }

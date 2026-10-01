@@ -39,7 +39,6 @@ fn make_angzarr_deferred() -> AngzarrDeferredSequence {
         source_seq: 5,
         source_component: "saga-orders-customer".to_string(),
         command_index: 2,
-        basis_seq: 0,
     }
 }
 
@@ -270,7 +269,6 @@ async fn test_handle_business_response_with_events() {
                     type_url: "test.Compensated".to_string(),
                     value: vec![],
                 })),
-                ..Default::default()
             }],
             snapshot: None,
             ..Default::default()

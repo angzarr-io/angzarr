@@ -70,12 +70,17 @@ pub(crate) enum DeliveryPolicy {
 
 impl DeliveryPolicy {
     pub(crate) fn from_mode(mode: Option<CascadeErrorMode>) -> Self {
-        match mode {
-            None => DeliveryPolicy::Background,
-            Some(CascadeErrorMode::CascadeErrorFailFast) => DeliveryPolicy::FailFast,
-            Some(CascadeErrorMode::CascadeErrorCompensate) => DeliveryPolicy::Compensate,
-            Some(CascadeErrorMode::CascadeErrorContinue) => DeliveryPolicy::Continue,
-            Some(CascadeErrorMode::CascadeErrorDeadLetter) => DeliveryPolicy::DeadLetter,
+        use crate::proto_ext::CascadeErrorModeExt;
+        let Some(mode) = mode else {
+            return DeliveryPolicy::Background;
+        };
+        match CascadeErrorMode::or_default_fail_fast(mode as i32) {
+            CascadeErrorMode::CascadeErrorCompensate => DeliveryPolicy::Compensate,
+            CascadeErrorMode::CascadeErrorContinue => DeliveryPolicy::Continue,
+            CascadeErrorMode::CascadeErrorDeadLetter => DeliveryPolicy::DeadLetter,
+            CascadeErrorMode::CascadeErrorFailFast | CascadeErrorMode::CascadeErrorUnspecified => {
+                DeliveryPolicy::FailFast
+            }
         }
     }
 

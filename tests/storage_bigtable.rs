@@ -131,7 +131,6 @@ async fn create_tables(host: &str) {
     let mut grpc = tonic::client::Grpc::new(channel.expect("Bigtable emulator never accepted"));
 
     create_table(&mut grpc, EVENTS_TABLE, "event").await;
-    create_table(&mut grpc, &format!("{EVENTS_TABLE}_cascade_index"), "ref").await;
     create_table(&mut grpc, SNAPSHOTS_TABLE, "snapshot").await;
     create_table(&mut grpc, POSITIONS_TABLE, "position").await;
 }

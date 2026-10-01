@@ -1,15 +1,40 @@
-//! Tests for enum wire-value resolution (SyncModeExt / MergeStrategyExt):
-//! the zero value is the documented default, unknown ints resolve to that
-//! default, and real values pass through untouched.
+//! Tests for enum wire-value resolution (SyncModeExt / MergeStrategyExt /
+//! CascadeErrorModeExt): the zero value (`*_UNSPECIFIED`) is the documented
+//! default, unknown ints resolve to that default, and real values pass
+//! through untouched.
 
 use super::*;
 
 // ----- SyncMode --------------------------------------------------------------
 
-/// The proto3 zero value (omitted field) is Async — the documented default.
+/// The proto3 zero value (omitted field) is SYNC_MODE_UNSPECIFIED, which the
+/// server treats as Async — the documented default.
 #[test]
 fn sync_mode_zero_is_async() {
+    assert_eq!(SyncMode::Unspecified as i32, 0);
     assert_eq!(SyncMode::or_default_async(0), SyncMode::Async);
+    assert_eq!(
+        SyncMode::or_default_async(SyncMode::Unspecified as i32),
+        SyncMode::Async
+    );
+}
+
+/// A per-command header override is honoured only for a real mode:
+/// UNSPECIFIED and unknown ints mean "inherit the flow's mode".
+#[test]
+fn sync_mode_explicit_ignores_unspecified_and_unknown() {
+    assert_eq!(SyncMode::explicit(0), None);
+    assert_eq!(SyncMode::explicit(999), None);
+    assert_eq!(SyncMode::explicit(-1), None);
+    for mode in [
+        SyncMode::Async,
+        SyncMode::Simple,
+        SyncMode::Cascade,
+        SyncMode::Decision,
+        SyncMode::Isolated,
+    ] {
+        assert_eq!(SyncMode::explicit(mode as i32), Some(mode));
+    }
 }
 
 /// Unknown wire ints (future values from a newer client, or garbage) must
@@ -38,10 +63,11 @@ fn sync_mode_real_values_pass_through() {
 
 // ----- MergeStrategy ---------------------------------------------------------
 
-/// The proto3 zero value (omitted merge_strategy) is Commutative — the
-/// documented default.
+/// The proto3 zero value (omitted merge_strategy) is MERGE_UNSPECIFIED,
+/// which the server treats as Commutative — the documented default.
 #[test]
 fn merge_strategy_zero_is_commutative() {
+    assert_eq!(MergeStrategy::MergeUnspecified as i32, 0);
     assert_eq!(
         MergeStrategy::or_default_commutative(0),
         MergeStrategy::MergeCommutative
@@ -79,14 +105,24 @@ fn merge_strategy_real_values_pass_through() {
     }
 }
 
-/// Unknown cascade error modes resolve to the documented default, FAIL_FAST;
-/// every real mode passes through.
+/// The zero value (CASCADE_ERROR_UNSPECIFIED) and unknown cascade error
+/// modes resolve to the documented default, FAIL_FAST; every real mode
+/// passes through.
 #[test]
 fn test_cascade_error_mode_resolution() {
     use crate::proto::CascadeErrorMode;
     use crate::proto_ext::CascadeErrorModeExt;
+    assert_eq!(CascadeErrorMode::CascadeErrorUnspecified as i32, 0);
+    assert_eq!(
+        CascadeErrorMode::or_default_fail_fast(0),
+        CascadeErrorMode::CascadeErrorFailFast
+    );
     assert_eq!(
         CascadeErrorMode::or_default_fail_fast(999),
+        CascadeErrorMode::CascadeErrorFailFast
+    );
+    assert_eq!(
+        CascadeErrorMode::or_default_fail_fast(-1),
         CascadeErrorMode::CascadeErrorFailFast
     );
     for mode in [

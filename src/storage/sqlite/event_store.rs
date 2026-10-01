@@ -34,9 +34,7 @@ use crate::storage::sql::event_store::{
     merge_composite_events, resolve_divergence,
 };
 use crate::storage::timeline::{validate_append, AppendWindow, MAIN_TIMELINE_STORAGE_EDITION};
-use crate::storage::{
-    AddMeta, AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo, StorageError,
-};
+use crate::storage::{AddMeta, AddOutcome, EventStore, Result, SourceInfo, StorageError};
 
 /// SQLite implementation of EventStore.
 pub struct SqliteEventStore {
@@ -227,10 +225,6 @@ impl SqliteEventStore {
             let sequence = event_sequence(&event);
             let created_at = crate::storage::helpers::parse_timestamp(&event)?;
 
-            // Extract cascade tracking fields from EventPage
-            let committed = !event.no_commit;
-            let cascade_id = event.cascade_id.clone();
-
             // C-15: edition + source_edition normalize to SQL NULL when the
             // caller passes a main-timeline sentinel. Splitting storage
             // between NULL/`""`/`"angzarr"` is the polarity bug this fix
@@ -264,8 +258,6 @@ impl SqliteEventStore {
                         Events::SourceSeq,
                         Events::SourceComponent,
                         Events::SourceCommandIndex,
-                        Events::Committed,
-                        Events::CascadeId,
                         Events::Ext,
                     ])
                     .values_panic([
@@ -283,8 +275,6 @@ impl SqliteEventStore {
                         source_seq.into(),
                         source_component.into(),
                         source_command_index.into(),
-                        committed.into(),
-                        cascade_id.clone().into(),
                         ext_bytes.clone().into(),
                     ])
                     .to_string(SqliteQueryBuilder)
@@ -300,8 +290,6 @@ impl SqliteEventStore {
                         Events::EventData,
                         Events::CorrelationId,
                         Events::ExternalId,
-                        Events::Committed,
-                        Events::CascadeId,
                         Events::Ext,
                     ])
                     .values_panic([
@@ -313,8 +301,6 @@ impl SqliteEventStore {
                         event_data.into(),
                         correlation_id.into(),
                         external_id.into(),
-                        committed.into(),
-                        cascade_id.into(),
                         ext_bytes.clone().into(),
                     ])
                     .to_string(SqliteQueryBuilder)
@@ -883,125 +869,5 @@ impl EventStore for SqliteEventStore {
 
         let result = sqlx::query(&query).execute(&self.pool).await?;
         Ok(result.rows_affected() as u32)
-    }
-
-    async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {
-        // `created_at` is stored as canonical RFC 3339 text; render the
-        // threshold the same way so the text comparison orders by instant.
-        let threshold = crate::storage::timeline::canonical_rfc3339(threshold)?;
-        // Per-participant resolution (C-02): a cascade is stale iff it has
-        // at least one (cascade_id, domain, edition, root) participant that
-        // is past the threshold AND has no committed cascade row on that
-        // SAME (domain, edition, root) for the same cascade_id.
-        //
-        // Pre-fix semantics filtered out the entire cascade when ANY
-        // committed row existed for that cascade_id (globally) — once
-        // participant 1 of N was revoked, participants 2..N were stranded
-        // because the cascade was treated as "already resolved" even though
-        // their no_commit rows were still live.
-        //
-        // SQL: NOT EXISTS (SELECT 1 FROM events c WHERE c.cascade_id = stale.cascade_id
-        //                  AND c.domain = stale.domain AND c.edition = stale.edition
-        //                  AND c.root = stale.root AND c.committed = true)
-        //
-        // sea-query lacks correlated-subquery sugar — fall back to raw SQL.
-        //
-        // C-15: `c.edition IS s.edition` (SQLite's NULL-aware equality) so
-        // main-timeline rows (where both sides are NULL) match correctly.
-        // A plain `=` would yield NULL there and exclude the row.
-        let raw = "SELECT DISTINCT s.cascade_id \
-             FROM events s \
-             WHERE s.committed = false \
-               AND s.cascade_id IS NOT NULL \
-               AND s.created_at < ? \
-               AND NOT EXISTS ( \
-                 SELECT 1 FROM events c \
-                 WHERE c.committed = true \
-                   AND c.cascade_id = s.cascade_id \
-                   AND c.domain = s.domain \
-                   AND c.edition IS s.edition \
-                   AND c.root = s.root \
-               )";
-        let rows = sqlx::query(raw)
-            .bind(&threshold)
-            .fetch_all(&self.pool)
-            .await?;
-
-        let mut cascade_ids = Vec::with_capacity(rows.len());
-        for row in rows {
-            let cascade_id: String = row.get("cascade_id");
-            cascade_ids.push(cascade_id);
-        }
-
-        Ok(cascade_ids)
-    }
-
-    async fn query_cascade_participants(
-        &self,
-        cascade_id: &str,
-    ) -> Result<Vec<CascadeParticipant>> {
-        use std::collections::HashMap;
-
-        // Per-participant resolution (C-02): exclude (domain, edition, root)
-        // participants that already have a committed cascade row (a
-        // Revocation or Confirmation) for this cascade_id. Without this
-        // filter, the reaper would re-write Revocations on every cycle for
-        // already-resolved participants.
-        //
-        // C-15: `c.edition IS s.edition` for NULL-aware equality on the
-        // main timeline (SQLite stores `""` / `"angzarr"` as SQL NULL).
-        let raw = "SELECT s.domain, s.edition, s.root, s.sequence \
-             FROM events s \
-             WHERE s.cascade_id = ? \
-               AND s.committed = false \
-               AND NOT EXISTS ( \
-                 SELECT 1 FROM events c \
-                 WHERE c.committed = true \
-                   AND c.cascade_id = s.cascade_id \
-                   AND c.domain = s.domain \
-                   AND c.edition IS s.edition \
-                   AND c.root = s.root \
-               ) \
-             ORDER BY s.domain ASC, s.root ASC, s.sequence ASC";
-
-        let rows = sqlx::query(raw)
-            .bind(cascade_id)
-            .fetch_all(&self.pool)
-            .await?;
-
-        // Group by (domain, edition, root)
-        let mut participants_map: HashMap<(String, String, Uuid), Vec<u32>> = HashMap::new();
-
-        for row in rows {
-            let domain: String = row.get("domain");
-            // C-15: SQLite stores main-timeline rows as SQL NULL since
-            // migration 0006; decode as Option<String> and surface back
-            // as the empty-string sentinel at the API boundary.
-            let edition_raw: Option<String> = row.get("edition");
-            let edition = edition_from_db(edition_raw);
-            let root_str: String = row.get("root");
-            let sequence: i32 = row.get("sequence");
-
-            let root = Uuid::parse_str(&root_str)?;
-            let key = (domain, edition, root);
-
-            participants_map
-                .entry(key)
-                .or_default()
-                .push(sequence as u32);
-        }
-
-        // Convert to CascadeParticipant list
-        let participants: Vec<CascadeParticipant> = participants_map
-            .into_iter()
-            .map(|((domain, edition, root), sequences)| CascadeParticipant {
-                domain,
-                edition,
-                root,
-                sequences,
-            })
-            .collect();
-
-        Ok(participants)
     }
 }

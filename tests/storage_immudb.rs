@@ -142,9 +142,8 @@ async fn shared_immudb_url() -> String {
 }
 
 /// T4: core suite only. ImmuDB is append-only (delete_edition_events →
-/// NotImplemented, asserted by test_immudb_delete_not_supported below)
-/// and has no committed/cascade_id columns (reaper queries →
-/// NotImplemented). Running the full suite was self-contradictory:
+/// NotImplemented, asserted by test_immudb_delete_not_supported below).
+/// Running the full suite was self-contradictory:
 /// it asserted both that delete succeeds AND that delete is unsupported.
 ///
 /// T11: one generated `#[tokio::test]` per core contract fn. The known

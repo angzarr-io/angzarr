@@ -10,7 +10,6 @@ pub mod errmsg {
     pub const NOT_FOUND: &str = "Event not found: ";
     pub const SEQUENCE_CONFLICT: &str = "Sequence conflict: ";
     pub const INVALID_TIMESTAMP: &str = "Invalid timestamp: ";
-    pub const INVALID_TIMESTAMP_FORMAT: &str = "Invalid timestamp format: ";
     pub const INVALID_DIVERGENCE_POINT: &str = "Invalid divergence point: ";
     pub const INVALID_UUID: &str = "Invalid UUID: ";
     pub const DATABASE_ERROR: &str = "Database error: ";
@@ -35,9 +34,6 @@ pub enum StorageError {
 
     #[error("{}seconds={seconds}, nanos={nanos}", errmsg::INVALID_TIMESTAMP)]
     InvalidTimestamp { seconds: i64, nanos: i32 },
-
-    #[error("{}{}", errmsg::INVALID_TIMESTAMP_FORMAT, .0)]
-    InvalidTimestampFormat(String),
 
     #[error("{}{}", errmsg::INVALID_DIVERGENCE_POINT, .0)]
     InvalidDivergencePoint(String),

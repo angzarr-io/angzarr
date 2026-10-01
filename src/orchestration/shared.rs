@@ -186,9 +186,9 @@ pub(crate) fn compensate_marker(
             .join(",")
     );
     let marker = Compensate {
-        target: Some(cover.clone()),
         sequences,
         reason: reason.to_string(),
+        command_type: String::new(),
     };
     Some(EventBook {
         cover: Some(cover),

@@ -22,6 +22,13 @@ fn test_fail_fast_stops_and_reports_only() {
     assert!(!policy.dead_letters());
 }
 
+/// An unset mode (CASCADE_ERROR_UNSPECIFIED) is FAIL_FAST (C-0437).
+#[test]
+fn test_unspecified_mode_is_fail_fast() {
+    let policy = DeliveryPolicy::from_mode(Some(CascadeErrorMode::CascadeErrorUnspecified));
+    assert_eq!(policy, DeliveryPolicy::FailFast);
+}
+
 /// COMPENSATE stops; its compensation is Compensate markers for delivered
 /// commands, not the rejection flow back to the source.
 #[test]

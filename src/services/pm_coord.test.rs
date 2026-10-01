@@ -288,7 +288,6 @@ async fn test_handle_speculative_returns_commands_without_side_effects() {
         request: Some(ProcessManagerHandleRequest {
             trigger: Some(test_event_book()),
             process_state: None,
-            destination_sequences: std::collections::HashMap::new(),
         }),
     });
 

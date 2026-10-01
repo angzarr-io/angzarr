@@ -152,7 +152,6 @@ fn test_sequence_mismatch_error_with_state_roundtrip() {
             }),
             created_at: None,
             payload: None,
-            ..Default::default()
         }],
         snapshot: None,
         ..Default::default()

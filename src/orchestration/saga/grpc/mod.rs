@@ -4,7 +4,6 @@
 //! event fetching, and saga invocation. Includes compensation flow for
 //! rejected commands.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -77,14 +76,12 @@ impl GrpcSagaContext {
 /// inherited `sync_mode` (NOT the legacy hardcoded `Simple`).
 pub(super) fn build_saga_handle_request(
     source: &EventBook,
-    destination_sequences: HashMap<String, u32>,
     sync_mode: SyncMode,
 ) -> SagaHandleRequest {
     SagaHandleRequest {
         source: Some(source.clone()),
         sync_mode: sync_mode.into(),
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        destination_sequences,
     }
 }
 
@@ -92,12 +89,11 @@ pub(super) fn build_saga_handle_request(
 impl SagaRetryContext for GrpcSagaContext {
     async fn handle(
         &self,
-        destination_sequences: HashMap<String, u32>,
         sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         let correlation_id = self.source.correlation_id();
         let mut client = self.saga_client.lock().await.clone();
-        let request = build_saga_handle_request(&self.source, destination_sequences, sync_mode);
+        let request = build_saga_handle_request(&self.source, sync_mode);
         let mut response = client
             .handle(correlated_request(request, correlation_id))
             .await
@@ -237,7 +233,6 @@ async fn handle_command_rejection(
         command: Some(notification_command),
         sync_mode: SyncMode::Async.into(),
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        cascade_id: None,
     };
     let response = handler
         .handle_compensation(correlated_request(sync_command, &correlation_id))

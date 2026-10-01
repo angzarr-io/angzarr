@@ -7,17 +7,10 @@
 //! - event: serialized EventPage (Binary)
 //! - created_at: RFC 3339 timestamp (String)
 //! - correlation_id: for cross-domain queries (String)
-//! - committed: cascade commit status (Boolean)
-//! - cascade_id: cascade identifier (String, sparse)
 //!
 //! GSI `correlation-index`:
 //! - PK: correlation_id
 //! - SK: `{domain}#{edition}#{root}#{seq}`
-//!
-//! GSI `cascade-index` (projection must include `pk`, `seq`, `committed`
-//! and `created_at`):
-//! - PK: cascade_id
-//! - SK: pk (main table partition key)
 //!
 //! Every Query and Scan follows `LastEvaluatedKey` to the end, so results
 //! are complete regardless of DynamoDB's 1 MB page limit.
@@ -37,16 +30,12 @@ use uuid::Uuid;
 use crate::proto::{Cover, Edition, EventBook, EventPage, Uuid as ProtoUuid};
 use crate::proto_ext::EventPageExt;
 use crate::storage::batch_write::{write_all_or_undo, UnitWriter};
-use crate::storage::cascade_resolution::{stale_cascade_ids, unresolved_participants, CascadeRow};
 use crate::storage::helpers::{is_main_timeline, parse_timestamp, BookParts};
 use crate::storage::timeline::{
-    guard_edition_delete, merge_composite_events, parse_rfc3339_utc, reported_edition,
-    resolve_divergence, storage_edition, validate_append, AppendWindow,
-    MAIN_TIMELINE_STORAGE_EDITION,
+    guard_edition_delete, merge_composite_events, reported_edition, resolve_divergence,
+    storage_edition, validate_append, AppendWindow, MAIN_TIMELINE_STORAGE_EDITION,
 };
-use crate::storage::{
-    AddMeta, AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo, StorageError,
-};
+use crate::storage::{AddMeta, AddOutcome, EventStore, Result, SourceInfo, StorageError};
 
 /// One DynamoDB item.
 pub(crate) type Item = HashMap<String, AttributeValue>;
@@ -204,14 +193,6 @@ impl DynamoEventStore {
             );
         }
 
-        item.insert(
-            "committed".to_string(),
-            AttributeValue::Bool(!event.no_commit),
-        );
-        if let Some(ref cid) = event.cascade_id {
-            item.insert("cascade_id".to_string(), AttributeValue::S(cid.clone()));
-        }
-
         // Parent-routing cover (Cover.ext), replicated per row.
         if let Some(any) = meta.ext {
             item.insert(
@@ -242,35 +223,6 @@ impl DynamoEventStore {
         }
         events.sort_by_key(|e| e.sequence_num());
         Ok(events)
-    }
-
-    /// Build a cascade row from a `cascade-index` item.
-    pub(crate) fn cascade_row_from_item(item: &Item) -> Option<CascadeRow> {
-        let cascade_id = match item.get("cascade_id") {
-            Some(AttributeValue::S(cid)) => cid.clone(),
-            _ => return None,
-        };
-        let (domain, edition, root) = match item.get("pk") {
-            Some(AttributeValue::S(pk)) => Self::parse_pk(pk)?,
-            _ => return None,
-        };
-        let sequence = Self::item_seq(item)?;
-        let committed = matches!(item.get("committed"), Some(AttributeValue::Bool(true)));
-        let created_at = match item.get("created_at") {
-            Some(AttributeValue::S(ts)) => chrono::DateTime::parse_from_rfc3339(ts)
-                .ok()
-                .map(|dt| dt.with_timezone(&chrono::Utc)),
-            _ => None,
-        };
-        Some(CascadeRow {
-            cascade_id,
-            domain,
-            edition,
-            root,
-            sequence,
-            committed,
-            created_at,
-        })
     }
 
     /// Whether a cancelled transaction failed on a conflicting write (an
@@ -868,44 +820,5 @@ impl EventStore for DynamoEventStore {
             .external_id_items(Self::pk(domain, edition, root), external_id)
             .await?;
         Self::events_or_none(items)
-    }
-
-    async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {
-        let threshold = parse_rfc3339_utc(threshold)?;
-
-        let scan = self
-            .client
-            .scan()
-            .table_name(&self.table_name)
-            .index_name("cascade-index")
-            .projection_expression("cascade_id, pk, seq, #committed, created_at")
-            .expression_attribute_names("#committed", "committed");
-        let rows: Vec<CascadeRow> = self
-            .scan_all(scan)
-            .await?
-            .iter()
-            .filter_map(Self::cascade_row_from_item)
-            .collect();
-        Ok(stale_cascade_ids(&rows, threshold))
-    }
-
-    async fn query_cascade_participants(
-        &self,
-        cascade_id: &str,
-    ) -> Result<Vec<CascadeParticipant>> {
-        let query = self
-            .client
-            .query()
-            .table_name(&self.table_name)
-            .index_name("cascade-index")
-            .key_condition_expression("cascade_id = :cid")
-            .expression_attribute_values(":cid", AttributeValue::S(cascade_id.to_string()));
-        let rows: Vec<CascadeRow> = self
-            .query_all(query)
-            .await?
-            .iter()
-            .filter_map(Self::cascade_row_from_item)
-            .collect();
-        Ok(unresolved_participants(&rows, cascade_id))
     }
 }

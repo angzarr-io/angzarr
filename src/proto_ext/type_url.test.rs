@@ -45,11 +45,14 @@ fn test_fqn_is_prefix_agnostic() {
     assert_eq!(fqn(NOTIFICATION), "io.angzarr.v1.Notification");
     // Other-language Any.Pack() default.
     assert_eq!(
-        fqn("type.googleapis.com/io.angzarr.v1.Confirmation"),
-        "io.angzarr.v1.Confirmation"
+        fqn("type.googleapis.com/io.angzarr.v1.Compensate"),
+        "io.angzarr.v1.Compensate"
     );
     // No `/` at all — whole string is the name.
-    assert_eq!(fqn("io.angzarr.v1.NoOp"), "io.angzarr.v1.NoOp");
+    assert_eq!(
+        fqn("io.angzarr.v1.Notification"),
+        "io.angzarr.v1.Notification"
+    );
 }
 
 /// The canonical constants are the bare form: a leading `/` then the FQN,
@@ -60,10 +63,7 @@ fn test_constants_are_bare_canonical() {
         NOTIFICATION,
         REJECTION_NOTIFICATION,
         SAGA_COMPENSATION_FAILED,
-        CONFIRMATION,
-        REVOCATION,
         COMPENSATE,
-        NOOP,
         COMMAND_BOOK,
     ] {
         assert!(

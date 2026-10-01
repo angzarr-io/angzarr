@@ -453,13 +453,6 @@ pub fn build_notification_command_book(context: &CompensationContext) -> Result<
                     // colliding compensation notifications (O1 class).
                     source_component: context.source.source_component.clone(),
                     command_index: context.source.command_index,
-                    // D-7: deliberately 0, NOT the rejected command's
-                    // basis_seq — that basis was observed at the REJECTING
-                    // destination, while this notification routes back to
-                    // the SOURCE aggregate, whose head nobody observed at
-                    // build time. 0 = the conservative whole-history
-                    // overlap window at the source.
-                    basis_seq: 0,
                 })),
             }),
             payload: Some(crate::proto::command_page::Payload::Command(
@@ -613,7 +606,6 @@ pub fn build_compensation_failed_event_book_with_clock(
                 type_url: type_url::SAGA_COMPENSATION_FAILED.to_string(),
                 value: event.encode_to_vec(),
             })),
-            ..Default::default()
         }],
         snapshot: None,
         ..Default::default()

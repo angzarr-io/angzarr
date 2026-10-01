@@ -222,13 +222,9 @@ impl ProcessManagerContext for GrpcPMContext {
             "GrpcPMContext.handle sending trigger to PM"
         );
 
-        // PMs do not rebuild destination state; destination_sequences is
-        // populated by the coordinator side from any pre-fetched aggregates.
-        // For pure-PM-state PMs this map is empty.
         let request = ProcessManagerHandleRequest {
             trigger: Some(trigger.clone()),
             process_state: pm_state.cloned(),
-            destination_sequences: Default::default(),
         };
 
         let mut client = self.client.lock().await.clone();

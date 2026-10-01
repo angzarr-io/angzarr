@@ -22,7 +22,7 @@ mod event_store;
 mod position_store;
 mod snapshot_store;
 
-pub use event_store::{AddMeta, AddOutcome, CascadeParticipant, EventStore, SourceInfo};
+pub use event_store::{AddMeta, AddOutcome, EventStore, SourceInfo};
 pub use position_store::PositionStore;
 pub use snapshot_store::{is_superseded, SnapshotStore};
 
@@ -42,8 +42,6 @@ pub use factory::{
 pub mod batch_write;
 #[cfg(feature = "bigtable")]
 pub mod bigtable;
-// Per-participant cascade resolution for backends that evaluate it in code
-pub mod cascade_resolution;
 #[cfg(feature = "dynamo")]
 pub mod dynamo;
 pub mod helpers;

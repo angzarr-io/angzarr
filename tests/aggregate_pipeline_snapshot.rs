@@ -197,7 +197,6 @@ fn event_page(seq: u32) -> EventPage {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }
 }
 
@@ -233,7 +232,6 @@ fn send(command_book: CommandBook) -> Request<CommandRequest> {
         command: Some(command_book),
         sync_mode: SyncMode::Async as i32,
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        cascade_id: None,
     })
 }
 

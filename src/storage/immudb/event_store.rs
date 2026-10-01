@@ -881,38 +881,6 @@ impl EventStore for ImmudbEventStore {
         }
         Ok(Some(events))
     }
-
-    // -------------------------------------------------------------------------
-    // Cascade query methods.
-    //
-    // NOTE (out of scope for C-19): the immudb EventStore does not yet store
-    // the cascade-tracking columns (`committed`, `cascade_id`) that the
-    // `query_stale_cascades` / `query_cascade_participants` trait methods
-    // depend on — the schema in `super::schema::CREATE_EVENTS_TABLE` predates
-    // the Phase-5 cascade trait additions. These stub implementations exist
-    // ONLY so the `immudb` feature compiles against the current trait shape;
-    // they do not provide cascade reaper coverage on this backend. Proper
-    // implementation belongs to whichever finding picks up immudb's missing
-    // cascade-tracking columns (related to C-02 / C-18). C-19's responsibility
-    // is the missing-transaction race in `add()`, which IS fixed above.
-    async fn query_stale_cascades(&self, _threshold: &str) -> Result<Vec<String>> {
-        Err(StorageError::NotImplemented(
-            "immudb EventStore does not yet store cascade tracking columns; \
-             see C-19 NOTE in plans/deep-review-remediation.md"
-                .to_string(),
-        ))
-    }
-
-    async fn query_cascade_participants(
-        &self,
-        _cascade_id: &str,
-    ) -> Result<Vec<crate::storage::CascadeParticipant>> {
-        Err(StorageError::NotImplemented(
-            "immudb EventStore does not yet store cascade tracking columns; \
-             see C-19 NOTE in plans/deep-review-remediation.md"
-                .to_string(),
-        ))
-    }
 }
 
 #[cfg(test)]

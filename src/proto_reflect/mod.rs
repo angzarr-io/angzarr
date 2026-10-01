@@ -94,7 +94,7 @@ pub fn is_initialized() -> bool {
 /// Embedded descriptor set from build time.
 ///
 /// Contains all proto message definitions compiled into the binary —
-/// including framework-internal types (Confirmation, Revocation, NoOp,
+/// including framework-internal types (Notification, Compensate,
 /// AngzarrDeferredSequence, PMState, etc.). Use `init_from_embedded()`
 /// to initialize the pool with this data; the pool needs the full set
 /// to decode every payload site (event-store, DLQ admin, GraphQL
@@ -288,7 +288,7 @@ pub fn decode_any_to_json(any: &Any) -> String {
 /// (today: `proto/io/angzarr/status/v1/dlq_admin.proto` + transitive imports).
 /// Framework-internal protos (command-handler, saga, projector, PM,
 /// query, stream, upcaster, the internal `types.proto` carrying
-/// Confirmation / Revocation / NoOp / AngzarrDeferredSequence /
+/// Notification / Compensate / AngzarrDeferredSequence /
 /// PMState) are deliberately omitted so reflection clients can't
 /// enumerate them and start integrating against private types.
 ///

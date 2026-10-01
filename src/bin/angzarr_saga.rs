@@ -4,20 +4,9 @@
 //! message bus (AMQP, Kafka, or IPC), forwards to saga for processing,
 //! and executes resulting commands via the command handler.
 //!
-//! ## Two-Phase Saga Protocol
-//! 1. **Prepare**: Saga declares which destination aggregates it needs to read
-//! 2. **Fetch**: Sidecar fetches destination EventBooks via EventQuery
-//! 3. **Execute**: Saga receives source + destinations, produces commands
-//!
 //! ## Architecture
 //! ```text
-//! [Event Bus] -> [angzarr-saga] -> [Saga.Prepare] -> destinations
-//!                        |                               |
-//!                        v                               v
-//!              [EventQuery.GetEventBook] <-------- fetch state
-//!                        |
-//!                        v
-//!              [Saga.Execute(source, destinations)] -> commands
+//! [Event Bus] -> [angzarr-saga] -> [Saga.Handle(source)] -> deferred commands
 //!                        |
 //!                        v
 //!              [AggregateCoordinator.Handle] -> events
@@ -169,7 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         format!("Saga sidecar requires {}", STATIC_ENDPOINTS_ENV_VAR)
     })?;
 
-    info!("Using static endpoint configuration for two-phase saga routing");
+    info!("Using static endpoint configuration for saga command routing");
     let (executor, _fetcher, fact_executor) = connect_endpoints(&endpoints_str).await?;
     let factory: Arc<GrpcSagaContextFactory> = Arc::new(GrpcSagaContextFactory::new(
         Arc::new(Mutex::new(saga_client)),
@@ -182,7 +171,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let handler = SagaEventHandler::from_factory_with_validator(
         factory.clone(),
         executor.clone(),
-        None,
         None,
         Some(fact_executor.clone()),
         None,

@@ -154,7 +154,6 @@ impl SagaCoordinatorService for SagaCoord {
             ctx.as_ref(),
             self.executor.as_ref(),
             self.command_bus.as_deref(),
-            None, // fetcher unused in new model
             self.fact_executor.as_deref(),
             saga_name,
             &correlation_id,
@@ -207,16 +206,12 @@ impl SagaCoordinatorService for SagaCoord {
         let sync_mode = SyncMode::or_default_async(req.sync_mode);
 
         // Create context and call handle() directly (no command delivery)
-        // For speculative execution, pass empty sequences since we're not actually delivering commands
         let ctx = self.factory.create(Arc::new(source));
 
-        let response = ctx
-            .handle(std::collections::HashMap::new(), sync_mode)
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Saga handler failed");
-                Status::internal(format!("Saga handler failed: {}", e))
-            })?;
+        let response = ctx.handle(sync_mode).await.map_err(|e| {
+            error!(error = %e, "Saga handler failed");
+            Status::internal(format!("Saga handler failed: {}", e))
+        })?;
 
         Ok(Response::new(response))
     }

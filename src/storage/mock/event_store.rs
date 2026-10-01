@@ -2,9 +2,8 @@
 //!
 //! An in-memory store that follows the same contract as the production
 //! backends — one main-timeline spelling, composite edition reads, the
-//! append window, the main-timeline delete guard and per-participant
-//! cascade resolution — by using the shared rules in
-//! [`crate::storage::timeline`] and [`crate::storage::cascade_resolution`].
+//! append window and the main-timeline delete guard — by using the shared
+//! rules in [`crate::storage::timeline`].
 
 use std::collections::HashMap;
 
@@ -14,16 +13,13 @@ use uuid::Uuid;
 
 use crate::proto::{EventBook, EventPage};
 use crate::proto_ext::EventPageExt;
-use crate::storage::cascade_resolution::{stale_cascade_ids, unresolved_participants, CascadeRow};
 use crate::storage::helpers::{assemble_event_books, is_main_timeline, BookParts};
 use crate::storage::timeline::{
-    guard_edition_delete, implicit_divergence, merge_composite_events, parse_rfc3339_utc,
-    reported_edition, resolve_divergence, storage_edition, validate_append, AppendWindow,
+    guard_edition_delete, implicit_divergence, merge_composite_events, reported_edition,
+    resolve_divergence, storage_edition, validate_append, AppendWindow,
     MAIN_TIMELINE_STORAGE_EDITION,
 };
-use crate::storage::{
-    AddMeta, AddOutcome, CascadeParticipant, EventStore, Result, SourceInfo, StorageError,
-};
+use crate::storage::{AddMeta, AddOutcome, EventStore, Result, SourceInfo, StorageError};
 
 /// Stored event with correlation and idempotency tracking.
 struct StoredEvent {
@@ -131,28 +127,6 @@ impl MockEventStore {
             .filter(|e| divergence.is_none_or(|d| e.sequence_num() < d))
             .collect();
         Ok(merge_composite_events(main_prefix, edition_events, keep))
-    }
-
-    fn cascade_rows(store: &HashMap<StreamKey, Vec<StoredEvent>>) -> Vec<CascadeRow> {
-        store
-            .iter()
-            .flat_map(|((domain, edition, root), events)| {
-                events.iter().filter_map(move |stored| {
-                    let cascade_id = stored.page.cascade_id.clone()?;
-                    Some(CascadeRow {
-                        cascade_id,
-                        domain: domain.clone(),
-                        edition: edition.clone(),
-                        root: *root,
-                        sequence: stored.page.sequence_num(),
-                        committed: !stored.page.no_commit,
-                        created_at: stored.page.created_at.as_ref().and_then(|ts| {
-                            chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)
-                        }),
-                    })
-                })
-            })
-            .collect()
     }
 }
 
@@ -429,22 +403,5 @@ impl EventStore for MockEventStore {
             })
             .unwrap_or_default();
         Ok((!matching.is_empty()).then_some(matching))
-    }
-
-    async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {
-        let threshold = parse_rfc3339_utc(threshold)?;
-        let store = self.events.read().await;
-        Ok(stale_cascade_ids(&Self::cascade_rows(&store), threshold))
-    }
-
-    async fn query_cascade_participants(
-        &self,
-        cascade_id: &str,
-    ) -> Result<Vec<CascadeParticipant>> {
-        let store = self.events.read().await;
-        Ok(unresolved_participants(
-            &Self::cascade_rows(&store),
-            cascade_id,
-        ))
     }
 }

@@ -44,7 +44,6 @@ fn deferred_command(
             source_seq,
             source_component: source_component.to_string(),
             command_index,
-            basis_seq: 0,
         })),
         sync_mode: None,
     };

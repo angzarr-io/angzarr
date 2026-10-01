@@ -27,7 +27,6 @@
 
 #![cfg(feature = "test-utils")]
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -667,7 +666,6 @@ impl DlqAwareSagaContext {
 impl SagaRetryContext for DlqAwareSagaContext {
     async fn handle(
         &self,
-        _destination_sequences: HashMap<String, u32>,
         _sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         // Emit one command so the dispatch loop has something to do.
@@ -762,7 +760,6 @@ async fn run_saga(ctx: &dyn SagaRetryContext, executor: &dyn CommandExecutor) {
         ctx,
         executor,
         None, // command_bus
-        None, // fetcher
         None, // fact_executor
         "saga-feature",
         "corr-saga",

@@ -67,7 +67,6 @@ impl GrpcCommandExecutor {
             command: Some(command_book),
             sync_mode: sync_mode.into(),
             cascade_error_mode: crate::proto::CascadeErrorMode::CascadeErrorFailFast.into(),
-            cascade_id: None,
         };
         client
             .handle_command(correlated_request(sync_command, &correlation_id))

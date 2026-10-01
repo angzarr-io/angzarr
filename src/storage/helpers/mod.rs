@@ -108,7 +108,7 @@ pub fn timestamp_to_rfc3339(
 ///
 /// Backends that build composite row keys with `#` as the separator
 /// (Bigtable row keys, DynamoDB partition keys) must escape `#` inside
-/// each component or any `#` in `domain`, `edition`, `cascade_id`, etc.
+/// each component or any `#` in `domain`, `edition`, etc.
 /// silently mis-parses on the way back out.
 ///
 /// We escape only the minimal set of characters needed to make the

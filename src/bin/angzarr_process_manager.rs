@@ -4,10 +4,9 @@
 //! multiple domains via the message bus, coordinates long-running workflows
 //! with event-sourced state.
 //!
-//! ## Two-Phase Protocol
-//! 1. **Prepare**: PM declares additional destinations needed (beyond trigger)
-//! 2. **Fetch**: Sidecar fetches destination EventBooks via EventQuery
-//! 3. **Handle**: PM receives trigger + PM state + destinations, produces commands + PM events
+//! ## Protocol
+//! The PM receives the trigger and its own event-sourced state and produces
+//! commands (deferred: no expected version), facts and PM events.
 //!
 //! ## Differences from Saga
 //! - PM subscribes to MULTIPLE domains (saga recommends single domain)

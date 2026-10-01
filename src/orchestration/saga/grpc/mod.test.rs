@@ -168,17 +168,10 @@ async fn test_handle_forwards_sync_mode_and_propagates_source_edition() {
     let saga = RecordingSaga::default();
     let ctx = context_with(saga.clone(), None, make_source_event_book("orders")).await;
 
-    let response = ctx
-        .handle(
-            HashMap::from([("inventory".to_string(), 4)]),
-            SyncMode::Cascade,
-        )
-        .await
-        .unwrap();
+    let response = ctx.handle(SyncMode::Cascade).await.unwrap();
 
     let requests = saga.0.lock().await;
     assert_eq!(requests[0].sync_mode, SyncMode::Cascade as i32);
-    assert_eq!(requests[0].destination_sequences.get("inventory"), Some(&4));
     assert_eq!(
         requests[0]
             .source
@@ -353,44 +346,26 @@ fn test_compensation_context_captures_saga_source() {
 
 #[test]
 fn test_build_saga_handle_request_propagates_inherited_sync_mode_decision() {
-    use std::collections::HashMap as StdHashMap;
     let source = make_source_event_book("orders");
-    let mut dest_sequences = StdHashMap::new();
-    dest_sequences.insert("inventory".to_string(), 7u32);
-    let request = super::build_saga_handle_request(
-        &source,
-        dest_sequences.clone(),
-        crate::proto::SyncMode::Decision,
-    );
+    let request = super::build_saga_handle_request(&source, crate::proto::SyncMode::Decision);
     assert_eq!(
         request.sync_mode,
         crate::proto::SyncMode::Decision as i32,
         "H-17: SagaHandleRequest.sync_mode must reflect orchestrate_saga\'s sync_mode (Decision), not legacy hardcoded Simple"
     );
-    assert_eq!(request.destination_sequences, dest_sequences);
     assert!(request.source.is_some());
 }
 
 #[test]
 fn test_build_saga_handle_request_propagates_inherited_sync_mode_cascade() {
-    use std::collections::HashMap as StdHashMap;
     let source = make_source_event_book("orders");
-    let request = super::build_saga_handle_request(
-        &source,
-        StdHashMap::new(),
-        crate::proto::SyncMode::Cascade,
-    );
+    let request = super::build_saga_handle_request(&source, crate::proto::SyncMode::Cascade);
     assert_eq!(request.sync_mode, crate::proto::SyncMode::Cascade as i32);
 }
 
 #[test]
 fn test_build_saga_handle_request_propagates_inherited_sync_mode_simple() {
-    use std::collections::HashMap as StdHashMap;
     let source = make_source_event_book("orders");
-    let request = super::build_saga_handle_request(
-        &source,
-        StdHashMap::new(),
-        crate::proto::SyncMode::Simple,
-    );
+    let request = super::build_saga_handle_request(&source, crate::proto::SyncMode::Simple);
     assert_eq!(request.sync_mode, crate::proto::SyncMode::Simple as i32);
 }

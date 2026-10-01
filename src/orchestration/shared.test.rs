@@ -306,7 +306,6 @@ fn test_compensate_marker_lists_produced_sequences_idempotently() {
     let compensate = crate::proto::Compensate::decode(any.value.as_slice()).unwrap();
     assert_eq!(compensate.sequences, vec![4, 5]);
     assert_eq!(compensate.reason, "declined");
-    assert_eq!(compensate.target.unwrap().domain, "inventory");
 }
 
 #[test]

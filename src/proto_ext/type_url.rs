@@ -45,15 +45,8 @@ pub const REJECTION_NOTIFICATION: &str = "/io.angzarr.v1.RejectionNotification";
 /// Type URL for SagaCompensationFailed messages.
 pub const SAGA_COMPENSATION_FAILED: &str = "/io.angzarr.v1.SagaCompensationFailed";
 
-// Two-phase commit framework events
-/// Type URL for Confirmation messages (2PC commit).
-pub const CONFIRMATION: &str = "/io.angzarr.v1.Confirmation";
-/// Type URL for Revocation messages (2PC rollback).
-pub const REVOCATION: &str = "/io.angzarr.v1.Revocation";
-/// Type URL for Compensate messages (client-implemented rollback).
+/// Type URL for Compensate notification payloads.
 pub const COMPENSATE: &str = "/io.angzarr.v1.Compensate";
-/// Type URL for NoOp messages (filtered event placeholder).
-pub const NOOP: &str = "/io.angzarr.v1.NoOp";
 /// Type URL for CommandBook messages wrapped for bus transport.
 pub const COMMAND_BOOK: &str = "/io.angzarr.v1.CommandBook";
 
@@ -99,10 +92,10 @@ pub fn strip_prefix(type_url: &str) -> &str {
 /// # Example
 /// ```
 /// use angzarr::proto_ext::type_url;
-/// assert_eq!(type_url::fqn("/io.angzarr.v1.Confirmation"), "io.angzarr.v1.Confirmation");
+/// assert_eq!(type_url::fqn("/io.angzarr.v1.Compensate"), "io.angzarr.v1.Compensate");
 /// assert_eq!(
-///     type_url::fqn("type.googleapis.com/io.angzarr.v1.Confirmation"),
-///     "io.angzarr.v1.Confirmation"
+///     type_url::fqn("type.googleapis.com/io.angzarr.v1.Compensate"),
+///     "io.angzarr.v1.Compensate"
 /// );
 /// ```
 pub fn fqn(type_url: &str) -> &str {

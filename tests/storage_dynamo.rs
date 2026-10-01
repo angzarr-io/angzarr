@@ -89,7 +89,7 @@ fn gsi(name: &str, hash: &str, range: &str) -> GlobalSecondaryIndex {
 }
 
 /// Create the tables the Dynamo stores expect: events (pk, seq) with the
-/// `correlation-index` and `cascade-index` GSIs, snapshots (pk, seq) and
+/// `correlation-index` GSI, snapshots (pk, seq) and
 /// positions (pk).
 async fn create_tables(endpoint: &str) {
     let client = admin_client(endpoint).await;
@@ -116,9 +116,7 @@ async fn create_tables(endpoint: &str) {
         .attribute_definitions(attr("seq", ScalarAttributeType::N))
         .attribute_definitions(attr("correlation_id", ScalarAttributeType::S))
         .attribute_definitions(attr("gsi_sk", ScalarAttributeType::S))
-        .attribute_definitions(attr("cascade_id", ScalarAttributeType::S))
         .global_secondary_indexes(gsi("correlation-index", "correlation_id", "gsi_sk"))
-        .global_secondary_indexes(gsi("cascade-index", "cascade_id", "pk"))
         .send()
         .await
         .expect("create events table");

@@ -7,7 +7,7 @@
 -- edition + same (domain, root, seq) differ only via the composite
 -- columns, which is the real uniqueness boundary anyway.
 
--- Events table rebuild (preserves all columns added by 0002-0004).
+-- Events table rebuild (preserves all columns added by 0002-0003).
 CREATE TABLE events_new (
     domain TEXT NOT NULL,
     edition TEXT,                                    -- was NOT NULL
@@ -21,15 +21,12 @@ CREATE TABLE events_new (
     source_domain TEXT,
     source_root TEXT,
     source_seq INTEGER,
-    committed INTEGER DEFAULT 1,
-    cascade_id TEXT,
     PRIMARY KEY (domain, edition, root, sequence)
 );
 
 INSERT INTO events_new (
     domain, edition, root, sequence, created_at, event_data, correlation_id,
-    external_id, source_edition, source_domain, source_root, source_seq,
-    committed, cascade_id
+    external_id, source_edition, source_domain, source_root, source_seq
 )
 SELECT
     domain,
@@ -37,8 +34,7 @@ SELECT
     root, sequence, created_at, event_data, correlation_id,
     external_id,
     CASE WHEN source_edition IN ('angzarr', '') THEN NULL ELSE source_edition END,
-    source_domain, source_root, source_seq,
-    committed, cascade_id
+    source_domain, source_root, source_seq
 FROM events;
 
 DROP TABLE events;
@@ -55,10 +51,6 @@ CREATE INDEX IF NOT EXISTS idx_events_external_id
 CREATE INDEX IF NOT EXISTS idx_events_source
     ON events (domain, edition, root, source_edition, source_domain, source_root, source_seq)
     WHERE source_edition IS NOT NULL;
-CREATE INDEX IF NOT EXISTS idx_events_cascade
-    ON events (cascade_id, domain, root, sequence) WHERE committed = 0;
-CREATE INDEX IF NOT EXISTS idx_events_uncommitted_age
-    ON events (created_at, cascade_id) WHERE committed = 0;
 
 -- Snapshots table rebuild (preserves retention from 0005).
 CREATE TABLE snapshots_new (

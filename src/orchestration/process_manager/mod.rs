@@ -54,7 +54,7 @@ use crate::proto::{
     page_header::SequenceType, AngzarrDeferredSequence, CascadeErrorMode, CommandBook, EventBook,
     Notification, PageHeader, RevocationResponse, SyncMode,
 };
-use crate::proto_ext::CoverExt;
+use crate::proto_ext::{CoverExt, SyncModeExt};
 
 use super::command::{CommandExecutor, CommandOutcome, DeliveryPolicy};
 use super::destination::DestinationFetcher;
@@ -127,8 +127,8 @@ pub struct ProcessManagerHandleResult {
 /// persists PM events to the PM's aggregate domain, and executes resulting commands.
 ///
 /// PMs translate trigger events + their own state into commands/facts. They do not
-/// rebuild destination aggregate state — destination_sequences (provided by the
-/// coordinator) carry the next-sequence values needed for command stamping.
+/// rebuild destination aggregate state: their commands are deferred (no expected
+/// version) and the destination appends them at its head.
 pub trait ProcessManagerHandler: Send + Sync + 'static {
     /// Produce commands, PM events, and facts given trigger and PM state.
     ///
@@ -733,9 +733,7 @@ struct PmCommandSource<'a> {
 /// unique per triggering event — two triggers that emit commands without PM
 /// events can no longer share a key and have the second swallowed as a
 /// replay. A handler-stamped explicit sequence passes through untouched (the
-/// destination validates it). `basis_seq` keeps a handler-provided value;
-/// otherwise 0 (whole-history overlap window), since the PM path observes no
-/// destination heads.
+/// destination validates it like a client command).
 async fn execute_pm_commands(
     ctx: &dyn ProcessManagerContext,
     executor: &dyn CommandExecutor,
@@ -773,14 +771,12 @@ async fn execute_pm_commands(
                     source_seq: existing.source_seq,
                     source_component: pm_name.to_string(),
                     command_index: command_index as u32,
-                    basis_seq: existing.basis_seq,
                 },
                 _ => AngzarrDeferredSequence {
                     source: trigger_cover.clone(),
                     source_seq: trigger_seq,
                     source_component: pm_name.to_string(),
                     command_index: command_index as u32,
-                    basis_seq: 0,
                 },
             };
             page.header = Some(PageHeader {
@@ -805,15 +801,15 @@ async fn execute_pm_commands(
 
         // A sync_mode on the command's first page header overrides the flow's
         // mode for that command (e.g. DECISION when the PM needs the
-        // accept/reject answer synchronously). Presence matters — an explicit
-        // ASYNC overrides too; an unknown int inherits, so a garbled header
-        // can never demote a Cascade or Decision flow to fire-and-forget.
+        // accept/reject answer synchronously). An explicit ASYNC overrides
+        // too; UNSPECIFIED and unknown ints inherit, so a garbled header can
+        // never demote a Cascade or Decision flow to fire-and-forget.
         let effective_sync_mode = command_book
             .pages
             .first()
             .and_then(|page| page.header.as_ref())
             .and_then(|header| header.sync_mode)
-            .and_then(|raw| SyncMode::try_from(raw).ok())
+            .and_then(SyncMode::explicit)
             .unwrap_or(sync_mode);
 
         debug!(

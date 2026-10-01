@@ -5,7 +5,7 @@
 //!
 //! `#![allow(dead_code)]` because each backend's integration-test binary
 //! only invokes the subset of contract tests its implementation actually
-//! supports (e.g. the mock backend skips cascade-query tests).
+//! supports (e.g. ImmuDB skips the delete group).
 
 // Each backend binary compiles only the subset it runs; the inventory
 // test at the bottom of this file (T12) guards against silent unwiring.
@@ -30,7 +30,6 @@ pub fn make_event(seq: u32, event_type: &str) -> EventPage {
             type_url: format!("type.example/{}", event_type),
             value: vec![1, 2, 3, seq as u8],
         })),
-        ..Default::default()
     }
 }
 
@@ -499,7 +498,6 @@ pub async fn test_get_preserves_event_data<S: EventStore>(store: &S) {
             type_url: "type.example/TestEvent".to_string(),
             value: vec![10, 20, 30, 40, 50, 100, 200],
         })),
-        ..Default::default()
     };
 
     store
@@ -2261,7 +2259,6 @@ pub async fn test_get_until_timestamp_filters<S: EventStore>(store: &S) {
             type_url: "type.example/Old".to_string(),
             value: vec![1],
         })),
-        ..Default::default()
     };
 
     let event_new = EventPage {
@@ -2274,7 +2271,6 @@ pub async fn test_get_until_timestamp_filters<S: EventStore>(store: &S) {
             type_url: "type.example/New".to_string(),
             value: vec![2],
         })),
-        ..Default::default()
     };
 
     store
@@ -2328,7 +2324,6 @@ pub async fn test_get_until_timestamp_returns_all_when_recent<S: EventStore>(sto
             type_url: "type.example/E".to_string(),
             value: vec![1],
         })),
-        ..Default::default()
     };
 
     store
@@ -2406,7 +2401,6 @@ pub async fn test_get_until_timestamp_nanosecond_boundary_precision<S: EventStor
             type_url: "type.example/AtBoundary".to_string(),
             value: vec![1],
         })),
-        ..Default::default()
     };
     let event_after_boundary = EventPage {
         header: Some(PageHeader {
@@ -2418,7 +2412,6 @@ pub async fn test_get_until_timestamp_nanosecond_boundary_precision<S: EventStor
             type_url: "type.example/AfterBoundary".to_string(),
             value: vec![2],
         })),
-        ..Default::default()
     };
 
     store
@@ -2473,7 +2466,6 @@ pub async fn test_timestamp_preservation<S: EventStore>(store: &S) {
             type_url: "type.example/TimestampTest".to_string(),
             value: vec![1, 2, 3],
         })),
-        ..Default::default()
     };
 
     store
@@ -3093,425 +3085,6 @@ pub async fn test_find_by_source_distinguishes_invocation_commands<S: EventStore
     );
 }
 
-// =============================================================================
-// query_stale_cascades tests
-// =============================================================================
-
-/// Create a test event with cascade tracking fields.
-pub fn make_cascade_event(
-    seq: u32,
-    no_commit: bool,
-    cascade_id: Option<&str>,
-    timestamp_secs: i64,
-) -> EventPage {
-    EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(SequenceType::Sequence(seq)),
-        }),
-        created_at: Some(prost_types::Timestamp {
-            seconds: timestamp_secs,
-            nanos: 0,
-        }),
-        payload: Some(event_page::Payload::Event(Any {
-            type_url: format!("type.example/CascadeEvent{}", seq),
-            value: vec![seq as u8],
-        })),
-        no_commit,
-        cascade_id: cascade_id.map(String::from),
-    }
-}
-
-pub async fn test_query_stale_cascades_finds_old_uncommitted<S: EventStore>(store: &S) {
-    let domain = "test_stale_cascade";
-    let root = Uuid::new_v4();
-
-    // Add uncommitted event from 2 hours ago
-    let old_time = chrono::Utc::now() - chrono::Duration::hours(2);
-    let event = make_cascade_event(0, true, Some("cascade-stale-1"), old_time.timestamp());
-
-    store
-        .add(
-            domain,
-            "angzarr",
-            root,
-            vec![event],
-            &AddMeta {
-                correlation_id: "",
-                external_id: None,
-                source_info: None,
-                ext: None,
-            },
-        )
-        .await
-        .expect("add should succeed");
-
-    // Query with 1-hour threshold
-    let threshold = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-    let stale = store
-        .query_stale_cascades(&threshold)
-        .await
-        .expect("query should succeed");
-
-    assert!(
-        stale.contains(&"cascade-stale-1".to_string()),
-        "should find stale cascade"
-    );
-}
-
-pub async fn test_query_stale_cascades_ignores_resolved<S: EventStore>(store: &S) {
-    let domain = "test_resolved_cascade";
-    let root = Uuid::new_v4();
-
-    // Add uncommitted event from 2 hours ago
-    let old_time = chrono::Utc::now() - chrono::Duration::hours(2);
-    let uncommitted = make_cascade_event(0, true, Some("cascade-resolved-1"), old_time.timestamp());
-
-    store
-        .add(
-            domain,
-            "angzarr",
-            root,
-            vec![uncommitted],
-            &AddMeta {
-                correlation_id: "",
-                external_id: None,
-                source_info: None,
-                ext: None,
-            },
-        )
-        .await
-        .expect("add should succeed");
-
-    // Add committed event with same cascade_id (resolves the cascade)
-    let committed = make_cascade_event(
-        1,
-        false,
-        Some("cascade-resolved-1"),
-        chrono::Utc::now().timestamp(),
-    );
-    store
-        .add(
-            domain,
-            "angzarr",
-            root,
-            vec![committed],
-            &AddMeta {
-                correlation_id: "",
-                external_id: None,
-                source_info: None,
-                ext: None,
-            },
-        )
-        .await
-        .expect("add should succeed");
-
-    // Query with 1-hour threshold
-    let threshold = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-    let stale = store
-        .query_stale_cascades(&threshold)
-        .await
-        .expect("query should succeed");
-
-    assert!(
-        !stale.contains(&"cascade-resolved-1".to_string()),
-        "resolved cascade should not be stale"
-    );
-}
-
-pub async fn test_query_stale_cascades_ignores_fresh<S: EventStore>(store: &S) {
-    let domain = "test_fresh_cascade";
-    let root = Uuid::new_v4();
-
-    // Add uncommitted event from just now
-    let event = make_cascade_event(
-        0,
-        true,
-        Some("cascade-fresh-1"),
-        chrono::Utc::now().timestamp(),
-    );
-
-    store
-        .add(
-            domain,
-            "angzarr",
-            root,
-            vec![event],
-            &AddMeta {
-                correlation_id: "",
-                external_id: None,
-                source_info: None,
-                ext: None,
-            },
-        )
-        .await
-        .expect("add should succeed");
-
-    // Query with 1-hour threshold
-    let threshold = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-    let stale = store
-        .query_stale_cascades(&threshold)
-        .await
-        .expect("query should succeed");
-
-    assert!(
-        !stale.contains(&"cascade-fresh-1".to_string()),
-        "fresh cascade should not be stale"
-    );
-}
-
-// =============================================================================
-// query_cascade_participants tests
-// =============================================================================
-
-pub async fn test_query_cascade_participants_finds_uncommitted<S: EventStore>(store: &S) {
-    let domain = "test_cascade_parts";
-    let root = Uuid::new_v4();
-
-    // Add uncommitted events with cascade_id
-    let event1 = make_cascade_event(
-        0,
-        true,
-        Some("cascade-parts-1"),
-        chrono::Utc::now().timestamp(),
-    );
-    let event2 = make_cascade_event(
-        1,
-        true,
-        Some("cascade-parts-1"),
-        chrono::Utc::now().timestamp(),
-    );
-
-    store
-        .add(
-            domain,
-            "angzarr",
-            root,
-            vec![event1, event2],
-            &AddMeta {
-                correlation_id: "",
-                external_id: None,
-                source_info: None,
-                ext: None,
-            },
-        )
-        .await
-        .expect("add should succeed");
-
-    let participants = store
-        .query_cascade_participants("cascade-parts-1")
-        .await
-        .expect("query should succeed");
-
-    assert_eq!(participants.len(), 1, "should find one participant");
-    assert_eq!(participants[0].domain, domain);
-    assert_eq!(participants[0].root, root);
-    assert_eq!(
-        participants[0].sequences.len(),
-        2,
-        "should have 2 sequences"
-    );
-}
-
-pub async fn test_query_cascade_participants_ignores_committed<S: EventStore>(store: &S) {
-    let domain = "test_cascade_committed";
-    let root = Uuid::new_v4();
-
-    // Add committed event (should not be returned as participant)
-    let event = make_cascade_event(
-        0,
-        false,
-        Some("cascade-committed-1"),
-        chrono::Utc::now().timestamp(),
-    );
-
-    store
-        .add(
-            domain,
-            "angzarr",
-            root,
-            vec![event],
-            &AddMeta {
-                correlation_id: "",
-                external_id: None,
-                source_info: None,
-                ext: None,
-            },
-        )
-        .await
-        .expect("add should succeed");
-
-    let participants = store
-        .query_cascade_participants("cascade-committed-1")
-        .await
-        .expect("query should succeed");
-
-    assert!(
-        participants.is_empty(),
-        "committed events should not be participants"
-    );
-}
-
-pub async fn test_query_cascade_participants_multiple_aggregates<S: EventStore>(store: &S) {
-    let domain = "test_cascade_multi";
-    let root1 = Uuid::new_v4();
-    let root2 = Uuid::new_v4();
-
-    // Add uncommitted events to two aggregates with same cascade_id
-    let event1 = make_cascade_event(
-        0,
-        true,
-        Some("cascade-multi-1"),
-        chrono::Utc::now().timestamp(),
-    );
-    let event2 = make_cascade_event(
-        0,
-        true,
-        Some("cascade-multi-1"),
-        chrono::Utc::now().timestamp(),
-    );
-
-    store
-        .add(
-            domain,
-            "angzarr",
-            root1,
-            vec![event1],
-            &AddMeta {
-                correlation_id: "",
-                external_id: None,
-                source_info: None,
-                ext: None,
-            },
-        )
-        .await
-        .expect("add should succeed");
-    store
-        .add(
-            domain,
-            "angzarr",
-            root2,
-            vec![event2],
-            &AddMeta {
-                correlation_id: "",
-                external_id: None,
-                source_info: None,
-                ext: None,
-            },
-        )
-        .await
-        .expect("add should succeed");
-
-    let participants = store
-        .query_cascade_participants("cascade-multi-1")
-        .await
-        .expect("query should succeed");
-
-    assert_eq!(participants.len(), 2, "should find two participants");
-}
-
-/// Per-participant cascade resolution: one participant's Revocation does not
-/// resolve the others. A cascade with participant A revoked and participant
-/// B still provisional stays stale, and only B is reported as unresolved.
-pub async fn test_query_stale_cascades_partially_revoked_remains_stale<S: EventStore>(store: &S) {
-    let domain = "test_cascade_partial";
-    let cascade_id = format!("cascade-partial-{}", Uuid::new_v4());
-    let revoked = Uuid::new_v4();
-    let pending = Uuid::new_v4();
-    let old = (chrono::Utc::now() - chrono::Duration::hours(2)).timestamp();
-
-    for root in [revoked, pending] {
-        store
-            .add(
-                domain,
-                "angzarr",
-                root,
-                vec![make_cascade_event(0, true, Some(&cascade_id), old)],
-                &AddMeta::default(),
-            )
-            .await
-            .expect("provisional add should succeed");
-    }
-    store
-        .add(
-            domain,
-            "angzarr",
-            revoked,
-            vec![make_cascade_event(
-                1,
-                false,
-                Some(&cascade_id),
-                chrono::Utc::now().timestamp(),
-            )],
-            &AddMeta::default(),
-        )
-        .await
-        .expect("revocation marker add should succeed");
-
-    let threshold = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-    let stale = store
-        .query_stale_cascades(&threshold)
-        .await
-        .expect("query_stale_cascades should succeed");
-    assert!(
-        stale.contains(&cascade_id),
-        "a cascade with an unresolved participant must stay stale; got {stale:?}"
-    );
-
-    let participants = store
-        .query_cascade_participants(&cascade_id)
-        .await
-        .expect("query_cascade_participants should succeed");
-    let roots: Vec<Uuid> = participants.iter().map(|p| p.root).collect();
-    assert_eq!(
-        roots,
-        vec![pending],
-        "only the unresolved participant must be reported"
-    );
-    assert_eq!(participants[0].sequences, vec![0]);
-}
-
-/// A stale threshold spelled with a non-UTC offset names an instant, not a
-/// string: a row created one second before it is stale even though the
-/// threshold's local wall-clock text sorts before the stored UTC text.
-pub async fn test_query_stale_cascades_threshold_offset_spelling<S: EventStore>(store: &S) {
-    let domain = "test_cascade_threshold_spelling";
-    let cascade_id = format!("cascade-spelling-{}", Uuid::new_v4());
-    let created = chrono::Utc::now() - chrono::Duration::hours(2);
-    store
-        .add(
-            domain,
-            "angzarr",
-            Uuid::new_v4(),
-            vec![make_cascade_event(
-                0,
-                true,
-                Some(&cascade_id),
-                created.timestamp(),
-            )],
-            &AddMeta::default(),
-        )
-        .await
-        .expect("provisional add should succeed");
-
-    let minus_two = chrono::FixedOffset::west_opt(2 * 3600).unwrap();
-    let threshold = (chrono::DateTime::from_timestamp(created.timestamp() + 1, 0).unwrap())
-        .with_timezone(&minus_two)
-        .to_rfc3339();
-    assert!(
-        threshold.ends_with("-02:00"),
-        "threshold must carry the offset"
-    );
-    let stale = store
-        .query_stale_cascades(&threshold)
-        .await
-        .expect("query_stale_cascades should succeed");
-    assert!(
-        stale.contains(&cascade_id),
-        "row created before the threshold instant must be stale; threshold={threshold}"
-    );
-}
-
 /// An aggregate history larger than one backend result page (DynamoDB pages
 /// at 1 MB) must be read completely by every read path, and the external-id
 /// probe must see claims written before the page boundary.
@@ -4005,12 +3578,10 @@ macro_rules! __gen_event_store_tests {
 }
 
 /// Generate the CORE EventStore contract tests — everything except the
-/// `delete_edition_events` and 2PC-cascade groups, which are split into
-/// `generate_event_store_delete_tests!` / `generate_event_store_cascade_tests!`
-/// because some backends legitimately do not implement them (ImmuDB is
-/// append-only and has no cascade columns; it asserts NotImplemented in
-/// its own suite instead). Fully-featured backends should invoke
-/// `generate_event_store_tests!`, which composes all three groups (T4).
+/// `delete_edition_events` group, which is split into
+/// `generate_event_store_delete_tests!` because ImmuDB is append-only and
+/// asserts NotImplemented in its own suite instead. Fully-featured backends
+/// should invoke `generate_event_store_tests!`, which composes both groups.
 #[macro_export]
 macro_rules! generate_event_store_core_tests {
     ($fixture:path) => {
@@ -4117,34 +3688,13 @@ macro_rules! generate_event_store_delete_tests {
     };
 }
 
-/// 2PC cascade-reaper query group — only for backends that persist the
-/// `committed`/`cascade_id` columns. ImmuDB lacks them and returns
-/// NotImplemented from the reaper queries.
-#[macro_export]
-macro_rules! generate_event_store_cascade_tests {
-    ($fixture:path) => {
-        $crate::__gen_event_store_tests!(
-            $fixture,
-            test_query_stale_cascades_finds_old_uncommitted,
-            test_query_stale_cascades_ignores_resolved,
-            test_query_stale_cascades_ignores_fresh,
-            test_query_stale_cascades_partially_revoked_remains_stale,
-            test_query_stale_cascades_threshold_offset_spelling,
-            test_query_cascade_participants_finds_uncommitted,
-            test_query_cascade_participants_ignores_committed,
-            test_query_cascade_participants_multiple_aggregates,
-        );
-    };
-}
-
-/// Generate ALL EventStore contract tests (core + delete + cascade) — the
+/// Generate ALL EventStore contract tests (core + delete) — the
 /// full contract for fully-featured backends (SQLite, Postgres).
 #[macro_export]
 macro_rules! generate_event_store_tests {
     ($fixture:path) => {
         $crate::generate_event_store_core_tests!($fixture);
         $crate::generate_event_store_delete_tests!($fixture);
-        $crate::generate_event_store_cascade_tests!($fixture);
     };
 }
 

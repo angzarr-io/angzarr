@@ -51,7 +51,6 @@ fn pm_book(pm_domain: &str, pm_root: Uuid, correlation_id: &str, sequences: &[u3
                     value: vec![],
                 })),
                 created_at: None,
-                ..Default::default()
             })
             .collect(),
         snapshot: None,

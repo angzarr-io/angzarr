@@ -478,8 +478,6 @@ fn event_page_with_seq(seq: u32) -> crate::proto::EventPage {
             sequence_type: Some(SequenceType::Sequence(seq)),
         }),
         created_at: None,
-        no_commit: false,
-        cascade_id: None,
         payload: Some(EvPayload::Event(prost_types::Any {
             type_url: "test.PmEvent".to_string(),
             value: vec![],
@@ -1698,7 +1696,6 @@ async fn test_pm_preserves_handler_stamped_deferred_source_and_seq() {
                 // these MUST be normalized by the rewrite.
                 source_component: "handler-scribble".to_string(),
                 command_index: 99,
-                basis_seq: 0,
             })),
         })],
     };

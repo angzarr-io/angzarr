@@ -154,7 +154,6 @@ fn make_event_page(seq: u32) -> EventPage {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }
 }
 
@@ -175,7 +174,6 @@ fn make_fact_page() -> EventPage {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }
 }
 
@@ -309,7 +307,6 @@ async fn test_handle_command_invokes_business_logic() {
         command: Some(command_book),
         sync_mode: SyncMode::Async as i32,
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        cascade_id: None,
     });
 
     let response = service.handle_command(request).await;
@@ -329,7 +326,6 @@ async fn test_handle_command_missing_command_returns_error() {
         command: None,
         sync_mode: SyncMode::Async as i32,
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        cascade_id: None,
     });
 
     let response = service.handle_command(request).await;
@@ -352,7 +348,6 @@ async fn test_handle_command_with_sync_mode_creates_sync_context() {
         command: Some(command_book),
         sync_mode: SyncMode::Simple as i32,
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        cascade_id: None,
     });
 
     let response = service.handle_command(request).await;
@@ -499,7 +494,6 @@ async fn test_handle_compensation_missing_command_returns_error() {
         command: None,
         sync_mode: SyncMode::Async as i32,
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        cascade_id: None,
     });
 
     let response = service.handle_compensation(request).await;
@@ -525,7 +519,6 @@ async fn test_handle_compensation_returns_business_response() {
         command: Some(command_book),
         sync_mode: SyncMode::Async as i32,
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        cascade_id: None,
     });
 
     let response = service.handle_compensation(request).await;
@@ -548,7 +541,6 @@ async fn test_handle_compensation_with_empty_response() {
         command: Some(command_book),
         sync_mode: SyncMode::Async as i32,
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        cascade_id: None,
     });
 
     let response = service.handle_compensation(request).await;
@@ -621,49 +613,6 @@ async fn test_handle_event_default_routes_through_handler() {
         1,
         "unset skip_handler must invoke handle_fact (safe default)"
     );
-}
-
-/// Facts are persisted with no_commit=false (committed) regardless of input.
-///
-/// Protobuf bool defaults to false, which now correctly means "committed".
-/// But if a caller accidentally sets no_commit=true, the pipeline must
-/// override it. Facts are external realities and must always be immediately
-/// committed.
-#[tokio::test]
-async fn test_handle_event_facts_persisted_as_committed() {
-    let (service, _) = create_test_service().await;
-
-    let root = Uuid::new_v4();
-    // Create a fact page with no_commit=true (simulate caller error)
-    let mut fact_page = make_fact_page();
-    fact_page.no_commit = true; // Simulate caller sending uncommitted
-
-    let facts = make_event_book("orders", root, vec![fact_page]);
-
-    let request = Request::new(EventRequest {
-        events: Some(facts),
-        sync_mode: SyncMode::Async as i32,
-        skip_handler: true,
-    });
-
-    let response = service.handle_event(request).await;
-    assert!(
-        response.is_ok(),
-        "Expected ok but got: {:?}",
-        response.err()
-    );
-
-    let fact_response = response.unwrap().into_inner();
-    let events = fact_response.events.expect("should have events");
-
-    // The pipeline must set no_commit=false on fact pages (committed)
-    for page in &events.pages {
-        assert!(
-            !page.no_commit,
-            "Fact events must be committed (no_commit=false), got no_commit=true for seq {:?}",
-            page.header
-        );
-    }
 }
 
 /// skip_handler: true persists facts directly without invoking handle_fact.
@@ -791,7 +740,6 @@ async fn test_domain_bound_service_refuses_foreign_domain() {
         command: Some(make_command_book(domain, root, 0)),
         sync_mode: SyncMode::Async as i32,
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        cascade_id: None,
     };
 
     let err = service
@@ -849,7 +797,6 @@ async fn test_handle_compensation_validates_command_book() {
             command: Some(book),
             sync_mode: SyncMode::Async as i32,
             cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-            cascade_id: None,
         }))
         .await
         .unwrap_err();
@@ -878,7 +825,6 @@ async fn test_handle_compensation_persists_and_publishes_events() {
             command: Some(make_command_book("orders", root, 0)),
             sync_mode: SyncMode::Async as i32,
             cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-            cascade_id: None,
         }))
         .await
         .unwrap();

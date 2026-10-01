@@ -2,7 +2,7 @@
 //!
 //! These are pure data structures with simple methods - no async, no I/O.
 
-use super::{AddMeta, AddOutcome, CascadeParticipant, EventStore, SourceInfo};
+use super::{AddMeta, AddOutcome, EventStore, SourceInfo};
 use crate::proto::{EventBook, EventPage};
 use crate::storage::{Result, StorageError};
 use async_trait::async_trait;
@@ -259,15 +259,6 @@ impl EventStore for DefaultImplStub {
         unimplemented!()
     }
     async fn delete_edition_events(&self, _domain: &str, _edition: &str) -> Result<u32> {
-        unimplemented!()
-    }
-    async fn query_stale_cascades(&self, _threshold: &str) -> Result<Vec<String>> {
-        unimplemented!()
-    }
-    async fn query_cascade_participants(
-        &self,
-        _cascade_id: &str,
-    ) -> Result<Vec<CascadeParticipant>> {
         unimplemented!()
     }
 }

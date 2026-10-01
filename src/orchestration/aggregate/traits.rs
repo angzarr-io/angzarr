@@ -175,15 +175,6 @@ pub trait AggregateContext: Send + Sync {
         );
     }
 
-    /// Get the cascade ID for 2PC atomic execution, if set.
-    ///
-    /// When a cascade_id is active, events are persisted with `no_commit=true`
-    /// and the cascade_id stamped on each event. Returns `None` for normal
-    /// (non-cascade) command execution.
-    fn cascade_id(&self) -> Option<&str> {
-        None
-    }
-
     /// Check if a saga-produced command has already been processed.
     ///
     /// For commands with `angzarr_deferred` sequences, checks if events exist
