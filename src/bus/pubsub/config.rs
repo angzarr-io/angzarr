@@ -10,7 +10,8 @@ pub struct PubSubConfig {
     /// Subscription ID suffix (consumer group equivalent).
     pub subscription_id: Option<String>,
     /// Domains to subscribe to (for consumers).
-    /// Empty means all domains (requires subscription to a wildcard or specific topics).
+    /// Must be non-empty for consumers: each domain has its own topic, so
+    /// there is no all-domains subscription (`start_consuming` rejects it).
     pub domains: Vec<String>,
 }
 
@@ -39,16 +40,14 @@ impl PubSubConfig {
         }
     }
 
-    /// Create config for subscribing to all domains.
-    pub fn subscriber_all(
-        project_id: impl Into<String>,
-        subscription_id: impl Into<String>,
-    ) -> Self {
+    /// Derive a subscriber config that shares this config's project and
+    /// topic prefix, so a subscriber created from a publisher reads the
+    /// topics that publisher writes.
+    pub fn subscriber_config(&self, subscription_id: &str, domain: Option<&str>) -> Self {
         Self {
-            project_id: project_id.into(),
-            topic_prefix: "angzarr".to_string(),
-            subscription_id: Some(subscription_id.into()),
-            domains: Vec::new(),
+            subscription_id: Some(subscription_id.to_string()),
+            domains: domain.map(|d| vec![d.to_string()]).unwrap_or_default(),
+            ..self.clone()
         }
     }
 

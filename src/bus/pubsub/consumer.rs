@@ -1,5 +1,6 @@
 //! Pub/Sub consumer helpers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gcloud_pubsub::client::Client;
@@ -31,6 +32,7 @@ pub(super) enum ProcessResult {
 pub(super) async fn process_message_payload(
     data: &[u8],
     domain: &str,
+    attributes: &HashMap<String, String>,
     handlers: &Arc<RwLock<Vec<Box<dyn EventHandler>>>>,
     filter_domains: &[String],
 ) -> ProcessResult {
@@ -55,6 +57,10 @@ pub(super) async fn process_message_payload(
 
     // Dispatch to handlers
     let consume_span = tracing::info_span!("bus.consume", domain = %domain);
+    #[cfg(feature = "otel")]
+    super::otel::pubsub_extract_trace_context(attributes, &consume_span);
+    #[cfg(not(feature = "otel"))]
+    let _ = attributes;
     let success = crate::bus::dispatch::dispatch_to_handlers_with_domain(handlers, &book, domain)
         .instrument(consume_span)
         .await;
@@ -109,7 +115,7 @@ pub(super) async fn ensure_subscription_exists(
             .await
             .map_err(|e| BusError::Subscribe(format!("Failed to check topic existence: {}", e)))?
         {
-            topic.create(None, None).await.map_err(|e| {
+            super::tolerate_already_exists(topic.create(None, None).await).map_err(|e| {
                 BusError::Subscribe(format!("Failed to create topic {}: {}", topic_name, e))
             })?;
             info!(topic = %topic_name, "Created Pub/Sub topic");
@@ -118,19 +124,21 @@ pub(super) async fn ensure_subscription_exists(
         // Create subscription. `build_subscription_config()` enforces
         // `enable_message_ordering=true` so the broker honors the
         // publisher's `ordering_key=root_id` and preserves per-root order.
-        subscription
-            .create(
-                topic.fully_qualified_name(),
-                build_subscription_config(),
-                None,
-            )
-            .await
-            .map_err(|e| {
-                BusError::Subscribe(format!(
-                    "Failed to create subscription {}: {}",
-                    subscription_name, e
-                ))
-            })?;
+        super::tolerate_already_exists(
+            subscription
+                .create(
+                    topic.fully_qualified_name(),
+                    build_subscription_config(),
+                    None,
+                )
+                .await,
+        )
+        .map_err(|e| {
+            BusError::Subscribe(format!(
+                "Failed to create subscription {}: {}",
+                subscription_name, e
+            ))
+        })?;
 
         info!(
             subscription = %subscription_name,

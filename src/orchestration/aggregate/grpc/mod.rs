@@ -3,6 +3,7 @@
 //! Uses EventBookRepository for storage and K8s service discovery for projectors.
 //! client logic invocation is handled by the pipeline via gRPC client.
 
+use crate::transport::GrpcMessageLimits;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -320,7 +321,7 @@ impl GrpcAggregateContext {
         events: &EventBook,
     ) -> Result<Vec<CascadeReactionError>, Status> {
         let channel = self.channels.channel(&endpoint.grpc_url())?;
-        let mut client = SagaCoordinatorServiceClient::new(channel);
+        let mut client = SagaCoordinatorServiceClient::new(channel).with_message_limits();
         let request = self.downstream_request(
             SagaHandleRequest {
                 source: Some(events.clone()),
@@ -343,7 +344,7 @@ impl GrpcAggregateContext {
         events: &EventBook,
     ) -> Result<Vec<CascadeReactionError>, Status> {
         let channel = self.channels.channel(&endpoint.grpc_url())?;
-        let mut client = ProcessManagerCoordinatorServiceClient::new(channel);
+        let mut client = ProcessManagerCoordinatorServiceClient::new(channel).with_message_limits();
         let request = self.downstream_request(
             ProcessManagerCoordinatorRequest {
                 trigger: Some(events.clone()),

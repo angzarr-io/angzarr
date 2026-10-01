@@ -350,6 +350,10 @@ gateway-gen:
 gateway-build: gateway-gen
     just _go "cd gateway && go build -o /tmp/angzarr-grpc-gateway ."
 
+# Generate, vet and test the gRPC-Gateway (routing, discovery, REST wiring)
+gateway-test: gateway-gen
+    just _go "cd gateway && go vet ./... && go test ./... && bash test_dlq_admin_generated.sh"
+
 # Run gRPC-Gateway locally (connects to local coordinator)
 gateway-dev: gateway-gen
     just _go "cd gateway && go run . --grpc-target=localhost:1310"
@@ -426,6 +430,12 @@ cognitive:
 # Run unit tests
 test:
     just _container test
+
+# Run unit tests with extra backend features compiled in, so feature-gated
+# bus/storage unit tests run too. FEATURES is comma-separated, e.g.
+#   just test-features amqp,kafka,pubsub,sns-sqs
+test-features FEATURES:
+    just _container test-features {{FEATURES}}
 
 # Pre-commit gate: fmt + lint + test in a SINGLE container invocation.
 # Avoids the inter-container `.cargo-lock` race that bites when lefthook
@@ -884,6 +894,11 @@ secrets-init:
 # One-time setup: configure Skaffold for local registry
 skaffold-init:
     @uv run "{{TOP}}/scripts/configure_skaffold.py"
+
+# Render-test the angzarr Helm chart (helm template + assertions)
+helm-test:
+    bash "{{TOP}}/deploy/k8s/helm/angzarr/tests/test_status_envoy_security.sh"
+    bash "{{TOP}}/deploy/k8s/helm/angzarr/tests/test_sidecar_wiring.sh"
 
 # Build framework images (angzarr sidecars)
 framework-build: _skaffold-ready

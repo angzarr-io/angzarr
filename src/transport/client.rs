@@ -273,3 +273,47 @@ impl ServiceEndpointConfig {
         connect_with_transport(transport, &self.name, self.qualifier.as_deref(), tcp_addr).await
     }
 }
+
+/// Applies the framework's gRPC message-size limit
+/// ([`max_grpc_message_size`](super::max_grpc_message_size)) to a generated
+/// client, matching the limit set on every server.
+///
+/// Generated clients default to tonic's 4 MiB decode limit, so without
+/// this a response between 4 MiB and the server limit (an event book with
+/// a long history, a large projection) fails with `OutOfRange` on the
+/// caller even though the server sent it.
+pub trait GrpcMessageLimits: Sized {
+    /// Return the client with encode and decode limits set.
+    fn with_message_limits(self) -> Self;
+}
+
+macro_rules! impl_grpc_message_limits {
+    ($($client:ty),* $(,)?) => {
+        $(
+            impl GrpcMessageLimits for $client {
+                fn with_message_limits(self) -> Self {
+                    let limit = super::max_grpc_message_size();
+                    self.max_decoding_message_size(limit)
+                        .max_encoding_message_size(limit)
+                }
+            }
+        )*
+    };
+}
+
+impl_grpc_message_limits!(
+    crate::proto::command_handler_service_client::CommandHandlerServiceClient<Channel>,
+    crate::proto::command_handler_coordinator_service_client::CommandHandlerCoordinatorServiceClient<Channel>,
+    crate::proto::event_query_service_client::EventQueryServiceClient<Channel>,
+    crate::proto::saga_service_client::SagaServiceClient<Channel>,
+    crate::proto::saga_coordinator_service_client::SagaCoordinatorServiceClient<Channel>,
+    crate::proto::process_manager_service_client::ProcessManagerServiceClient<Channel>,
+    crate::proto::process_manager_coordinator_service_client::ProcessManagerCoordinatorServiceClient<Channel>,
+    crate::proto::projector_service_client::ProjectorServiceClient<Channel>,
+    crate::proto::projector_coordinator_service_client::ProjectorCoordinatorServiceClient<Channel>,
+    crate::proto::upcaster_service_client::UpcasterServiceClient<Channel>,
+);
+
+#[cfg(test)]
+#[path = "client.test.rs"]
+mod tests;

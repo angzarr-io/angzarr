@@ -1,8 +1,8 @@
 //! angzarr-saga: Saga sidecar
 //!
 //! Kubernetes sidecar for saga services. Subscribes to events from the
-//! message bus (AMQP, Kafka, or IPC), forwards to saga for processing,
-//! and executes resulting commands via the command handler.
+//! message bus (AMQP, Kafka, Pub/Sub or SNS/SQS), forwards to saga for
+//! processing, and executes resulting commands via the command handler.
 //!
 //! ## Two-Phase Saga Protocol
 //! 1. **Prepare**: Saga declares which destination aggregates it needs to read
@@ -36,8 +36,8 @@
 //! - TARGET_COMMAND: Optional command to spawn saga (embedded mode)
 //! - ANGZARR_SUBSCRIPTIONS: Event subscriptions (format: "domain:Type1,Type2;domain2")
 //! - ANGZARR_STATIC_ENDPOINTS: Static endpoints for multi-domain routing (format: "domain=address,...")
-//! - MESSAGING_TYPE: amqp or kafka
-//! - ANGZARR_COORDINATOR_PORT: Port for CASCADE mode coordinator (default: 1350)
+//! - ANGZARR__MESSAGING__TYPE: amqp, kafka, pubsub or sns-sqs
+//! - ANGZARR_COORDINATOR_PORT: TCP port for the CASCADE coordinator (default: 1350)
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -49,23 +49,29 @@ use tonic_health::server::health_reporter;
 use tracing::{error, info, warn};
 
 use angzarr::bus::{init_event_bus, EventBusMode};
-use angzarr::config::{SagaCompensationConfig, STATIC_ENDPOINTS_ENV_VAR};
+use angzarr::config::STATIC_ENDPOINTS_ENV_VAR;
 use angzarr::descriptor::{parse_subscriptions, Target};
 use angzarr::dlq::init_dlq_publisher;
 use angzarr::handlers::core::saga::SagaEventHandler;
 use angzarr::orchestration::saga::grpc::GrpcSagaContextFactory;
+use angzarr::payload_store::{init_payload_offload, with_offload};
+use angzarr::proto::command_handler_coordinator_service_client::CommandHandlerCoordinatorServiceClient;
 use angzarr::proto::saga_coordinator_service_server::SagaCoordinatorServiceServer;
 use angzarr::proto::saga_service_client::SagaServiceClient;
 use angzarr::services::SagaCoord;
-use angzarr::transport::{connect_to_address, grpc_trace_layer, max_grpc_message_size};
+use angzarr::transport::{
+    connect_to_address, grpc_trace_layer, max_grpc_message_size, serve_with_transport,
+    GrpcMessageLimits,
+};
+use angzarr::utils::bootstrap::parse_static_endpoints;
 use angzarr::utils::retry::connection_backoff;
-use angzarr::utils::sidecar::{bootstrap_sidecar, connect_endpoints};
+use angzarr::utils::sidecar::{
+    bootstrap_sidecar, compensation_endpoint, connect_endpoints, coordinator_transport,
+    start_subscriber, COORDINATOR_PORT_ENV_VAR,
+};
 
 /// Environment variable for subscription configuration.
 const SUBSCRIPTIONS_ENV_VAR: &str = "ANGZARR_SUBSCRIPTIONS";
-
-/// Environment variable for coordinator port (CASCADE mode).
-const COORDINATOR_PORT_ENV_VAR: &str = "ANGZARR_COORDINATOR_PORT";
 
 /// Default coordinator port for CASCADE mode.
 const DEFAULT_COORDINATOR_PORT: u16 = 1350;
@@ -116,7 +122,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let addr = saga_addr.clone();
         async move {
             let channel = connect_to_address(&addr).await.map_err(|e| e.to_string())?;
-            Ok::<_, String>(SagaServiceClient::new(channel))
+            Ok::<_, String>(SagaServiceClient::new(channel).with_message_limits())
         }
     })
     .retry(connection_backoff())
@@ -125,10 +131,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .await?;
 
+    let offload = init_payload_offload(&bootstrap.config.payload_offload).await?;
+
     // Create publisher for saga-produced event books
     let publisher = init_event_bus(messaging, EventBusMode::Publisher)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+    let publisher = with_offload(publisher, offload.as_ref());
 
     // Get subscriptions from environment variable or config
     let inputs = if let Ok(subs_str) = std::env::var(SUBSCRIPTIONS_ENV_VAR) {
@@ -171,13 +180,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Using static endpoint configuration for two-phase saga routing");
     let (executor, _fetcher, fact_executor) = connect_endpoints(&endpoints_str).await?;
+
+    // Rejected commands are compensated by notifying the aggregate whose
+    // event triggered the saga, i.e. the saga's source domain.
+    let compensation_handler =
+        match compensation_endpoint(&inputs, &parse_static_endpoints(&endpoints_str)) {
+            Ok(address) => {
+                info!(address = %address, "Compensation routed to source aggregate");
+                let channel = connect_to_address(&address).await?;
+                Some(Arc::new(Mutex::new(
+                    CommandHandlerCoordinatorServiceClient::new(channel).with_message_limits(),
+                )))
+            }
+            Err(reason) => {
+                warn!(reason = %reason, "Saga compensation disabled");
+                None
+            }
+        };
+
     let factory: Arc<GrpcSagaContextFactory> = Arc::new(GrpcSagaContextFactory::new(
         Arc::new(Mutex::new(saga_client)),
         publisher,
-        SagaCompensationConfig::default(),
-        None,
+        bootstrap.config.saga_compensation.clone(),
+        compensation_handler,
         bootstrap.domain.clone(),
-        dlq_publisher,
+        dlq_publisher.clone(),
     ));
     let handler = SagaEventHandler::from_factory_with_validator(
         factory.clone(),
@@ -192,35 +219,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // =========================================================================
     // Start bus subscriber (ASYNC mode)
     // =========================================================================
-    let queue_name = format!("saga-{}", bootstrap.domain);
-    let subscriber_mode = EventBusMode::SubscriberAll {
-        queue: queue_name.clone(),
-    };
-    let subscriber = init_event_bus(messaging, subscriber_mode)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
-
-    subscriber
-        .subscribe(Box::new(handler))
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-
-    subscriber
-        .start_consuming()
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-
-    info!(queue = %queue_name, "Bus subscriber started (ASYNC mode)");
+    let _subscriber = start_subscriber(
+        messaging,
+        format!("saga-{}", bootstrap.domain),
+        inputs,
+        Box::new(handler),
+        dlq_publisher.clone(),
+        offload.as_ref(),
+        &bootstrap.domain,
+        "saga",
+    )
+    .await?;
 
     // =========================================================================
     // Start gRPC coordinator server (CASCADE mode)
     // =========================================================================
-    let coordinator_port: u16 = std::env::var(COORDINATOR_PORT_ENV_VAR)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_COORDINATOR_PORT);
-
-    let coordinator_addr = format!("0.0.0.0:{}", coordinator_port);
+    let coordinator = coordinator_transport(
+        &bootstrap.config.transport,
+        std::env::var(COORDINATOR_PORT_ENV_VAR).ok().as_deref(),
+        DEFAULT_COORDINATOR_PORT,
+    )?;
 
     // Create saga coordinator service for CASCADE mode
     let saga_coord = SagaCoord::new(factory, executor).with_fact_executor(fact_executor);
@@ -242,22 +260,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .max_encoding_message_size(msg_size),
         );
 
-    let addr: std::net::SocketAddr = coordinator_addr.parse()?;
     info!(
-        address = %addr,
         saga = %bootstrap.domain,
-        "Saga coordinator server starting (CASCADE mode)"
+        "Coordinator server starting (CASCADE mode)"
     );
 
-    // Run both subscriber and coordinator server until shutdown
-    coordinator_server
-        .serve_with_shutdown(addr, async {
-            tokio::signal::ctrl_c()
-                .await
-                .expect("Failed to install CTRL+C handler");
-            info!("Shutdown signal received");
-        })
-        .await?;
+    // Serves until SIGTERM/SIGINT, then drains and flushes telemetry.
+    serve_with_transport(
+        coordinator_server,
+        &coordinator,
+        "saga",
+        Some(&bootstrap.domain),
+    )
+    .await?;
 
     Ok(())
 }

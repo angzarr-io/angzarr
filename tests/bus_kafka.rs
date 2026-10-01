@@ -11,6 +11,8 @@ mod bus;
 
 use std::time::Duration;
 
+use angzarr::bus::EventBus;
+
 use angzarr::bus::kafka::{KafkaEventBus, KafkaEventBusConfig};
 use angzarr::dlq::DlqConfig;
 use testcontainers::{
@@ -112,6 +114,21 @@ async fn test_kafka_event_bus() {
         .expect("Failed to create Kafka publisher");
 
     run_event_bus_tests!(&bus, &prefix);
+    run_all_domains_subscription_test!(&bus, &prefix);
+
+    let domain = format!("{}-order-after-fail", prefix);
+    let subscriber = bus
+        .create_subscriber(&format!("{}-sub-order-after-fail", prefix), Some(&domain))
+        .await
+        .expect("create subscriber");
+    bus::event_bus_tests::test_root_order_preserved_after_handler_failure(
+        subscriber,
+        &bus,
+        &domain,
+        std::time::Duration::from_secs(30),
+    )
+    .await;
+    println!("  test_root_order_preserved_after_handler_failure: PASSED");
 
     // H-11: per-root ordering contract test. Re-create the bus inside an
     // Arc so the helper can clone it across concurrent producer tasks

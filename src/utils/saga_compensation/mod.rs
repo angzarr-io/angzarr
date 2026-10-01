@@ -27,8 +27,8 @@ use tracing::{debug, error, info, warn};
 #[cfg(test)]
 use uuid::Uuid;
 
-use crate::bus::EventBus;
 use crate::config::SagaCompensationConfig;
+use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher};
 use crate::proto::{
     business_response, page_header::SequenceType, AngzarrDeferredSequence, BusinessResponse,
     CommandBook, Cover, EventBook, EventPage, MergeStrategy, Notification, PageHeader,
@@ -129,26 +129,34 @@ pub trait EscalationHandler: Send + Sync {
     ) -> std::result::Result<(), CompensationError>;
 }
 
-/// Default escalation handler that routes based on configuration.
+/// Default escalation handler.
 ///
-/// - `quarantine`: If `dead_letter_queue_url` configured → publishes to fallback domain via EventBus
+/// - `quarantine`: publishes the rejected command to the saga's dead letter
+///   queue, so operators can inspect and replay it.
 /// - `notify`: If `escalation_webhook_url` configured → calls webhook with retry
 pub struct DefaultEscalationHandler {
-    event_bus: Arc<dyn EventBus>,
+    dlq: Arc<dyn DeadLetterPublisher>,
     config: SagaCompensationConfig,
+    component: String,
     http_client: reqwest::Client,
 }
 
 impl DefaultEscalationHandler {
-    /// Create a new default escalation handler.
-    pub fn new(event_bus: Arc<dyn EventBus>, config: SagaCompensationConfig) -> Self {
+    /// Create a new default escalation handler. `component` names the saga
+    /// in dead letters.
+    pub fn new(
+        dlq: Arc<dyn DeadLetterPublisher>,
+        config: SagaCompensationConfig,
+        component: impl Into<String>,
+    ) -> Self {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("Failed to create HTTP client for webhook escalation");
         Self {
-            event_bus,
+            dlq,
             config,
+            component: component.into(),
             http_client,
         }
     }
@@ -161,29 +169,37 @@ impl EscalationHandler for DefaultEscalationHandler {
         context: &CompensationContext,
         reason: &str,
     ) -> std::result::Result<(), CompensationError> {
-        let Some(ref dlq_url) = self.config.dead_letter_queue_url else {
-            warn!(
-                source_domain = %context.source.source.as_ref().map(|c| c.domain.as_str()).unwrap_or("?"),
-                "Quarantine requested but dead_letter_queue_url not configured"
-            );
-            return Ok(());
-        };
+        let source_domain = context
+            .source
+            .source
+            .as_ref()
+            .map(|c| c.domain.as_str())
+            .unwrap_or("?");
+        if !self.dlq.is_configured() {
+            return Err(CompensationError::EscalationFailed(format!(
+                "quarantine requested for compensation of {} but no DLQ target is \
+                 configured (dlq.targets)",
+                source_domain
+            )));
+        }
 
         info!(
-            source_domain = %context.source.source.as_ref().map(|c| c.domain.as_str()).unwrap_or("?"),
+            source_domain = %source_domain,
             source_seq = context.source.source_seq,
-            dlq_url = %dlq_url,
             reason = %reason,
             "Quarantining compensation failure"
         );
 
-        let event_book = build_compensation_failed_event_book(context, reason, &self.config);
-        self.event_bus
-            .publish(Arc::new(event_book))
-            .await
-            .map_err(|e| {
-                CompensationError::EscalationFailed(format!("Quarantine failed: {}", e))
-            })?;
+        let dead_letter = AngzarrDeadLetter::from_saga_command_rejection(
+            &context.rejected_command,
+            reason,
+            0,
+            false,
+            &self.component,
+        );
+        self.dlq.publish(dead_letter).await.map_err(|e| {
+            CompensationError::EscalationFailed(format!("Quarantine failed: {}", e))
+        })?;
 
         Ok(())
     }
@@ -853,10 +869,12 @@ pub async fn process_compensation_response(
     context: &CompensationContext,
     config: &SagaCompensationConfig,
     event_bus: &std::sync::Arc<dyn crate::bus::EventBus>,
+    dlq: &Arc<dyn DeadLetterPublisher>,
     saga_name: &str,
     triggering_domain: &str,
 ) {
-    let escalation_handler = DefaultEscalationHandler::new(event_bus.clone(), config.clone());
+    let escalation_handler =
+        DefaultEscalationHandler::new(Arc::clone(dlq), config.clone(), saga_name);
 
     let outcome = handle_business_response(response, context, config, &escalation_handler).await;
 

@@ -55,7 +55,7 @@ impl RedisSnapshotStore {
         let client = Client::open(url)?;
         let conn = ConnectionManager::new(client).await?;
 
-        info!(url = %url, "Connected to Redis for snapshots");
+        info!(url = %crate::utils::redact::redact_uri(url), "Connected to Redis for snapshots");
 
         Ok(Self {
             conn,

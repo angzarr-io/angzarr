@@ -68,3 +68,31 @@ fn test_default_topic_prefix() {
     let default_prefix = "angzarr-dlq";
     assert_eq!(default_prefix, "angzarr-dlq");
 }
+
+// ============================================================================
+// Retention subscription
+// ============================================================================
+
+use super::{retention_subscription_config, retention_subscription_name};
+
+/// Each DLQ topic gets a retention subscription named after it.
+#[test]
+fn test_retention_subscription_name() {
+    assert_eq!(
+        retention_subscription_name("angzarr-dlq-orders"),
+        "angzarr-dlq-orders-retain"
+    );
+}
+
+/// The retention subscription keeps dead letters for the Pub/Sub maximum
+/// (7 days) and never expires for inactivity — a DLQ is idle by design.
+#[test]
+fn test_retention_subscription_keeps_messages_and_never_expires() {
+    let config = retention_subscription_config();
+    assert_eq!(
+        config.message_retention_duration,
+        Some(std::time::Duration::from_secs(604_800))
+    );
+    let expiration = config.expiration_policy.expect("expiration policy set");
+    assert!(expiration.ttl.is_none(), "ttl unset = never expire");
+}

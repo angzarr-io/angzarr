@@ -71,18 +71,13 @@ inventory::submit! {
                     EventBusMode::Publisher => {
                         PubSubConfig::publisher(&project_id).with_topic_prefix(&topic_prefix)
                     }
-                    EventBusMode::Subscriber { queue, domain } => {
-                        PubSubConfig::subscriber(&project_id, queue, vec![domain])
+                    EventBusMode::Subscriber { queue, domains } => {
+                        PubSubConfig::subscriber(&project_id, queue, domains)
                             .with_topic_prefix(&topic_prefix)
                     }
                     EventBusMode::SubscriberAll { queue } => {
-                        let domains = domains.unwrap_or_default();
-                        if domains.is_empty() {
-                            PubSubConfig::subscriber_all(&project_id, queue)
-                        } else {
-                            PubSubConfig::subscriber(&project_id, queue, domains)
-                        }
-                        .with_topic_prefix(&topic_prefix)
+                        PubSubConfig::subscriber(&project_id, queue, domains.unwrap_or_default())
+                            .with_topic_prefix(&topic_prefix)
                     }
                 };
 
@@ -98,6 +93,20 @@ inventory::submit! {
                 }
             })
         },
+    }
+}
+
+/// Treat `ALREADY_EXISTS` from a topic/subscription create as success.
+///
+/// Replicas starting together all see "missing" and race to create the
+/// same resource; the losers get `ALREADY_EXISTS`, which means the resource
+/// they wanted is there.
+pub(crate) fn tolerate_already_exists(
+    result: std::result::Result<(), tonic::Status>,
+) -> std::result::Result<(), tonic::Status> {
+    match result {
+        Err(status) if status.code() == tonic::Code::AlreadyExists => Ok(()),
+        other => other,
     }
 }
 

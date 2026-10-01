@@ -2,6 +2,8 @@
 
 use serde::Deserialize;
 
+use crate::descriptor::Target;
+
 /// Messaging configuration.
 ///
 /// The `messaging_type` field is a string that identifies which backend to use.
@@ -55,6 +57,58 @@ pub struct MessagingConfig {
     pub pubsub: PubSubBusConfig,
     /// AWS SNS/SQS-specific configuration.
     pub sns_sqs: SnsSqsBusConfig,
+    /// Consumer-side redelivery limits for handler failures.
+    pub delivery: DeliveryConfig,
+}
+
+/// Consumer-side redelivery policy for events whose handler fails.
+///
+/// Every transport redelivers a message whose handler returned `Err`.
+/// Without a cap, one poison event blocks its key/partition/group forever.
+/// After `max_attempts` failed deliveries the event is dead-lettered
+/// through the component's DLQ publisher and acknowledged; between
+/// attempts the consumer waits an exponential backoff
+/// (`initial_backoff_ms` doubling up to `max_backoff_ms`).
+///
+/// `max_attempts = 0` disables the cap. When no DLQ target is configured
+/// the event is never dropped: it keeps retrying at `max_backoff_ms`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct DeliveryConfig {
+    /// Failed deliveries before the event is dead-lettered (0 = unlimited).
+    pub max_attempts: u32,
+    /// Backoff after the first failed delivery, in milliseconds.
+    pub initial_backoff_ms: u64,
+    /// Upper bound on the backoff between deliveries, in milliseconds.
+    pub max_backoff_ms: u64,
+}
+
+impl Default for DeliveryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 10,
+            initial_backoff_ms: 200,
+            max_backoff_ms: 10_000,
+        }
+    }
+}
+
+impl DeliveryConfig {
+    /// Whether `failed_attempts` failed deliveries exhaust the budget.
+    pub fn is_exhausted(&self, failed_attempts: u32) -> bool {
+        self.max_attempts != 0 && failed_attempts >= self.max_attempts
+    }
+
+    /// Backoff to wait after the `failed_attempts`-th failed delivery
+    /// (1-based): `initial * 2^(n-1)`, capped at `max_backoff_ms`.
+    pub fn backoff(&self, failed_attempts: u32) -> std::time::Duration {
+        let exponent = failed_attempts.saturating_sub(1).min(32);
+        let millis = self
+            .initial_backoff_ms
+            .saturating_mul(1u64 << exponent)
+            .min(self.max_backoff_ms);
+        std::time::Duration::from_millis(millis)
+    }
 }
 
 /// Mode for event bus initialization.
@@ -62,18 +116,39 @@ pub struct MessagingConfig {
 pub enum EventBusMode {
     /// Publisher-only mode (no consuming).
     Publisher,
-    /// Subscriber mode for a specific domain.
+    /// Subscriber mode for an explicit set of domains.
     Subscriber {
         /// Queue/group name.
         queue: String,
-        /// Domain to subscribe to.
-        domain: String,
+        /// Domains to subscribe to (at least one).
+        domains: Vec<String>,
     },
     /// Subscriber mode for all domains.
     SubscriberAll {
         /// Queue/group name.
         queue: String,
     },
+}
+
+impl EventBusMode {
+    /// Subscriber mode covering the domains named by `targets`.
+    ///
+    /// Domains are de-duplicated in first-seen order. An empty target list
+    /// means "every domain" and yields [`EventBusMode::SubscriberAll`].
+    pub fn for_targets(queue: impl Into<String>, targets: &[Target]) -> Self {
+        let queue = queue.into();
+        let mut domains: Vec<String> = Vec::new();
+        for target in targets {
+            if !domains.contains(&target.domain) {
+                domains.push(target.domain.clone());
+            }
+        }
+        if domains.is_empty() {
+            EventBusMode::SubscriberAll { queue }
+        } else {
+            EventBusMode::Subscriber { queue, domains }
+        }
+    }
 }
 
 // ============================================================================
@@ -191,3 +266,7 @@ impl Default for SnsSqsBusConfig {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "config.test.rs"]
+mod tests;

@@ -64,3 +64,23 @@ fn test_ssl_config() {
     assert_eq!(config.security_protocol, Some("SSL".to_string()));
     assert_eq!(config.ssl_ca_location, Some("/path/to/ca.crt".to_string()));
 }
+
+/// A subscriber derived from a publisher keeps the brokers, topic prefix
+/// and SASL/SSL settings, so it reads the publisher's topics over the same
+/// authenticated connection.
+#[test]
+fn test_subscriber_config_keeps_prefix_and_security() {
+    let publisher = KafkaEventBusConfig::publisher("broker:9092")
+        .with_topic_prefix("tenant-a")
+        .with_sasl(TEST_USER, TEST_PASSWORD, "SCRAM-SHA-512")
+        .with_ssl_ca("/ca.pem");
+    let sub = publisher.subscriber_config("audit", Some("orders"));
+    assert_eq!(sub.bootstrap_servers, "broker:9092");
+    assert_eq!(sub.topic_prefix, "tenant-a");
+    assert_eq!(sub.sasl_username.as_deref(), Some(TEST_USER));
+    assert_eq!(sub.sasl_mechanism.as_deref(), Some("SCRAM-SHA-512"));
+    assert_eq!(sub.ssl_ca_location.as_deref(), Some("/ca.pem"));
+    assert_eq!(sub.group_id.as_deref(), Some("audit"));
+    assert_eq!(sub.domains, Some(vec!["orders".to_string()]));
+    assert_eq!(publisher.subscriber_config("all", None).domains, None);
+}

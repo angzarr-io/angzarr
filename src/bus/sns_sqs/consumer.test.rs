@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use aws_sdk_sqs::primitives::Blob;
 use aws_sdk_sqs::types::MessageAttributeValue;
 
-use super::extract_payload_bytes;
+use super::{extract_payload_bytes, message_group_id};
 use crate::bus::sns_sqs::PAYLOAD_ATTR;
 
 /// H-08 happy path: the consumer must read the protobuf bytes out of the
@@ -105,4 +105,22 @@ fn extract_payload_bytes_returns_empty_vec_for_empty_binary_attribute() {
         extracted.is_empty(),
         "extracted bytes must match the original empty payload"
     );
+}
+
+// ============================================================================
+// FIFO message group extraction
+// ============================================================================
+
+/// The group id comes from the `MessageGroupId` system attribute.
+#[test]
+fn message_group_id_reads_system_attribute() {
+    use aws_sdk_sqs::types::{Message, MessageSystemAttributeName};
+
+    let with_group = Message::builder()
+        .attributes(MessageSystemAttributeName::MessageGroupId, "abc123")
+        .build();
+    assert_eq!(message_group_id(&with_group), Some("abc123"));
+
+    let without = Message::builder().build();
+    assert_eq!(message_group_id(&without), None);
 }

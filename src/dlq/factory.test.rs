@@ -176,3 +176,65 @@ async fn init_dlq_reader_unknown_storage_type_returns_err() {
          falling back to noop would silently mask configuration errors"
     );
 }
+
+// ============================================================================
+// init_replay_audit_writer
+// ============================================================================
+
+/// Without `dlq.audit` replays are not recorded (no-op writer).
+#[tokio::test]
+async fn replay_audit_writer_without_audit_is_noop() {
+    let writer = init_replay_audit_writer(None).await.unwrap();
+    assert!(!writer.is_configured());
+}
+
+/// With `dlq.audit` the writer is real and its table exists (migrations
+/// applied at construction), so the two-phase fence works: a second
+/// pending row with the same idempotency key is a conflict.
+#[tokio::test]
+async fn replay_audit_writer_sqlite_fences_duplicate_replays() {
+    use crate::dlq::{ReplayAuditRecord, ReplayMode, ReplayOutcome};
+    use crate::storage::config::SqliteConfig;
+
+    // A file, not `:memory:` — every pooled connection to `:memory:` is a
+    // separate database.
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("audit.db");
+    std::fs::File::create(&path).unwrap();
+    let audit = DatabaseDlqConfig {
+        storage_type: "sqlite".to_string(),
+        sqlite: SqliteConfig {
+            path: Some(path.display().to_string()),
+        },
+        ..Default::default()
+    };
+    let writer = init_replay_audit_writer(Some(&audit)).await.unwrap();
+    assert!(writer.is_configured());
+
+    let record = ReplayAuditRecord {
+        dlq_id: 7,
+        replayed_at: chrono::Utc::now(),
+        replay_mode: ReplayMode::AsIs,
+        new_correlation_id: "n".to_string(),
+        original_correlation_id: None,
+        outcome: ReplayOutcome::Pending,
+        result_message: None,
+        idempotency_key: "replay-7-k".to_string(),
+    };
+    writer
+        .begin_pending(&record)
+        .await
+        .expect("first replay recorded");
+    let dup = writer.begin_pending(&record).await;
+    assert!(matches!(dup, Err(DlqError::Conflict(_))), "{dup:?}");
+}
+
+/// An unknown audit backend is a boot error, not a silent no-op.
+#[tokio::test]
+async fn replay_audit_writer_unknown_type_fails() {
+    let audit = DatabaseDlqConfig {
+        storage_type: "carrier-pigeon".to_string(),
+        ..Default::default()
+    };
+    assert!(init_replay_audit_writer(Some(&audit)).await.is_err());
+}

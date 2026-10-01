@@ -138,6 +138,13 @@ pub trait DeadLetterReader: Send + Sync {
     /// the same id are not an error.
     async fn delete(&self, id: i64) -> Result<bool>;
 
+    /// Delete every entry that occurred before `cutoff`; returns how many
+    /// were removed. Drives DLQ retention (`dlq.retention_days`). Readers
+    /// without durable storage have nothing to delete.
+    async fn delete_older_than(&self, _cutoff: DateTime<Utc>) -> Result<u64> {
+        Ok(0)
+    }
+
     /// Whether this reader can answer queries against a live backend.
     ///
     /// Matches the [`super::DeadLetterPublisher::is_configured`]

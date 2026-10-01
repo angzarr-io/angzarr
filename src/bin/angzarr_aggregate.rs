@@ -26,13 +26,11 @@
 //! - bigtable: GCP Bigtable (ANGZARR__STORAGE__PROJECT_ID, TABLE_NAME)
 //! - dynamodb: AWS DynamoDB (ANGZARR__STORAGE__TABLE_NAME)
 //!
-//! ### Messaging (ANGZARR__MESSAGING__*)
-//! - amqp: RabbitMQ (ANGZARR__MESSAGING__AMQP_URL)
-//! - kafka: Kafka/Redpanda (ANGZARR__MESSAGING__BOOTSTRAP_SERVERS)
-//! - pubsub: GCP Pub/Sub (ANGZARR__MESSAGING__PROJECT_ID)
-//! - sns-sqs: AWS SNS/SQS (ANGZARR__MESSAGING__AWS_REGION)
-//! - ipc: Unix domain sockets (local-dev mode)
-//! - channel: In-memory (testing only)
+//! ### Messaging (ANGZARR__MESSAGING__*, required)
+//! - amqp: RabbitMQ (ANGZARR__MESSAGING__AMQP__URL)
+//! - kafka: Kafka/Redpanda (ANGZARR__MESSAGING__KAFKA__BOOTSTRAP_SERVERS)
+//! - pubsub: GCP Pub/Sub (ANGZARR__MESSAGING__PUBSUB__PROJECT_ID)
+//! - sns-sqs: AWS SNS/SQS (ANGZARR__MESSAGING__SNS_SQS__REGION)
 //!
 //! ## Embedded Mode
 //! When `target.command` is configured, the sidecar will:
@@ -63,6 +61,7 @@ use angzarr::config::{Config, DISCOVERY_ENV_VAR, DISCOVERY_STATIC};
 use angzarr::discovery::K8sServiceDiscovery;
 use angzarr::discovery::{ServiceDiscovery, StaticServiceDiscovery};
 use angzarr::dlq::init_dlq_publisher;
+use angzarr::payload_store::{init_payload_offload, with_offload};
 use angzarr::proto::{
     command_handler_coordinator_service_server::CommandHandlerCoordinatorServiceServer,
     command_handler_service_client::CommandHandlerServiceClient,
@@ -70,7 +69,9 @@ use angzarr::proto::{
 };
 use angzarr::services::{AggregateService, EventQueryService, Upcaster};
 use angzarr::storage::{init_event_store, init_snapshot_store};
-use angzarr::transport::{grpc_trace_layer, max_grpc_message_size, serve_with_transport};
+use angzarr::transport::{
+    grpc_trace_layer, max_grpc_message_size, serve_with_transport, GrpcMessageLimits,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -131,7 +132,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use angzarr::transport::connect_to_address;
     let channel = connect_to_address(&address).await?;
 
-    let client_logic_client = CommandHandlerServiceClient::new(channel.clone());
+    let client_logic_client =
+        CommandHandlerServiceClient::new(channel.clone()).with_message_limits();
 
     // Create upcaster if enabled
     // By default, upcaster uses the same channel as client logic (same server)
@@ -153,14 +155,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // C02: route through the self-registering bus factory instead of
-    // hand-rolling a match here. The previous inline match fell back to
-    // `MockEventBus` (which always returns `Ok` from `publish`) for every
-    // non-AMQP messaging type, including "unconfigured" -- so a kafka,
-    // pubsub, sns-sqs, or simply missing `messaging:` config silently
-    // discarded every published event with nothing but a `warn!` log line.
-    // `init_event_bus` fails the type it doesn't recognize instead of
-    // masking it, matching the saga/projector/PM sidecars.
+    // Publisher from the self-registering bus factory; an unset or unknown
+    // messaging type fails boot.
     let messaging = config
         .messaging
         .as_ref()
@@ -169,6 +165,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_bus: Arc<dyn EventBus> = init_event_bus(messaging, EventBusMode::Publisher)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+    let offload = init_payload_offload(&config.payload_offload).await?;
+    let event_bus = with_offload(event_bus, offload.as_ref());
 
     // Load service discovery for sync processing
     // With DISCOVERY_ENV_VAR=static we skip K8s entirely
@@ -245,7 +243,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         event_bus,
         discovery,
     )
-    .with_dlq_publisher(dlq_publisher);
+    .with_dlq_publisher(dlq_publisher)
+    .with_limits(config.limits.clone());
 
     if let Some(upcaster) = upcaster {
         aggregate_service = aggregate_service.with_upcaster(upcaster);

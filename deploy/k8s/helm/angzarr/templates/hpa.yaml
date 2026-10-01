@@ -1,32 +1,50 @@
+{{- /* One HPA per application Deployment (their replica count is left
+       to the HPA when autoscaling is enabled). */}}
 {{- if .Values.autoscaling.enabled }}
+{{- $targets := list }}
+{{- range .Values.applications.business }}
+{{- $targets = append $targets (include "angzarr.aggregate-service-name" (dict "domain" .domain)) }}
+{{- end }}
+{{- range .Values.applications.projectors }}
+{{- $targets = append $targets (include "angzarr.projector-service-name" (dict "name" .name)) }}
+{{- end }}
+{{- range .Values.applications.sagas }}
+{{- $targets = append $targets (include "angzarr.saga-service-name" (dict "name" .name)) }}
+{{- end }}
+{{- range .Values.applications.processManagers }}
+{{- $targets = append $targets (include "angzarr.pm-service-name" (dict "name" .name)) }}
+{{- end }}
+{{- range $targets }}
+---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
 metadata:
-  name: {{ include "angzarr.fullname" . }}
+  name: {{ . }}
   labels:
-    {{- include "angzarr.labels" . | nindent 4 }}
+    {{- include "angzarr.labels" $ | nindent 4 }}
 spec:
   scaleTargetRef:
     apiVersion: apps/v1
     kind: Deployment
-    name: {{ include "angzarr.fullname" . }}
-  minReplicas: {{ .Values.autoscaling.minReplicas }}
-  maxReplicas: {{ .Values.autoscaling.maxReplicas }}
+    name: {{ . }}
+  minReplicas: {{ $.Values.autoscaling.minReplicas }}
+  maxReplicas: {{ $.Values.autoscaling.maxReplicas }}
   metrics:
-    {{- if .Values.autoscaling.targetCPUUtilizationPercentage }}
+    {{- if $.Values.autoscaling.targetCPUUtilizationPercentage }}
     - type: Resource
       resource:
         name: cpu
         target:
           type: Utilization
-          averageUtilization: {{ .Values.autoscaling.targetCPUUtilizationPercentage }}
+          averageUtilization: {{ $.Values.autoscaling.targetCPUUtilizationPercentage }}
     {{- end }}
-    {{- if .Values.autoscaling.targetMemoryUtilizationPercentage }}
+    {{- if $.Values.autoscaling.targetMemoryUtilizationPercentage }}
     - type: Resource
       resource:
         name: memory
         target:
           type: Utilization
-          averageUtilization: {{ .Values.autoscaling.targetMemoryUtilizationPercentage }}
+          averageUtilization: {{ $.Values.autoscaling.targetMemoryUtilizationPercentage }}
     {{- end }}
+{{- end }}
 {{- end }}

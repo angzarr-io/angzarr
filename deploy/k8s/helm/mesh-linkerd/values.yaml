@@ -3,23 +3,24 @@
 # Namespace where angzarr is deployed
 angzarrNamespace: angzarr
 
-# Aggregate coordinator services
+# Aggregate coordinator services ({domain}-aggregate, as the angzarr chart names them)
 aggregates:
   # List of domains to route to
   domains:
     - name: order
-      service: angzarr-agg-order-rs
+      service: order-aggregate
       port: 1310
     - name: inventory
-      service: angzarr-agg-inventory-rs
+      service: inventory-aggregate
       port: 1310
     - name: fulfillment
-      service: angzarr-agg-fulfillment-rs
+      service: fulfillment-aggregate
       port: 1310
 
-# EventStream service
+# EventStream service (none ships with the angzarr chart; enable when an
+# external stream service is deployed)
 stream:
-  enabled: true
+  enabled: false
   service: angzarr-stream
   port: 1340
 

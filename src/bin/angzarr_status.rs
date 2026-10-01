@@ -1,10 +1,14 @@
 //! `angzarr-status` — operations console backend.
 //!
-//! Phase 0 skeleton: tonic server with `grpc.health.v1.Health/Check`
-//! only. No DLQ admin, no descriptor pulling, no handlers — those land
-//! in later phases per `plans/virtual-spinning-flute.md`. Bringing this
-//! up validates the cross-cutting infrastructure (Helm chart, Skaffold
-//! target, envoy sidecar, frontend init-container, port wiring).
+//! Serves `DlqAdminService` (list / get / delete / replay dead letters),
+//! gRPC health and the public reflection subset.
+//!
+//! - Dead letters are read from the `dlq.audit` store; replays are fenced
+//!   and recorded in the same store's `dlq_replay_audit` table.
+//! - Replays are re-submitted to the aggregate of the command's domain,
+//!   addressed through `ANGZARR_STATIC_ENDPOINTS` (`domain=address,...`);
+//!   without it, replay reports "not configured".
+//! - `dlq.retention_days` deletes older dead letters once a day.
 //!
 //! ## Multi-instance / HA
 //!
@@ -27,13 +31,19 @@ use tonic_health::server::health_reporter;
 use tonic_health::ServingStatus;
 use tracing::{error, info, warn};
 
-use angzarr::dlq::init_dlq_reader;
+use std::sync::Arc;
+
+use angzarr::config::STATIC_ENDPOINTS_ENV_VAR;
+use angzarr::dlq::{
+    init_dlq_reader, init_replay_audit_writer, DeadLetterReader, GrpcReplayPublisher,
+    NoopReplayPublisher, ReplayPublisher,
+};
 use angzarr::proto::status::dlq_admin_service_server::DlqAdminServiceServer;
 use angzarr::proto_reflect;
 use angzarr::status::descriptors;
 use angzarr::status::handlers::dlq::DlqAdminHandler;
 use angzarr::transport::{grpc_trace_layer, serve_with_transport};
-use angzarr::utils::bootstrap::startup;
+use angzarr::utils::bootstrap::{parse_static_endpoints, startup};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -103,7 +113,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "DLQ audit reader initialized"
         );
     }
-    let dlq_handler = DlqAdminHandler::new(dlq_reader);
+    let audit_writer = init_replay_audit_writer(config.dlq.audit.as_ref())
+        .await
+        .map_err(|e| {
+            error!("DLQ replay-audit writer init failed (boot abort): {}", e);
+            e
+        })?;
+    let replay: Arc<dyn ReplayPublisher> = match std::env::var(STATIC_ENDPOINTS_ENV_VAR) {
+        Ok(endpoints) if !endpoints.trim().is_empty() => {
+            info!("DLQ replay re-submits commands to aggregates from {STATIC_ENDPOINTS_ENV_VAR}");
+            Arc::new(GrpcReplayPublisher::new(parse_static_endpoints(&endpoints)))
+        }
+        _ => {
+            warn!(
+                "{STATIC_ENDPOINTS_ENV_VAR} is unset; DLQ replay is disabled \
+                 (ReplayDeadLetter reports not-configured)"
+            );
+            Arc::new(NoopReplayPublisher)
+        }
+    };
+    if let Some(days) = config.dlq.retention_days {
+        spawn_dlq_retention(dlq_reader.clone(), days);
+    }
+    let dlq_handler = DlqAdminHandler::new_with_audit(dlq_reader, replay, audit_writer);
 
     let router = Server::builder()
         .layer(grpc_trace_layer())
@@ -118,4 +150,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     serve_with_transport(router, &config.transport, "status", None).await?;
 
     Ok(())
+}
+
+/// Delete dead letters older than `days` from the audit store, at start
+/// and then once a day.
+fn spawn_dlq_retention(reader: Arc<dyn DeadLetterReader>, days: u32) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+        loop {
+            ticker.tick().await;
+            let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+            match reader.delete_older_than(cutoff).await {
+                Ok(0) => {}
+                Ok(removed) => info!(
+                    removed,
+                    retention_days = days,
+                    "expired dead letters deleted"
+                ),
+                Err(e) => warn!(error = %e, "DLQ retention pass failed"),
+            }
+        }
+    });
 }

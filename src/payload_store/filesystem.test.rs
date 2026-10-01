@@ -83,15 +83,16 @@ async fn test_different_payloads() {
 // Error Handling Tests
 // ============================================================================
 
-/// Get returns NotFound for non-existent payload.
+/// Get returns NotFound for a payload this store never wrote.
 #[tokio::test]
 async fn test_get_not_found() {
     let (store, _temp) = create_temp_store().await;
+    let hash = compute_hash(b"never stored");
 
     let reference = PayloadReference {
         storage_type: PayloadStorageType::Filesystem as i32,
-        uri: "file:///nonexistent/path/hash.bin".to_string(),
-        content_hash: vec![0; 32],
+        uri: store.uri_for_path(&store.path_for_hash(&hash)),
+        content_hash: hash,
         original_size: 100,
         stored_at: None,
     };
@@ -100,22 +101,116 @@ async fn test_get_not_found() {
     assert!(matches!(result, Err(PayloadStoreError::NotFound(_))));
 }
 
-/// Corrupted hash causes IntegrityFailed error.
+/// A file whose bytes no longer match the reference's hash (corrupted on
+/// disk) fails the integrity check.
 #[tokio::test]
 async fn test_integrity_check() {
     let (store, _temp) = create_temp_store().await;
-    let payload = b"original payload";
+    let reference = store.put(b"original payload").await.unwrap();
 
-    let mut reference = store.put(payload).await.unwrap();
-
-    // Corrupt the hash
-    reference.content_hash[0] ^= 0xFF;
+    let path = store.path_from_uri(&reference.uri).unwrap();
+    std::fs::write(&path, b"tampered payload").unwrap();
 
     let result = store.get(&reference).await;
     assert!(matches!(
         result,
         Err(PayloadStoreError::IntegrityFailed { .. })
     ));
+}
+
+/// A reference naming any file other than this store's file for its
+/// content hash is refused without reading it — a forged reference cannot
+/// read arbitrary files on the sidecar.
+#[tokio::test]
+async fn test_get_refuses_path_outside_store() {
+    let (store, temp) = create_temp_store().await;
+    let outside = temp.path().join("..").join("secret.txt");
+    let reference = PayloadReference {
+        storage_type: PayloadStorageType::Filesystem as i32,
+        uri: format!("file://{}", outside.display()),
+        content_hash: compute_hash(b"secret"),
+        original_size: 6,
+        stored_at: None,
+    };
+
+    let result = store.get(&reference).await;
+    assert!(
+        matches!(result, Err(PayloadStoreError::InvalidUri(_))),
+        "{result:?}"
+    );
+}
+
+/// Re-storing an existing payload refreshes its modification time, so the
+/// TTL reaper does not delete a payload a new event has just referenced.
+#[tokio::test]
+async fn test_put_existing_refreshes_mtime() {
+    let (store, _temp) = create_temp_store().await;
+    let reference = store.put(b"shared payload").await.unwrap();
+    let path = store.path_from_uri(&reference.uri).unwrap();
+
+    let old = SystemTime::now() - Duration::from_secs(48 * 3600);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+
+    store.put(b"shared payload").await.unwrap();
+
+    let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+    assert!(
+        modified > SystemTime::now() - Duration::from_secs(60),
+        "mtime not refreshed"
+    );
+    assert_eq!(
+        store
+            .delete_older_than(Duration::from_secs(3600))
+            .await
+            .unwrap(),
+        0
+    );
+}
+
+/// Concurrent writers of one payload each use their own temp file: all
+/// succeed and no temp file is left behind.
+#[tokio::test]
+async fn test_concurrent_puts_of_same_payload() {
+    let (store, temp) = create_temp_store().await;
+    let store = std::sync::Arc::new(store);
+    let payload = vec![5u8; 64 * 1024];
+
+    let tasks: Vec<_> = (0..8)
+        .map(|_| {
+            let store = std::sync::Arc::clone(&store);
+            let payload = payload.clone();
+            tokio::spawn(async move { store.put(&payload).await })
+        })
+        .collect();
+    let mut refs = Vec::new();
+    for t in tasks {
+        refs.push(t.await.unwrap().unwrap());
+    }
+
+    assert_eq!(store.get(&refs[0]).await.unwrap(), payload);
+    let leftovers: Vec<_> = walk(temp.path())
+        .into_iter()
+        .filter(|p| p.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+}
+
+fn walk(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_dir() {
+            out.extend(walk(&path));
+        } else {
+            out.push(path);
+        }
+    }
+    out
 }
 
 // ============================================================================

@@ -1,14 +1,14 @@
 # Production values example for Angzarr infrastructure
 #
 # Usage:
-#   helm upgrade --install angzarr-db ./deploy/helm/angzarr-db-postgres \
-#     -n angzarr -f deploy/helm/values-production.yaml \
+#   helm upgrade --install angzarr-db ./deploy/k8s/helm/postgres \
+#     -n angzarr -f deploy/k8s/helm/values-production.yaml \
 #     --set auth.password=<secure-password>
 #
 # This file shows recommended production settings. Copy and customize.
 
 # PostgreSQL (CloudNativePG) - HA configuration
-# Chart: angzarr-db-postgres
+# Chart: angzarr-db-postgres (deploy/k8s/helm/postgres)
 postgresql:
   # 3 instances for HA with automatic failover
   instances: 3
@@ -50,7 +50,7 @@ postgresql:
 
 ---
 # RabbitMQ (Cluster Operator) - HA configuration
-# Chart: angzarr-mq-rabbitmq
+# Chart: angzarr-mq-rabbitmq (deploy/k8s/helm/rabbitmq)
 rabbitmq:
   # 3 replicas for quorum queues
   replicas: 3
@@ -74,7 +74,7 @@ rabbitmq:
 
 ---
 # Kafka (Strimzi) - HA configuration
-# Chart: angzarr-mq-kafka
+# Chart: angzarr-mq-kafka (deploy/k8s/helm/kafka)
 kafka:
   kafka:
     replicas: 3
@@ -111,7 +111,7 @@ kafka:
 
 ---
 # Redis - HA configuration (if using Redis)
-# Chart: angzarr-db-redis
+# Chart: angzarr-db-redis (deploy/k8s/helm/redis)
 redis:
   architecture: replication
   replicas: 2

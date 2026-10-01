@@ -1,8 +1,12 @@
 # Angzarr Server Configuration Example
 # Copy to config.yaml and customize for your environment
 #
-# Environment variable overrides: ANGZARR_<SECTION>__<KEY>
-# Example: ANGZARR_SERVER__HOST=0.0.0.0
+# Environment variable overrides: ANGZARR__<SECTION>__<KEY> (double
+# underscore after the prefix and between every key).
+# Example: ANGZARR__TRANSPORT__TCP__HOST=0.0.0.0
+# Top-level sections the sidecars read: storage, transport, messaging,
+# target, dlq, limits, saga_compensation, payload_offload, upcaster,
+# cascade_reaper. Anything else is ignored with a startup warning.
 
 # =============================================================================
 # Storage Configuration
@@ -56,14 +60,6 @@ transport:
   #   base_path: /tmp/angzarr
 
 # =============================================================================
-# Server Configuration (legacy - prefer transport section)
-# =============================================================================
-server:
-  ch_port: 1313
-  event_query_port: 1314
-  host: 0.0.0.0
-
-# =============================================================================
 # Messaging Configuration
 # =============================================================================
 # `messaging.type` has no default — it must be set explicitly to one of
@@ -73,20 +69,19 @@ server:
 #   type: amqp
 #   amqp:
 #     url: amqp://localhost:5672
-#     domain: customers  # Single domain (for aggregate mode)
-#     # domains:         # Multiple domains (for projector/saga modes)
-#     #   - customers
-#     #   - orders
+#
+#   # Handler-failure redelivery before an event is dead-lettered
+#   # (saga / process-manager / projector sidecars). 0 = never.
+#   delivery:
+#     max_attempts: 10
+#     initial_backoff_ms: 200
+#     max_backoff_ms: 10000
 #
 #   # Kafka:
 #   # type: kafka
 #   # kafka:
 #   #   bootstrap_servers: localhost:9092
 #   #   topic_prefix: angzarr
-#   #   group_id: my-consumer
-#   #   domains:
-#   #     - customers
-#   #     - orders
 
 # =============================================================================
 # Service Discovery & Endpoints
@@ -97,24 +92,42 @@ server:
 #   address: localhost:50051
 #   domain: orders
 
-# client logic services (gateway mode)
-# client_logic:
-#   - domain: orders
-#     address: localhost:50051
-#   - domain: inventory
-#     address: localhost:50052
+# Saga/PM/projector subscriptions come from ANGZARR_SUBSCRIPTIONS
+# ("domain:Type1,Type2;domain2"); the bus subscription is scoped to those
+# domains.
 
-# Projector endpoints
-# projectors:
-#   - name: ui_projector
-#     address: localhost:60001
-#     synchronous: false
-#   - name: reporting
-#     address: localhost:60002
-#     synchronous: true
+# =============================================================================
+# Dead Letter Queue
+# =============================================================================
+# dlq:
+#   targets:            # tried in order; empty = log and drop
+#     - type: database
+#       database:
+#         storage_type: postgres
+#         postgres:
+#           uri: postgres://localhost:5432/angzarr
+#   audit:              # what angzarr-status reads
+#     storage_type: postgres
+#     postgres:
+#       uri: postgres://localhost:5432/angzarr
 
-# Saga endpoints
-# sagas:
-#   - name: order_saga
-#     address: localhost:70001
-#     synchronous: false
+# =============================================================================
+# Limits, saga compensation, payload offload
+# =============================================================================
+# limits:
+#   max_payload_bytes: 262144
+#   max_pages_per_book: 100
+#
+# saga_compensation:
+#   fallback_domain: angzarr.saga-failures
+#   fallback_emit_system_revocation: true
+#   fallback_send_to_dlq: false        # quarantine to dlq.targets
+#   fallback_escalate: false
+#   escalation_webhook_url: https://ops.example/hooks/angzarr
+#
+# payload_offload:                     # claim check for oversized events
+#   enabled: true
+#   type: filesystem
+#   retention_hours: 24
+#   filesystem:
+#     base_path: /var/angzarr/payloads

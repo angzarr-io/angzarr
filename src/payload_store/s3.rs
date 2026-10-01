@@ -14,7 +14,10 @@ use aws_sdk_s3::Client;
 use prost_types::Timestamp;
 use tracing::{debug, warn};
 
-use super::{compute_hash, hash_to_hex, PayloadStore, PayloadStoreError, Result};
+use super::{
+    compute_hash, hash_to_hex, is_payload_object_key, payload_object_key, PayloadStore,
+    PayloadStoreError, Result,
+};
 use crate::proto::{PayloadReference, PayloadStorageType};
 
 /// S3-based payload store.
@@ -82,13 +85,7 @@ impl S3PayloadStore {
 
     /// Get the object key for a given hash.
     fn object_key(&self, hash: &[u8]) -> String {
-        let hex = hash_to_hex(hash);
-        let subdir = &hex[0..2];
-
-        match &self.prefix {
-            Some(prefix) => format!("{}/{}/{}", prefix, subdir, hex),
-            None => format!("{}/{}", subdir, hex),
-        }
+        payload_object_key(self.prefix.as_deref(), hash)
     }
 
     /// Build a URI for an object.
@@ -116,39 +113,24 @@ impl PayloadStore for S3PayloadStore {
         let hash = compute_hash(payload);
         let key = self.object_key(&hash);
 
-        // Check if already exists (deduplication)
-        let exists = self
-            .client
-            .head_object()
+        // Always upload: content addressing makes the write idempotent, and
+        // rewriting refreshes LastModified so the TTL reaper never deletes a
+        // payload a just-published event still references.
+        self.client
+            .put_object()
             .bucket(&self.bucket)
             .key(&key)
+            .body(ByteStream::from(payload.to_vec()))
             .send()
             .await
-            .is_ok();
+            .map_err(|e| PayloadStoreError::StoreFailed(format!("S3 upload failed: {}", e)))?;
 
-        if exists {
-            debug!(
-                hash = %hash_to_hex(&hash),
-                "Payload already exists in S3, returning existing reference"
-            );
-        } else {
-            // Upload the payload
-            self.client
-                .put_object()
-                .bucket(&self.bucket)
-                .key(&key)
-                .body(ByteStream::from(payload.to_vec()))
-                .send()
-                .await
-                .map_err(|e| PayloadStoreError::StoreFailed(format!("S3 upload failed: {}", e)))?;
-
-            debug!(
-                hash = %hash_to_hex(&hash),
-                size = payload.len(),
-                bucket = %self.bucket,
-                "Stored payload in S3"
-            );
-        }
+        debug!(
+            hash = %hash_to_hex(&hash),
+            size = payload.len(),
+            bucket = %self.bucket,
+            "Stored payload in S3"
+        );
 
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -168,6 +150,12 @@ impl PayloadStore for S3PayloadStore {
 
     async fn get(&self, reference: &PayloadReference) -> Result<Vec<u8>> {
         let key = self.key_from_uri(&reference.uri)?;
+        if key != self.object_key(&reference.content_hash) {
+            return Err(PayloadStoreError::InvalidUri(format!(
+                "{} is not this store's object for its content hash",
+                reference.uri
+            )));
+        }
 
         let response = self
             .client
@@ -228,6 +216,12 @@ impl PayloadStore for S3PayloadStore {
                 .map_err(|e| PayloadStoreError::StoreFailed(format!("S3 list failed: {}", e)))?;
 
             for object in response.contents() {
+                if !object
+                    .key()
+                    .is_some_and(|k| is_payload_object_key(k, self.prefix.as_deref()))
+                {
+                    continue;
+                }
                 // Check object last modified time
                 if let Some(last_modified) = object.last_modified() {
                     let modified_secs = last_modified.secs() as u64;

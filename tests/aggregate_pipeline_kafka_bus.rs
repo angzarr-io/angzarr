@@ -285,7 +285,7 @@ async fn kafka_messaging_type_via_init_event_bus_reaches_real_consumer() {
         &messaging,
         EventBusMode::Subscriber {
             queue: format!("{domain}-group"),
-            domain: domain.clone(),
+            domains: vec![domain.clone()],
         },
     )
     .await

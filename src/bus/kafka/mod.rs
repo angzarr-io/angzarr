@@ -62,13 +62,10 @@ async fn try_create(
             cfg = apply_kafka_security(cfg, &config.kafka);
             cfg
         }
-        EventBusMode::Subscriber { queue, domain } => {
-            let mut cfg = KafkaEventBusConfig::subscriber(
-                &config.kafka.bootstrap_servers,
-                queue,
-                vec![domain],
-            )
-            .with_topic_prefix(&config.kafka.topic_prefix);
+        EventBusMode::Subscriber { queue, domains } => {
+            let mut cfg =
+                KafkaEventBusConfig::subscriber(&config.kafka.bootstrap_servers, queue, domains)
+                    .with_topic_prefix(&config.kafka.topic_prefix);
             cfg = apply_kafka_security(cfg, &config.kafka);
             cfg
         }

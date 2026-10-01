@@ -314,3 +314,42 @@ async fn dlq_round_trip_postgres_pm_persist_retry_exhausted_metadata_survives() 
         other => panic!("expected EventProcessingFailed, got {other:?}"),
     }
 }
+
+/// Retention against Postgres deletes only dead letters that occurred
+/// before the cutoff (`occurred_at` is RFC 3339 text; the reader binds the
+/// cutoff in the same encoding).
+#[tokio::test]
+async fn dlq_round_trip_postgres_retention_deletes_only_expired_entries() {
+    let (_container, publisher, reader) = setup_round_trip().await;
+
+    let mut old = AngzarrDeadLetter::from_saga_command_rejection(
+        &command("order", "c-old"),
+        "old",
+        0,
+        false,
+        "saga-x",
+    );
+    old.occurred_at = Some(prost_types::Timestamp {
+        seconds: 1_000_000_000, // 2001
+        nanos: 0,
+    });
+    publisher.publish(old).await.expect("publish old");
+    publisher
+        .publish(AngzarrDeadLetter::from_saga_command_rejection(
+            &command("order", "c-new"),
+            "new",
+            0,
+            false,
+            "saga-x",
+        ))
+        .await
+        .expect("publish new");
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    let removed = reader.delete_older_than(cutoff).await.expect("retention");
+
+    assert_eq!(removed, 1);
+    let left = reader.list(ListFilter::default()).await.unwrap().entries;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].correlation_id.as_deref(), Some("c-new"));
+}

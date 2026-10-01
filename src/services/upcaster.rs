@@ -30,6 +30,7 @@ use crate::proto::{upcaster_service_client::UpcasterServiceClient, EventPage, Up
 use crate::proto_ext::correlated_request;
 #[cfg(test)]
 use crate::proto_ext::EventPageExt;
+use crate::transport::GrpcMessageLimits;
 
 // ============================================================================
 // Configuration
@@ -93,7 +94,7 @@ impl Upcaster {
     ///
     /// Uses the same channel as client logic (both services on same server).
     pub fn from_channel(channel: Channel) -> Self {
-        let client = UpcasterServiceClient::new(channel);
+        let client = UpcasterServiceClient::new(channel).with_message_limits();
         info!("Upcaster client created (shared channel with client logic)");
         Self {
             client: Some(Arc::new(Mutex::new(client))),
@@ -107,7 +108,7 @@ impl Upcaster {
         use crate::transport::connect_to_address;
 
         let channel = connect_to_address(address).await?;
-        let client = UpcasterServiceClient::new(channel);
+        let client = UpcasterServiceClient::new(channel).with_message_limits();
         info!(address = %address, "Upcaster client connected (separate address)");
 
         Ok(Self {

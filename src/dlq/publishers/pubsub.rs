@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use gcloud_googleapis::pubsub::v1::PubsubMessage;
+use gcloud_googleapis::pubsub::v1::{ExpirationPolicy, PubsubMessage};
 use gcloud_pubsub::client::{Client, ClientConfig};
 use gcloud_pubsub::publisher::Publisher;
+use gcloud_pubsub::subscription::SubscriptionConfig;
 use prost::Message;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -119,10 +120,38 @@ impl PubSubDeadLetterPublisher {
         if !topic.exists(None).await.map_err(|e| {
             DlqError::PublishFailed(format!("Failed to check topic existence: {}", e))
         })? {
-            topic.create(None, None).await.map_err(|e| {
-                DlqError::PublishFailed(format!("Failed to create topic {}: {}", topic_name, e))
-            })?;
+            crate::bus::pubsub::tolerate_already_exists(topic.create(None, None).await).map_err(
+                |e| {
+                    DlqError::PublishFailed(format!("Failed to create topic {}: {}", topic_name, e))
+                },
+            )?;
             info!(topic = %topic_name, "Created Pub/Sub DLQ topic");
+        }
+
+        // Pub/Sub discards messages published to a topic with no
+        // subscription; a retention subscription keeps the dead letters.
+        let retention = self
+            .client
+            .subscription(&retention_subscription_name(&topic_name));
+        if !retention.exists(None).await.map_err(|e| {
+            DlqError::PublishFailed(format!("Failed to check DLQ subscription: {}", e))
+        })? {
+            crate::bus::pubsub::tolerate_already_exists(
+                retention
+                    .create(
+                        topic.fully_qualified_name(),
+                        retention_subscription_config(),
+                        None,
+                    )
+                    .await,
+            )
+            .map_err(|e| {
+                DlqError::PublishFailed(format!(
+                    "Failed to create DLQ subscription for {}: {}",
+                    topic_name, e
+                ))
+            })?;
+            info!(topic = %topic_name, "Created Pub/Sub DLQ retention subscription");
         }
 
         let publisher = topic.new_publisher(None);
@@ -134,6 +163,21 @@ impl PubSubDeadLetterPublisher {
         }
 
         Ok(publisher)
+    }
+}
+
+/// Name of the subscription that retains a DLQ topic's dead letters.
+pub(crate) fn retention_subscription_name(topic_name: &str) -> String {
+    format!("{}-retain", topic_name)
+}
+
+/// Retention subscription settings: keep dead letters for the Pub/Sub
+/// maximum (7 days) and never expire the subscription for inactivity.
+pub(crate) fn retention_subscription_config() -> SubscriptionConfig {
+    SubscriptionConfig {
+        message_retention_duration: Some(std::time::Duration::from_secs(7 * 24 * 3600)),
+        expiration_policy: Some(ExpirationPolicy { ttl: None }),
+        ..SubscriptionConfig::default()
     }
 }
 

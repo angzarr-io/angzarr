@@ -26,8 +26,7 @@ jobs:
           - angzarr-projector
           - angzarr-saga
           - angzarr-process-manager
-          - angzarr-log
-          - angzarr-stream
+          - angzarr-status
           - angzarr-grpc-gateway
     steps:
       - name: Delete PR images
@@ -51,8 +50,7 @@ jobs:
           - angzarr-projector
           - angzarr-saga
           - angzarr-process-manager
-          - angzarr-log
-          - angzarr-stream
+          - angzarr-status
           - angzarr-grpc-gateway
           - angzarr-rust
           - angzarr-go

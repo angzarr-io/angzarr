@@ -1,0 +1,41 @@
+# Render fixture for test_sidecar_wiring.sh: one application of every kind
+# plus DLQ configuration, so the rendered sidecar wiring can be asserted.
+applications:
+  business:
+    - name: order
+      domain: order
+      port: 50051
+      image: {repository: order-agg, tag: test}
+      upcaster: {enabled: true}
+      snapshotEvery: 20
+    - name: payment
+      domain: payment
+      port: 50052
+      image: {repository: payment-agg, tag: test}
+  projectors:
+    - name: order-audit
+      domain: order
+      port: 50061
+      topics: ["order.*", "payment.*"]
+      image: {repository: order-audit, tag: test}
+  sagas:
+    - name: order-payment
+      domain: payment
+      port: 50071
+      topics: ["order.OrderPlaced"]
+      image: {repository: order-payment-saga, tag: test}
+  processManagers:
+    - name: checkout-flow
+      domain: checkout
+      port: 50081
+      topics: ["order.*", "payment.PaymentSettled"]
+      image: {repository: checkout-pm, tag: test}
+
+config:
+  dlq:
+    targets:
+      - type: database
+        database:
+          storage_type: postgres
+    audit:
+      storage_type: postgres

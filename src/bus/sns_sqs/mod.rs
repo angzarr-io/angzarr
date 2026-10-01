@@ -96,18 +96,12 @@ inventory::submit! {
                     EventBusMode::Publisher => {
                         SnsSqsConfig::publisher().with_topic_prefix(&topic_prefix)
                     }
-                    EventBusMode::Subscriber { queue, domain } => {
-                        SnsSqsConfig::subscriber(queue, vec![domain])
-                            .with_topic_prefix(&topic_prefix)
+                    EventBusMode::Subscriber { queue, domains } => {
+                        SnsSqsConfig::subscriber(queue, domains).with_topic_prefix(&topic_prefix)
                     }
                     EventBusMode::SubscriberAll { queue } => {
-                        let domains = domains.unwrap_or_default();
-                        if domains.is_empty() {
-                            SnsSqsConfig::subscriber_all(queue)
-                        } else {
-                            SnsSqsConfig::subscriber(queue, domains)
-                        }
-                        .with_topic_prefix(&topic_prefix)
+                        SnsSqsConfig::subscriber(queue, domains.unwrap_or_default())
+                            .with_topic_prefix(&topic_prefix)
                     }
                 };
 

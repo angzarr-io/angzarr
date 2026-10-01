@@ -18,6 +18,7 @@
 //! - Fallback behavior when business logic is unavailable
 
 use super::*;
+use crate::bus::EventBus;
 use crate::config::DEFAULT_SAGA_FALLBACK_DOMAIN;
 use crate::proto::{command_page, event_page, page_header, CommandPage, MergeStrategy};
 
@@ -676,4 +677,89 @@ async fn test_handle_business_response_with_quarantine_flag() {
         .unwrap();
     // Should return Declined since emit_system_revocation is false
     assert!(matches!(outcome, CompensationOutcome::Declined { .. }));
+}
+
+// ============================================================================
+// DefaultEscalationHandler quarantine → DLQ
+// ============================================================================
+
+/// Quarantine publishes the rejected command to the saga's dead letter
+/// queue (replayable payload), not an event onto the bus.
+#[tokio::test]
+async fn test_default_quarantine_publishes_rejected_command_to_dlq() {
+    let (dlq, mut rx) = crate::dlq::ChannelDeadLetterPublisher::new();
+    let handler = DefaultEscalationHandler::new(
+        Arc::new(dlq),
+        SagaCompensationConfig::default(),
+        "saga-order-fulfillment",
+    );
+    let context = make_context();
+
+    handler
+        .quarantine(&context, "compensation refused")
+        .await
+        .expect("quarantine succeeds");
+
+    let dead = rx.try_recv().expect("dead letter published");
+    assert_eq!(dead.source_component, "saga-order-fulfillment");
+    assert_eq!(dead.source_component_type, "saga");
+    assert!(dead.rejection_reason.contains("compensation refused"));
+    match dead.payload {
+        crate::dlq::DeadLetterPayload::Command(cmd) => {
+            assert_eq!(cmd, context.rejected_command)
+        }
+        other => panic!("expected the rejected command, got {other:?}"),
+    }
+}
+
+/// Without a DLQ target quarantine fails loudly instead of reporting
+/// success while discarding the failure.
+#[tokio::test]
+async fn test_default_quarantine_without_dlq_is_an_error() {
+    let handler = DefaultEscalationHandler::new(
+        Arc::new(crate::dlq::NoopDeadLetterPublisher),
+        SagaCompensationConfig::default(),
+        "saga-x",
+    );
+
+    let result = handler.quarantine(&make_context(), "r").await;
+    assert!(matches!(
+        result,
+        Err(CompensationError::EscalationFailed(_))
+    ));
+}
+
+/// With both quarantine and system revocation requested, the bus gets the
+/// SagaCompensationFailed event exactly once (quarantine goes to the DLQ).
+#[tokio::test]
+async fn test_quarantine_and_emit_publish_fallback_event_once() {
+    use crate::bus::MockEventBus;
+
+    let mock = Arc::new(MockEventBus::new());
+    let bus: Arc<dyn EventBus> = mock.clone();
+    let (dlq, mut rx) = crate::dlq::ChannelDeadLetterPublisher::new();
+    let dlq: Arc<dyn DeadLetterPublisher> = Arc::new(dlq);
+    let response = Ok(BusinessResponse {
+        result: Some(business_response::Result::Revocation(RevocationResponse {
+            emit_system_revocation: true,
+            send_to_dead_letter_queue: true,
+            escalate: false,
+            abort: false,
+            reason: "both".to_string(),
+        })),
+    });
+
+    process_compensation_response(
+        response,
+        &make_context(),
+        &SagaCompensationConfig::default(),
+        &bus,
+        &dlq,
+        "saga-x",
+        "order",
+    )
+    .await;
+
+    assert_eq!(mock.take_published().await.len(), 1);
+    assert!(rx.try_recv().is_ok(), "quarantined to the DLQ");
 }
