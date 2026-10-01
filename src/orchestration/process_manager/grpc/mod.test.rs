@@ -70,7 +70,7 @@ async fn persist_publishes_pages_from_process_events() {
     let pm_root = Uuid::new_v4();
 
     let book = pm_book("pm", pm_root, "corr", &[0, 1, 2]);
-    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &book, "corr", None).await;
+    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &book, "corr", None, None).await;
     assert!(matches!(outcome, CommandOutcome::Success(_)));
 
     let published = bus.take_published().await;
@@ -97,13 +97,14 @@ async fn persist_sequence_conflict_maps_to_retryable() {
     // First persist claims sequence 0.
     let first = pm_book("pm", pm_root, "corr", &[0]);
     assert!(matches!(
-        persist_pm_event_book(&store, &bus_dyn, "pm", &first, "corr", None).await,
+        persist_pm_event_book(&store, &bus_dyn, "pm", &first, "corr", None, None).await,
         CommandOutcome::Success(_)
     ));
 
     // A "concurrent PM instance" persists at the same sequence.
     let conflicting = pm_book("pm", pm_root, "corr", &[0]);
-    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &conflicting, "corr", None).await;
+    let outcome =
+        persist_pm_event_book(&store, &bus_dyn, "pm", &conflicting, "corr", None, None).await;
     match outcome {
         CommandOutcome::Retryable { reason, .. } => {
             assert!(
@@ -126,7 +127,7 @@ async fn persist_publishes_book_with_cover_present() {
     let pm_root = Uuid::new_v4();
 
     let book = pm_book("pm-domain", pm_root, "corr", &[0]);
-    persist_pm_event_book(&store, &bus_dyn, "pm-domain", &book, "corr", None).await;
+    persist_pm_event_book(&store, &bus_dyn, "pm-domain", &book, "corr", None, None).await;
 
     let published = bus.take_published().await;
     let cover = published[0]
@@ -153,7 +154,7 @@ async fn persist_stamps_in_flight_correlation_id_on_cover() {
 
     // PM service returned a cover with NO correlation_id.
     let book = pm_book("pm", pm_root, "", &[0]);
-    persist_pm_event_book(&store, &bus_dyn, "pm", &book, "in-flight", None).await;
+    persist_pm_event_book(&store, &bus_dyn, "pm", &book, "in-flight", None, None).await;
 
     let published = bus.take_published().await;
     assert_eq!(
@@ -184,7 +185,7 @@ async fn persist_stores_under_correlation_derived_root_not_cover_root() {
 
     let book = pm_book("pm", cover_root, "friendly-flow-7", &[0]);
     let outcome =
-        persist_pm_event_book(&store, &bus_dyn, "pm", &book, "friendly-flow-7", None).await;
+        persist_pm_event_book(&store, &bus_dyn, "pm", &book, "friendly-flow-7", None, None).await;
     assert!(matches!(outcome, CommandOutcome::Success(_)));
 
     let derived = "friendly-flow-7".correlation_root();
@@ -222,7 +223,7 @@ async fn persist_publishes_cover_with_correlation_derived_root() {
     let cover_root = Uuid::new_v4(); // differs from the derived root
 
     let book = pm_book("pm", cover_root, "friendly-flow-7", &[0]);
-    persist_pm_event_book(&store, &bus_dyn, "pm", &book, "friendly-flow-7", None).await;
+    persist_pm_event_book(&store, &bus_dyn, "pm", &book, "friendly-flow-7", None, None).await;
 
     let published = bus.take_published().await;
     assert_eq!(published.len(), 1);
@@ -269,7 +270,8 @@ async fn persist_add_meta_carries_correlation_id_and_ext() {
     let mut book = pm_book("pm", Uuid::new_v4(), "corr-meta", &[0]);
     book.cover.as_mut().unwrap().ext = Some(parent_ext.clone());
 
-    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &book, "corr-meta", None).await;
+    let outcome =
+        persist_pm_event_book(&store, &bus_dyn, "pm", &book, "corr-meta", None, None).await;
     assert!(matches!(outcome, CommandOutcome::Success(_)));
 
     let books = mock_store
@@ -301,7 +303,7 @@ async fn persist_returns_rejected_internal_when_store_add_fails() {
     let pm_root = Uuid::new_v4();
 
     let book = pm_book("pm", pm_root, "corr", &[0]);
-    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &book, "corr", None).await;
+    let outcome = persist_pm_event_book(&store, &bus_dyn, "pm", &book, "corr", None, None).await;
     match outcome {
         CommandOutcome::Rejected { code, .. } => assert_eq!(code, tonic::Code::Internal),
         other => panic!("expected Rejected, got {other:?}"),
@@ -348,6 +350,7 @@ async fn persist_publish_failure_retries_then_dead_letters() {
         &book,
         "corr",
         Some((&dlq_dyn, "pm-flow")),
+        None,
     )
     .await;
     assert!(matches!(outcome, CommandOutcome::Success(_)));
@@ -391,7 +394,43 @@ async fn persist_publish_success_is_not_dead_lettered() {
         &book,
         "corr",
         Some((&dlq_dyn, "pm-flow")),
+        None,
     )
     .await;
     assert!(dlq.0.lock().await.is_empty());
+}
+
+/// PM events persisted for a trigger are found again by that trigger's
+/// provenance, which is what lets a second delivery be skipped.
+#[tokio::test]
+async fn persisted_trigger_is_recognised_by_its_provenance() {
+    use crate::orchestration::process_manager::ProcessManagerContext;
+    use crate::orchestration::shared::CorrelationRootExt;
+    let store: Arc<dyn EventStore> = Arc::new(MockEventStore::new());
+    let bus: Arc<dyn EventBus> = Arc::new(MockEventBus::new());
+    let trigger = crate::storage::SourceInfo::new("", "order", Uuid::new_v4(), 8, "pm-flow", 0);
+    let other = crate::storage::SourceInfo::new("", "order", trigger.root, 9, "pm-flow", 0);
+
+    let channel = tonic::transport::Channel::from_static("http://127.0.0.1:1").connect_lazy();
+    let ctx = super::GrpcPMContext::new(
+        Arc::new(tokio::sync::Mutex::new(
+            crate::proto::process_manager_service_client::ProcessManagerServiceClient::new(channel),
+        )),
+        store.clone(),
+        bus,
+        "pm".to_string(),
+        Arc::new(crate::dlq::NoopDeadLetterPublisher),
+        "pm-flow".to_string(),
+        Arc::new(crate::orchestration::process_manager::outbox::InMemoryCommandOutbox::new()),
+    );
+    assert!(!ctx.trigger_handled(&trigger, "", "corr").await.unwrap());
+
+    let book = pm_book("pm", "corr".correlation_root(), "corr", &[0]);
+    assert!(matches!(
+        ctx.persist_pm_events_for_trigger(&book, "corr", &trigger)
+            .await,
+        CommandOutcome::Success(_)
+    ));
+    assert!(ctx.trigger_handled(&trigger, "", "corr").await.unwrap());
+    assert!(!ctx.trigger_handled(&other, "", "corr").await.unwrap());
 }

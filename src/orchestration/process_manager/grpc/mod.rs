@@ -62,6 +62,7 @@ pub async fn persist_pm_event_book(
     process_events: &EventBook,
     correlation_id: &str,
     unpublished: Option<(&Arc<dyn DeadLetterPublisher>, &str)>,
+    trigger: Option<&crate::storage::SourceInfo>,
 ) -> CommandOutcome {
     // O7/D-11: the PM aggregate root is derived from the correlation id via
     // the one shared rule — identical to the stamping site in
@@ -83,7 +84,8 @@ pub async fn persist_pm_event_book(
             process_events.pages.clone(),
             &crate::storage::AddMeta {
                 correlation_id,
-                // No idempotency key / source tracking for PM events.
+                // The trigger these events answer, for trigger deduplication.
+                source_info: trigger,
                 ext: process_events.cover.as_ref().and_then(|c| c.ext.as_ref()),
                 ..Default::default()
             },
@@ -287,8 +289,46 @@ impl ProcessManagerContext for GrpcPMContext {
             process_events,
             correlation_id,
             Some((&self.dlq_publisher, &self.component_name)),
+            None,
         )
         .await
+    }
+
+    async fn persist_pm_events_for_trigger(
+        &self,
+        process_events: &EventBook,
+        correlation_id: &str,
+        trigger: &crate::storage::SourceInfo,
+    ) -> CommandOutcome {
+        persist_pm_event_book(
+            &self.event_store,
+            &self.event_bus,
+            &self.pm_domain,
+            process_events,
+            correlation_id,
+            Some((&self.dlq_publisher, &self.component_name)),
+            Some(trigger),
+        )
+        .await
+    }
+
+    async fn trigger_handled(
+        &self,
+        trigger: &crate::storage::SourceInfo,
+        edition: &str,
+        correlation_id: &str,
+    ) -> Result<bool, tonic::Status> {
+        let found = self
+            .event_store
+            .find_by_source(
+                &self.pm_domain,
+                edition,
+                correlation_id.correlation_root(),
+                trigger,
+            )
+            .await
+            .map_err(|e| tonic::Status::internal(format!("PM trigger lookup failed: {e}")))?;
+        Ok(found.is_some_and(|pages| !pages.is_empty()))
     }
 
     #[crate::trivial_delegation]

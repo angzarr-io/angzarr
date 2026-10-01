@@ -191,6 +191,7 @@ async fn pm_persist_writes_event_book_to_store_and_bus() {
         &book,
         "corr-1",
         None,
+        None,
     )
     .await;
     assert!(
@@ -254,6 +255,7 @@ async fn pm_persist_increments_sequence_across_two_calls() {
         &book0,
         "corr-1",
         None,
+        None,
     )
     .await;
     assert!(matches!(outcome0, CommandOutcome::Success(_)));
@@ -265,6 +267,7 @@ async fn pm_persist_increments_sequence_across_two_calls() {
         "pm-domain",
         &book1,
         "corr-1",
+        None,
         None,
     )
     .await;
@@ -351,6 +354,7 @@ async fn pm_persist_publishes_only_new_events_not_history() {
         &new_book,
         "flow-corr",
         None,
+        None,
     )
     .await;
     assert!(matches!(outcome, CommandOutcome::Success(_)));
@@ -407,6 +411,7 @@ async fn pm_persist_publishes_book_with_stamped_correlation_id() {
         &book_with_blank_corr,
         "in-flight-corr",
         None,
+        None,
     )
     .await;
     assert!(matches!(outcome, CommandOutcome::Success(_)));
@@ -444,6 +449,7 @@ async fn pm_persist_propagates_edition_to_store() {
         "pm-domain",
         &book,
         "corr-1",
+        None,
         None,
     )
     .await;
@@ -492,6 +498,7 @@ async fn pm_persist_sequence_conflict_returns_retryable() {
         &book,
         "corr-1",
         None,
+        None,
     )
     .await;
     assert!(matches!(first, CommandOutcome::Success(_)));
@@ -503,6 +510,7 @@ async fn pm_persist_sequence_conflict_returns_retryable() {
         "pm-domain",
         &book,
         "corr-1",
+        None,
         None,
     )
     .await;

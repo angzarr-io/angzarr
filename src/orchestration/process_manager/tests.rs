@@ -2431,3 +2431,122 @@ async fn pm_dead_letter_transient_failure_is_captured_as_transient() {
         other => panic!("unexpected {other:?}"),
     }
 }
+
+// ============================================================================
+// Trigger deduplication
+// ============================================================================
+
+/// PM context backed by an in-memory record of the triggers whose PM events
+/// were persisted.
+struct TriggerRecordingPm {
+    inner: StateObservingPm,
+    recorded: std::sync::Mutex<Vec<crate::storage::SourceInfo>>,
+}
+
+#[async_trait]
+impl ProcessManagerContext for TriggerRecordingPm {
+    async fn handle(
+        &self,
+        trigger: &EventBook,
+        pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.handle(trigger, pm_state).await
+    }
+    async fn persist_pm_events(&self, events: &EventBook, correlation_id: &str) -> CommandOutcome {
+        self.inner.persist_pm_events(events, correlation_id).await
+    }
+    async fn persist_pm_events_for_trigger(
+        &self,
+        events: &EventBook,
+        correlation_id: &str,
+        trigger: &crate::storage::SourceInfo,
+    ) -> CommandOutcome {
+        self.recorded.lock().unwrap().push(trigger.clone());
+        self.inner.persist_pm_events(events, correlation_id).await
+    }
+    async fn trigger_handled(
+        &self,
+        trigger: &crate::storage::SourceInfo,
+        _edition: &str,
+        _correlation_id: &str,
+    ) -> Result<bool, tonic::Status> {
+        Ok(self.recorded.lock().unwrap().iter().any(|r| {
+            (
+                &r.edition,
+                &r.domain,
+                r.root,
+                r.seq,
+                &r.component,
+                r.command_index,
+            ) == (
+                &trigger.edition,
+                &trigger.domain,
+                trigger.root,
+                trigger.seq,
+                &trigger.component,
+                trigger.command_index,
+            )
+        }))
+    }
+}
+
+/// A trigger delivered twice (bus redelivery, or the bus copy of an event a
+/// CASCADE already ran through this PM) runs the PM handler once.
+#[tokio::test]
+async fn test_pm_trigger_delivered_twice_is_handled_once() {
+    let ctx = TriggerRecordingPm {
+        inner: StateObservingPm::new(),
+        recorded: Default::default(),
+    };
+    let trigger = trigger_at("order", 3, 8, "");
+    for _ in 0..2 {
+        orchestrate_pm(
+            &ctx,
+            &NoOpFetcher,
+            &NoOpExecutor,
+            None,
+            &trigger,
+            "pmg-fulfillment",
+            "fulfillment-pm",
+            "corr-1",
+            SyncMode::Async,
+            fast_backoff(),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(ctx.inner.handle_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(ctx.inner.persist_calls.load(Ordering::SeqCst), 1);
+    let recorded = ctx.recorded.lock().unwrap();
+    assert_eq!(recorded[0].domain, "order");
+    assert_eq!(recorded[0].seq, 8);
+    assert_eq!(recorded[0].component, "pmg-fulfillment");
+}
+
+/// A later event from the same aggregate is a new trigger.
+#[tokio::test]
+async fn test_pm_next_trigger_is_not_deduplicated() {
+    let ctx = TriggerRecordingPm {
+        inner: StateObservingPm::new(),
+        recorded: Default::default(),
+    };
+    for seq in [8, 9] {
+        orchestrate_pm(
+            &ctx,
+            &NoOpFetcher,
+            &NoOpExecutor,
+            None,
+            &trigger_at("order", 3, seq, ""),
+            "pmg-fulfillment",
+            "fulfillment-pm",
+            "corr-1",
+            SyncMode::Async,
+            fast_backoff(),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(ctx.inner.handle_calls.load(Ordering::SeqCst), 2);
+}

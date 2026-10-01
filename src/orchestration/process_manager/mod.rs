@@ -204,6 +204,33 @@ pub trait ProcessManagerContext: Send + Sync {
         correlation_id: &str,
     ) -> CommandOutcome;
 
+    /// Persist PM events attributed to the trigger that produced them, so a
+    /// later delivery of the same trigger is recognised
+    /// ([`Self::trigger_handled`]). Defaults to an unattributed persist.
+    async fn persist_pm_events_for_trigger(
+        &self,
+        process_events: &EventBook,
+        correlation_id: &str,
+        trigger: &crate::storage::SourceInfo,
+    ) -> CommandOutcome {
+        let _ = trigger;
+        self.persist_pm_events(process_events, correlation_id).await
+    }
+
+    /// Whether this PM already persisted events for `trigger` on the
+    /// workflow's PM aggregate (`edition`, `correlation_id`): a redelivery,
+    /// or the bus copy of a trigger a CASCADE already ran synchronously.
+    /// Defaults to `false` (no trigger deduplication).
+    async fn trigger_handled(
+        &self,
+        trigger: &crate::storage::SourceInfo,
+        edition: &str,
+        correlation_id: &str,
+    ) -> Result<bool, tonic::Status> {
+        let _ = (trigger, edition, correlation_id);
+        Ok(false)
+    }
+
     /// Handle a rejected command produced by this PM.
     ///
     /// Called when a command produced by this PM is rejected by the target aggregate.
@@ -424,6 +451,24 @@ pub async fn orchestrate_pm(
         "Processing event in process manager"
     );
 
+    // A trigger whose PM events are already recorded has been handled — a
+    // bus redelivery, or the bus copy of an event a CASCADE already ran
+    // through this PM synchronously. Commands it emitted are deduplicated at
+    // their destinations; re-running the handler would duplicate PM events.
+    let trigger_source = trigger_source_info(trigger, pm_name);
+    let pm_edition =
+        super::aggregate::edition_key(trigger.edition().unwrap_or_default()).to_string();
+    if let Some(source) = &trigger_source {
+        let handled = ctx
+            .trigger_handled(source, &pm_edition, correlation_id)
+            .await
+            .map_err(BusError::Grpc)?;
+        if handled {
+            debug!("PM trigger already handled; skipping");
+            return Ok(Vec::new());
+        }
+    }
+
     // Manual retry loop for PM event persistence. We retry from PM state fetch
     // because sequence conflicts mean another instance updated the PM state
     // concurrently — we need to re-read it before retrying.
@@ -523,7 +568,14 @@ pub async fn orchestrate_pm(
                 );
                 continue;
             }
-            match ctx.persist_pm_events(process_events, correlation_id).await {
+            let outcome = match &trigger_source {
+                Some(source) => {
+                    ctx.persist_pm_events_for_trigger(process_events, correlation_id, source)
+                        .await
+                }
+                None => ctx.persist_pm_events(process_events, correlation_id).await,
+            };
+            match outcome {
                 CommandOutcome::Success(_) => {
                     info!(
                         events = process_events.pages.len(),
@@ -671,6 +723,24 @@ pub async fn orchestrate_pm(
         // continues asynchronously.
         return Ok(reaction_errors);
     }
+}
+
+/// The provenance recorded on a PM's events for the trigger that produced
+/// them: the triggering aggregate and its last sequence, under the PM's name.
+/// `None` when the trigger names no aggregate root.
+fn trigger_source_info(trigger: &EventBook, pm_name: &str) -> Option<crate::storage::SourceInfo> {
+    use crate::proto_ext::EventPageExt;
+    let cover = trigger.cover.as_ref()?;
+    let root = uuid::Uuid::from_slice(&cover.root.as_ref()?.value).ok()?;
+    let seq = trigger.pages.iter().map(|p| p.sequence_num()).max()?;
+    Some(crate::storage::SourceInfo::new(
+        super::aggregate::edition_key(cover.edition().unwrap_or_default()),
+        cover.domain.as_str(),
+        root,
+        seq,
+        pm_name,
+        0,
+    ))
 }
 
 /// What a PM's commands are attributed to.
