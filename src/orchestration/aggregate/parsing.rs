@@ -199,3 +199,37 @@ pub fn extract_event_edition(event_book: &EventBook) -> Result<String, Status> {
     }
     Ok(edition)
 }
+
+/// The storage provenance of a saga/PM command, from its deferred header.
+///
+/// `Ok(None)` when the header names no source (nothing to deduplicate on);
+/// an unparseable source root is `InvalidArgument`, since a command whose
+/// provenance cannot be recorded could never be recognised as a replay.
+pub(crate) fn deferred_source_info(
+    deferred: &AngzarrDeferredSequence,
+) -> Result<Option<crate::storage::SourceInfo>, Status> {
+    let Some(source) = deferred.source.as_ref() else {
+        return Ok(None);
+    };
+    if source.domain.is_empty() {
+        return Ok(None);
+    }
+    let Some(root) = source.root.as_ref() else {
+        return Ok(None);
+    };
+    let source_root = Uuid::from_slice(&root.value).map_err(|e| {
+        Status::invalid_argument(format!("deferred source root is not a valid UUID: {e}"))
+    })?;
+    Ok(Some(crate::storage::SourceInfo::new(
+        source
+            .edition
+            .as_ref()
+            .map(|e| e.name.as_str())
+            .unwrap_or(""),
+        source.domain.as_str(),
+        source_root,
+        deferred.source_seq,
+        deferred.source_component.as_str(),
+        deferred.command_index,
+    )))
+}

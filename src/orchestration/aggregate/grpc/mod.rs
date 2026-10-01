@@ -25,7 +25,7 @@ use crate::proto::{
     ProcessManagerCoordinatorRequest, Projection, Revocation, SagaHandleRequest, Snapshot,
     Uuid as ProtoUuid,
 };
-use crate::proto_ext::{correlated_request, CoverExt, EventPageExt};
+use crate::proto_ext::{calculate_set_next_seq, correlated_request, CoverExt, EventPageExt};
 use crate::repository::EventBookRepository;
 use crate::repository::SnapshotRepository;
 use crate::services::upcaster::Upcaster;
@@ -39,40 +39,6 @@ use super::{
     is_noop, transform_for_two_phase, AggregateContext, AggregateContextFactory, ClientLogic,
     PersistOutcome, SyncFanout, TemporalQuery, TwoPhaseContext,
 };
-
-/// Translate an `AngzarrDeferredSequence` into a `SourceInfo` for the
-/// storage layer's `find_by_source` lookup. Same shape as the local-impl
-/// helper — kept duplicated rather than hoisted to avoid a circular dep
-/// on `super::traits` from the storage module.
-fn deferred_to_source_info(
-    deferred: &AngzarrDeferredSequence,
-) -> Result<Option<crate::storage::SourceInfo>, Status> {
-    let Some(source) = deferred.source.as_ref() else {
-        return Ok(None);
-    };
-    if source.domain.is_empty() {
-        return Ok(None);
-    }
-    let Some(root_uuid) = source.root.as_ref() else {
-        return Ok(None);
-    };
-    let source_root = Uuid::from_slice(&root_uuid.value).map_err(|e| {
-        Status::invalid_argument(format!("deferred source root is not a valid UUID: {e}"))
-    })?;
-    let edition_str = source
-        .edition
-        .as_ref()
-        .map(|e| e.name.as_str())
-        .unwrap_or("");
-    Ok(Some(crate::storage::SourceInfo::new(
-        edition_str,
-        source.domain.as_str(),
-        source_root,
-        deferred.source_seq,
-        deferred.source_component.as_str(),
-        deferred.command_index,
-    )))
-}
 
 /// The cover persisted events are written under: the coordinator's resolved
 /// `(domain, root)` and validated correlation id, keeping the response's
@@ -141,13 +107,6 @@ fn build_event_book(
     };
     calculate_set_next_seq(&mut book);
     book
-}
-
-/// Calculate and set next_sequence on an EventBook.
-fn calculate_set_next_seq(book: &mut EventBook) {
-    let max_from_pages = book.pages.last().map(|p| p.sequence_num()).unwrap_or(0);
-    let max_from_snapshot = book.snapshot.as_ref().map(|s| s.sequence).unwrap_or(0);
-    book.next_sequence = max_from_pages.max(max_from_snapshot) + 1;
 }
 
 /// O2 (phantom-commit guard): committed-only view of an EventBook for
@@ -1028,7 +987,7 @@ impl AggregateContext for GrpcAggregateContext {
         root: Uuid,
         deferred: &AngzarrDeferredSequence,
     ) -> Result<Option<EventBook>, Status> {
-        let Some(source_info) = deferred_to_source_info(deferred)? else {
+        let Some(source_info) = super::parsing::deferred_source_info(deferred)? else {
             return Ok(None);
         };
         let pages = self

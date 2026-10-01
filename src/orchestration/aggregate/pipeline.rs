@@ -121,27 +121,13 @@ pub async fn execute_command_with_retry(
 /// header into an explicit Sequence. Persist passes this to storage so a future
 /// redelivery's `check_deferred_idempotency` lookup can find these events by
 /// `(source.domain, source.root, source_seq, source_component, command_index)`.
-fn extract_source_info(command_book: &CommandBook) -> Option<crate::storage::SourceInfo> {
-    let deferred = extract_angzarr_deferred(command_book)?;
-    let source = deferred.source.as_ref()?;
-    if source.domain.is_empty() {
-        return None;
+fn extract_source_info(
+    command_book: &CommandBook,
+) -> Result<Option<crate::storage::SourceInfo>, Status> {
+    match extract_angzarr_deferred(command_book) {
+        Some(deferred) => super::parsing::deferred_source_info(deferred),
+        None => Ok(None),
     }
-    let root_proto = source.root.as_ref()?;
-    let source_root = Uuid::from_slice(&root_proto.value).ok()?;
-    let source_edition = source
-        .edition
-        .as_ref()
-        .map(|e| e.name.as_str())
-        .unwrap_or("");
-    Some(crate::storage::SourceInfo::new(
-        source_edition,
-        source.domain.as_str(),
-        source_root,
-        deferred.source_seq,
-        deferred.source_component.as_str(),
-        deferred.command_index,
-    ))
 }
 
 /// For a deferred (saga-produced) command, return the cached result if it was
@@ -686,7 +672,7 @@ async fn execute_attempt(
 
     // Capture source provenance before `stamp_deferred_sequences` later rewrites
     // the angzarr_deferred header into an explicit Sequence.
-    let source_info = extract_source_info(&command_book);
+    let source_info = extract_source_info(&command_book)?;
 
     // For angzarr_deferred commands, return the cached result if this command was
     // already processed (idempotent replay).

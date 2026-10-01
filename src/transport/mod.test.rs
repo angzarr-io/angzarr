@@ -164,11 +164,22 @@ fn test_is_uds_address_tcp() {
 // max_grpc_message_size Tests
 // ============================================================================
 
+/// The message-size tests share one process-wide environment variable;
+/// running them in parallel let one test's value leak into another's read.
+static GRPC_MESSAGE_SIZE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_message_size_env() -> std::sync::MutexGuard<'static, ()> {
+    GRPC_MESSAGE_SIZE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// max_grpc_message_size returns default when env var not set.
 ///
 /// Default is 10MB (10240 KB * 1024 = 10485760 bytes).
 #[test]
 fn test_max_grpc_message_size_default() {
+    let _env = lock_message_size_env();
     // Save and clear env var
     let original = std::env::var(GRPC_MESSAGE_SIZE_KB_ENV).ok();
     std::env::remove_var(GRPC_MESSAGE_SIZE_KB_ENV);
@@ -185,6 +196,7 @@ fn test_max_grpc_message_size_default() {
 /// max_grpc_message_size reads env var value.
 #[test]
 fn test_max_grpc_message_size_from_env() {
+    let _env = lock_message_size_env();
     // Save original
     let original = std::env::var(GRPC_MESSAGE_SIZE_KB_ENV).ok();
 
@@ -204,6 +216,7 @@ fn test_max_grpc_message_size_from_env() {
 /// max_grpc_message_size falls back to default on invalid value.
 #[test]
 fn test_max_grpc_message_size_invalid_env() {
+    let _env = lock_message_size_env();
     // Save original
     let original = std::env::var(GRPC_MESSAGE_SIZE_KB_ENV).ok();
 

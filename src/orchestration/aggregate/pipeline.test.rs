@@ -356,7 +356,7 @@ impl AggregateContext for TestCtx {
 /// A non-deferred command (explicit Sequence) has no source provenance.
 #[test]
 fn test_extract_source_info_non_deferred_is_none() {
-    assert!(extract_source_info(&plain_command()).is_none());
+    assert!(extract_source_info(&plain_command()).unwrap().is_none());
 }
 
 /// A deferred command whose source cover has an empty domain yields no source —
@@ -364,7 +364,24 @@ fn test_extract_source_info_non_deferred_is_none() {
 #[test]
 fn test_extract_source_info_empty_source_domain_is_none() {
     let cmd = deferred_command(Some(cover("", "")), 5);
-    assert!(extract_source_info(&cmd).is_none());
+    assert!(extract_source_info(&cmd).unwrap().is_none());
+}
+
+/// A deferred command whose source root is not a UUID is refused: its
+/// provenance could not be recorded, so a redelivery would execute twice.
+/// (One helper now serves the pipeline and the idempotency lookup; they used
+/// to disagree — one errored, the other silently persisted no provenance.)
+#[test]
+fn test_extract_source_info_invalid_root_is_invalid_argument() {
+    let mut src = cover("orders", "");
+    src.root = Some(ProtoUuid {
+        value: vec![1, 2, 3],
+    });
+    let cmd = deferred_command(Some(src), 5);
+    assert_eq!(
+        extract_source_info(&cmd).unwrap_err().code(),
+        tonic::Code::InvalidArgument
+    );
 }
 
 /// A deferred command with a valid source cover yields the source provenance,
@@ -376,7 +393,9 @@ fn test_extract_source_info_valid_source() {
     src.root = Some(proto_uuid(source_root));
     let cmd = deferred_command(Some(src), 7);
 
-    let info = extract_source_info(&cmd).expect("valid source should yield SourceInfo");
+    let info = extract_source_info(&cmd)
+        .unwrap()
+        .expect("valid source should yield SourceInfo");
     assert_eq!(info.domain, "orders");
     assert_eq!(info.root, source_root);
     assert_eq!(info.seq, 7);

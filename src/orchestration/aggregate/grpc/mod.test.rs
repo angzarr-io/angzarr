@@ -1834,3 +1834,26 @@ async fn sync_fanout_continue_collects_reported_reaction_errors() {
     let fanout = ctx.sync_fanout(&cascade_book()).await.unwrap();
     assert_eq!(fanout.reaction_errors, vec![reported]);
 }
+
+/// A book loaded with no pages and no snapshot is an empty aggregate: its
+/// next sequence is 0, not 1 (a new edition branched at 0 would otherwise
+/// write its first event at sequence 1).
+#[tokio::test]
+async fn test_load_divergence_with_no_events_starts_at_zero() {
+    let ctx = build_ctx_with_stores(
+        Arc::new(MockEventStore::new()),
+        Arc::new(MockSnapshotStore::new()),
+    );
+    let book = ctx
+        .load_prior_events_with_divergence(
+            "orders",
+            "branch",
+            Uuid::new_v4(),
+            &TemporalQuery::Current,
+            Some(0),
+        )
+        .await
+        .unwrap();
+    assert!(book.pages.is_empty());
+    assert_eq!(book.next_sequence, 0);
+}
