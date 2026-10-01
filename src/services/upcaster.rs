@@ -145,6 +145,7 @@ impl Upcaster {
 
         debug!(domain = %domain, event_count = events.len(), "Upcasting events");
 
+        let identities: Vec<PageIdentity> = events.iter().map(PageIdentity::of).collect();
         let request = correlated_request(
             UpcastRequest {
                 domain: domain.to_string(),
@@ -154,9 +155,40 @@ impl Upcaster {
         );
 
         let mut client = client.lock().await.clone();
-        let response = client.upcast(request).await?;
+        let upcast = client.upcast(request).await?.into_inner().events;
 
-        Ok(response.into_inner().events)
+        let returned: Vec<PageIdentity> = upcast.iter().map(PageIdentity::of).collect();
+        if returned != identities {
+            return Err(Status::internal(format!(
+                "Upcaster for {domain} changed the event stream: sent {} page(s) {:?}, \
+                 got {} page(s) {:?}; it may rewrite payloads only",
+                identities.len(),
+                identities,
+                returned.len(),
+                returned
+            )));
+        }
+        Ok(upcast)
+    }
+}
+
+/// What an upcaster must hand back unchanged for each page: its sequence and
+/// its two-phase-commit status. Only the payload may be rewritten.
+#[derive(Debug, PartialEq, Eq)]
+struct PageIdentity {
+    sequence: u32,
+    no_commit: bool,
+    cascade_id: Option<String>,
+}
+
+impl PageIdentity {
+    fn of(page: &EventPage) -> Self {
+        use crate::proto_ext::EventPageExt;
+        Self {
+            sequence: page.sequence_num(),
+            no_commit: page.no_commit,
+            cascade_id: page.cascade_id.clone(),
+        }
     }
 }
 
