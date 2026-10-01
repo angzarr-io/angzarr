@@ -25,7 +25,6 @@
 //!
 //! # Module Structure
 //!
-//! - `local/`: in-process saga handler calls
 //! - `grpc/`: remote gRPC saga client calls (distributed mode)
 
 pub mod grpc;
@@ -124,8 +123,8 @@ pub trait SagaRetryContext: Send + Sync {
     /// Sagas use these via `stamp_command()` helper to stamp commands correctly.
     ///
     /// `sync_mode` is the flow mode inherited from `orchestrate_saga`'s caller.
-    /// Distributed (gRPC) impls stamp it onto the outgoing SagaHandleRequest
-    /// (H-17); in-process impls may ignore it.
+    /// Distributed (gRPC) impls stamp it onto the outgoing SagaHandleRequest;
+    /// in-process impls may ignore it.
     async fn handle(
         &self,
         destination_sequences: HashMap<String, u32>,
@@ -161,7 +160,7 @@ pub trait SagaRetryContext: Send + Sync {
     ///
     /// Returns `None` to disable DLQ publication. Production impls
     /// SHOULD return `Some(_)` so 4xx-class rejections and 5xx-class
-    /// retry-exhausted failures are operator-observable per R2-15.
+    /// retry-exhausted failures are operator-observable.
     /// Test fakes that don't exercise DLQ paths can keep the default.
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
         None
@@ -213,17 +212,13 @@ struct SagaOperation<'a> {
     correlation_id: &'a str,
     /// Sync mode for command execution.
     /// ASYNC: commands published to bus (fire-and-forget), results via RejectionNotification.
-    /// CASCADE: commands executed synchronously with no bus publishing.
-    /// SIMPLE: commands executed synchronously with bus publishing.
+    /// Forwarded to each destination with the command.
     sync_mode: SyncMode,
     commands: Vec<CommandBook>,
-    /// Positions (within `commands`) that hit a Retryable outcome THIS
-    /// attempt. O11/F4: tracked per-INDEX, not per-domain — one invocation
-    /// may emit multiple commands to the same domain (that's why
-    /// `command_index` provenance exists), and a domain-keyed retry set
-    /// would re-execute a succeeded command (duplicate destination events)
-    /// or re-fire a Rejected one (duplicate compensation + DLQ entries)
-    /// whenever it shares a domain with a failed command.
+    /// Positions (within `commands`) that hit a Retryable outcome this
+    /// attempt. Tracked per index, not per domain: one invocation may emit
+    /// several commands to the same domain, and a succeeded or rejected
+    /// command must not be re-sent because a sibling in its domain failed.
     failed_indices: HashSet<usize>,
     /// Shared accumulator the builder reads on retry exhaustion to emit
     /// per-command DLQ entries. See [`RetryExhaustionTracker`].
@@ -278,18 +273,11 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
                         }
                         Err(e) => {
                             error!(%domain, error = %e, "Failed to publish command to bus");
-                            // O8: a bus publish failure aborts the pass with
-                            // Fatal (infrastructure error — not retryable).
-                            // Fatal never populates the retry-exhaustion
-                            // tracker, so without this the failing command AND
-                            // every command after it (never attempted) would be
-                            // silently lost — `orchestrate_saga` still returns
-                            // Ok and the retry-exhausted DLQ path drains only
-                            // the tracker. Record `self.commands[idx..]` — the
-                            // failing command plus the un-attempted remainder —
-                            // so the DLQ captures them. Commands published
-                            // earlier this pass (`..idx`) are in flight and are
-                            // NOT re-recorded. Fatal semantics are preserved.
+                            // A bus publish failure ends the pass (Fatal). The
+                            // failing command and every command after it
+                            // (never attempted) are recorded as undelivered so
+                            // they are dead-lettered; commands published
+                            // earlier in the pass are in flight and are not.
                             let reason = format!("Command bus publish failed: {e}");
                             {
                                 let mut tracker = self.tracker.lock().await;
@@ -361,30 +349,14 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
             SAGA_RETRY_TOTAL.add(1, &[name_attr(self.saga_name)]);
         }
 
-        // In the new model, sagas are NOT re-executed on retry.
-        // Commands are produced once with angzarr_deferred sequences.
-        // Retry happens at the delivery level (executor handles sequence stamping).
-        //
-        // O11: trim the retry set to only the commands that actually returned
-        // Retryable THIS attempt. Re-iterating the full command set each retry
-        // re-executes already-succeeded commands, republishing their
-        // destination events (duplicate event storms; cyclic topologies
-        // self-sustain). Idempotency (O1/D-5) is untouched — we simply stop
-        // dispatching commands that already succeeded (or were Rejected —
-        // re-dispatching those would re-fire on_command_rejected and emit
-        // duplicate immediate-rejection DLQ entries every retry).
-        //
-        // F4: filter by INDEX, not domain — one invocation may emit multiple
-        // commands to the same domain, and a succeeded/Rejected command must
-        // not ride along just because a sibling in its domain failed.
-        // Positions are relative to the CURRENT `self.commands`; the next
-        // `try_execute` pass repopulates `failed_indices` against the trimmed
-        // vec, so indices never go stale across attempts.
-        //
-        // `mem::take` hands ownership to the retain closure (avoiding a
-        // borrow conflict between `self.commands` and `self.failed_indices`)
-        // AND empties `failed_indices` for the next attempt — replacing the
-        // explicit clear the old code did here.
+        // The saga is not re-run on retry: its commands were produced once.
+        // Only the commands that returned Retryable this attempt are kept —
+        // re-sending a succeeded command republishes its destination events,
+        // and re-sending a rejected one repeats its compensation and dead
+        // letter. Positions are relative to the current `self.commands`, and
+        // the next `try_execute` repopulates `failed_indices` against the
+        // trimmed list. `mem::take` both moves the set into the closure and
+        // empties it for the next attempt.
         let failed_indices = std::mem::take(&mut self.failed_indices);
         let mut position = 0usize;
         self.commands.retain(|_| {
@@ -604,10 +576,9 @@ struct DeliveryOutcome {
 /// sequences (for command stamping). They should NOT rebuild destination state
 /// to make decisions. Use facts and let aggregates decide.
 ///
-/// `sync_mode` controls how commands are executed:
-/// - `Async`: Commands published to bus (fire-and-forget), results via RejectionNotification
-/// - `Simple`: Sync execution with bus publishing for downstream sagas
-/// - `Cascade`: Full sync chain, no bus publishing
+/// `sync_mode` is forwarded to each destination with the command. With
+/// `Async` and a command bus, commands are published to the bus instead of
+/// delivered directly.
 ///
 /// `command_bus` is required when `sync_mode == Async`. If None and sync_mode is Async,
 /// falls back to direct execution.
@@ -666,7 +637,7 @@ pub async fn orchestrate_saga(
                         error!(
                             %domain,
                             error = %e,
-                            "Destination sequence fetch failed; failing saga orchestration (O9)"
+                            "Destination sequence fetch failed; failing saga orchestration"
                         );
                         return Err(BusError::Grpc(e));
                     }
@@ -851,19 +822,16 @@ pub async fn orchestrate_saga(
             name: saga_name.to_string(),
             message: format!(
                 "Saga produced {} fact(s) (target domains: {:?}) but no \
-                 FactExecutor is wired — facts cannot be silently dropped \
-                 (H-15). Wire a FactExecutor or guarantee handle() returns \
-                 no events.",
+                 FactExecutor is wired — facts cannot be silently dropped. \
+                 Wire a FactExecutor or guarantee handle() returns no events.",
                 events.len(),
                 domains,
             ),
         });
     }
     if let Some(fact_exec) = fact_executor {
-        // O10: facts inherit the workflow correlation_id (like commands do in
-        // `SagaOperation::try_execute`) so downstream PMs don't skip them —
-        // an empty correlation on an injected fact means no correlated PM ever
-        // triggers on it.
+        // Facts inherit the workflow correlation_id, as commands do, so
+        // correlated PMs see them.
         fill_fact_correlation_id(&mut events, correlation_id);
         for fact in events {
             let domain = fact

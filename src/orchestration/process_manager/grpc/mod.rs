@@ -45,13 +45,13 @@ const PUBLISH_BACKOFF_MS: u64 = 200;
 /// - `CommandOutcome::Success` when both `event_store.add` and the
 ///   subsequent `event_store.get` + `event_bus.publish` succeed.
 /// - `CommandOutcome::Retryable` when `event_store.add` returns a
-///   `SequenceConflict` (O3): another PM instance or a replay advanced
+///   `SequenceConflict`: another PM instance or a replay advanced
 ///   this workflow concurrently. The caller's refetch-and-retry loop in
 ///   `orchestrate_pm` re-fetches PM state and re-runs the handler.
 /// - `CommandOutcome::Rejected { code: Internal, ... }` for all other
 ///   `event_store.add` errors (storage I/O, serialization). The caller
-///   classifies this as immediate-Rejected per R2-15 (it does NOT count
-///   toward the retry budget). The bus publish step never fails the
+///   classifies this as an immediate rejection (it does not count toward
+///   the retry budget). The bus publish step never fails the
 ///   persist outcome: the events ARE durably persisted. A publish that
 ///   keeps failing after `POST_PERSIST_ATTEMPTS` is captured to
 ///   `unpublished` (publisher, component name) for operator replay.
@@ -64,13 +64,9 @@ pub async fn persist_pm_event_book(
     unpublished: Option<(&Arc<dyn DeadLetterPublisher>, &str)>,
     trigger: Option<&crate::storage::SourceInfo>,
 ) -> CommandOutcome {
-    // O7/D-11: the PM aggregate root is derived from the correlation id via
-    // the one shared rule — identical to the stamping site in
-    // `execute_pm_commands`, so a rejection notification stamped there always
-    // reaches the PM state persisted here. Pre-fix this read `cover.root` and
-    // fell back to the NIL uuid, which could disagree with the stamped root
-    // (and collapsed every missing/invalid root onto one shared NIL
-    // aggregate). The correlation id is the authoritative PM root by design.
+    // The PM aggregate root is derived from the correlation id by the one
+    // shared rule (`CorrelationRootExt`), the same derivation the PM state
+    // fetch uses; the handler's `cover.root` is not trusted.
     let pm_root = correlation_id.correlation_root();
     let edition =
         crate::orchestration::aggregate::edition_key(process_events.edition().unwrap_or_default());
@@ -92,11 +88,9 @@ pub async fn persist_pm_event_book(
         )
         .await
     {
-        // O3: a sequence conflict means another PM instance (or a replay)
-        // advanced this workflow concurrently — exactly the case
-        // orchestrate_pm's documented refetch-and-retry loop exists for.
-        // That loop only fires on `Retryable`; mapping conflicts to
-        // `Rejected` made it dead code and DLQ'd healthy concurrency.
+        // A sequence conflict means another PM instance (or a replay)
+        // advanced this workflow concurrently: Retryable, so orchestrate_pm
+        // refetches the state and re-runs the handler.
         if let crate::storage::StorageError::SequenceConflict { expected, actual } = e {
             return CommandOutcome::Retryable {
                 reason: format!(
@@ -115,22 +109,9 @@ pub async fn persist_pm_event_book(
         };
     }
 
-    // Publish exactly the events the handler just emitted. R2-02-LIVE:
-    // pre-fix this path re-read the store via
-    // `event_store.get(pm_domain, edition, pm_root)` and published the
-    // full history, fanning out O(historical pages) on every PM update.
-    // The pages we just persisted are already in scope as
-    // `process_events.pages`; publishing those directly is correct
-    // and removes a redundant storage round-trip on the hot path.
-    //
-    // Stamp the in-flight `correlation_id` onto the published cover so
-    // downstream subscribers always see the active correlation, even
-    // if the PM service returned a cover with a stale/default value.
-    //
-    // F6/O7: also stamp the correlation-derived `pm_root` onto the
-    // published cover. Storage keys this book by `pm_root` (above); if
-    // the publish kept the handler's `cover.root`, bus consumers keying
-    // by root would see a different identity than storage.
+    // Publish exactly the pages just persisted, under the identity storage
+    // keyed them by: the in-flight correlation_id and the correlation-derived
+    // root (not whatever the handler put on its cover).
     let mut cover = process_events.cover.clone();
     if let Some(c) = cover.as_mut() {
         c.correlation_id = correlation_id.to_string();
@@ -196,7 +177,7 @@ pub struct GrpcPMContext {
     dlq_publisher: Arc<dyn DeadLetterPublisher>,
     component_name: String,
     /// Outbox for at-least-once redelivery of transiently-failed post-persist
-    /// commands (C04). Shared across every context the factory produces, and
+    /// commands. Shared across every context the factory produces, and
     /// drained by the PM binary's background drain loop.
     command_outbox: Arc<dyn CommandOutbox>,
 }
@@ -260,7 +241,7 @@ impl ProcessManagerContext for GrpcPMContext {
         let mut process_events = response.process_events;
         let mut facts = response.facts;
 
-        // Audit #86 contract: stamp the trigger cover's edition onto
+        // Stamp the trigger cover's edition onto
         // every outgoing book. See `super::edition_propagation` for
         // the contract details and tests.
         super::edition_propagation::propagate_trigger_edition(
@@ -358,7 +339,7 @@ pub struct GrpcPMContextFactory {
     name: String,
     pm_domain: String,
     dlq_publisher: Arc<dyn DeadLetterPublisher>,
-    /// Shared command outbox handed to every context (C04). Defaults to an
+    /// Shared command outbox handed to every context. Defaults to an
     /// in-memory outbox; the binary injects a shared instance via
     /// [`with_command_outbox`](Self::with_command_outbox) so its drain loop and
     /// the contexts operate on the same queue.

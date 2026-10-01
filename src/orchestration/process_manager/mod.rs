@@ -63,7 +63,7 @@ use super::FactExecutor;
 use outbox::{CommandOutbox, OutboxEntry};
 
 /// Stable fingerprint for a PM event book, used to deduplicate persistence
-/// across outer-loop iterations (H-13).
+/// across outer-loop iterations.
 ///
 /// When `persist_pm_events` returns `Retryable` on book N (with books
 /// 1..N-1 already persisted successfully), the whole outer loop restarts:
@@ -107,10 +107,8 @@ impl BookFingerprint {
 ///
 /// Contains commands, PM events, and facts to inject to other aggregates.
 ///
-/// Audit #92 (2026-04-29): `process_events` is `Vec<EventBook>` —
-/// PMs can emit multiple PM-domain books per trigger; the coordinator
-/// merges / persists with full information rather than the client
-/// applying a first-non-empty-cover-wins reduction pre-emit.
+/// `process_events` is a list: a PM may emit several PM-domain books per
+/// trigger, and the coordinator persists each one.
 #[derive(Debug, Clone, Default)]
 pub struct ProcessManagerHandleResult {
     /// Commands to send to other aggregates.
@@ -136,7 +134,7 @@ pub trait ProcessManagerHandler: Send + Sync + 'static {
     ///
     /// Returns commands to execute, optional PM events to persist, and facts to inject.
     ///
-    /// # Idempotency Contract (H-13)
+    /// # Idempotency Contract
     ///
     /// PM handlers MUST be deterministic and idempotent on the input pair
     /// `(trigger, process_state)`. When a `Retryable` outcome causes the
@@ -171,8 +169,7 @@ pub trait ProcessManagerHandler: Send + Sync + 'static {
 
 /// Response from a process manager's handle phase.
 ///
-/// Audit #92: `process_events` is `Vec<EventBook>` — see
-/// `ProcessManagerHandleResult` doc.
+/// `process_events` is a list — see `ProcessManagerHandleResult`.
 pub struct PmHandleResponse {
     /// Commands to execute on aggregates.
     pub commands: Vec<CommandBook>,
@@ -258,7 +255,7 @@ pub trait ProcessManagerContext: Send + Sync {
     /// Returns `None` to disable DLQ publication. Production impls
     /// SHOULD return `Some(_)` so 4xx-class command rejections,
     /// retry-exhausted persistence failures, and immediate persistence
-    /// rejections are operator-observable per R2-15. Test fakes that
+    /// rejections are operator-observable. Test fakes that
     /// don't exercise DLQ paths can keep the default.
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
         None
@@ -273,7 +270,7 @@ pub trait ProcessManagerContext: Send + Sync {
     }
 
     /// Outbox for at-least-once redelivery of commands that fail transiently
-    /// after the PM persist boundary (C04).
+    /// after the PM persist boundary.
     ///
     /// When `Some(_)`, a non-Decision `Retryable` outcome in
     /// `execute_pm_commands` is captured to the outbox and redelivered by the
@@ -333,21 +330,20 @@ async fn publish_pm_persist_dlq(
 /// Publish a dead letter for a PM command rejection at the dispatch loop.
 ///
 /// Covers both the `CommandOutcome::Rejected` site (where the destination
-/// aggregate or transport returned a permanent error) and the H-14
-/// Decision-mode degraded-from-Retryable site (where the PM lost its
-/// synchronous accept/reject contract).
+/// aggregate or transport returned a permanent error) and the Decision-mode
+/// site where a transient failure could not answer the synchronous
+/// accept/reject.
 ///
 /// `gate_on_classify = true` defensively skips publication when the
 /// code's `classify_for_dlq` says transient — the alignment between
 /// `is_retryable_status` and `classify_for_dlq` makes that case
 /// impossible today, but the gate guards against future drift. The
-/// H-14 path passes `false` since it doesn't carry a `tonic::Code` and
-/// is unconditionally a permanent failure from the PM's perspective.
+/// Decision path passes no code: it is a permanent failure from the PM's
+/// perspective.
 ///
-/// `is_transient` flags the dead letter for operators: `true` for the C04
-/// no-outbox transient-capture fallback (a transport blip that no drain loop
-/// will redeliver), `false` for permanent failures (Rejected, H-14 contract
-/// loss).
+/// `is_transient` flags the dead letter for operators: `true` for a
+/// transient failure captured without redelivery (no outbox), `false` for
+/// permanent failures (rejections, Decision-mode contract loss).
 async fn publish_pm_command_dlq(
     ctx: &dyn ProcessManagerContext,
     command: &CommandBook,
@@ -475,30 +471,17 @@ pub async fn orchestrate_pm(
     let mut delays = backoff.build();
     let mut attempt = 0u32;
 
-    // H-13: dedup guard for PM-domain writes across outer-loop iterations.
-    //
-    // When the outer loop restarts after a `Retryable` on book N (with books
-    // 1..N-1 already persisted), the PM handler is called again and an
-    // idempotent handler will re-emit the same earlier books. Without this
-    // guard `persist_pm_events` would be invoked again with the same
-    // content; nothing in the persister deduplicates by sequence range.
-    //
-    // Track which book fingerprints have been persisted successfully and
-    // skip any book whose fingerprint is already in the set on re-run.
+    // When the outer loop restarts after a `Retryable` on book N (books
+    // 1..N-1 already persisted), an idempotent handler re-emits the earlier
+    // books; their fingerprints are remembered so they are not persisted
+    // twice.
     let mut persisted: HashSet<BookFingerprint> = HashSet::new();
 
     loop {
-        // Load PM state by correlation_id.
-        // Why by correlation_id? The PM's aggregate root IS the correlation_id.
-        // This is a design choice: a PM instance is identified by the workflow
-        // it coordinates, not by an arbitrary UUID. This simplifies lookups and
-        // ensures all events for a workflow flow through one PM instance.
-        //
-        // O9: a fetch ERROR is NOT "no state". Only Ok(None) means a new
-        // workflow. Treating a transient gRPC/storage failure as None made
-        // the PM rebuild the workflow from empty — re-issuing commands and
-        // corrupting state. Fail this attempt instead; bus redelivery (the
-        // handler propagates errors) retries the trigger with state intact.
+        // The PM's state: the aggregate whose root derives from the
+        // correlation id, on the trigger's edition. Only Ok(None) means a new
+        // workflow; a fetch error fails this attempt (bus redelivery retries
+        // the trigger) instead of restarting a live workflow from empty.
         let pm_state = fetcher
             .fetch_pm_state(
                 pm_domain,
@@ -510,7 +493,7 @@ pub async fn orchestrate_pm(
                 error!(
                     error = %e,
                     "PM state fetch failed; failing PM attempt instead of \
-                     restarting workflow from empty (O9)"
+                     restarting workflow from empty"
                 );
                 BusError::Grpc(e)
             })?;
@@ -548,23 +531,19 @@ pub async fn orchestrate_pm(
         // sequence conflict, the aggregate saw a concurrent write — the PM will
         // receive a Notification and can decide whether to retry or compensate.
         //
-        // Audit #92: `process_events` is `Vec<EventBook>` — persist each
-        // book separately. Empty books are skipped.
+        // Each emitted book is persisted separately; empty books are skipped.
         let mut should_continue_outer = false;
         let mut should_return_err: Option<BusError> = None;
         for process_events in &response.process_events {
             if process_events.pages.is_empty() {
                 continue;
             }
-            // H-13: skip books we already persisted on a prior outer-loop
-            // iteration. Without this guard, when book N returned Retryable
-            // (causing restart) the prior books 1..N-1 would be persisted
-            // again — the persister has no sequence-range dedup of its own.
+            // Skip books already persisted on a prior outer-loop iteration.
             let fp = BookFingerprint::of(process_events);
             if persisted.contains(&fp) {
                 debug!(
                     fingerprint = ?fp,
-                    "Skipping already-persisted PM book on retry (H-13 dedup)"
+                    "Skipping already-persisted PM book on retry"
                 );
                 continue;
             }
@@ -602,8 +581,8 @@ pub async fn orchestrate_pm(
                             attempt,
                             &reason,
                         );
-                        // R2-15: persist retry-exhausted -> DLQ the
-                        // failed PM event book so operators can replay.
+                        // Retries exhausted: dead-letter the PM event book
+                        // so operators can replay it.
                         publish_pm_persist_dlq(ctx, process_events, &reason, attempt, true).await;
                         should_return_err = Some(BusError::Publish(reason));
                         break;
@@ -615,9 +594,8 @@ pub async fn orchestrate_pm(
                         attempt,
                         &format!("{code:?}: {message}"),
                     );
-                    // R2-15: persist immediate-rejection -> DLQ the
-                    // failed PM event book. retry_count=0 since no
-                    // attempts were spent on this rejection.
+                    // Immediate rejection: dead-letter the PM event book
+                    // (no retries were spent).
                     publish_pm_persist_dlq(ctx, process_events, &message, 0, false).await;
                     should_return_err = Some(BusError::Publish(message));
                     break;
@@ -672,12 +650,7 @@ pub async fn orchestrate_pm(
         // Fact injection failure fails the entire PM operation — facts are not
         // best-effort, they're part of the transaction.
         //
-        // H-15: silent-drop refused. If the PM emits any facts but no
-        // `FactExecutor` is wired, return an explicit error instead of
-        // silently discarding them. This prevents the bc1d3db4 regression
-        // class where a caller forgets to wire an executor and every fact
-        // is lost. The API can no longer swallow facts — callers must
-        // either pass an executor or guarantee an empty `facts` vec.
+        // Facts with no FactExecutor wired are an error, never a silent drop.
         if !response.facts.is_empty() && fact_executor.is_none() {
             let domains: Vec<&str> = response
                 .facts
@@ -692,17 +665,15 @@ pub async fn orchestrate_pm(
             return Err(BusError::Publish(format!(
                 "PM '{pm_name}' produced {} fact(s) (target domains: {:?}) \
                  but no FactExecutor is wired — facts cannot be silently \
-                 dropped (H-15). Wire a FactExecutor or guarantee handle() \
-                 returns no facts.",
+                 dropped. Wire a FactExecutor or guarantee handle() returns \
+                 no facts.",
                 response.facts.len(),
                 domains,
             )));
         }
         if let Some(fact_exec) = fact_executor {
-            // O10: injected facts must carry the workflow correlation_id, or
-            // downstream PMs skip them (empty correlation ⇒ no PM trigger).
-            // Commands are already backfilled in `execute_pm_commands`; facts
-            // were not, so backfill them here on the same shared rule.
+            // Facts carry the workflow correlation_id, as commands do, so
+            // correlated PMs see them.
             super::shared::fill_fact_correlation_id(&mut response.facts, correlation_id);
             for fact in response.facts {
                 let domain = fact

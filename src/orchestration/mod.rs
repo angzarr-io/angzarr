@@ -1,8 +1,9 @@
-//! Orchestration layer for unified in-process and distributed execution.
+//! Orchestration layer: the coordinator logic for aggregates, sagas, process
+//! managers and projectors.
 //!
-//! Each sub-module defines a trait (interface) in `mod.rs` with shared orchestration logic.
-//! Transport-specific implementations live in `local/` (in-process) and `grpc/` (remote)
-//! subdirectories, named by their key differentiating factor.
+//! Each sub-module defines its trait (interface) and shared orchestration
+//! logic in `mod.rs`; the gRPC implementations used by the coordinator
+//! binaries live in its `grpc/` subdirectory.
 
 use async_trait::async_trait;
 

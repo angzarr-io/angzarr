@@ -67,9 +67,8 @@ impl HybridDestinationFetcher {
 impl DestinationFetcher for HybridDestinationFetcher {
     async fn fetch(&self, cover: &Cover) -> Result<Option<EventBook>, Status> {
         if cover.domain == self.local_domain {
-            // O9: a malformed cover or a storage failure is an ERROR, not
-            // "no state" — mapping either to Ok(None) is what silently
-            // restarted PM workflows from empty on transient failures.
+            // A malformed cover or a storage failure is an error, not "no
+            // state": Ok(None) would make a PM restart a live workflow.
             let root = cover.root.as_ref().ok_or_else(|| {
                 Status::invalid_argument(crate::orchestration::errmsg::COVER_MISSING_ROOT)
             })?;
@@ -167,9 +166,8 @@ impl DestinationFetcher for HybridDestinationFetcher {
 
             // First find the aggregate by correlation_id.
             //
-            // O9: a storage failure here must propagate as Err. This is THE
-            // process-manager state read — collapsing it to Ok(None) makes
-            // the PM believe the workflow is brand new and restart it.
+            // A storage failure propagates as Err: as Ok(None) the PM would
+            // treat a live workflow as brand new.
             let books = self
                 .local_event_store
                 .get_by_correlation(correlation_id)
@@ -219,10 +217,9 @@ impl DestinationFetcher for HybridDestinationFetcher {
             // The first lookup is just to find the root UUID — we need to know which
             // aggregate instance has this correlation_id before we can do a proper fetch.
             //
-            // O9: at this point state for the workflow EXISTS. A book we
-            // cannot interpret (missing cover/root, unparseable root) is
-            // corrupt data, not absence — treating it as Ok(None) would
-            // restart a live workflow, so it is an internal error.
+            // State for the workflow exists here; a book we cannot interpret
+            // (missing cover/root, unparseable root) is corrupt data, not
+            // absence, so it is an internal error.
             let cover = book.cover.as_ref().ok_or_else(|| {
                 Status::internal(crate::orchestration::errmsg::EVENT_BOOK_MISSING_COVER)
             })?;

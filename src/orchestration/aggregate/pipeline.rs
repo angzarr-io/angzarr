@@ -133,12 +133,10 @@ fn extract_source_info(
 /// For a deferred (saga-produced) command, return the cached result if it was
 /// already processed. `Ok(Some(_))` short-circuits the pipeline.
 ///
-/// The cached EventBook is republished (`post_persist`) before returning: if the
-/// first attempt persisted events but failed to publish (bus temporarily
-/// unavailable), this ensures they eventually reach the bus on retry. The
-/// in-flight command's correlation_id is stamped onto the rebuilt book first
-/// because `build_event_book` hardcodes `correlation_id: ""` and PMs never fire
-/// on events with an empty correlation_id (C-04).
+/// The cached EventBook is republished before returning, so events whose
+/// first publish failed reach the bus on redelivery. The in-flight command's
+/// correlation_id is stamped onto the rebuilt book first: storage does not
+/// return it, and PMs ignore events without one.
 async fn try_deferred_idempotency_replay(
     ctx: &dyn AggregateContext,
     command_book: &CommandBook,
@@ -311,7 +309,7 @@ fn enforce_strict_gate(
     Ok(())
 }
 
-/// Post-execution cascade-conflict gate (C-03).
+/// Post-execution cascade-conflict gate.
 ///
 /// Purely observational — never mutates events. A Conflict aborts; replay errors
 /// degrade gracefully (proceed optimistically) rather than wedge the pipeline.
@@ -808,8 +806,8 @@ async fn execute_attempt(
         )
         .await?;
 
-    // Distinguish Persisted (new events / snapshot change) from NoOp (no diff);
-    // the NoOp book must not reach the bus (H-16, see `publish_unless_noop`).
+    // Distinguish Persisted (new events / snapshot change) from NoOp (no
+    // diff); a NoOp book is never published (see `publish_unless_noop`).
     let (mut persisted, is_noop) = resolve_command_persist_outcome(outcome)?;
 
     // Set next_sequence on persisted EventBook for callers
