@@ -186,6 +186,74 @@ fn make_event_book(domain: &str, root: Uuid, pages: Vec<EventPage>) -> EventBook
     }
 }
 
+/// A deferred command from saga "OrderFulfillment" (triggered by
+/// order/`source_root` at sequence 0) to `domain`/`root`.
+fn deferred_command(
+    domain: &str,
+    root: Uuid,
+    source_root: Uuid,
+    command_index: u32,
+) -> CommandBook {
+    let mut command = make_command_book(domain, root, 0);
+    command.pages[0].header = Some(PageHeader {
+        sync_mode: None,
+        sequence_type: Some(page_header::SequenceType::AngzarrDeferred(
+            crate::proto::AngzarrDeferredSequence {
+                source: Some(make_cover("order", source_root)),
+                source_seq: 0,
+                source_component: "OrderFulfillment".to_string(),
+                command_index,
+            },
+        )),
+    });
+    command
+}
+
+/// A Compensate delivery envelope undoing that command at its target.
+fn compensate_delivery(
+    domain: &str,
+    root: Uuid,
+    source_root: Uuid,
+    command_index: u32,
+) -> CommandBook {
+    crate::orchestration::compensation::compensate_envelope(
+        &deferred_command(domain, root, source_root, command_index),
+        None,
+        "card declined",
+    )
+}
+
+/// A RejectionNotification delivery envelope to order/`source_root`.
+fn rejection_delivery(source_root: Uuid, command_index: u32) -> CommandBook {
+    crate::orchestration::compensation::rejection_envelope(
+        &deferred_command("inventory", Uuid::new_v4(), source_root, command_index),
+        "out of stock",
+    )
+    .expect("deferred command has a source")
+}
+
+fn compensation_request(envelope: CommandBook) -> Request<CommandRequest> {
+    Request::new(CommandRequest {
+        command: Some(envelope),
+        sync_mode: SyncMode::Async as i32,
+        cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
+    })
+}
+
+/// A service over a shared MockEventStore and MockClientLogic.
+fn service_over(
+    event_store: Arc<MockEventStore>,
+    business: Arc<MockClientLogic>,
+) -> AggregateService {
+    AggregateService::with_business_logic(
+        event_store,
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        business,
+        Arc::new(MockEventBus::new()),
+        Arc::new(StaticServiceDiscovery::new()),
+    )
+}
+
 async fn create_test_service() -> (AggregateService, Arc<MockClientLogic>) {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
@@ -511,17 +579,12 @@ async fn test_handle_compensation_returns_business_response() {
     let (service, business) = create_test_service().await;
 
     let root = Uuid::new_v4();
-    let command_book = make_command_book("orders", root, 0);
-    let events = make_event_book("orders", root, vec![make_event_page(0)]);
+    let events = make_event_book("order", root, vec![make_event_page(0)]);
     business.enqueue_events(events).await;
 
-    let request = Request::new(CommandRequest {
-        command: Some(command_book),
-        sync_mode: SyncMode::Async as i32,
-        cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-    });
-
-    let response = service.handle_compensation(request).await;
+    let response = service
+        .handle_compensation(compensation_request(rejection_delivery(root, 0)))
+        .await;
     assert!(response.is_ok());
     let br = response.unwrap().into_inner();
     assert!(br.result.is_some());
@@ -533,17 +596,12 @@ async fn test_handle_compensation_with_empty_response() {
     let (service, business) = create_test_service().await;
 
     let root = Uuid::new_v4();
-    let command_book = make_command_book("orders", root, 0);
     // Default response is empty events
     business.enqueue_events(EventBook::default()).await;
 
-    let request = Request::new(CommandRequest {
-        command: Some(command_book),
-        sync_mode: SyncMode::Async as i32,
-        cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-    });
-
-    let response = service.handle_compensation(request).await;
+    let response = service
+        .handle_compensation(compensation_request(rejection_delivery(root, 0)))
+        .await;
     assert!(response.is_ok());
     let br = response.unwrap().into_inner();
     // Verify events result was returned
@@ -818,17 +876,179 @@ async fn test_handle_compensation_persists_and_publishes_events() {
     );
     let root = Uuid::new_v4();
     business
-        .enqueue_events(make_event_book("orders", root, vec![make_event_page(0)]))
+        .enqueue_events(make_event_book("order", root, vec![make_event_page(0)]))
         .await;
     service
-        .handle_compensation(Request::new(CommandRequest {
-            command: Some(make_command_book("orders", root, 0)),
+        .handle_compensation(compensation_request(rejection_delivery(root, 0)))
+        .await
+        .unwrap();
+    use crate::storage::EventStore;
+    assert_eq!(event_store.get("order", "", root).await.unwrap().len(), 1);
+    assert_eq!(bus.published_count().await, 1);
+}
+
+// ============================================================================
+// Compensation delivery deduplication (compensation_delivery.feature)
+// ============================================================================
+
+fn handler_calls(business: &MockClientLogic) -> usize {
+    business
+        .invocations
+        .try_lock()
+        .map(|v| v.len())
+        .unwrap_or(0)
+}
+
+/// C-0467: a redelivered notification is applied once and the second
+/// delivery returns the events of the first.
+#[tokio::test]
+async fn test_redelivered_compensate_is_applied_once() {
+    use crate::storage::EventStore;
+    let event_store = Arc::new(MockEventStore::new());
+    let business = Arc::new(MockClientLogic::new());
+    let service = service_over(event_store.clone(), business.clone());
+    let sku = Uuid::new_v4();
+    let order = Uuid::new_v4();
+    business
+        .enqueue_events(make_event_book("inventory", sku, vec![make_event_page(0)]))
+        .await;
+
+    let first = service
+        .handle_compensation(compensation_request(compensate_delivery(
+            "inventory",
+            sku,
+            order,
+            0,
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+    let second = service
+        .handle_compensation(compensation_request(compensate_delivery(
+            "inventory",
+            sku,
+            order,
+            0,
+        )))
+        .await
+        .unwrap()
+        .into_inner();
+
+    assert_eq!(handler_calls(&business), 1, "handler invoked once");
+    assert_eq!(
+        event_store.get("inventory", "", sku).await.unwrap().len(),
+        1
+    );
+    let (Some(business_response::Result::Events(a)), Some(business_response::Result::Events(b))) =
+        (first.result, second.result)
+    else {
+        panic!("both deliveries answer with events");
+    };
+    assert_eq!(
+        a.pages, b.pages,
+        "second delivery returns the first's events"
+    );
+}
+
+/// C-0468: notifications that differ only in command_index are each applied.
+#[tokio::test]
+async fn test_rejections_differing_in_command_index_are_each_applied() {
+    use crate::storage::EventStore;
+    let event_store = Arc::new(MockEventStore::new());
+    let business = Arc::new(MockClientLogic::new());
+    let service = service_over(event_store.clone(), business.clone());
+    let order = Uuid::new_v4();
+    business
+        .enqueue_events(make_event_book("order", order, vec![make_event_page(0)]))
+        .await;
+    business
+        .enqueue_events(make_event_book("order", order, vec![make_event_page(1)]))
+        .await;
+
+    for index in [0, 1] {
+        service
+            .handle_compensation(compensation_request(rejection_delivery(order, index)))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(handler_calls(&business), 2);
+    assert_eq!(event_store.get("order", "", order).await.unwrap().len(), 2);
+}
+
+/// C-0473: a Compensate sharing an applied command's provenance is
+/// delivered (never dropped as that command's duplicate), and its
+/// redelivery is deduplicated.
+#[tokio::test]
+async fn test_compensate_sharing_command_provenance_is_applied() {
+    use crate::storage::EventStore;
+    let event_store = Arc::new(MockEventStore::new());
+    let business = Arc::new(MockClientLogic::new());
+    let service = service_over(event_store.clone(), business.clone());
+    let sku = Uuid::new_v4();
+    let order = Uuid::new_v4();
+    business
+        .enqueue_events(make_event_book("inventory", sku, vec![make_event_page(0)]))
+        .await;
+    business
+        .enqueue_events(make_event_book("inventory", sku, vec![make_event_page(1)]))
+        .await;
+
+    service
+        .handle_command(Request::new(CommandRequest {
+            command: Some(deferred_command("inventory", sku, order, 0)),
             sync_mode: SyncMode::Async as i32,
             cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
         }))
         .await
         .unwrap();
+    for _ in 0..2 {
+        service
+            .handle_compensation(compensation_request(compensate_delivery(
+                "inventory",
+                sku,
+                order,
+                0,
+            )))
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        handler_calls(&business),
+        2,
+        "command once, compensation once"
+    );
+    assert_eq!(
+        event_store.get("inventory", "", sku).await.unwrap().len(),
+        2
+    );
+}
+
+/// C-0470: the notification is never written to the target's stream; only
+/// the handler's events are.
+#[tokio::test]
+async fn test_notification_is_never_written_to_the_stream() {
+    use crate::proto_ext::EventPageExt;
     use crate::storage::EventStore;
-    assert_eq!(event_store.get("orders", "", root).await.unwrap().len(), 1);
-    assert_eq!(bus.published_count().await, 1);
+    let event_store = Arc::new(MockEventStore::new());
+    let business = Arc::new(MockClientLogic::new());
+    let service = service_over(event_store.clone(), business.clone());
+    let order = Uuid::new_v4();
+    let mut cancelled = make_event_page(0);
+    if let Some(event_page::Payload::Event(any)) = cancelled.payload.as_mut() {
+        any.type_url = "/order.OrderCancelled".to_string();
+    }
+    business
+        .enqueue_events(make_event_book("order", order, vec![cancelled]))
+        .await;
+
+    service
+        .handle_compensation(compensation_request(rejection_delivery(order, 0)))
+        .await
+        .unwrap();
+
+    let stream = event_store.get("order", "", order).await.unwrap();
+    assert_eq!(stream.len(), 1);
+    assert_eq!(stream[0].type_url(), Some("/order.OrderCancelled"));
 }

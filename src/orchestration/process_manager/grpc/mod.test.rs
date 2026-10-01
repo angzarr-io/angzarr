@@ -420,7 +420,7 @@ async fn persisted_trigger_is_recognised_by_its_provenance() {
         "pm".to_string(),
         Arc::new(crate::dlq::NoopDeadLetterPublisher),
         "pm-flow".to_string(),
-        Arc::new(crate::orchestration::process_manager::outbox::InMemoryCommandOutbox::new()),
+        None,
     );
     assert!(!ctx.trigger_handled(&trigger, "", "corr").await.unwrap());
 

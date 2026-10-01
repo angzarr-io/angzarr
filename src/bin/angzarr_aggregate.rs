@@ -210,6 +210,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &config.storage.snapshots_enable,
     ));
 
+    // Compensation outbox for CASCADE_ERROR_COMPENSATE: Compensate
+    // notifications are recorded in this aggregate's event store and
+    // delivered to their targets' HandleCompensation.
+    let outbox = angzarr::orchestration::outbox::Outbox::start(
+        domain,
+        "aggregate",
+        Arc::new(angzarr::orchestration::outbox::EventStoreOutboxLog::new(
+            event_store.clone(),
+            domain,
+        )),
+        Arc::new(angzarr::orchestration::outbox::CoordinatorDeliverer::new(
+            Arc::new(
+                angzarr::orchestration::outbox::DiscoveryCompensationSender::new(discovery.clone()),
+            ),
+        )),
+        &config.outbox,
+        dlq_publisher.clone(),
+    )
+    .await?;
+
     let mut aggregate_service = AggregateService::new(
         event_store.clone(),
         snapshot_repo,
@@ -217,7 +237,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         event_bus,
         discovery,
     )
-    .with_dlq_publisher(dlq_publisher);
+    .with_dlq_publisher(dlq_publisher)
+    .with_outbox(outbox);
 
     if let Some(upcaster) = upcaster {
         aggregate_service = aggregate_service.with_upcaster(upcaster);

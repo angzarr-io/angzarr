@@ -111,6 +111,9 @@ pub struct Config {
     pub payload_offload: PayloadOffloadConfig,
     /// Dead letter queue configuration.
     pub dlq: DlqConfig,
+    /// Coordinator outbox retry schedule (compensation notifications and
+    /// PM command redelivery).
+    pub outbox: crate::orchestration::outbox::OutboxConfig,
 }
 
 impl Config {

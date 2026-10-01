@@ -676,7 +676,6 @@ impl SagaRetryContext for DlqAwareSagaContext {
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -851,9 +850,9 @@ impl ProcessManagerContext for DlqAwarePmContext {
         &self,
         _command: &CommandBook,
         _reason: &str,
-        _correlation_id: &str,
-    ) {
+    ) -> Result<(), angzarr::orchestration::outbox::OutboxError> {
         self.compensation_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {

@@ -23,8 +23,8 @@ use crate::proto::{CommandResponse, EventBook, ProcessManagerHandleRequest, Uuid
 use crate::proto_ext::{correlated_request, CoverExt};
 use crate::storage::EventStore;
 
-use super::outbox::{CommandOutbox, InMemoryCommandOutbox};
 use super::{PMContextFactory, PmHandleResponse, ProcessManagerContext};
+use crate::orchestration::outbox::Outbox;
 
 /// Publish attempts for persisted PM events before dead-lettering them.
 const PUBLISH_ATTEMPTS: u32 = 3;
@@ -176,10 +176,10 @@ pub struct GrpcPMContext {
     pm_domain: String,
     dlq_publisher: Arc<dyn DeadLetterPublisher>,
     component_name: String,
-    /// Outbox for at-least-once redelivery of transiently-failed post-persist
-    /// commands. Shared across every context the factory produces, and
-    /// drained by the PM binary's background drain loop.
-    command_outbox: Arc<dyn CommandOutbox>,
+    /// The PM coordinator's outbox (commands and notifications), shared
+    /// across every context the factory produces and drained by the PM
+    /// binary.
+    outbox: Option<Arc<Outbox>>,
 }
 
 impl GrpcPMContext {
@@ -192,7 +192,7 @@ impl GrpcPMContext {
         pm_domain: String,
         dlq_publisher: Arc<dyn DeadLetterPublisher>,
         component_name: String,
-        command_outbox: Arc<dyn CommandOutbox>,
+        outbox: Option<Arc<Outbox>>,
     ) -> Self {
         Self {
             client,
@@ -201,7 +201,7 @@ impl GrpcPMContext {
             pm_domain,
             dlq_publisher,
             component_name,
-            command_outbox,
+            outbox,
         }
     }
 }
@@ -319,8 +319,8 @@ impl ProcessManagerContext for GrpcPMContext {
     }
 
     #[crate::trivial_delegation]
-    fn command_outbox(&self) -> Option<&Arc<dyn CommandOutbox>> {
-        Some(&self.command_outbox)
+    fn outbox(&self) -> Option<&Arc<Outbox>> {
+        self.outbox.as_ref()
     }
 }
 
@@ -335,19 +335,16 @@ pub struct GrpcPMContextFactory {
     name: String,
     pm_domain: String,
     dlq_publisher: Arc<dyn DeadLetterPublisher>,
-    /// Shared command outbox handed to every context. Defaults to an
-    /// in-memory outbox; the binary injects a shared instance via
-    /// [`with_command_outbox`](Self::with_command_outbox) so its drain loop and
-    /// the contexts operate on the same queue.
-    command_outbox: Arc<dyn CommandOutbox>,
+    /// Outbox handed to every context; the binary injects the instance its
+    /// drain loop delivers from via [`with_outbox`](Self::with_outbox).
+    outbox: Option<Arc<Outbox>>,
 }
 
 impl GrpcPMContextFactory {
     /// Create a new factory with gRPC client, event store, event bus, and PM domain.
     ///
-    /// The command outbox defaults to a fresh [`InMemoryCommandOutbox`]. Call
-    /// [`with_command_outbox`](Self::with_command_outbox) to share one instance
-    /// with the binary's drain loop.
+    /// Call [`with_outbox`](Self::with_outbox) to give the contexts the
+    /// coordinator's outbox.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: Arc<Mutex<ProcessManagerServiceClient<tonic::transport::Channel>>>,
@@ -364,20 +361,15 @@ impl GrpcPMContextFactory {
             name,
             pm_domain,
             dlq_publisher,
-            command_outbox: Arc::new(InMemoryCommandOutbox::new()),
+            outbox: None,
         }
     }
 
-    /// Inject a shared command outbox so contexts enqueue into the same queue
-    /// the binary's drain loop redelivers from.
-    pub fn with_command_outbox(mut self, outbox: Arc<dyn CommandOutbox>) -> Self {
-        self.command_outbox = outbox;
+    /// Record commands and notifications in `outbox`, shared with the
+    /// binary's drain loop.
+    pub fn with_outbox(mut self, outbox: Arc<Outbox>) -> Self {
+        self.outbox = Some(outbox);
         self
-    }
-
-    /// Handle to the shared command outbox (for wiring the drain loop).
-    pub fn command_outbox(&self) -> Arc<dyn CommandOutbox> {
-        self.command_outbox.clone()
     }
 }
 
@@ -390,7 +382,7 @@ impl PMContextFactory for GrpcPMContextFactory {
             self.pm_domain.clone(),
             self.dlq_publisher.clone(),
             self.name.clone(),
-            self.command_outbox.clone(),
+            self.outbox.clone(),
         ))
     }
 

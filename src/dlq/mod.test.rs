@@ -554,3 +554,48 @@ fn test_reason_type_unknown() {
     };
     assert_eq!(dl.reason_type(), "unknown");
 }
+
+/// compensation_delivery.feature C-0469/C-0479: a notification whose
+/// delivery failed is dead-lettered with the delivery envelope as
+/// rejected_command and compensation_delivery_failed details, on the
+/// target domain's DLQ topic.
+#[test]
+fn test_from_compensation_delivery_failure() {
+    let root = Uuid::new_v4();
+    let envelope = make_test_command("inventory", root);
+
+    let dead_letter = AngzarrDeadLetter::from_compensation_delivery_failure(
+        &envelope,
+        3,
+        "inventory service down",
+        "OrderFulfillment",
+        "saga",
+    );
+
+    assert_eq!(dead_letter.topic(), "angzarr.dlq.inventory");
+    assert_eq!(dead_letter.reason_type(), "compensation_delivery_failed");
+    assert_eq!(dead_letter.source_component, "OrderFulfillment");
+    assert_eq!(dead_letter.source_component_type, "saga");
+    assert!(dead_letter.rejection_reason.contains("3 attempts"));
+    assert!(dead_letter
+        .rejection_reason
+        .contains("inventory service down"));
+
+    let proto = dead_letter.to_proto();
+    assert_eq!(
+        proto.payload,
+        Some(crate::proto::angzarr_dead_letter::Payload::RejectedCommand(
+            envelope.clone()
+        ))
+    );
+    match proto.rejection_details {
+        Some(crate::proto::angzarr_dead_letter::RejectionDetails::CompensationDeliveryFailed(
+            d,
+        )) => {
+            assert_eq!(d.attempts, 3);
+            assert_eq!(d.last_error, "inventory service down");
+        }
+        other => panic!("expected compensation_delivery_failed details, got {other:?}"),
+    }
+    assert_eq!(proto.cover, envelope.cover);
+}

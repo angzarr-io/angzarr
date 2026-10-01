@@ -236,6 +236,10 @@ struct TestCtx {
     /// requested sequences recorded.
     historical_events: Option<EventBook>,
     historical_requests: Arc<std::sync::Mutex<Vec<u32>>>,
+    /// Claims `check_deferred_idempotency` was asked about.
+    claims_looked_up: Arc<std::sync::Mutex<Vec<SourceInfo>>>,
+    /// The provenance claim each `persist_events` call carried.
+    persisted_claims: Arc<std::sync::Mutex<Vec<Option<SourceInfo>>>>,
 }
 
 #[async_trait]
@@ -286,9 +290,13 @@ impl AggregateContext for TestCtx {
         _root: Uuid,
         _correlation_id: &str,
         _external_id: Option<&str>,
-        _source_info: Option<&SourceInfo>,
+        source_info: Option<&SourceInfo>,
     ) -> Result<PersistOutcome, Status> {
         self.persist_calls.fetch_add(1, Ordering::SeqCst);
+        self.persisted_claims
+            .lock()
+            .unwrap()
+            .push(source_info.cloned());
         self.persist_outcome
             .clone()
             .ok_or_else(|| Status::unimplemented("persist_events not configured for this test"))
@@ -322,8 +330,9 @@ impl AggregateContext for TestCtx {
         _domain: &str,
         _edition: &str,
         _root: Uuid,
-        _deferred: &AngzarrDeferredSequence,
+        source: &SourceInfo,
     ) -> Result<Option<EventBook>, Status> {
+        self.claims_looked_up.lock().unwrap().push(source.clone());
         Ok(self.deferred_cached.clone())
     }
 
@@ -585,10 +594,16 @@ async fn test_try_deferred_replay_non_deferred_is_none() {
     };
     let cmd = plain_command();
 
-    let result =
-        try_deferred_idempotency_replay(&ctx, &cmd, "dest", "angzarr", Uuid::new_v4(), "c")
-            .await
-            .unwrap();
+    let result = try_deferred_idempotency_replay(
+        &ctx,
+        extract_source_info(&cmd).unwrap().as_ref(),
+        "dest",
+        "angzarr",
+        Uuid::new_v4(),
+        "c",
+    )
+    .await
+    .unwrap();
 
     assert!(result.is_none());
     assert_eq!(
@@ -607,10 +622,16 @@ async fn test_try_deferred_replay_deferred_not_cached_is_none() {
     };
     let cmd = deferred_command(Some(cover("orders", "")), 1);
 
-    let result =
-        try_deferred_idempotency_replay(&ctx, &cmd, "dest", "angzarr", Uuid::new_v4(), "c")
-            .await
-            .unwrap();
+    let result = try_deferred_idempotency_replay(
+        &ctx,
+        extract_source_info(&cmd).unwrap().as_ref(),
+        "dest",
+        "angzarr",
+        Uuid::new_v4(),
+        "c",
+    )
+    .await
+    .unwrap();
 
     assert!(result.is_none());
 }
@@ -630,7 +651,7 @@ async fn test_try_deferred_replay_cached_returns_and_stamps_correlation() {
 
     let response = try_deferred_idempotency_replay(
         &ctx,
-        &cmd,
+        extract_source_info(&cmd).unwrap().as_ref(),
         "dest",
         "angzarr",
         Uuid::new_v4(),
@@ -1517,4 +1538,115 @@ async fn test_reaction_errors_reach_the_command_response() {
     .unwrap();
     assert_eq!(response.reaction_errors, vec![error]);
     assert_eq!(response.projections.len(), 1);
+}
+
+// ============================================================================
+// Compensation delivery (HandleCompensation)
+// ============================================================================
+
+/// A Compensate envelope for a deferred command to `dest` with provenance
+/// (source "order", source_seq 0, component "OrderFulfillment", index).
+fn compensate_delivery(command_index: u32) -> CommandBook {
+    let mut command = deferred_command(Some(cover("order", "")), 0);
+    if let Some(SequenceType::AngzarrDeferred(d)) = command.pages[0]
+        .header
+        .as_mut()
+        .and_then(|h| h.sequence_type.as_mut())
+    {
+        d.source_component = "OrderFulfillment".to_string();
+        d.command_index = command_index;
+    }
+    crate::orchestration::compensation::compensate_envelope(&command, None, "card declined")
+}
+
+/// Counts handler invocations and answers with one event.
+struct CountingCompensator {
+    invocations: AtomicUsize,
+}
+
+#[async_trait]
+impl ClientLogic for CountingCompensator {
+    async fn invoke(&self, _cmd: ContextualCommand) -> Result<BusinessResponse, Status> {
+        self.invocations.fetch_add(1, Ordering::SeqCst);
+        let mut events = book_with_domain("dest", "");
+        events.pages = vec![make_event_page(0)];
+        Ok(BusinessResponse {
+            result: Some(business_response::Result::Events(events)),
+        })
+    }
+    async fn invoke_fact(&self, _ctx: FactContext) -> Result<EventBook, Status> {
+        unreachable!()
+    }
+}
+
+/// C-0467: a redelivered notification whose claim already has events does
+/// not invoke the compensation handler again and returns the first
+/// delivery's events.
+#[tokio::test]
+async fn test_compensation_redelivery_returns_first_events_without_handler() {
+    let mut first = book_with_domain("dest", "");
+    first.pages = vec![make_event_page(7)];
+    let ctx = TestCtx {
+        deferred_cached: Some(first.clone()),
+        ..Default::default()
+    };
+    let logic = CountingCompensator {
+        invocations: AtomicUsize::new(0),
+    };
+
+    let response = execute_compensation_pipeline(&ctx, &logic, compensate_delivery(0))
+        .await
+        .unwrap();
+
+    assert_eq!(logic.invocations.load(Ordering::SeqCst), 0);
+    assert_eq!(ctx.persist_calls.load(Ordering::SeqCst), 0);
+    let Some(business_response::Result::Events(events)) = response.result else {
+        panic!("expected the cached events");
+    };
+    assert_eq!(events.pages, first.pages);
+}
+
+/// The first delivery looks its claim up under the notification's kind and
+/// persists the handler's events under that same claim, so the next
+/// delivery finds them.
+#[tokio::test]
+async fn test_compensation_first_delivery_persists_under_its_kind() {
+    let ctx = TestCtx {
+        persist_outcome: Some(PersistOutcome::Persisted(book_with_domain("dest", ""))),
+        ..Default::default()
+    };
+    let logic = CountingCompensator {
+        invocations: AtomicUsize::new(0),
+    };
+
+    execute_compensation_pipeline(&ctx, &logic, compensate_delivery(3))
+        .await
+        .unwrap();
+
+    assert_eq!(logic.invocations.load(Ordering::SeqCst), 1);
+    let looked_up = ctx.claims_looked_up.lock().unwrap().clone();
+    assert_eq!(looked_up.len(), 1);
+    assert_eq!(
+        looked_up[0].kind,
+        crate::storage::ProvenanceKind::CompensateNotification
+    );
+    assert_eq!(looked_up[0].command_index, 3);
+    assert_eq!(looked_up[0].component, "OrderFulfillment");
+    let persisted = ctx.persisted_claims.lock().unwrap().clone();
+    assert_eq!(persisted.len(), 1);
+    assert_eq!(persisted[0].as_ref(), Some(&looked_up[0]));
+}
+
+/// HandleCompensation accepts only Notification delivery envelopes.
+#[tokio::test]
+async fn test_compensation_rejects_a_plain_command() {
+    let ctx = TestCtx::default();
+    let logic = CountingCompensator {
+        invocations: AtomicUsize::new(0),
+    };
+    let err = execute_compensation_pipeline(&ctx, &logic, plain_command())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    assert_eq!(logic.invocations.load(Ordering::SeqCst), 0);
 }

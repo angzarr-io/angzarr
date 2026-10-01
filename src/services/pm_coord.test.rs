@@ -323,3 +323,31 @@ async fn test_handle_speculative_requires_request() {
 
     assert!(result.is_err(), "speculative should fail without request");
 }
+
+/// A COMPENSATE caller learns which reaction commands this PM executed; other
+/// modes carry no such report.
+#[tokio::test]
+async fn test_handle_reports_executed_reactions_to_compensate_callers() {
+    for (mode, reported) in [
+        (CascadeErrorMode::CascadeErrorCompensate, 1),
+        (CascadeErrorMode::CascadeErrorFailFast, 0),
+    ] {
+        let factory = Arc::new(MockPmContextFactory::new("test-pm", "pm-domain"));
+        factory.set_commands(vec![test_command()]).await;
+        let service = PmCoord::new(
+            factory,
+            Arc::new(MockDestinationFetcher),
+            Arc::new(MockCommandExecutor::new()),
+        );
+        let response = service
+            .handle(Request::new(ProcessManagerCoordinatorRequest {
+                trigger: Some(test_event_book()),
+                sync_mode: SyncMode::Cascade.into(),
+                cascade_error_mode: mode.into(),
+            }))
+            .await
+            .unwrap();
+        let executed = crate::orchestration::shared::read_executed_reactions(response.metadata());
+        assert_eq!(executed.len(), reported, "{mode:?}");
+    }
+}

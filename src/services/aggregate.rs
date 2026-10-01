@@ -59,6 +59,8 @@ pub struct AggregateService {
     /// Channels to saga/PM coordinators for CASCADE fan-out, shared by every
     /// command this service handles.
     channels: Arc<ChannelCache>,
+    /// Compensation outbox for CASCADE_ERROR_COMPENSATE requests.
+    outbox: Option<Arc<crate::orchestration::outbox::Outbox>>,
 }
 
 impl AggregateService {
@@ -87,6 +89,7 @@ impl AggregateService {
             dlq_publisher: Arc::new(NoopDeadLetterPublisher),
             domain: None,
             channels: Arc::new(ChannelCache::new()),
+            outbox: None,
         }
     }
 
@@ -105,6 +108,13 @@ impl AggregateService {
             ))),
             _ => Ok(()),
         }
+    }
+
+    /// Record CASCADE_ERROR_COMPENSATE Compensate notifications in `outbox`
+    /// (drained by the binary).
+    pub fn with_outbox(mut self, outbox: Arc<crate::orchestration::outbox::Outbox>) -> Self {
+        self.outbox = Some(outbox);
+        self
     }
 
     /// Set the upcaster for event version transformation.
@@ -151,6 +161,7 @@ impl AggregateService {
             dlq_publisher: Arc::new(NoopDeadLetterPublisher),
             domain: None,
             channels: Arc::new(ChannelCache::new()),
+            outbox: None,
         }
     }
 
@@ -166,6 +177,9 @@ impl AggregateService {
         .with_channel_cache(self.channels.clone());
         if let Some(ref upcaster) = self.upcaster {
             ctx = ctx.with_upcaster(upcaster.clone());
+        }
+        if let Some(ref outbox) = self.outbox {
+            ctx = ctx.with_outbox(outbox.clone());
         }
         ctx
     }
@@ -183,6 +197,9 @@ impl AggregateService {
         .with_channel_cache(self.channels.clone());
         if let Some(ref upcaster) = self.upcaster {
             ctx = ctx.with_upcaster(upcaster.clone());
+        }
+        if let Some(ref outbox) = self.outbox {
+            ctx = ctx.with_outbox(outbox.clone());
         }
         ctx
     }
@@ -272,11 +289,14 @@ impl CommandHandlerCoordinatorService for AggregateService {
         Ok(Response::new(response))
     }
 
-    /// Handle compensation flow - returns BusinessResponse for saga compensation handling.
+    /// Handle a compensation delivery: a Notification envelope (RejectionNotification
+    /// or Compensate) from a coordinator's outbox.
     ///
-    /// Unlike normal HandleCommand, this returns the raw BusinessResponse so the caller
-    /// can inspect revocation flags and decide how to handle (quarantine, notify, etc.).
-    /// If business logic returns events, they are persisted before returning.
+    /// Returns the raw BusinessResponse so the delivering coordinator can act on a
+    /// revocation response. Events the handler returns are persisted under the
+    /// envelope's provenance claim; a redelivered envelope returns the first
+    /// delivery's events without invoking the handler again. An UNIMPLEMENTED answer
+    /// from the handler (no handler for the notification) passes through unchanged.
     #[tracing::instrument(name = "aggregate.handle_compensation", skip_all)]
     async fn handle_compensation(
         &self,

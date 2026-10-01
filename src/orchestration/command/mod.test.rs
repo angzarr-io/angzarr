@@ -5,10 +5,9 @@
 use super::*;
 
 #[test]
-fn test_background_policy_compensates_and_dead_letters_silently() {
+fn test_background_policy_dead_letters_and_continues() {
     let policy = DeliveryPolicy::from_mode(None);
     assert_eq!(policy, DeliveryPolicy::Background);
-    assert!(policy.compensates());
     assert!(policy.dead_letters());
     assert!(!policy.stops_on_failure());
 }
@@ -18,7 +17,6 @@ fn test_fail_fast_stops_and_reports_only() {
     let policy = DeliveryPolicy::from_mode(Some(CascadeErrorMode::CascadeErrorFailFast));
     assert_eq!(policy, DeliveryPolicy::FailFast);
     assert!(policy.stops_on_failure());
-    assert!(!policy.compensates());
     assert!(!policy.dead_letters());
 }
 
@@ -29,14 +27,12 @@ fn test_unspecified_mode_is_fail_fast() {
     assert_eq!(policy, DeliveryPolicy::FailFast);
 }
 
-/// COMPENSATE stops; its compensation is Compensate markers for delivered
-/// commands, not the rejection flow back to the source.
+/// COMPENSATE stops and does not dead-letter.
 #[test]
-fn test_compensate_stops_without_source_compensation() {
+fn test_compensate_stops_without_dead_letters() {
     let policy = DeliveryPolicy::from_mode(Some(CascadeErrorMode::CascadeErrorCompensate));
     assert_eq!(policy, DeliveryPolicy::Compensate);
     assert!(policy.stops_on_failure());
-    assert!(!policy.compensates());
     assert!(!policy.dead_letters());
 }
 
@@ -46,7 +42,6 @@ fn test_continue_neither_stops_nor_reports() {
     let policy = DeliveryPolicy::from_mode(Some(CascadeErrorMode::CascadeErrorContinue));
     assert_eq!(policy, DeliveryPolicy::Continue);
     assert!(!policy.stops_on_failure());
-    assert!(!policy.compensates());
     assert!(!policy.dead_letters());
 }
 
@@ -56,5 +51,4 @@ fn test_dead_letter_captures_without_reporting() {
     assert_eq!(policy, DeliveryPolicy::DeadLetter);
     assert!(policy.dead_letters());
     assert!(!policy.stops_on_failure());
-    assert!(!policy.compensates());
 }

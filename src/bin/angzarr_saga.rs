@@ -42,10 +42,15 @@ use angzarr::config::{SagaCompensationConfig, STATIC_ENDPOINTS_ENV_VAR};
 use angzarr::descriptor::{parse_subscriptions, Target};
 use angzarr::dlq::init_dlq_publisher;
 use angzarr::handlers::core::saga::SagaEventHandler;
+use angzarr::orchestration::outbox::{
+    CoordinatorDeliverer, EventStoreOutboxLog, MemoryOutboxLog, Outbox, OutboxLog,
+    RevocationHandling,
+};
 use angzarr::orchestration::saga::grpc::GrpcSagaContextFactory;
 use angzarr::proto::saga_coordinator_service_server::SagaCoordinatorServiceServer;
 use angzarr::proto::saga_service_client::SagaServiceClient;
 use angzarr::services::SagaCoord;
+use angzarr::storage::init_event_store;
 use angzarr::transport::{connect_to_address, grpc_trace_layer, max_grpc_message_size};
 use angzarr::utils::retry::connection_backoff;
 use angzarr::utils::sidecar::{bootstrap_sidecar, connect_endpoints};
@@ -160,14 +165,47 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Using static endpoint configuration for saga command routing");
     let (executor, _fetcher, fact_executor) = connect_endpoints(&endpoints_str).await?;
-    let factory: Arc<GrpcSagaContextFactory> = Arc::new(GrpcSagaContextFactory::new(
-        Arc::new(Mutex::new(saga_client)),
-        publisher,
-        SagaCompensationConfig::default(),
-        None,
-        bootstrap.domain.clone(),
-        dlq_publisher,
-    ));
+
+    // Compensation outbox: rejection and Compensate notifications are
+    // recorded before the triggering event is acknowledged and delivered to
+    // their targets' HandleCompensation. Durable when storage is configured.
+    let outbox_log: Arc<dyn OutboxLog> = match init_event_store(&bootstrap.config.storage).await {
+        Ok(store) => Arc::new(EventStoreOutboxLog::new(store, &bootstrap.domain)),
+        Err(e) => {
+            error!(
+                error = %e,
+                "no storage for the saga's compensation outbox; recorded notifications \
+                 will not survive a restart — configure storage for this sidecar"
+            );
+            Arc::new(MemoryOutboxLog)
+        }
+    };
+    let deliverer =
+        CoordinatorDeliverer::new(executor.clone()).with_revocation_handling(RevocationHandling {
+            event_bus: publisher,
+            config: bootstrap
+                .config
+                .saga_compensation
+                .clone()
+                .unwrap_or_else(SagaCompensationConfig::default),
+        });
+    let outbox = Outbox::start(
+        &bootstrap.domain,
+        "saga",
+        outbox_log,
+        Arc::new(deliverer),
+        &bootstrap.config.outbox,
+        dlq_publisher.clone(),
+    )
+    .await?;
+    let factory: Arc<GrpcSagaContextFactory> = Arc::new(
+        GrpcSagaContextFactory::new(
+            Arc::new(Mutex::new(saga_client)),
+            bootstrap.domain.clone(),
+            dlq_publisher,
+        )
+        .with_outbox(outbox),
+    );
     let handler = SagaEventHandler::from_factory_with_validator(
         factory.clone(),
         executor.clone(),

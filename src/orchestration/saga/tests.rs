@@ -38,7 +38,6 @@ impl SagaRetryContext for AlwaysSucceeds {
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse::default())
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -64,7 +63,6 @@ impl SagaRetryContext for RetryingSagaContext {
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -89,8 +87,13 @@ impl SagaRetryContext for AlwaysRejects {
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse::default())
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {
+    async fn on_command_rejected(
+        &self,
+        _command: &CommandBook,
+        _reason: &str,
+    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.rejection_count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
     fn source_cover(&self) -> Option<&Cover> {
         None
@@ -362,7 +365,6 @@ impl SagaRetryContext for RetryableCommandContext {
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -475,7 +477,6 @@ impl SagaRetryContext for SagaWithExistingDeferredAndSyncMode {
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -522,7 +523,6 @@ impl SagaRetryContext for SagaWithNoDeferredAndSyncMode {
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -661,7 +661,6 @@ impl SagaRetryContext for SagaWithFact {
             events: vec![fact],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -732,7 +731,6 @@ impl SagaRetryContext for RecordingSyncModeContext {
         *self.recorded.lock().await = Some(sync_mode);
         Ok(SagaResponse::default())
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -837,8 +835,13 @@ impl SagaRetryContext for DlqAwareContext {
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(SagaResponse::default())
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {
+    async fn on_command_rejected(
+        &self,
+        _command: &CommandBook,
+        _reason: &str,
+    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.rejection_count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
     fn source_cover(&self) -> Option<&Cover> {
         None
@@ -1065,7 +1068,6 @@ impl SagaRetryContext for SagaEmittingHeaders {
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         self.source.as_ref()
     }
@@ -1309,7 +1311,6 @@ impl SagaRetryContext for SagaEmittingFact {
             }],
         })
     }
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {}
     fn source_cover(&self) -> Option<&Cover> {
         None
     }
@@ -1657,10 +1658,11 @@ async fn saga_async_publish_failure_dlqs_failing_command_and_remainder() {
 // Delivery policy: the synchronous caller's CascadeErrorMode
 // ============================================================================
 
-/// Saga emitting two commands to `dest`, with a DLQ publisher and a
-/// compensation counter.
+/// Saga emitting two commands to `dest`, with a DLQ publisher, a rejection
+/// counter and (optionally) a compensation outbox.
 struct TwoCommandSaga {
     inner: DlqAwareContext,
+    outbox: Option<Arc<crate::orchestration::outbox::Outbox>>,
 }
 
 #[async_trait]
@@ -1675,14 +1677,26 @@ impl SagaRetryContext for TwoCommandSaga {
                 root: Some(crate::proto::Uuid { value: vec![n; 16] }),
                 ..Default::default()
             }),
-            pages: vec![],
+            pages: vec![crate::proto::CommandPage {
+                payload: Some(crate::proto::command_page::Payload::Command(
+                    prost_types::Any {
+                        type_url: "/test.Charge".to_string(),
+                        value: vec![],
+                    },
+                )),
+                ..Default::default()
+            }],
         };
         Ok(SagaResponse {
             commands: vec![command(1), command(2)],
             events: vec![],
         })
     }
-    async fn on_command_rejected(&self, command: &CommandBook, reason: &str) {
+    async fn on_command_rejected(
+        &self,
+        command: &CommandBook,
+        reason: &str,
+    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.inner.on_command_rejected(command, reason).await
     }
     fn source_cover(&self) -> Option<&Cover> {
@@ -1693,6 +1707,9 @@ impl SagaRetryContext for TwoCommandSaga {
     }
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
         self.inner.dlq_publisher()
+    }
+    fn outbox(&self) -> Option<&Arc<crate::orchestration::outbox::Outbox>> {
+        self.outbox.as_ref()
     }
 }
 
@@ -1728,7 +1745,7 @@ impl CommandExecutor for FirstFailsExecutor {
 }
 
 struct PolicyRun {
-    result: Result<Vec<crate::proto::CascadeReactionError>, BusError>,
+    result: Result<crate::orchestration::shared::ReactionReport, BusError>,
     executions: u32,
     compensations: u32,
     dead_letters: usize,
@@ -1738,6 +1755,7 @@ async fn run_policy(mode: Option<CascadeErrorMode>, retryable: bool) -> PolicyRu
     let publisher = Arc::new(CapturingDlqPublisher::new());
     let ctx = TwoCommandSaga {
         inner: DlqAwareContext::new(publisher.clone()),
+        outbox: None,
     };
     let executor = FirstFailsExecutor {
         executions: AtomicU32::new(0),
@@ -1765,7 +1783,9 @@ async fn run_policy(mode: Option<CascadeErrorMode>, retryable: bool) -> PolicyRu
     }
 }
 
-fn aborted(result: &Result<Vec<crate::proto::CascadeReactionError>, BusError>) -> &tonic::Status {
+fn aborted(
+    result: &Result<crate::orchestration::shared::ReactionReport, BusError>,
+) -> &tonic::Status {
     match result {
         Err(BusError::Grpc(status)) => {
             assert_eq!(status.code(), tonic::Code::Aborted);
@@ -1775,8 +1795,8 @@ fn aborted(result: &Result<Vec<crate::proto::CascadeReactionError>, BusError>) -
     }
 }
 
-/// Bus-driven (no caller): the rejection is compensated and dead-lettered,
-/// the rest still delivered, and the orchestration succeeds.
+/// Bus-driven (no caller): the rejection reaches its source and is
+/// dead-lettered, the rest still delivered, and the orchestration succeeds.
 #[tokio::test]
 async fn test_background_rejection_compensates_dead_letters_and_continues() {
     let run = run_policy(None, false).await;
@@ -1786,47 +1806,48 @@ async fn test_background_rejection_compensates_dead_letters_and_continues() {
     assert_eq!(run.dead_letters, 1);
 }
 
-/// FAIL_FAST: the first rejection stops delivery and reaches the caller —
-/// no compensation, no dead letter.
+/// FAIL_FAST: the first rejection stops delivery and reaches the caller; the
+/// rejection still reaches its source (C-0471); no dead letter.
 #[tokio::test]
 async fn test_fail_fast_rejection_stops_and_reports() {
     let run = run_policy(Some(CascadeErrorMode::CascadeErrorFailFast), false).await;
     let status = aborted(&run.result);
     assert!(status.message().contains("insufficient funds"));
     assert_eq!(run.executions, 1);
-    assert_eq!(run.compensations, 0);
+    assert_eq!(run.compensations, 1);
     assert_eq!(run.dead_letters, 0);
 }
 
 /// COMPENSATE: delivery stops at the rejection and the caller gets the
-/// failure (nothing was delivered before it, so no markers).
+/// failure; the rejection reaches its source.
 #[tokio::test]
 async fn test_compensate_rejection_stops_and_reports() {
     let run = run_policy(Some(CascadeErrorMode::CascadeErrorCompensate), false).await;
     aborted(&run.result);
     assert_eq!(run.executions, 1);
-    assert_eq!(run.compensations, 0);
+    assert_eq!(run.compensations, 1);
     assert_eq!(run.dead_letters, 0);
 }
 
-/// CONTINUE: every command is delivered and the orchestration succeeds.
+/// CONTINUE: every command is delivered and the orchestration succeeds;
+/// the rejection reaches its source.
 #[tokio::test]
 async fn test_continue_rejection_delivers_all_and_succeeds() {
     let run = run_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
     run.result.unwrap();
     assert_eq!(run.executions, 2);
-    assert_eq!(run.compensations, 0);
+    assert_eq!(run.compensations, 1);
     assert_eq!(run.dead_letters, 0);
 }
 
 /// DEAD_LETTER: the failure is dead-lettered, the rest delivered, and the
-/// caller sees success.
+/// caller sees success; the rejection reaches its source.
 #[tokio::test]
 async fn test_dead_letter_rejection_captures_and_succeeds() {
     let run = run_policy(Some(CascadeErrorMode::CascadeErrorDeadLetter), false).await;
     run.result.unwrap();
     assert_eq!(run.executions, 2);
-    assert_eq!(run.compensations, 0);
+    assert_eq!(run.compensations, 1);
     assert_eq!(run.dead_letters, 1);
 }
 
@@ -1839,22 +1860,6 @@ async fn test_fail_fast_retry_exhaustion_reports() {
     assert!(status.message().contains("Unavailable"));
     assert_eq!(run.dead_letters, 0);
     assert_eq!(run.compensations, 0);
-}
-
-/// Records injected facts with how they were delivered.
-#[derive(Default)]
-struct MarkerCapture(AsyncMutex<Vec<(EventBook, crate::orchestration::FactDelivery)>>);
-
-#[async_trait]
-impl FactExecutor for MarkerCapture {
-    async fn inject(
-        &self,
-        fact: EventBook,
-        delivery: crate::orchestration::FactDelivery,
-    ) -> Result<(), crate::orchestration::FactInjectionError> {
-        self.0.lock().await.push((fact, delivery));
-        Ok(())
-    }
 }
 
 /// Accepts the command to root byte 1 (producing an event at sequence 4 on
@@ -1890,23 +1895,26 @@ impl CommandExecutor for SecondRejectedExecutor {
     }
 }
 
-/// COMPENSATE: after the failure, the target of every command already
-/// delivered receives a Compensate marker for the events it produced —
-/// written without the target's fact handler — and the request fails. The
-/// failed command's source is not compensated.
+/// COMPENSATE (C-0439): after the failure, every command its target
+/// executed gets a Compensate notification recorded in the outbox, carrying
+/// the command's type and the sequences its events landed at; the rejected
+/// command gets its RejectionNotification; the request fails. Nothing is
+/// written to the targets' streams by the framework.
 #[tokio::test]
-async fn test_compensate_writes_markers_for_delivered_commands() {
+async fn test_compensate_records_compensates_for_executed_commands() {
+    use crate::storage::ProvenanceKind;
     use prost::Message;
     let publisher = Arc::new(CapturingDlqPublisher::new());
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("ChargeSaga");
     let ctx = TwoCommandSaga {
         inner: DlqAwareContext::new(publisher.clone()),
+        outbox: Some(outbox.clone()),
     };
-    let markers = MarkerCapture::default();
     let result = orchestrate_saga(
         &ctx,
         &SecondRejectedExecutor,
         None,
-        Some(&markers),
+        None,
         "ChargeSaga",
         "corr-1",
         None,
@@ -1916,28 +1924,127 @@ async fn test_compensate_writes_markers_for_delivered_commands() {
     )
     .await;
     assert!(aborted(&result).message().contains("card declined"));
-    assert_eq!(ctx.inner.rejection_count.load(Ordering::SeqCst), 0);
+    assert_eq!(ctx.inner.rejection_count.load(Ordering::SeqCst), 1);
     assert!(publisher.captured.lock().await.is_empty());
 
-    let written = markers.0.lock().await;
-    assert_eq!(written.len(), 1, "one marker for the delivered command");
-    let (marker, delivery) = &written[0];
-    assert!(delivery.skip_handler);
-    let target = marker.cover.as_ref().unwrap();
+    let compensates = deliverer.attempted_of(ProvenanceKind::CompensateNotification);
+    assert_eq!(
+        compensates.len(),
+        1,
+        "one Compensate for the executed command"
+    );
+    let target = compensates[0].book.cover.as_ref().unwrap();
     assert_eq!(target.domain, "dest");
     assert_eq!(target.root.as_ref().unwrap().value, vec![1; 16]);
-    let crate::proto::event_page::Payload::Event(any) = marker.pages[0].payload.as_ref().unwrap()
-    else {
-        panic!("marker payload");
-    };
-    assert_eq!(any.type_url, crate::proto_ext::type_url::COMPENSATE);
-    let compensate = crate::proto::Compensate::decode(any.value.as_slice()).unwrap();
+    let notification =
+        crate::orchestration::compensation::envelope_notification(&compensates[0].book).unwrap();
+    let compensate =
+        crate::proto::Compensate::decode(notification.payload.unwrap().value.as_slice()).unwrap();
     assert_eq!(compensate.sequences, vec![4]);
     assert!(compensate.reason.contains("card declined"));
-    assert!(matches!(
-        marker.pages[0].header.as_ref().unwrap().sequence_type,
-        Some(SequenceType::ExternalDeferred(_))
-    ));
+    assert_eq!(compensate.command_type, "test.Charge");
+    let Some(SequenceType::AngzarrDeferred(provenance)) = compensates[0].book.pages[0]
+        .header
+        .as_ref()
+        .unwrap()
+        .sequence_type
+        .as_ref()
+    else {
+        panic!("the Compensate carries the command's provenance");
+    };
+    assert_eq!(provenance.source_component, "ChargeSaga");
+    assert_eq!(provenance.command_index, 0);
+    assert!(outbox.open_keys().await.is_empty(), "delivered and closed");
+}
+
+/// The report lists the commands their targets executed.
+#[tokio::test]
+async fn test_report_lists_executed_commands() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = TwoCommandSaga {
+        inner: DlqAwareContext::new(publisher),
+        outbox: None,
+    };
+    let report = orchestrate_saga(
+        &ctx,
+        &SecondRejectedExecutor,
+        None,
+        None,
+        "ChargeSaga",
+        "corr-1",
+        None,
+        SyncMode::Cascade,
+        fast_backoff(),
+        Some(CascadeErrorMode::CascadeErrorContinue),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.executed.len(), 1);
+    assert_eq!(
+        report.executed[0]
+            .command
+            .cover
+            .as_ref()
+            .unwrap()
+            .root
+            .as_ref()
+            .unwrap()
+            .value,
+        vec![1; 16]
+    );
+    assert_eq!(report.reaction_errors.len(), 1);
+}
+
+/// A rejection whose notification cannot be recorded fails the
+/// orchestration, so the triggering event is not acknowledged (C-0463).
+#[tokio::test]
+async fn test_unrecorded_rejection_fails_the_orchestration() {
+    struct UnrecordableRejections(TwoCommandSaga);
+    #[async_trait]
+    impl SagaRetryContext for UnrecordableRejections {
+        async fn handle(
+            &self,
+            sync_mode: SyncMode,
+        ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
+            self.0.handle(sync_mode).await
+        }
+        async fn on_command_rejected(
+            &self,
+            _command: &CommandBook,
+            _reason: &str,
+        ) -> Result<(), crate::orchestration::outbox::OutboxError> {
+            Err(crate::orchestration::outbox::OutboxError::Log(
+                "disk full".into(),
+            ))
+        }
+        fn source_cover(&self) -> Option<&Cover> {
+            None
+        }
+        fn source_max_sequence(&self) -> u32 {
+            0
+        }
+    }
+    let ctx = UnrecordableRejections(TwoCommandSaga {
+        inner: DlqAwareContext::new(Arc::new(CapturingDlqPublisher::new())),
+        outbox: None,
+    });
+    let result = orchestrate_saga(
+        &ctx,
+        &SecondRejectedExecutor,
+        None,
+        None,
+        "ChargeSaga",
+        "corr-1",
+        None,
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await;
+    let err = result.unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("rejection notification not recorded"));
 }
 
 /// CONTINUE returns one reaction error per undelivered command, naming the
@@ -1945,7 +2052,7 @@ async fn test_compensate_writes_markers_for_delivered_commands() {
 #[tokio::test]
 async fn test_continue_returns_reaction_errors() {
     let run = run_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
-    let errors = run.result.unwrap();
+    let errors = run.result.unwrap().reaction_errors;
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].component, "saga-policy");
     assert_eq!(errors[0].target.as_ref().unwrap().domain, "dest");

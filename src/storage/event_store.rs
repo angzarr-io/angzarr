@@ -48,7 +48,7 @@ impl ProvenanceKind {
 /// trigger this is — one invocation emitting several commands at the same
 /// destination (or two components reacting to the same event) must not share
 /// a key (O1); kind separates a command from the notifications about it.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceInfo {
     /// Source edition (usually "angzarr")
     pub edition: String,

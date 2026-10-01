@@ -36,7 +36,6 @@
 //! - `grpc/`: remote gRPC PM client calls (distributed mode)
 
 pub mod grpc;
-pub mod outbox;
 
 mod edition_propagation;
 
@@ -58,9 +57,10 @@ use crate::proto_ext::{CoverExt, SyncModeExt};
 
 use super::command::{CommandExecutor, CommandOutcome, DeliveryPolicy};
 use super::destination::DestinationFetcher;
+use super::outbox::OutboxEntry;
 use super::shared::UndeliveredCommand;
+use super::shared::{ExecutedCommand, ReactionReport};
 use super::FactExecutor;
-use outbox::{CommandOutbox, OutboxEntry};
 
 /// Stable fingerprint for a PM event book, used to deduplicate persistence
 /// across outer-loop iterations.
@@ -228,25 +228,16 @@ pub trait ProcessManagerContext: Send + Sync {
         Ok(false)
     }
 
-    /// Handle a rejected command produced by this PM.
-    ///
-    /// Called when a command produced by this PM is rejected by the target aggregate.
-    /// Implementations should invoke `handle_revocation()` on the PM handler and
-    /// persist any resulting PM events.
-    ///
-    /// Default implementation logs the rejection. Override in implementations
-    /// that have access to compensation handlers.
+    /// Raise the rejection of a command this PM emitted: record its
+    /// RejectionNotification in the outbox, addressed to the command's
+    /// `angzarr_deferred.source`. An error means the obligation was not
+    /// recorded and the trigger must not be acknowledged.
     async fn on_command_rejected(
         &self,
-        _command: &CommandBook,
-        _reason: &str,
-        _correlation_id: &str,
-    ) {
-        // Default: log only, no compensation
-        tracing::error!(
-            reason = %_reason,
-            "PM command rejected (no compensation path configured)"
-        );
+        command: &CommandBook,
+        reason: &str,
+    ) -> Result<(), super::outbox::OutboxError> {
+        super::shared::record_rejection(self.outbox(), command, reason).await
     }
 
     /// Publisher for routing failed PM commands and persistence attempts
@@ -269,15 +260,15 @@ pub trait ProcessManagerContext: Send + Sync {
         "process_manager"
     }
 
-    /// Outbox for at-least-once redelivery of commands that fail transiently
-    /// after the PM persist boundary.
+    /// The PM coordinator's outbox: commands that fail transiently after
+    /// the PM persist boundary, and rejection / Compensate notifications,
+    /// are recorded and delivered through it.
     ///
-    /// When `Some(_)`, a non-Decision `Retryable` outcome in
-    /// `execute_pm_commands` is captured to the outbox and redelivered by the
-    /// PM's drain loop instead of being dropped. When `None`, the same failure
-    /// falls back to DLQ *capture* (operator-visible, but no auto-redelivery) —
-    /// never a silent drop. Production impls SHOULD return `Some(_)`.
-    fn command_outbox(&self) -> Option<&Arc<dyn CommandOutbox>> {
+    /// When `None`, a transiently failed command falls back to DLQ capture
+    /// (operator-visible, never a silent drop), a rejection is logged
+    /// unrouted and Compensates are reported unrecorded. Production impls
+    /// return `Some(_)`.
+    fn outbox(&self) -> Option<&Arc<super::outbox::Outbox>> {
         None
     }
 }
@@ -415,11 +406,12 @@ async fn publish_pm_command_dlq(
 ///
 /// `error_mode` is the synchronous caller's `CascadeErrorMode` (`None` for
 /// bus-driven triggers): FAIL_FAST and COMPENSATE stop at the first failed
-/// command and return `Err` (COMPENSATE runs the PM's rejection handling
-/// first), CONTINUE runs every command and then returns `Err` listing the
-/// failures, DEAD_LETTER dead-letters failures and returns `Ok`. Without a
-/// caller, a rejection is compensated and dead-lettered and a transient
-/// failure goes to the command outbox.
+/// command and return `Err` (COMPENSATE first records a Compensate
+/// notification for every command already executed), CONTINUE runs every
+/// command and returns the failures as reaction errors, DEAD_LETTER
+/// dead-letters failures and returns `Ok`. Without a caller, a rejection is
+/// dead-lettered and a transient failure goes to the outbox. In every mode a
+/// rejected command's RejectionNotification is recorded for its source.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(name = "pm.orchestrate", skip_all, fields(%pm_name, %pm_domain, %correlation_id))]
 pub async fn orchestrate_pm(
@@ -434,7 +426,7 @@ pub async fn orchestrate_pm(
     sync_mode: SyncMode,
     backoff: ExponentialBuilder,
     error_mode: Option<CascadeErrorMode>,
-) -> Result<Vec<crate::proto::CascadeReactionError>, BusError> {
+) -> Result<ReactionReport, BusError> {
     let policy = DeliveryPolicy::from_mode(error_mode);
     let trigger_domain = trigger
         .cover
@@ -461,7 +453,7 @@ pub async fn orchestrate_pm(
             .map_err(BusError::Grpc)?;
         if handled {
             debug!("PM trigger already handled; skipping");
-            return Ok(Vec::new());
+            return Ok(ReactionReport::default());
         }
     }
 
@@ -625,10 +617,9 @@ pub async fn orchestrate_pm(
         // 2. The PM's job is to observe outcomes and react, not guarantee delivery
         // 3. Compensation is the PM's mechanism for handling failures
         //
-        let reaction_errors = execute_pm_commands(
+        let reaction_report = execute_pm_commands(
             ctx,
             executor,
-            fact_executor,
             response.commands,
             PmCommandSource {
                 trigger,
@@ -692,7 +683,7 @@ pub async fn orchestrate_pm(
 
         // PM events are persisted and commands dispatched; the workflow
         // continues asynchronously.
-        return Ok(reaction_errors);
+        return Ok(reaction_report);
     }
 }
 
@@ -737,12 +728,11 @@ struct PmCommandSource<'a> {
 async fn execute_pm_commands(
     ctx: &dyn ProcessManagerContext,
     executor: &dyn CommandExecutor,
-    fact_executor: Option<&dyn FactExecutor>,
     mut commands: Vec<CommandBook>,
     source: PmCommandSource<'_>,
     sync_mode: SyncMode,
     policy: DeliveryPolicy,
-) -> Result<Vec<crate::proto::CascadeReactionError>, BusError> {
+) -> Result<ReactionReport, BusError> {
     use super::shared::fill_correlation_id;
     use crate::proto_ext::EventPageExt;
     let PmCommandSource {
@@ -790,7 +780,7 @@ async fn execute_pm_commands(
     // reported to the caller whatever the delivery policy.
     let mut reported_failures: Vec<String> = Vec::new();
     let mut undelivered: Vec<UndeliveredCommand> = Vec::new();
-    let mut executed: Vec<EventBook> = Vec::new();
+    let mut executed: Vec<ExecutedCommand> = Vec::new();
 
     for command_book in commands {
         let cmd_domain = command_book
@@ -828,7 +818,10 @@ async fn execute_pm_commands(
                     has_events = cmd_response.events.is_some(),
                     "PM command executed successfully"
                 );
-                executed.extend(cmd_response.events);
+                executed.push(ExecutedCommand {
+                    command: command_book.clone(),
+                    events: cmd_response.events,
+                });
                 None
             }
             CommandOutcome::Rejected { code, message } => {
@@ -838,10 +831,8 @@ async fn execute_pm_commands(
                     error = %message,
                     "PM command rejected"
                 );
-                if policy.compensates() {
-                    ctx.on_command_rejected(&command_book, &message, correlation_id)
-                        .await;
-                }
+                // A rejection reaches its source whatever the policy.
+                raise_rejection(ctx, &command_book, &message).await?;
                 if policy.dead_letters() {
                     publish_pm_command_dlq(ctx, &command_book, Some(code), &message, false).await;
                 }
@@ -858,8 +849,7 @@ async fn execute_pm_commands(
                      retry later (underlying: {reason})"
                 );
                 error!(domain = %cmd_domain, error = %degraded, "PM Decision-mode command Retryable");
-                ctx.on_command_rejected(&command_book, &degraded, correlation_id)
-                    .await;
+                raise_rejection(ctx, &command_book, &degraded).await?;
                 publish_pm_command_dlq(ctx, &command_book, None, &degraded, false).await;
                 reported_failures.push(format!("{cmd_domain}: {degraded}"));
                 None
@@ -899,22 +889,43 @@ async fn execute_pm_commands(
     if !reported_failures.is_empty() {
         return Err(BusError::Publish(reported_failures.join("; ")));
     }
-    super::shared::settle_delivery(policy, pm_name, &undelivered, &executed, fact_executor).await
+    let reaction_errors =
+        super::shared::settle_delivery(policy, pm_name, &undelivered, &executed, ctx.outbox())
+            .await?;
+    Ok(ReactionReport {
+        reaction_errors,
+        executed,
+    })
+}
+
+/// Record a rejected PM command's RejectionNotification; failing to record
+/// it fails the orchestration so the trigger is redelivered.
+async fn raise_rejection(
+    ctx: &dyn ProcessManagerContext,
+    command: &CommandBook,
+    reason: &str,
+) -> Result<(), BusError> {
+    ctx.on_command_rejected(command, reason).await.map_err(|e| {
+        BusError::Publish(format!(
+            "{}: rejection notification not recorded: {e}",
+            command.domain()
+        ))
+    })
 }
 
 /// Hand a transiently-failed PM command to the outbox for redelivery, or
-/// capture it to the DLQ when no outbox is wired or enqueueing fails.
+/// capture it to the DLQ when no outbox is wired or recording fails.
 async fn enqueue_or_dead_letter(
     ctx: &dyn ProcessManagerContext,
     command_book: &CommandBook,
     cmd_domain: &str,
     reason: &str,
 ) {
-    match ctx.command_outbox() {
+    match ctx.outbox() {
         Some(outbox) => {
-            let entry = OutboxEntry::for_redelivery(command_book, reason);
-            let key = entry.dedup_key.clone();
-            if let Err(e) = outbox.enqueue(entry).await {
+            let entry = OutboxEntry::command(command_book.clone());
+            let key = entry.key.clone();
+            if let Err(e) = outbox.record(entry).await {
                 error!(
                     domain = %cmd_domain,
                     error = %e,

@@ -126,6 +126,33 @@ fn extract_source_info(
     }
 }
 
+/// The events already persisted under a provenance claim, with the
+/// in-flight correlation_id stamped on, or `None` when the claim is new (or
+/// there is no claim to look up).
+async fn cached_for_claim(
+    ctx: &dyn AggregateContext,
+    source_info: Option<&crate::storage::SourceInfo>,
+    domain: &str,
+    edition: &str,
+    root_uuid: Uuid,
+) -> Result<Option<EventBook>, Status> {
+    let Some(source_info) = source_info else {
+        return Ok(None);
+    };
+    let cached = ctx
+        .check_deferred_idempotency(domain, edition, root_uuid, source_info)
+        .await?;
+    if cached.is_some() {
+        tracing::debug!(
+            source_domain = %source_info.domain,
+            source_seq = source_info.seq,
+            kind = source_info.kind.as_str(),
+            "Deferred claim already processed, returning cached result"
+        );
+    }
+    Ok(cached)
+}
+
 /// For a deferred (saga-produced) command, return the cached result if it was
 /// already processed. `Ok(Some(_))` short-circuits the pipeline.
 ///
@@ -135,27 +162,17 @@ fn extract_source_info(
 /// return it, and PMs ignore events without one.
 async fn try_deferred_idempotency_replay(
     ctx: &dyn AggregateContext,
-    command_book: &CommandBook,
+    source_info: Option<&crate::storage::SourceInfo>,
     domain: &str,
     edition: &str,
     root_uuid: Uuid,
     correlation_id: &str,
 ) -> Result<Option<CommandResponse>, Status> {
-    let Some(deferred) = extract_angzarr_deferred(command_book) else {
-        return Ok(None);
-    };
-    let Some(mut existing_events) = ctx
-        .check_deferred_idempotency(domain, edition, root_uuid, deferred)
-        .await?
+    let Some(mut existing_events) =
+        cached_for_claim(ctx, source_info, domain, edition, root_uuid).await?
     else {
         return Ok(None);
     };
-
-    tracing::debug!(
-        source_domain = deferred.source.as_ref().map(|c| c.domain.as_str()),
-        source_seq = deferred.source_seq,
-        "Deferred command already processed, returning cached result"
-    );
 
     if let Some(ref mut cover) = existing_events.cover {
         if cover.correlation_id.is_empty() {
@@ -584,7 +601,7 @@ async fn execute_attempt(
     // already processed (idempotent replay).
     if let Some(response) = try_deferred_idempotency_replay(
         ctx,
-        &command_book,
+        source_info.as_ref(),
         &domain,
         &edition,
         root_uuid,
@@ -777,11 +794,15 @@ async fn speculative_mode(
     })
 }
 
-/// Execute a compensation (rejection notification) against the aggregate.
+/// Execute a compensation delivery (a Notification envelope carrying a
+/// RejectionNotification or a Compensate) against the aggregate.
 ///
-/// Returns the raw `BusinessResponse` so the saga-side caller can inspect a
-/// revocation response. Events the handler emits are persisted, published and
-/// fanned out like a command's.
+/// Returns the raw `BusinessResponse` so the delivering coordinator can act
+/// on a revocation response. Events the handler emits are persisted under
+/// the envelope's provenance claim (kind + tuple), published and fanned out
+/// like a command's; the Notification itself is never written to the
+/// stream. A redelivered envelope whose claim already has events does not
+/// invoke the handler again and returns the first delivery's events.
 pub async fn execute_compensation_pipeline(
     ctx: &dyn AggregateContext,
     business: &dyn ClientLogic,
@@ -790,6 +811,20 @@ pub async fn execute_compensation_pipeline(
     let (domain, root_uuid) = parse_command_cover(&command_book)?;
     let edition = extract_edition(&command_book)?;
     let correlation_id = crate::orchestration::correlation::extract_correlation_id(&command_book)?;
+    let claim = crate::orchestration::compensation::envelope_source_info(&command_book)?;
+
+    if let Some(mut cached) =
+        cached_for_claim(ctx, claim.as_ref(), &domain, &edition, root_uuid).await?
+    {
+        if let Some(ref mut cover) = cached.cover {
+            if cover.correlation_id.is_empty() {
+                cover.correlation_id = correlation_id.clone();
+            }
+        }
+        return Ok(BusinessResponse {
+            result: Some(business_response::Result::Events(cached)),
+        });
+    }
 
     let prior_events = load_prior(
         ctx,
@@ -819,7 +854,7 @@ pub async fn execute_compensation_pipeline(
                     root_uuid,
                     &correlation_id,
                     None,
-                    None,
+                    claim.as_ref(),
                 )
                 .await?;
             let (persisted, is_noop) = resolve_command_persist_outcome(outcome)?;

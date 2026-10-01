@@ -244,7 +244,8 @@ impl CommandPageExt for CommandPage {
 pub trait AngzarrDeferredSequenceExt {
     /// Generate the composite idempotency key for logging and display.
     ///
-    /// Format: `{source.edition}:{source.domain}:{source.root_hex}:{source_seq}`
+    /// Format: `{source.edition}:{source.domain}:{source.root_hex}:{source_seq}`;
+    /// a missing source contributes empty fields.
     ///
     /// Example: `angzarr:order:550e8400e29b41d4a716446655440000:7`
     fn idempotency_key(&self) -> String;
@@ -253,7 +254,7 @@ pub trait AngzarrDeferredSequenceExt {
 impl AngzarrDeferredSequenceExt for AngzarrDeferredSequence {
     fn idempotency_key(&self) -> String {
         use super::cover::CoverExt;
-        let source = self.source.as_ref().expect("source required");
+        let source = self.source.clone().unwrap_or_default();
         format!(
             "{}:{}:{}:{}",
             source.edition().unwrap_or_default(),

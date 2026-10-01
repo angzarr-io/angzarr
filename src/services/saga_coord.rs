@@ -150,7 +150,7 @@ impl SagaCoordinatorService for SagaCoord {
         // Create context and orchestrate
         let ctx = self.factory.create(Arc::new(source));
 
-        let reaction_errors = orchestrate_saga(
+        let report = orchestrate_saga(
             ctx.as_ref(),
             self.executor.as_ref(),
             self.command_bus.as_deref(),
@@ -166,9 +166,17 @@ impl SagaCoordinatorService for SagaCoord {
         .map_err(|e| super::orchestration_status("Saga", e))?;
 
         // Commands were delivered during orchestration; the response carries
-        // only CONTINUE-mode reaction errors, in its metadata.
+        // CONTINUE-mode reaction errors and, for a COMPENSATE caller, the
+        // reaction commands executed (so it can compensate them if another
+        // reaction fails), in its metadata.
         let mut response = Response::new(SagaResponse::default());
-        crate::orchestration::shared::attach_reaction_errors(&mut response, reaction_errors);
+        crate::orchestration::shared::attach_reaction_errors(&mut response, report.reaction_errors);
+        if cascade_error_mode == CascadeErrorMode::CascadeErrorCompensate {
+            crate::orchestration::shared::attach_executed_reactions(
+                &mut response,
+                &report.executed,
+            );
+        }
         Ok(response)
     }
 

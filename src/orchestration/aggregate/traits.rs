@@ -8,8 +8,7 @@ use tonic::Status;
 use uuid::Uuid;
 
 use crate::proto::{
-    AngzarrDeferredSequence, BusinessResponse, CascadeReactionError, CommandBook,
-    ContextualCommand, EventBook, Projection,
+    BusinessResponse, CascadeReactionError, CommandBook, ContextualCommand, EventBook, Projection,
 };
 
 /// What the synchronous downstream fan-out produced.
@@ -175,11 +174,12 @@ pub trait AggregateContext: Send + Sync {
         );
     }
 
-    /// Check if a saga-produced command has already been processed.
+    /// Check if a deferred command (or a notification about one) has already
+    /// been processed.
     ///
-    /// For commands with `angzarr_deferred` sequences, checks if events exist
-    /// with matching source info (edition, domain, root, sequence).
-    /// Returns `Some(events)` if already processed, None if new.
+    /// Looks up events persisted under the same provenance claim (kind +
+    /// source tuple). Returns `Some(events)` if already processed, None if
+    /// new.
     ///
     /// Default implementation returns None (no idempotency checking).
     async fn check_deferred_idempotency(
@@ -187,7 +187,7 @@ pub trait AggregateContext: Send + Sync {
         _domain: &str,
         _edition: &str,
         _root: Uuid,
-        _deferred: &AngzarrDeferredSequence,
+        _source: &crate::storage::SourceInfo,
     ) -> Result<Option<EventBook>, Status> {
         Ok(None)
     }

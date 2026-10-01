@@ -118,3 +118,20 @@ server:
 #   - name: order_saga
 #     address: localhost:70001
 #     synchronous: false
+
+# =============================================================================
+# Coordinator Outbox
+# =============================================================================
+# Compensation notifications (and PM commands that fail transiently after the
+# PM's events are persisted) are recorded in the coordinator's outbox and
+# delivered at least once with exponential backoff; after max_attempts the
+# entry is dead-lettered. Overrides are keyed by the coordinator's name.
+# outbox:
+#   max_attempts: 10
+#   initial_backoff_ms: 200
+#   max_backoff_ms: 30000
+#   jitter: true
+#   drain_interval_ms: 1000
+#   overrides:
+#     order-fulfillment:
+#       max_attempts: 5

@@ -48,18 +48,19 @@ pub trait CommandExecutor: Send + Sync {
 
 /// What happens when a saga- or PM-emitted command cannot be delivered.
 ///
-/// Bus-driven sagas and PMs (`None` error mode) have no caller to report to: a
-/// rejection is compensated at the source and dead-lettered, and a command
+/// A rejected command's RejectionNotification always reaches its source,
+/// whatever the policy. Bus-driven sagas and PMs (`None` error mode) have no
+/// caller to report to: a rejected command is dead-lettered, and a command
 /// that exhausts its retries is dead-lettered. A synchronous caller (CASCADE)
 /// chooses with its `CascadeErrorMode`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeliveryPolicy {
-    /// Compensate + DLQ, then carry on; the orchestration succeeds.
+    /// Dead-letter, then carry on; the orchestration succeeds.
     Background,
     /// Stop at the first failure and fail the orchestration.
     FailFast,
-    /// Stop at the first failure, write Compensate markers to the targets
-    /// of the commands already delivered, and fail.
+    /// Stop at the first failure, record a Compensate notification for every
+    /// command already executed, and fail.
     Compensate,
     /// Deliver every command; the orchestration succeeds with the commands
     /// that were delivered.
@@ -87,13 +88,6 @@ impl DeliveryPolicy {
     /// Whether a failure ends delivery of the remaining commands.
     pub(crate) fn stops_on_failure(self) -> bool {
         matches!(self, DeliveryPolicy::FailFast | DeliveryPolicy::Compensate)
-    }
-
-    /// Whether a rejected command is routed back to its source for
-    /// compensation (the bus-driven rejection flow). COMPENSATE instead
-    /// writes Compensate markers for the commands already delivered.
-    pub(crate) fn compensates(self) -> bool {
-        matches!(self, DeliveryPolicy::Background)
     }
 
     /// Whether failed commands are dead-lettered.

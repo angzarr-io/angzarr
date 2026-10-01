@@ -917,6 +917,9 @@ struct ScriptedSagaServer {
     fail: Option<tonic::Code>,
     /// Reaction errors reported in the success response's metadata.
     report: Vec<CascadeReactionError>,
+    /// Executed reaction commands reported in the success response's
+    /// metadata.
+    executed: Vec<crate::orchestration::shared::ExecutedCommand>,
     requests: Arc<Mutex<Vec<(SagaHandleRequest, tonic::metadata::MetadataMap)>>>,
 }
 
@@ -938,6 +941,10 @@ impl SagaCoordServiceTrait for ScriptedSagaServer {
                 crate::orchestration::shared::attach_reaction_errors(
                     &mut response,
                     self.report.clone(),
+                );
+                crate::orchestration::shared::attach_executed_reactions(
+                    &mut response,
+                    &self.executed,
                 );
                 Ok(response)
             }
@@ -1417,4 +1424,221 @@ async fn test_load_divergence_with_no_events_starts_at_zero() {
         .unwrap();
     assert!(book.pages.is_empty());
     assert_eq!(book.next_sequence, 0);
+}
+
+/// ReserveStock to inventory, as ReserveSaga delivered it, with the event
+/// it produced.
+fn executed_reserve_stock() -> crate::orchestration::shared::ExecutedCommand {
+    use crate::proto::{
+        command_page, page_header::SequenceType, AngzarrDeferredSequence, CommandPage, PageHeader,
+    };
+    crate::orchestration::shared::ExecutedCommand {
+        command: CommandBook {
+            cover: Some(Cover {
+                domain: "inventory".to_string(),
+                root: Some(crate::proto::Uuid { value: vec![5; 16] }),
+                correlation_id: "corr-1".to_string(),
+                edition: None,
+                ext: None,
+            }),
+            pages: vec![CommandPage {
+                header: Some(PageHeader {
+                    sync_mode: None,
+                    sequence_type: Some(SequenceType::AngzarrDeferred(AngzarrDeferredSequence {
+                        source: Some(Cover {
+                            domain: "orders".to_string(),
+                            root: Some(crate::proto::Uuid { value: vec![1; 16] }),
+                            ..Default::default()
+                        }),
+                        source_seq: 0,
+                        source_component: "ReserveSaga".to_string(),
+                        command_index: 0,
+                    })),
+                }),
+                payload: Some(command_page::Payload::Command(prost_types::Any {
+                    type_url: "/inventory.ReserveStock".to_string(),
+                    value: vec![1, 2, 3],
+                })),
+                merge_strategy: 0,
+            }],
+        },
+        events: Some(EventBook {
+            pages: vec![make_event_page(6)],
+            ..Default::default()
+        }),
+    }
+}
+
+/// C-0439 (cross-saga): under COMPENSATE, when a reaction fails, every
+/// reaction command another coordinator executed earlier in the request gets
+/// one Compensate notification addressed to its target, with the failure as
+/// the reason. Reactions are unordered: if the failing saga ran first, the
+/// other never ran and nothing is compensated.
+#[tokio::test]
+async fn sync_fanout_compensate_records_compensates_for_other_reactions() {
+    use crate::storage::ProvenanceKind;
+    let discovery = Arc::new(StaticServiceDiscovery::new());
+    let reserve = ScriptedSagaServer {
+        executed: vec![executed_reserve_stock()],
+        ..Default::default()
+    };
+    let charge = ScriptedSagaServer {
+        fail: Some(tonic::Code::Aborted),
+        ..Default::default()
+    };
+    spawn_saga(&discovery, "ReserveSaga", reserve.clone()).await;
+    spawn_saga(&discovery, "ChargeSaga", charge.clone()).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("orders");
+    let ctx = GrpcAggregateContext::new(
+        Arc::new(MockEventStore::new()),
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        discovery,
+        Arc::new(MockEventBus::new()),
+    )
+    .with_sync_mode(crate::proto::SyncMode::Cascade)
+    .with_cascade_error_mode(CascadeErrorMode::CascadeErrorCompensate)
+    .with_outbox(outbox);
+
+    let err = ctx.sync_fanout(&cascade_book()).await.unwrap_err();
+    assert!(err.message().contains("saga delivery rejected"));
+
+    let compensates = deliverer.attempted_of(ProvenanceKind::CompensateNotification);
+    if calls(&reserve).await == 0 {
+        assert!(
+            compensates.is_empty(),
+            "nothing executed, nothing compensated"
+        );
+        return;
+    }
+    assert_eq!(compensates.len(), 1);
+    let envelope = &compensates[0].book;
+    assert_eq!(envelope.cover.as_ref().unwrap().domain, "inventory");
+    let notification = crate::orchestration::compensation::envelope_notification(envelope).unwrap();
+    let compensate = <crate::proto::Compensate as prost::Message>::decode(
+        notification.payload.unwrap().value.as_slice(),
+    )
+    .unwrap();
+    assert_eq!(compensate.sequences, vec![6]);
+    assert_eq!(compensate.command_type, "inventory.ReserveStock");
+    assert!(compensate.reason.contains("ChargeSaga"));
+    assert!(compensate.reason.contains("saga delivery rejected"));
+}
+
+/// FAIL_FAST never compensates, whatever the other reactions executed.
+#[tokio::test]
+async fn sync_fanout_fail_fast_records_no_compensates() {
+    let discovery = Arc::new(StaticServiceDiscovery::new());
+    spawn_saga(
+        &discovery,
+        "ReserveSaga",
+        ScriptedSagaServer {
+            executed: vec![executed_reserve_stock()],
+            ..Default::default()
+        },
+    )
+    .await;
+    spawn_saga(
+        &discovery,
+        "ChargeSaga",
+        ScriptedSagaServer {
+            fail: Some(tonic::Code::Aborted),
+            ..Default::default()
+        },
+    )
+    .await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("orders");
+    let ctx = GrpcAggregateContext::new(
+        Arc::new(MockEventStore::new()),
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        discovery,
+        Arc::new(MockEventBus::new()),
+    )
+    .with_sync_mode(crate::proto::SyncMode::Cascade)
+    .with_cascade_error_mode(CascadeErrorMode::CascadeErrorFailFast)
+    .with_outbox(outbox);
+
+    ctx.sync_fanout(&cascade_book()).await.unwrap_err();
+    assert!(deliverer.attempted().is_empty());
+}
+
+/// A PM coordinator that fails every trigger.
+#[derive(Clone, Default)]
+struct FailingPmServer;
+
+#[tonic::async_trait]
+impl PmCoordServiceTrait for FailingPmServer {
+    async fn handle(
+        &self,
+        _request: tonic::Request<ProcessManagerCoordinatorRequest>,
+    ) -> Result<tonic::Response<ProcessManagerHandleResponse>, Status> {
+        Err(Status::aborted("card declined"))
+    }
+
+    async fn handle_speculative(
+        &self,
+        _request: tonic::Request<SpeculatePmRequest>,
+    ) -> Result<tonic::Response<ProcessManagerHandleResponse>, Status> {
+        Err(Status::unimplemented("not exercised by these tests"))
+    }
+}
+
+/// C-0439 (deterministic): the saga leg runs before the PM leg, so when the
+/// PM fails under COMPENSATE the saga's executed reaction is compensated.
+#[tokio::test]
+async fn sync_fanout_compensate_after_pm_failure_compensates_saga_reactions() {
+    use crate::storage::ProvenanceKind;
+    let discovery = Arc::new(StaticServiceDiscovery::new());
+    spawn_saga(
+        &discovery,
+        "ReserveSaga",
+        ScriptedSagaServer {
+            executed: vec![executed_reserve_stock()],
+            ..Default::default()
+        },
+    )
+    .await;
+    let (listener, port) = bind_ephemeral().await;
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(ProcessManagerCoordinatorServiceServer::new(FailingPmServer))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    discovery
+        .register_pm("ChargePm", &["orders"], "127.0.0.1", port)
+        .await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("orders");
+    let ctx = GrpcAggregateContext::new(
+        Arc::new(MockEventStore::new()),
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        discovery,
+        Arc::new(MockEventBus::new()),
+    )
+    .with_sync_mode(crate::proto::SyncMode::Cascade)
+    .with_cascade_error_mode(CascadeErrorMode::CascadeErrorCompensate)
+    .with_outbox(outbox);
+    let mut book = cascade_book();
+    book.cover.as_mut().unwrap().correlation_id = "corr-1".to_string();
+
+    let err = ctx.sync_fanout(&book).await.unwrap_err();
+    assert!(err.message().contains("card declined"));
+
+    let compensates = deliverer.attempted_of(ProvenanceKind::CompensateNotification);
+    assert_eq!(compensates.len(), 1);
+    assert_eq!(
+        compensates[0].book.cover.as_ref().unwrap().domain,
+        "inventory"
+    );
+    let notification =
+        crate::orchestration::compensation::envelope_notification(&compensates[0].book).unwrap();
+    let compensate = <crate::proto::Compensate as prost::Message>::decode(
+        notification.payload.unwrap().value.as_slice(),
+    )
+    .unwrap();
+    assert_eq!(compensate.sequences, vec![6]);
+    assert_eq!(compensate.reason, "ChargePm: card declined");
 }

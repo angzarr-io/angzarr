@@ -677,9 +677,9 @@ impl ProcessManagerContext for RejectionRecordingPm {
         &self,
         _command: &CommandBook,
         reason: &str,
-        _correlation_id: &str,
-    ) {
+    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.rejected.lock().await.push(reason.to_string());
+        Ok(())
     }
 }
 
@@ -956,9 +956,9 @@ impl ProcessManagerContext for DlqCommandPm {
         &self,
         _command: &CommandBook,
         _reason: &str,
-        _correlation_id: &str,
-    ) {
+    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.rejection_count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
         Some(&self.dlq_publisher)
@@ -968,12 +968,12 @@ impl ProcessManagerContext for DlqCommandPm {
     }
 }
 
-/// PM context identical to `DlqCommandPm` but ALSO wires a command outbox, so
+/// PM context identical to `DlqCommandPm` but ALSO wires an outbox, so
 /// the C04 else arm takes the outbox (redelivery) branch rather than the DLQ
 /// fallback.
 struct OutboxCommandPm {
     dlq_publisher: Arc<dyn DeadLetterPublisher>,
-    outbox: Arc<dyn crate::orchestration::process_manager::outbox::CommandOutbox>,
+    outbox: Arc<crate::orchestration::outbox::Outbox>,
 }
 
 #[async_trait]
@@ -1025,9 +1025,7 @@ impl ProcessManagerContext for OutboxCommandPm {
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
         Some(&self.dlq_publisher)
     }
-    fn command_outbox(
-        &self,
-    ) -> Option<&Arc<dyn crate::orchestration::process_manager::outbox::CommandOutbox>> {
+    fn outbox(&self) -> Option<&Arc<crate::orchestration::outbox::Outbox>> {
         Some(&self.outbox)
     }
     fn component_name(&self) -> &str {
@@ -1318,7 +1316,7 @@ async fn pm_2xx_success_does_not_publish() {
 //
 // The two tests below pin both branches: outbox present -> enqueue (no DLQ);
 // outbox absent -> DLQ capture. The full drain/redelivery state machine is
-// covered in `outbox.test.rs`.
+// covered in `orchestration/outbox/mod.test.rs`.
 
 /// C04 outbox path: a non-Decision command that fails transiently after the
 /// persist boundary is enqueued to the command outbox for redelivery — NOT
@@ -1326,10 +1324,8 @@ async fn pm_2xx_success_does_not_publish() {
 /// budget to spend).
 #[tokio::test]
 async fn pm_transient_command_after_persist_enqueues_to_outbox() {
-    use crate::orchestration::process_manager::outbox::{CommandOutbox, InMemoryCommandOutbox};
-
     let publisher = Arc::new(CapturingDlqPublisher::new());
-    let outbox: Arc<dyn CommandOutbox> = Arc::new(InMemoryCommandOutbox::new());
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("pm-test");
     let ctx = OutboxCommandPm {
         dlq_publisher: publisher.clone(),
         outbox: outbox.clone(),
@@ -1357,17 +1353,19 @@ async fn pm_transient_command_after_persist_enqueues_to_outbox() {
         "a fire-and-forget command failure must not fail orchestrate_pm"
     );
 
-    let pending = outbox.pending().await.unwrap();
+    let pending = outbox.open_keys().await;
     assert_eq!(
         pending.len(),
         1,
         "the transient command must be captured in the outbox for redelivery"
     );
-    assert_eq!(
-        pending[0].attempts, 0,
-        "no redelivery attempted yet at enqueue"
+    let entry = outbox.open_entry(&pending[0]).await.unwrap();
+    assert_eq!(entry.kind, crate::storage::ProvenanceKind::Command);
+    assert_eq!(entry.attempts, 0, "no redelivery attempted yet at record");
+    assert!(
+        deliverer.attempted().is_empty(),
+        "the drain loop, not the dispatch, redelivers"
     );
-    assert!(pending[0].last_error.contains("transport conflict"));
 
     let captured = publisher.captured.lock().await;
     assert!(
@@ -2227,10 +2225,12 @@ impl ProcessManagerContext for TwoCommandPm {
     async fn persist_pm_events(&self, events: &EventBook, correlation_id: &str) -> CommandOutcome {
         self.inner.persist_pm_events(events, correlation_id).await
     }
-    async fn on_command_rejected(&self, command: &CommandBook, reason: &str, correlation_id: &str) {
-        self.inner
-            .on_command_rejected(command, reason, correlation_id)
-            .await
+    async fn on_command_rejected(
+        &self,
+        command: &CommandBook,
+        reason: &str,
+    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
+        self.inner.on_command_rejected(command, reason).await
     }
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
         self.inner.dlq_publisher()
@@ -2269,7 +2269,7 @@ impl CommandExecutor for FirstFailsExecutor {
 }
 
 struct PmPolicyRun {
-    result: Result<Vec<crate::proto::CascadeReactionError>, BusError>,
+    result: Result<crate::orchestration::shared::ReactionReport, BusError>,
     executions: u32,
     compensations: u32,
     dead_letters: usize,
@@ -2308,7 +2308,7 @@ async fn run_pm_policy(mode: Option<CascadeErrorMode>, retryable: bool) -> PmPol
 }
 
 fn pm_aborted(
-    result: &Result<Vec<crate::proto::CascadeReactionError>, BusError>,
+    result: &Result<crate::orchestration::shared::ReactionReport, BusError>,
 ) -> &tonic::Status {
     match result {
         Err(BusError::Grpc(status)) => {
@@ -2333,7 +2333,10 @@ async fn pm_fail_fast_rejection_stops_and_reports() {
     let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorFailFast), false).await;
     assert!(pm_aborted(&run.result).message().contains("out of stock"));
     assert_eq!(run.executions, 1);
-    assert_eq!(run.compensations, 0);
+    assert_eq!(
+        run.compensations, 1,
+        "a rejection reaches its source in every mode"
+    );
     assert_eq!(run.dead_letters, 0);
 }
 
@@ -2342,7 +2345,10 @@ async fn pm_compensate_rejection_stops_and_reports() {
     let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorCompensate), false).await;
     pm_aborted(&run.result);
     assert_eq!(run.executions, 1);
-    assert_eq!(run.compensations, 0);
+    assert_eq!(
+        run.compensations, 1,
+        "a rejection reaches its source in every mode"
+    );
     assert_eq!(run.dead_letters, 0);
 }
 
@@ -2351,7 +2357,10 @@ async fn pm_continue_rejection_delivers_all_and_succeeds() {
     let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
     run.result.unwrap();
     assert_eq!(run.executions, 2);
-    assert_eq!(run.compensations, 0);
+    assert_eq!(
+        run.compensations, 1,
+        "a rejection reaches its source in every mode"
+    );
     assert_eq!(run.dead_letters, 0);
 }
 
@@ -2360,7 +2369,10 @@ async fn pm_dead_letter_rejection_captures_and_succeeds() {
     let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorDeadLetter), false).await;
     run.result.unwrap();
     assert_eq!(run.executions, 2);
-    assert_eq!(run.compensations, 0);
+    assert_eq!(
+        run.compensations, 1,
+        "a rejection reaches its source in every mode"
+    );
     assert_eq!(run.dead_letters, 1);
 }
 
@@ -2374,8 +2386,8 @@ async fn pm_fail_fast_transient_failure_reports() {
     assert_eq!(run.dead_letters, 0);
 }
 
-/// COMPENSATE does not route the failed command back for compensation; it
-/// fails the request (markers are written for commands already delivered).
+/// A transient failure under COMPENSATE is no rejection: nothing is routed
+/// to the source; the request fails.
 #[tokio::test]
 async fn pm_compensate_failure_does_not_compensate_source() {
     let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorCompensate), true).await;
@@ -2388,7 +2400,7 @@ async fn pm_compensate_failure_does_not_compensate_source() {
 #[tokio::test]
 async fn pm_continue_returns_reaction_errors() {
     let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
-    let errors = run.result.unwrap();
+    let errors = run.result.unwrap().reaction_errors;
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].component, "pm-policy");
     assert_eq!(errors[0].target.as_ref().unwrap().domain, "fulfillment");
@@ -2546,4 +2558,96 @@ async fn test_pm_next_trigger_is_not_deduplicated() {
         .unwrap();
     }
     assert_eq!(ctx.inner.handle_calls.load(Ordering::SeqCst), 2);
+}
+
+// ============================================================================
+// Rejections reach their source through the outbox
+// ============================================================================
+
+/// PM emitting one deferred command (no header: the coordinator stamps the
+/// trigger as its source), with an outbox.
+struct DeferredCommandPm {
+    outbox: Arc<crate::orchestration::outbox::Outbox>,
+}
+
+#[async_trait]
+impl ProcessManagerContext for DeferredCommandPm {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        _pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::{command_page::Payload as CmdPayload, CommandPage};
+        Ok(PmHandleResponse {
+            commands: vec![CommandBook {
+                cover: Some(Cover {
+                    domain: "fulfillment".to_string(),
+                    correlation_id: "corr-1".to_string(),
+                    ..Default::default()
+                }),
+                pages: vec![CommandPage {
+                    payload: Some(CmdPayload::Command(prost_types::Any {
+                        type_url: "/fulfillment.Ship".to_string(),
+                        value: vec![],
+                    })),
+                    ..Default::default()
+                }],
+            }],
+            process_events: vec![],
+            facts: vec![],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        _process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        CommandOutcome::Success(CommandResponse::default())
+    }
+    fn outbox(&self) -> Option<&Arc<crate::orchestration::outbox::Outbox>> {
+        Some(&self.outbox)
+    }
+}
+
+/// C-0472 (PM side): a rejected PM command's RejectionNotification is
+/// recorded in the outbox and delivered to the command's source — the
+/// trigger aggregate — whatever the caller's mode.
+#[tokio::test]
+async fn pm_rejection_is_delivered_to_its_source() {
+    use crate::storage::ProvenanceKind;
+    for mode in [
+        None,
+        Some(CascadeErrorMode::CascadeErrorFailFast),
+        Some(CascadeErrorMode::CascadeErrorContinue),
+    ] {
+        let (outbox, deliverer) =
+            crate::orchestration::outbox::testing::recording_outbox("pm-flow");
+        let ctx = DeferredCommandPm { outbox };
+        let executor = CodeRejectingExecutor {
+            code: tonic::Code::FailedPrecondition,
+            message: "no stock".to_string(),
+        };
+        let _ = orchestrate_pm(
+            &ctx,
+            &NoOpFetcher,
+            &executor,
+            None,
+            &trigger_event(),
+            "pm-flow",
+            "pm-flow",
+            "corr-1",
+            SyncMode::Cascade,
+            fast_backoff(),
+            mode,
+        )
+        .await;
+
+        let rejections = deliverer.attempted_of(ProvenanceKind::RejectionNotification);
+        assert_eq!(rejections.len(), 1, "mode {mode:?}");
+        assert_eq!(
+            rejections[0].book.domain(),
+            "order",
+            "routed to the trigger"
+        );
+    }
 }

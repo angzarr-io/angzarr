@@ -13,7 +13,6 @@ use tracing::{error, info, warn};
 use crate::bus::{init_event_bus, EventBusMode, EventHandler, MessagingConfig};
 use crate::config::{Config, TargetConfig};
 use crate::orchestration::command::grpc::GrpcCommandExecutor;
-use crate::orchestration::command::CommandExecutor;
 use crate::orchestration::destination::grpc::GrpcDestinationFetcher;
 use crate::orchestration::destination::DestinationFetcher;
 use crate::orchestration::fact::grpc::GrpcFactExecutor;
@@ -76,7 +75,7 @@ pub async fn connect_endpoints(
     endpoints_str: &str,
 ) -> Result<
     (
-        Arc<dyn CommandExecutor>,
+        Arc<GrpcCommandExecutor>,
         Arc<dyn DestinationFetcher>,
         Arc<dyn FactExecutor>,
     ),
@@ -142,7 +141,7 @@ pub async fn connect_endpoints(
         info!(domain = %domain, address = %address, "Connected to aggregate");
     }
 
-    let executor: Arc<dyn CommandExecutor> = Arc::new(GrpcCommandExecutor::new(command_clients));
+    let executor = Arc::new(GrpcCommandExecutor::new(command_clients));
     let fetcher: Arc<dyn DestinationFetcher> = Arc::new(GrpcDestinationFetcher::new(query_clients));
     let fact_executor: Arc<dyn FactExecutor> = Arc::new(GrpcFactExecutor::new(fact_clients));
 

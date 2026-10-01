@@ -49,7 +49,9 @@ use crate::proto_ext::CoverExt;
 use crate::utils::retry::{run_with_retry, RetryOutcome, RetryableOperation};
 
 use super::command::{CommandExecutor, CommandOutcome, DeliveryPolicy};
-use super::shared::{fill_fact_correlation_id, UndeliveredCommand};
+use super::shared::{
+    fill_fact_correlation_id, ExecutedCommand, ReactionReport, UndeliveredCommand,
+};
 use super::FactExecutor;
 
 /// Validator for saga output domain routing.
@@ -112,8 +114,24 @@ pub trait SagaRetryContext: Send + Sync {
         sync_mode: SyncMode,
     ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>>;
 
-    /// Handle a permanently rejected command (compensation, logging, etc.)
-    async fn on_command_rejected(&self, command: &CommandBook, reason: &str);
+    /// Raise the rejection of a command this saga emitted: record its
+    /// RejectionNotification in the compensation outbox, addressed to the
+    /// command's `angzarr_deferred.source`. An error means the obligation
+    /// was not recorded and the trigger must not be acknowledged.
+    async fn on_command_rejected(
+        &self,
+        command: &CommandBook,
+        reason: &str,
+    ) -> Result<(), super::outbox::OutboxError> {
+        super::shared::record_rejection(self.outbox(), command, reason).await
+    }
+
+    /// The coordinator's compensation outbox: rejection and Compensate
+    /// notifications are recorded and delivered through it. `None` leaves
+    /// rejections unrouted (logged) and Compensates unrecorded (reported).
+    fn outbox(&self) -> Option<&Arc<super::outbox::Outbox>> {
+        None
+    }
 
     /// Cover of the source event that triggered this saga invocation.
     ///
@@ -163,8 +181,11 @@ struct RetryExhaustionTracker {
     attempts: u32,
     /// Commands the destination rejected (non-retryable), across attempts.
     rejected: Vec<UndeliveredCommand>,
-    /// Events produced by commands delivered so far, across attempts.
-    executed: Vec<EventBook>,
+    /// Commands executed so far, with their events, across attempts.
+    executed: Vec<ExecutedCommand>,
+    /// A rejection whose notification could not be recorded: the
+    /// orchestration fails so the trigger is redelivered.
+    unrecorded_rejection: Option<String>,
 }
 
 /// State for retryable saga command delivery.
@@ -271,9 +292,10 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
             match self.executor.execute(command.clone(), self.sync_mode).await {
                 CommandOutcome::Success(response) => {
                     debug!(%domain, "Saga command executed successfully");
-                    if let Some(events) = response.events {
-                        self.tracker.lock().await.executed.push(events);
-                    }
+                    self.tracker.lock().await.executed.push(ExecutedCommand {
+                        command: command.clone(),
+                        events: response.events,
+                    });
                 }
                 CommandOutcome::Retryable { reason, .. } => {
                     warn!(%domain, error = %reason, "Transient delivery failure, will retry");
@@ -289,8 +311,12 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
                 }
                 CommandOutcome::Rejected { code, message } => {
                     error!(%domain, ?code, error = %message, "Saga command rejected (non-retryable)");
-                    if self.policy.compensates() {
-                        self.context.on_command_rejected(&command, &message).await;
+                    // A rejection reaches its source whatever the policy.
+                    if let Err(e) = self.context.on_command_rejected(&command, &message).await {
+                        error!(%domain, error = %e, "rejection notification not recorded");
+                        let reason = format!("{domain}: rejection notification not recorded: {e}");
+                        self.tracker.lock().await.unrecorded_rejection = Some(reason.clone());
+                        return RetryOutcome::Fatal(reason);
                     }
                     if self.policy.dead_letters() {
                         publish_immediate_rejection_dlq(self.context, &command, code, &message)
@@ -504,6 +530,7 @@ impl<'a> SagaRetryBuilder<'a> {
         let mut tracker = tracker_for_builder.lock().await;
         let mut undelivered = std::mem::take(&mut tracker.rejected);
         let executed = std::mem::take(&mut tracker.executed);
+        let unrecorded_rejection = tracker.unrecorded_rejection.take();
         if let Err(e) = outcome {
             error!(error = %e, "Saga command delivery failed after retries");
             let exhausted: Vec<UndeliveredCommand> = tracker
@@ -524,6 +551,7 @@ impl<'a> SagaRetryBuilder<'a> {
         DeliveryOutcome {
             undelivered,
             executed,
+            unrecorded_rejection,
         }
     }
 }
@@ -533,8 +561,10 @@ impl<'a> SagaRetryBuilder<'a> {
 struct DeliveryOutcome {
     /// Commands that could not be delivered.
     undelivered: Vec<UndeliveredCommand>,
-    /// Events the delivered commands produced at their targets.
-    executed: Vec<EventBook>,
+    /// Commands their targets executed, with the events they produced.
+    executed: Vec<ExecutedCommand>,
+    /// A rejection whose notification could not be recorded.
+    unrecorded_rejection: Option<String>,
 }
 
 /// Saga orchestration with delivery-retry model.
@@ -558,11 +588,16 @@ struct DeliveryOutcome {
 ///
 /// `error_mode` is the synchronous caller's `CascadeErrorMode` (`None` for
 /// bus-driven sagas, which have no caller): FAIL_FAST and COMPENSATE stop at
-/// the first undeliverable command and return `Err` (COMPENSATE routes it to
-/// its source for compensation first), CONTINUE delivers everything and then
-/// returns `Err` listing the failures, DEAD_LETTER dead-letters failures and
-/// returns `Ok`. Without a caller, failures are compensated and
-/// dead-lettered and the orchestration returns `Ok`.
+/// the first undeliverable command and return `Err` (COMPENSATE first records
+/// a Compensate notification for every command already executed), CONTINUE
+/// delivers everything and returns the failures as reaction errors,
+/// DEAD_LETTER dead-letters failures and returns `Ok`. Without a caller,
+/// failures are dead-lettered and the orchestration returns `Ok`. In every
+/// mode a rejected command's RejectionNotification is recorded for its
+/// source; failing to record it fails the orchestration.
+///
+/// The returned report lists the reaction errors (CONTINUE) and the commands
+/// their targets executed.
 #[tracing::instrument(name = "saga.orchestrate", skip_all, fields(%saga_name, %correlation_id))]
 #[allow(clippy::too_many_arguments)]
 pub async fn orchestrate_saga(
@@ -576,7 +611,7 @@ pub async fn orchestrate_saga(
     sync_mode: SyncMode,
     backoff: ExponentialBuilder,
     error_mode: Option<CascadeErrorMode>,
-) -> Result<Vec<crate::proto::CascadeReactionError>, BusError> {
+) -> Result<ReactionReport, BusError> {
     let policy = DeliveryPolicy::from_mode(error_mode);
     // Pass the inherited sync_mode so distributed (gRPC) contexts stamp it
     // onto the outgoing SagaHandleRequest.
@@ -661,12 +696,15 @@ pub async fn orchestrate_saga(
         .policy(policy)
         .execute()
         .await;
+    if let Some(reason) = delivery.unrecorded_rejection {
+        return Err(BusError::Publish(reason));
+    }
     let reaction_errors = super::shared::settle_delivery(
         policy,
         saga_name,
         &delivery.undelivered,
         &delivery.executed,
-        fact_executor,
+        ctx.outbox(),
     )
     .await?;
 
@@ -728,7 +766,10 @@ pub async fn orchestrate_saga(
         }
     }
 
-    Ok(reaction_errors)
+    Ok(ReactionReport {
+        reaction_errors,
+        executed: delivery.executed,
+    })
 }
 
 #[cfg(test)]

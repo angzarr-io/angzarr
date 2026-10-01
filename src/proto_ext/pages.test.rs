@@ -214,3 +214,16 @@ fn command_decode_typed_rejects_mismatched_suffix() {
     let decoded: Option<Compensate> = page.decode_typed();
     assert!(decoded.is_none());
 }
+
+/// Provenance arrives off the wire: a header without a source still yields
+/// a key (empty source fields) instead of panicking.
+#[test]
+fn idempotency_key_tolerates_a_missing_source() {
+    use crate::proto::AngzarrDeferredSequence;
+    let deferred = AngzarrDeferredSequence {
+        source: None,
+        source_seq: 3,
+        ..Default::default()
+    };
+    assert_eq!(deferred.idempotency_key(), ":::3");
+}

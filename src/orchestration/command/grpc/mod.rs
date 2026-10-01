@@ -95,6 +95,26 @@ impl CommandExecutor for GrpcCommandExecutor {
     }
 }
 
+#[async_trait]
+impl crate::orchestration::outbox::CompensationSender for GrpcCommandExecutor {
+    async fn handle_compensation(
+        &self,
+        envelope: CommandBook,
+    ) -> Result<crate::proto::BusinessResponse, tonic::Status> {
+        let domain = envelope.domain().to_string();
+        let client = self.clients.get(&domain).ok_or_else(|| {
+            tonic::Status::unavailable(format!("{}: {}", errmsg::NO_AGGREGATE_FOR_DOMAIN, domain))
+        })?;
+        let mut client = client.lock().await.clone();
+        client
+            .handle_compensation(
+                crate::orchestration::outbox::delivery::compensation_request(envelope),
+            )
+            .await
+            .map(tonic::Response::into_inner)
+    }
+}
+
 #[cfg(test)]
 #[path = "mod.test.rs"]
 mod tests;

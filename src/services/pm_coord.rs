@@ -149,7 +149,7 @@ impl ProcessManagerCoordinatorService for PmCoord {
         // Create context and orchestrate
         let ctx = self.factory.create();
 
-        let reaction_errors = orchestrate_pm(
+        let report = orchestrate_pm(
             ctx.as_ref(),
             self.fetcher.as_ref(),
             self.executor.as_ref(),
@@ -166,9 +166,17 @@ impl ProcessManagerCoordinatorService for PmCoord {
         .map_err(|e| super::orchestration_status("PM", e))?;
 
         // Commands were delivered during orchestration; the response carries
-        // only CONTINUE-mode reaction errors, in its metadata.
+        // CONTINUE-mode reaction errors and, for a COMPENSATE caller, the
+        // reaction commands executed (so it can compensate them if another
+        // reaction fails), in its metadata.
         let mut response = Response::new(ProcessManagerHandleResponse::default());
-        crate::orchestration::shared::attach_reaction_errors(&mut response, reaction_errors);
+        crate::orchestration::shared::attach_reaction_errors(&mut response, report.reaction_errors);
+        if cascade_error_mode == CascadeErrorMode::CascadeErrorCompensate {
+            crate::orchestration::shared::attach_executed_reactions(
+                &mut response,
+                &report.executed,
+            );
+        }
         Ok(response)
     }
 
