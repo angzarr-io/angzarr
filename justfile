@@ -597,7 +597,8 @@ check-ci-recipes:
 
 # Every CI job, run locally the way CI runs it (mutation testing excepted:
 # `just mutants-ci` on a git.diff).
-ci-local: check-ci-recipes check-submodules-clean
+ci-local: check-ci-recipes
+    just check-submodules-clean
     just _container fmt
     just _container lint
     just _container test

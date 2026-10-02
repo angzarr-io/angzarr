@@ -6,14 +6,18 @@ against FILE (default: justfile). The `storage` / `bus` dispatchers also need
 their `_storage-<backend>` / `_bus-<backend>` recipe. Recipe bodies in
 justfile.container must call nested recipes through `{{justfile()}}`: CI runs
 that file with `-f`, so a bare `just <recipe>` would resolve against the host
-justfile instead.
+justfile instead. Jobs that check out without submodules still parse the
+justfile, so it must not depend on recipes imported from a submodule.
 """
 
 import glob
 import json
+import pathlib
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 
 INVOCATION = re.compile(r"(?:^|[\s|;&])just\s+(-f\s+\S+\s+)?([A-Za-z_][\w-]*)(?:\s+([\w-]+))?")
 
@@ -26,6 +30,26 @@ def recipes(justfile: str) -> set[str]:
         check=True,
     )
     return set(json.loads(dump.stdout)["recipes"])
+
+
+def parses_without_submodules() -> str | None:
+    """Parse the justfile in a copy of the tree without submodule content."""
+    tracked = subprocess.run(
+        ["git", "ls-files", "-s"], capture_output=True, text=True, check=True
+    ).stdout.splitlines()
+    files = [line.split("\t", 1)[1] for line in tracked if not line.startswith("160000")]
+    with tempfile.TemporaryDirectory() as tmp:
+        for name in files:
+            if not (name.endswith("justfile") or name.endswith(".just")):
+                continue
+            target = pathlib.Path(tmp, name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy(name, target)
+        subprocess.run(["git", "init", "-q", tmp], check=True)
+        result = subprocess.run(
+            ["just", "--summary"], cwd=tmp, capture_output=True, text=True
+        )
+        return None if result.returncode == 0 else result.stderr.strip()
 
 
 def main() -> int:
@@ -54,6 +78,10 @@ def main() -> int:
                 failures.append(
                     f"justfile.container:{number}: nested `just` call without -f {{{{justfile()}}}}"
                 )
+
+    problem = parses_without_submodules()
+    if problem:
+        failures.append(f"justfile does not parse without submodules: {problem}")
 
     for failure in failures:
         print(failure)
