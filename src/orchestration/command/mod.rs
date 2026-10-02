@@ -27,9 +27,38 @@ pub enum CommandOutcome {
     },
     /// Non-retryable rejection. Carries the originating gRPC `Code` so
     /// downstream consumers (DLQ, compensation) can classify without
-    /// re-parsing the message. See `crate::dlq::trigger::CodeDlqExt` for
-    /// the canonical permanent/transient split.
-    Rejected { code: Code, message: String },
+    /// re-parsing the message (see `crate::dlq::trigger::CodeDlqExt` for
+    /// the canonical permanent/transient split), the status message, and
+    /// the machine rejection code (`google.rpc.ErrorInfo.reason` in the
+    /// status details; empty when there is none).
+    Rejected {
+        code: Code,
+        message: String,
+        error_code: String,
+    },
+}
+
+impl CommandOutcome {
+    /// Classify a failed command's status: retryable codes become
+    /// `Retryable` (carrying the aggregate state from the details when
+    /// present), everything else `Rejected` with the status's code, message
+    /// and ErrorInfo.reason.
+    pub fn from_status(status: tonic::Status) -> Self {
+        use crate::proto_ext::StatusExt;
+        if crate::utils::retry::is_retryable_status(&status) {
+            return CommandOutcome::Retryable {
+                reason: status.message().to_string(),
+                current_state: crate::utils::single_sequence_check::extract_event_book_from_status(
+                    &status,
+                ),
+            };
+        }
+        CommandOutcome::Rejected {
+            code: status.code(),
+            message: status.message().to_string(),
+            error_code: status.error_info_reason(),
+        }
+    }
 }
 
 /// Executes commands against aggregates.

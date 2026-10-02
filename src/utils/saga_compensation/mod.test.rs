@@ -74,6 +74,7 @@ fn make_context() -> CompensationContext {
     CompensationContext {
         source: make_angzarr_deferred(),
         rejection_reason: "Customer not found".to_string(),
+        rejection_code: "CUSTOMER_NOT_FOUND".to_string(),
         rejected_command: make_test_command(),
         correlation_id: "corr-123".to_string(),
     }
@@ -152,6 +153,7 @@ fn test_build_rejection_notification() {
     let notification = build_rejection_notification(&context);
 
     assert_eq!(notification.rejection_reason, "Customer not found");
+    assert_eq!(notification.code, "CUSTOMER_NOT_FOUND");
     assert!(notification.rejected_command.is_some());
 
     // Source provenance is in the rejected command's page header

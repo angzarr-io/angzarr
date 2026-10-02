@@ -91,6 +91,7 @@ impl SagaRetryContext for AlwaysRejects {
         &self,
         _command: &CommandBook,
         _reason: &str,
+        _code: &str,
     ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.rejection_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -155,6 +156,7 @@ impl CommandExecutor for RejectingExecutor {
         CommandOutcome::Rejected {
             code: tonic::Code::FailedPrecondition,
             message: "Business rule violation".to_string(),
+            error_code: String::new(),
         }
     }
 }
@@ -839,6 +841,7 @@ impl SagaRetryContext for DlqAwareContext {
         &self,
         _command: &CommandBook,
         _reason: &str,
+        _code: &str,
     ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.rejection_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -869,6 +872,7 @@ impl CommandExecutor for CodeRejectingExecutor {
         CommandOutcome::Rejected {
             code: self.code,
             message: self.message.clone(),
+            error_code: String::new(),
         }
     }
 }
@@ -1696,8 +1700,9 @@ impl SagaRetryContext for TwoCommandSaga {
         &self,
         command: &CommandBook,
         reason: &str,
+        code: &str,
     ) -> Result<(), crate::orchestration::outbox::OutboxError> {
-        self.inner.on_command_rejected(command, reason).await
+        self.inner.on_command_rejected(command, reason, code).await
     }
     fn source_cover(&self) -> Option<&Cover> {
         None
@@ -1735,6 +1740,7 @@ impl CommandExecutor for FirstFailsExecutor {
             (true, false) => CommandOutcome::Rejected {
                 code: tonic::Code::FailedPrecondition,
                 message: "insufficient funds".to_string(),
+                error_code: String::new(),
             },
             (true, true) => CommandOutcome::Retryable {
                 reason: "Unavailable".to_string(),
@@ -1890,6 +1896,7 @@ impl CommandExecutor for SecondRejectedExecutor {
             CommandOutcome::Rejected {
                 code: tonic::Code::FailedPrecondition,
                 message: "card declined".to_string(),
+                error_code: String::new(),
             }
         }
     }
@@ -2012,6 +2019,7 @@ async fn test_unrecorded_rejection_fails_the_orchestration() {
             &self,
             _command: &CommandBook,
             _reason: &str,
+            _code: &str,
         ) -> Result<(), crate::orchestration::outbox::OutboxError> {
             Err(crate::orchestration::outbox::OutboxError::Log(
                 "disk full".into(),
@@ -2068,4 +2076,105 @@ async fn test_background_retry_exhaustion_dead_letters_only() {
     run.result.unwrap();
     assert_eq!(run.dead_letters, 1);
     assert_eq!(run.compensations, 0);
+}
+
+// ============================================================================
+// Rejection code reaches the source
+// ============================================================================
+
+/// Saga emitting one command for an `order` source, recording rejections
+/// through the default `on_command_rejected` into its outbox.
+struct OutboxSaga {
+    source: Cover,
+    outbox: Arc<crate::orchestration::outbox::Outbox>,
+}
+
+#[async_trait]
+impl SagaRetryContext for OutboxSaga {
+    async fn handle(
+        &self,
+        _sync_mode: SyncMode,
+    ) -> Result<SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(SagaResponse {
+            commands: vec![CommandBook {
+                cover: Some(Cover {
+                    domain: "payment".to_string(),
+                    root: Some(crate::proto::Uuid { value: vec![9; 16] }),
+                    ..Default::default()
+                }),
+                pages: vec![crate::proto::CommandPage::default()],
+            }],
+            events: vec![],
+        })
+    }
+    fn source_cover(&self) -> Option<&Cover> {
+        Some(&self.source)
+    }
+    fn source_max_sequence(&self) -> u32 {
+        0
+    }
+    fn outbox(&self) -> Option<&Arc<crate::orchestration::outbox::Outbox>> {
+        Some(&self.outbox)
+    }
+}
+
+/// Rejects every command with code CARD_DECLINED, message "card declined".
+struct CardDeclinedExecutor;
+
+#[async_trait]
+impl CommandExecutor for CardDeclinedExecutor {
+    async fn execute(&self, _command: CommandBook, _sync_mode: SyncMode) -> CommandOutcome {
+        CommandOutcome::Rejected {
+            code: tonic::Code::FailedPrecondition,
+            message: "card declined".to_string(),
+            error_code: "CARD_DECLINED".to_string(),
+        }
+    }
+}
+
+/// C-0462 / C-0471: a rejected saga command's RejectionNotification is
+/// recorded for its source with the machine code and the human message in
+/// separate fields, in every cascade_error_mode.
+#[tokio::test]
+async fn test_rejection_notification_carries_code_and_message() {
+    for mode in [
+        None,
+        Some(CascadeErrorMode::CascadeErrorFailFast),
+        Some(CascadeErrorMode::CascadeErrorContinue),
+        Some(CascadeErrorMode::CascadeErrorCompensate),
+        Some(CascadeErrorMode::CascadeErrorDeadLetter),
+    ] {
+        let (outbox, deliverer) =
+            crate::orchestration::outbox::testing::recording_outbox("ChargeSaga");
+        let ctx = OutboxSaga {
+            source: Cover {
+                domain: "order".to_string(),
+                root: Some(crate::proto::Uuid { value: vec![1; 16] }),
+                ..Default::default()
+            },
+            outbox,
+        };
+        let _ = orchestrate_saga(
+            &ctx,
+            &CardDeclinedExecutor,
+            None,
+            None,
+            "ChargeSaga",
+            "corr-1",
+            None,
+            SyncMode::Cascade,
+            fast_backoff(),
+            mode,
+        )
+        .await;
+        let rejections =
+            deliverer.attempted_of(crate::storage::ProvenanceKind::RejectionNotification);
+        assert_eq!(rejections.len(), 1, "{mode:?}");
+        assert_eq!(rejections[0].book.cover.as_ref().unwrap().domain, "order");
+        assert_eq!(
+            crate::orchestration::outbox::testing::rejection_code_and_reason(&rejections[0].book),
+            ("CARD_DECLINED".to_string(), "card declined".to_string()),
+            "{mode:?}"
+        );
+    }
 }

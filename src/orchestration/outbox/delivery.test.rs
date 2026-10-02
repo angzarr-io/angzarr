@@ -43,8 +43,12 @@ fn reserve_stock() -> CommandBook {
 
 fn rejection_entry() -> OutboxEntry {
     OutboxEntry::notification(
-        crate::orchestration::compensation::rejection_envelope(&reserve_stock(), "out of stock")
-            .unwrap(),
+        crate::orchestration::compensation::rejection_envelope(
+            &reserve_stock(),
+            "out of stock",
+            "OUT_OF_STOCK",
+        )
+        .unwrap(),
     )
     .unwrap()
 }
@@ -103,6 +107,7 @@ async fn notification_unimplemented_is_rejected() {
         DeliveryResult::Rejected {
             code: tonic::Code::Unimplemented,
             message: "no undo handler".to_string(),
+            error_code: String::new(),
         }
     );
 }
@@ -153,6 +158,7 @@ async fn command_outcomes_map_to_delivery_results() {
         || CommandOutcome::Rejected {
             code: tonic::Code::FailedPrecondition,
             message: "out of stock".to_string(),
+            error_code: String::new(),
         },
         StdMutex::new(Vec::new()),
     ));
@@ -162,6 +168,7 @@ async fn command_outcomes_map_to_delivery_results() {
         DeliveryResult::Rejected {
             code: tonic::Code::FailedPrecondition,
             message: "out of stock".to_string(),
+            error_code: String::new(),
         }
     );
 }

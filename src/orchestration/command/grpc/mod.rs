@@ -11,8 +11,6 @@ use tokio::sync::Mutex;
 use crate::proto::command_handler_coordinator_service_client::CommandHandlerCoordinatorServiceClient;
 use crate::proto::{CommandBook, CommandRequest, SyncMode};
 use crate::proto_ext::{correlated_request, CoverExt};
-use crate::utils::retry::is_retryable_status;
-use crate::utils::single_sequence_check::extract_event_book_from_status;
 
 use super::CommandExecutor;
 use super::CommandOutcome;
@@ -80,17 +78,7 @@ impl CommandExecutor for GrpcCommandExecutor {
     async fn execute(&self, command: CommandBook, sync_mode: SyncMode) -> CommandOutcome {
         match self.execute_raw(command, sync_mode).await {
             Ok(response) => CommandOutcome::Success(response),
-            Err(e) if is_retryable_status(&e) => {
-                let current_state = extract_event_book_from_status(&e);
-                CommandOutcome::Retryable {
-                    reason: e.message().to_string(),
-                    current_state,
-                }
-            }
-            Err(e) => CommandOutcome::Rejected {
-                code: e.code(),
-                message: e.message().to_string(),
-            },
+            Err(status) => CommandOutcome::from_status(status),
         }
     }
 }

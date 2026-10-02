@@ -122,8 +122,9 @@ pub trait SagaRetryContext: Send + Sync {
         &self,
         command: &CommandBook,
         reason: &str,
+        code: &str,
     ) -> Result<(), super::outbox::OutboxError> {
-        super::shared::record_rejection(self.outbox(), command, reason).await
+        super::shared::record_rejection(self.outbox(), command, reason, code).await
     }
 
     /// The coordinator's compensation outbox: rejection and Compensate
@@ -309,10 +310,18 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
                         .failed_commands
                         .push((command.clone(), reason));
                 }
-                CommandOutcome::Rejected { code, message } => {
+                CommandOutcome::Rejected {
+                    code,
+                    message,
+                    error_code,
+                } => {
                     error!(%domain, ?code, error = %message, "Saga command rejected (non-retryable)");
                     // A rejection reaches its source whatever the policy.
-                    if let Err(e) = self.context.on_command_rejected(&command, &message).await {
+                    if let Err(e) = self
+                        .context
+                        .on_command_rejected(&command, &message, &error_code)
+                        .await
+                    {
                         error!(%domain, error = %e, "rejection notification not recorded");
                         let reason = format!("{domain}: rejection notification not recorded: {e}");
                         self.tracker.lock().await.unrecorded_rejection = Some(reason.clone());

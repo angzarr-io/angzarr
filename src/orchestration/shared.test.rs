@@ -385,9 +385,14 @@ fn test_executed_reactions_round_trip_through_response_metadata() {
 async fn test_record_rejection_routes_to_the_source() {
     let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("S");
 
-    record_rejection(Some(&outbox), &deferred_to("payment", 0), "card declined")
-        .await
-        .unwrap();
+    record_rejection(
+        Some(&outbox),
+        &deferred_to("payment", 0),
+        "card declined",
+        "CARD_DECLINED",
+    )
+    .await
+    .unwrap();
 
     let attempted = deliverer.attempted();
     assert_eq!(attempted.len(), 1);
@@ -399,6 +404,10 @@ async fn test_record_rejection_routes_to_the_source() {
         crate::proto_ext::CoverExt::domain(&attempted[0].book),
         "order"
     );
+    assert_eq!(
+        crate::orchestration::outbox::testing::rejection_code_and_reason(&attempted[0].book),
+        ("CARD_DECLINED".to_string(), "card declined".to_string())
+    );
 }
 
 /// A command without provenance has no source; nothing is recorded.
@@ -408,10 +417,10 @@ async fn test_record_rejection_without_provenance_records_nothing() {
     let mut command = deferred_to("payment", 0);
     command.pages[0].header = None;
 
-    record_rejection(Some(&outbox), &command, "card declined")
+    record_rejection(Some(&outbox), &command, "card declined", "CARD_DECLINED")
         .await
         .unwrap();
-    record_rejection(None, &deferred_to("payment", 0), "card declined")
+    record_rejection(None, &deferred_to("payment", 0), "card declined", "")
         .await
         .unwrap();
 

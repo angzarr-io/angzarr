@@ -255,7 +255,7 @@ async fn test_rejected_command_is_routed_to_source_compensation() {
         }],
     };
 
-    ctx.on_command_rejected(&rejected, "out of stock")
+    ctx.on_command_rejected(&rejected, "out of stock", "OUT_OF_STOCK")
         .await
         .unwrap();
 

@@ -36,6 +36,18 @@ impl OutboxDeliverer for RecordingDeliverer {
     }
 }
 
+/// The (code, rejection_reason) of a RejectionNotification envelope.
+pub(crate) fn rejection_code_and_reason(envelope: &crate::proto::CommandBook) -> (String, String) {
+    use prost::Message;
+    let notification = crate::orchestration::compensation::envelope_notification(envelope)
+        .expect("a Notification envelope");
+    let rejection = crate::proto::RejectionNotification::decode(
+        notification.payload.expect("a payload").value.as_slice(),
+    )
+    .expect("a RejectionNotification");
+    (rejection.code, rejection.rejection_reason)
+}
+
 /// An in-memory outbox delivering through a [`RecordingDeliverer`].
 pub(crate) fn recording_outbox(name: &str) -> (Arc<Outbox>, Arc<RecordingDeliverer>) {
     let deliverer = Arc::new(RecordingDeliverer::default());

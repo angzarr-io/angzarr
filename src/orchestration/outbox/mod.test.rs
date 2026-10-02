@@ -57,6 +57,7 @@ fn rejection(command_index: u32) -> OutboxEntry {
     let envelope = crate::orchestration::compensation::rejection_envelope(
         &reserve_stock(command_index),
         "out of stock",
+        "OUT_OF_STOCK",
     )
     .unwrap();
     OutboxEntry::notification(envelope).unwrap()
@@ -318,6 +319,7 @@ async fn unimplemented_notification_is_dead_lettered_at_once() {
     let deliverer = ScriptedDeliverer::failing(vec![DeliveryResult::Rejected {
         code: tonic::Code::Unimplemented,
         message: "no undo handler for inventory.CountStock".into(),
+        error_code: String::new(),
     }]);
     let (outbox, dlq) = outbox(deliverer.clone(), 10);
 
@@ -338,6 +340,7 @@ async fn other_notification_rejections_are_retried() {
     let deliverer = ScriptedDeliverer::failing(vec![DeliveryResult::Rejected {
         code: tonic::Code::InvalidArgument,
         message: "bad".into(),
+        error_code: String::new(),
     }]);
     let (outbox, dlq) = outbox(deliverer, 10);
 
@@ -356,6 +359,7 @@ async fn rejected_command_dead_letters_and_raises_its_rejection() {
         DeliveryResult::Rejected {
             code: tonic::Code::FailedPrecondition,
             message: "out of stock".into(),
+            error_code: "OUT_OF_STOCK".into(),
         },
         DeliveryResult::Retryable("order down".into()),
     ]);
@@ -385,6 +389,10 @@ async fn rejected_command_dead_letters_and_raises_its_rejection() {
     assert_eq!(attempted.len(), 2);
     assert_eq!(attempted[1].kind, ProvenanceKind::RejectionNotification);
     assert_eq!(attempted[1].book.domain(), "order", "routed to the source");
+    assert_eq!(
+        crate::orchestration::outbox::testing::rejection_code_and_reason(&attempted[1].book),
+        ("OUT_OF_STOCK".to_string(), "out of stock".to_string())
+    );
 }
 
 /// A command that keeps failing transiently is dead-lettered as transient

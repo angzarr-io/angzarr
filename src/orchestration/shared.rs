@@ -244,8 +244,9 @@ pub async fn record_rejection(
     outbox: Option<&std::sync::Arc<super::outbox::Outbox>>,
     command: &CommandBook,
     reason: &str,
+    code: &str,
 ) -> Result<(), super::outbox::OutboxError> {
-    let Some(envelope) = super::compensation::rejection_envelope(command, reason) else {
+    let Some(envelope) = super::compensation::rejection_envelope(command, reason, code) else {
         tracing::warn!(
             domain = %crate::proto_ext::CoverExt::domain(command),
             "rejected command carries no deferred provenance; no source to notify"

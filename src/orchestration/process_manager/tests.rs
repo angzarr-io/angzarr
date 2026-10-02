@@ -677,6 +677,7 @@ impl ProcessManagerContext for RejectionRecordingPm {
         &self,
         _command: &CommandBook,
         reason: &str,
+        _code: &str,
     ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.rejected.lock().await.push(reason.to_string());
         Ok(())
@@ -956,6 +957,7 @@ impl ProcessManagerContext for DlqCommandPm {
         &self,
         _command: &CommandBook,
         _reason: &str,
+        _code: &str,
     ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.rejection_count.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -1037,6 +1039,7 @@ impl ProcessManagerContext for OutboxCommandPm {
 struct CodeRejectingExecutor {
     code: tonic::Code,
     message: String,
+    error_code: String,
 }
 
 #[async_trait]
@@ -1045,6 +1048,7 @@ impl CommandExecutor for CodeRejectingExecutor {
         CommandOutcome::Rejected {
             code: self.code,
             message: self.message.clone(),
+            error_code: self.error_code.clone(),
         }
     }
 }
@@ -1111,6 +1115,7 @@ async fn pm_persist_immediate_rejection_publishes_dead_letter() {
         persist_outcome: Box::new(|| CommandOutcome::Rejected {
             code: tonic::Code::InvalidArgument,
             message: "schema mismatch".to_string(),
+            error_code: String::new(),
         }),
         dlq_publisher: publisher.clone(),
     };
@@ -1159,6 +1164,7 @@ async fn pm_4xx_command_rejection_publishes_dead_letter_immediately() {
     let executor = CodeRejectingExecutor {
         code: tonic::Code::InvalidArgument,
         message: "bad command".to_string(),
+        error_code: String::new(),
     };
     let trigger = trigger_event();
 
@@ -2229,8 +2235,9 @@ impl ProcessManagerContext for TwoCommandPm {
         &self,
         command: &CommandBook,
         reason: &str,
+        code: &str,
     ) -> Result<(), crate::orchestration::outbox::OutboxError> {
-        self.inner.on_command_rejected(command, reason).await
+        self.inner.on_command_rejected(command, reason, code).await
     }
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
         self.inner.dlq_publisher()
@@ -2259,6 +2266,7 @@ impl CommandExecutor for FirstFailsExecutor {
             (true, false) => CommandOutcome::Rejected {
                 code: tonic::Code::FailedPrecondition,
                 message: "out of stock".to_string(),
+                error_code: String::new(),
             },
             (true, true) => CommandOutcome::Retryable {
                 reason: "Unavailable".to_string(),
@@ -2626,6 +2634,7 @@ async fn pm_rejection_is_delivered_to_its_source() {
         let executor = CodeRejectingExecutor {
             code: tonic::Code::FailedPrecondition,
             message: "no stock".to_string(),
+            error_code: "OUT_OF_STOCK".to_string(),
         };
         let _ = orchestrate_pm(
             &ctx,
@@ -2648,6 +2657,11 @@ async fn pm_rejection_is_delivered_to_its_source() {
             rejections[0].book.domain(),
             "order",
             "routed to the trigger"
+        );
+        assert_eq!(
+            crate::orchestration::outbox::testing::rejection_code_and_reason(&rejections[0].book),
+            ("OUT_OF_STOCK".to_string(), "no stock".to_string()),
+            "code and message travel separately (C-0505)"
         );
     }
 }

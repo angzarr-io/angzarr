@@ -19,12 +19,15 @@ use crate::storage::{ProvenanceKind, SourceInfo};
 use crate::utils::saga_compensation::{build_notification_command_book, CompensationContext};
 
 /// The envelope that delivers a RejectionNotification for `rejected` to the
-/// aggregate whose event caused it (`angzarr_deferred.source`).
+/// aggregate whose event caused it (`angzarr_deferred.source`). `reason` is
+/// the rejecting status's message; `code` its ErrorInfo.reason (empty when
+/// it carried none).
 ///
 /// `None` when the command carries no deferred provenance with a source:
 /// there is nowhere to route its rejection.
-pub fn rejection_envelope(rejected: &CommandBook, reason: &str) -> Option<CommandBook> {
-    let context = CompensationContext::from_rejected_command(rejected, reason.to_string())?;
+pub fn rejection_envelope(rejected: &CommandBook, reason: &str, code: &str) -> Option<CommandBook> {
+    let context = CompensationContext::from_rejected_command(rejected, reason.to_string())?
+        .with_rejection_code(code);
     build_notification_command_book(&context).ok()
 }
 

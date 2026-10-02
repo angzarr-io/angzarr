@@ -126,9 +126,15 @@ impl CoordinatorDeliverer {
         {
             CommandOutcome::Success(_) => DeliveryResult::Delivered,
             CommandOutcome::Retryable { reason, .. } => DeliveryResult::Retryable(reason),
-            CommandOutcome::Rejected { code, message } => {
-                DeliveryResult::Rejected { code, message }
-            }
+            CommandOutcome::Rejected {
+                code,
+                message,
+                error_code,
+            } => DeliveryResult::Rejected {
+                code,
+                message,
+                error_code,
+            },
         }
     }
 
@@ -144,6 +150,7 @@ impl CoordinatorDeliverer {
                 DeliveryResult::Rejected {
                     code: status.code(),
                     message: status.message().to_string(),
+                    error_code: String::new(),
                 }
             }
             Err(status) => DeliveryResult::Retryable(status.message().to_string()),
@@ -175,6 +182,7 @@ impl CoordinatorDeliverer {
                 &rejected,
                 rejection.rejection_reason,
             )
+            .map(|context| context.with_rejection_code(rejection.code))
         else {
             return;
         };

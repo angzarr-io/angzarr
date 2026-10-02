@@ -83,7 +83,7 @@ async fn test_execute_not_found_maps_to_rejected() {
     let outcome = executor.execute(command, SyncMode::Simple).await;
 
     match outcome {
-        CommandOutcome::Rejected { code, message } => {
+        CommandOutcome::Rejected { code, message, .. } => {
             assert_eq!(code, tonic::Code::NotFound);
             assert!(message.contains(errmsg::NO_AGGREGATE_FOR_DOMAIN));
         }

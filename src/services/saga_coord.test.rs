@@ -309,6 +309,7 @@ impl crate::orchestration::command::CommandExecutor for RejectingExecutor {
         crate::orchestration::command::CommandOutcome::Rejected {
             code: tonic::Code::FailedPrecondition,
             message: "insufficient funds".to_string(),
+            error_code: String::new(),
         }
     }
 }

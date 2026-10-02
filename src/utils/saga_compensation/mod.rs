@@ -367,8 +367,11 @@ pub struct CompensationContext {
     /// The source provenance from the rejected command's page header.
     /// Identifies which aggregate/event triggered this command.
     pub source: AngzarrDeferredSequence,
-    /// Why the command was rejected.
+    /// Why the command was rejected: the human-readable status message.
     pub rejection_reason: String,
+    /// The machine rejection code (the rejecting status's
+    /// google.rpc.ErrorInfo.reason); empty when it carried none.
+    pub rejection_code: String,
     /// The rejected command.
     pub rejected_command: CommandBook,
     /// Correlation ID for tracing.
@@ -394,9 +397,16 @@ impl CompensationContext {
         Some(Self {
             source,
             rejection_reason,
+            rejection_code: String::new(),
             rejected_command: command.clone(),
             correlation_id,
         })
+    }
+
+    /// The same context with the machine rejection code set.
+    pub fn with_rejection_code(mut self, code: impl Into<String>) -> Self {
+        self.rejection_code = code.into();
+        self
     }
 }
 
@@ -405,15 +415,16 @@ impl CompensationContext {
 /// This is the payload for the Notification sent to the source aggregate
 /// (identified by angzarr_deferred.source), allowing it to emit compensation events.
 ///
-/// The new RejectionNotification structure is simpler:
 /// - `rejected_command`: The command that was rejected
-/// - `rejection_reason`: Why it was rejected
+/// - `rejection_reason`: The human-readable rejection message
+/// - `code`: The machine rejection code compensation logic branches on
 ///
 /// Source provenance is already in the rejected_command's page headers.
 pub fn build_rejection_notification(context: &CompensationContext) -> RejectionNotification {
     RejectionNotification {
         rejected_command: Some(context.rejected_command.clone()),
         rejection_reason: context.rejection_reason.clone(),
+        code: context.rejection_code.clone(),
     }
 }
 

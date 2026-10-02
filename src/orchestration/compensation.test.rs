@@ -130,10 +130,11 @@ fn compensate_envelope_without_events_has_no_sequences() {
 }
 
 /// A rejection envelope goes to the rejected command's source with the
-/// command's provenance tuple and the rejected command inside.
+/// command's provenance tuple and the rejected command inside; the machine
+/// code and the human message travel in separate fields (C-0505).
 #[test]
 fn rejection_envelope_addresses_the_source() {
-    let envelope = rejection_envelope(&reserve_stock(1), "out of stock").unwrap();
+    let envelope = rejection_envelope(&reserve_stock(1), "out of stock", "OUT_OF_STOCK").unwrap();
 
     let mut expected_cover = cover("order", 1, "");
     expected_cover.correlation_id = "corr-1".to_string();
@@ -144,6 +145,7 @@ fn rejection_envelope_addresses_the_source() {
     assert_eq!(payload.type_url, type_url::REJECTION_NOTIFICATION);
     let rejection = RejectionNotification::decode(payload.value.as_slice()).unwrap();
     assert_eq!(rejection.rejection_reason, "out of stock");
+    assert_eq!(rejection.code, "OUT_OF_STOCK");
     assert_eq!(rejection.rejected_command, Some(reserve_stock(1)));
     assert_eq!(
         notification_kind(&envelope),
@@ -160,7 +162,17 @@ fn rejection_envelope_requires_provenance() {
         sync_mode: None,
         sequence_type: Some(SequenceType::Sequence(4)),
     });
-    assert!(rejection_envelope(&command, "nope").is_none());
+    assert!(rejection_envelope(&command, "nope", "").is_none());
+}
+
+/// A rejection without a machine code keeps its message (C-0506).
+#[test]
+fn rejection_envelope_without_code_keeps_the_message() {
+    let envelope = rejection_envelope(&reserve_stock(1), "out of stock", "").unwrap();
+    let payload = notification_of(&envelope).payload.unwrap();
+    let rejection = RejectionNotification::decode(payload.value.as_slice()).unwrap();
+    assert_eq!(rejection.code, "");
+    assert_eq!(rejection.rejection_reason, "out of stock");
 }
 
 /// Readers accept any type URL prefix and match the full name.

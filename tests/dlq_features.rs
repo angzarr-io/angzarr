@@ -706,6 +706,7 @@ impl CommandExecutor for SagaRejectingExecutor {
         CommandOutcome::Rejected {
             code: self.code,
             message: format!("{:?}", self.code),
+            error_code: String::new(),
         }
     }
 }
@@ -850,6 +851,7 @@ impl ProcessManagerContext for DlqAwarePmContext {
         &self,
         _command: &CommandBook,
         _reason: &str,
+        _code: &str,
     ) -> Result<(), angzarr::orchestration::outbox::OutboxError> {
         self.compensation_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -882,6 +884,7 @@ impl CommandExecutor for CodeRejectingPmExecutor {
         CommandOutcome::Rejected {
             code: self.code,
             message: self.message.clone(),
+            error_code: String::new(),
         }
     }
 }

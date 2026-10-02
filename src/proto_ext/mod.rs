@@ -34,6 +34,6 @@ pub use constants::{
 pub use cover::CoverExt;
 pub use edition::EditionExt;
 pub use enums::{CascadeErrorModeExt, MergeStrategyExt, SyncModeExt};
-pub use grpc::correlated_request;
+pub use grpc::{correlated_request, StatusExt};
 pub use pages::{AngzarrDeferredSequenceExt, CommandPageExt, EventPageExt, PageHeaderExt};
 pub use uuid::{ProtoUuidExt, UuidExt};

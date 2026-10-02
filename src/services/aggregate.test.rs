@@ -228,6 +228,7 @@ fn rejection_delivery(source_root: Uuid, command_index: u32) -> CommandBook {
     crate::orchestration::compensation::rejection_envelope(
         &deferred_command("inventory", Uuid::new_v4(), source_root, command_index),
         "out of stock",
+        "OUT_OF_STOCK",
     )
     .expect("deferred command has a source")
 }

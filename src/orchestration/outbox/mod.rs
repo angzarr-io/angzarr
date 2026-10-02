@@ -213,6 +213,8 @@ pub enum DeliveryResult {
         code: tonic::Code,
         /// Error message.
         message: String,
+        /// Machine rejection code (ErrorInfo.reason); empty when none.
+        error_code: String,
     },
 }
 
@@ -457,7 +459,7 @@ impl Outbox {
         now: Instant,
     ) -> Result<DrainStats, OutboxError> {
         let attempts = entry.attempts + 1;
-        let (message, permanent) = match result {
+        let (message, permanent, rejection_code) = match result {
             DeliveryResult::Delivered => {
                 debug!(outbox = %self.name, key = %entry.key, "outbox entry delivered");
                 self.close(&entry.key).await?;
@@ -466,13 +468,17 @@ impl Outbox {
                     ..Default::default()
                 });
             }
-            DeliveryResult::Retryable(message) => (message, false),
-            DeliveryResult::Rejected { code, message } => {
+            DeliveryResult::Retryable(message) => (message, false, String::new()),
+            DeliveryResult::Rejected {
+                code,
+                message,
+                error_code,
+            } => {
                 // A notification target without a handler answers
                 // UNIMPLEMENTED; any other rejection of a notification is
                 // retried. A command's rejection is final.
                 let permanent = !entry.is_notification() || code == tonic::Code::Unimplemented;
-                (message, permanent)
+                (message, permanent, error_code)
             }
         };
 
@@ -501,7 +507,8 @@ impl Outbox {
         self.dead_letter(entry, attempts, &message, !permanent)
             .await;
         if permanent && !entry.is_notification() {
-            self.raise_rejection(entry, &message).await?;
+            self.raise_rejection(entry, &message, &rejection_code)
+                .await?;
         }
         self.close(&entry.key).await?;
         Ok(DrainStats {
@@ -512,9 +519,14 @@ impl Outbox {
 
     /// A command rejected on redelivery reaches its source like any other
     /// rejection: record its RejectionNotification.
-    async fn raise_rejection(&self, entry: &OutboxEntry, reason: &str) -> Result<(), OutboxError> {
+    async fn raise_rejection(
+        &self,
+        entry: &OutboxEntry,
+        reason: &str,
+        code: &str,
+    ) -> Result<(), OutboxError> {
         let Some(envelope) =
-            crate::orchestration::compensation::rejection_envelope(&entry.book, reason)
+            crate::orchestration::compensation::rejection_envelope(&entry.book, reason, code)
         else {
             return Ok(());
         };

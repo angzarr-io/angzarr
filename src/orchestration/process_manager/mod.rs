@@ -236,8 +236,9 @@ pub trait ProcessManagerContext: Send + Sync {
         &self,
         command: &CommandBook,
         reason: &str,
+        code: &str,
     ) -> Result<(), super::outbox::OutboxError> {
-        super::shared::record_rejection(self.outbox(), command, reason).await
+        super::shared::record_rejection(self.outbox(), command, reason, code).await
     }
 
     /// Publisher for routing failed PM commands and persistence attempts
@@ -580,7 +581,7 @@ pub async fn orchestrate_pm(
                         break;
                     }
                 },
-                CommandOutcome::Rejected { code, message } => {
+                CommandOutcome::Rejected { code, message, .. } => {
                     crate::utils::retry::log_fatal_error(
                         &format!("pm:{pm_name}"),
                         attempt,
@@ -824,7 +825,11 @@ async fn execute_pm_commands(
                 });
                 None
             }
-            CommandOutcome::Rejected { code, message } => {
+            CommandOutcome::Rejected {
+                code,
+                message,
+                error_code,
+            } => {
                 error!(
                     domain = %cmd_domain,
                     ?code,
@@ -832,7 +837,7 @@ async fn execute_pm_commands(
                     "PM command rejected"
                 );
                 // A rejection reaches its source whatever the policy.
-                raise_rejection(ctx, &command_book, &message).await?;
+                raise_rejection(ctx, &command_book, &message, &error_code).await?;
                 if policy.dead_letters() {
                     publish_pm_command_dlq(ctx, &command_book, Some(code), &message, false).await;
                 }
@@ -849,7 +854,7 @@ async fn execute_pm_commands(
                      retry later (underlying: {reason})"
                 );
                 error!(domain = %cmd_domain, error = %degraded, "PM Decision-mode command Retryable");
-                raise_rejection(ctx, &command_book, &degraded).await?;
+                raise_rejection(ctx, &command_book, &degraded, "").await?;
                 publish_pm_command_dlq(ctx, &command_book, None, &degraded, false).await;
                 reported_failures.push(format!("{cmd_domain}: {degraded}"));
                 None
@@ -904,13 +909,16 @@ async fn raise_rejection(
     ctx: &dyn ProcessManagerContext,
     command: &CommandBook,
     reason: &str,
+    code: &str,
 ) -> Result<(), BusError> {
-    ctx.on_command_rejected(command, reason).await.map_err(|e| {
-        BusError::Publish(format!(
-            "{}: rejection notification not recorded: {e}",
-            command.domain()
-        ))
-    })
+    ctx.on_command_rejected(command, reason, code)
+        .await
+        .map_err(|e| {
+            BusError::Publish(format!(
+                "{}: rejection notification not recorded: {e}",
+                command.domain()
+            ))
+        })
 }
 
 /// Hand a transiently-failed PM command to the outbox for redelivery, or

@@ -106,6 +106,7 @@ pub async fn persist_pm_event_book(
         return CommandOutcome::Rejected {
             code: tonic::Code::Internal,
             message: e.to_string(),
+            error_code: String::new(),
         };
     }
 
