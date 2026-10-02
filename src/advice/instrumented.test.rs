@@ -76,3 +76,41 @@ fn test_instrumented_into_inner() {
     // Should consume wrapper and return inner
     let _recovered: MockEventStore = instrumented.into_inner();
 }
+
+/// Every production store is wrapped in `Instrumented`; an explicit-divergence
+/// read (a new edition branch with no snapshot yet) must reach the inner
+/// store's implementation, not the trait's NotImplemented default.
+#[tokio::test]
+async fn test_instrumented_forwards_get_with_divergence() {
+    use crate::storage::AddMeta;
+    let inner = MockEventStore::new();
+    let root = Uuid::new_v4();
+    let page = |seq: u32| EventPage {
+        header: Some(crate::proto::PageHeader {
+            sync_mode: None,
+            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(seq)),
+        }),
+        ..Default::default()
+    };
+    inner
+        .add(
+            "orders",
+            "",
+            root,
+            vec![page(0), page(1), page(2)],
+            &AddMeta::default(),
+        )
+        .await
+        .unwrap();
+    let instrumented = Instrumented::new(inner, "mock");
+
+    let events = instrumented
+        .get_with_divergence("orders", "branch", root, Some(2))
+        .await
+        .expect("divergence read forwarded to the inner store");
+    assert_eq!(
+        events.len(),
+        2,
+        "main-timeline events before the divergence"
+    );
+}

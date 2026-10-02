@@ -1,29 +1,50 @@
 # Angzarr Server Configuration Example
 # Copy to config.yaml and customize for your environment
 #
-# Environment variable overrides: ANGZARR_<SECTION>__<KEY>
-# Example: ANGZARR_STORAGE__TYPE=postgres
+# Environment variable overrides: ANGZARR__<SECTION>__<KEY> (double
+# underscore after the prefix and between every key).
+# Example: ANGZARR__TRANSPORT__TCP__HOST=0.0.0.0
+# Top-level sections the sidecars read: storage, transport, messaging,
+# target, dlq, limits, saga_compensation, payload_offload, upcaster,
+# cascade_reaper. Anything else is ignored with a startup warning.
 
 # =============================================================================
 # Storage Configuration
 # =============================================================================
+# Backends are defined once in a named registry; each storage role (events /
+# snapshots / positions) references a registry entry by name. One backend can
+# serve several roles, or different backends can serve different roles.
 storage:
-  type: sqlite
-  sqlite:
-    path: ./data/events.db
-  # For in-memory SQLite, omit the path:
-  # sqlite: {}
+  backends:
+    local:
+      type: sqlite
+      path: ./data/events.db   # omit `path` for in-memory SQLite
+  events:
+    use: local
+  snapshots:
+    use: local
+  positions:
+    use: local
 
-  # PostgreSQL (production):
-  # type: postgres
-  # postgres:
-  #   uri: postgres://localhost:5432/angzarr
+  # PostgreSQL (production) — events + snapshots + positions on one backend:
+  # backends:
+  #   primary:
+  #     type: postgres
+  #     uri: postgres://localhost:5432/angzarr
+  # events:    { use: primary }
+  # snapshots: { use: primary }
+  # positions: { use: primary }
 
-  # MongoDB:
-  # type: mongodb
-  # mongodb:
-  #   uri: mongodb://localhost:27017
-  #   database: angzarr
+  # Mixed roles — append-only event ledger (ImmuDB) with a separate mutable
+  # editions store, Redis snapshots, and SQL position checkpoints:
+  # backends:
+  #   ledger:    { type: immudb, uri: postgresql://immudb:immudb@localhost:5432/defaultdb }
+  #   branches:  { type: postgres, uri: postgres://localhost:5432/angzarr }
+  #   events:    { type: composite, main: ledger, editions: branches }
+  #   cache:     { type: redis, uri: redis://localhost:6379 }
+  # events:    { use: events }
+  # snapshots: { use: cache }
+  # positions: { use: branches }
 
 # =============================================================================
 # Transport Configuration
@@ -39,37 +60,28 @@ transport:
   #   base_path: /tmp/angzarr
 
 # =============================================================================
-# Server Configuration (legacy - prefer transport section)
-# =============================================================================
-server:
-  ch_port: 1313
-  event_query_port: 1314
-  host: 0.0.0.0
-
-# =============================================================================
 # Messaging Configuration
 # =============================================================================
+# `messaging.type` has no default — it must be set explicitly to one of
+# amqp, kafka, pubsub, sns-sqs. There is no in-process/standalone transport;
+# an unset or unrecognized type fails startup with an actionable error.
 # messaging:
 #   type: amqp
 #   amqp:
 #     url: amqp://localhost:5672
-#     domain: customers  # Single domain (for aggregate mode)
-#     # domains:         # Multiple domains (for projector/saga modes)
-#     #   - customers
-#     #   - orders
+#
+#   # Handler-failure redelivery before an event is dead-lettered
+#   # (saga / process-manager / projector sidecars). 0 = never.
+#   delivery:
+#     max_attempts: 10
+#     initial_backoff_ms: 200
+#     max_backoff_ms: 10000
 #
 #   # Kafka:
 #   # type: kafka
 #   # kafka:
 #   #   bootstrap_servers: localhost:9092
 #   #   topic_prefix: angzarr
-#   #   group_id: my-consumer
-#   #   domains:
-#   #     - customers
-#   #     - orders
-#
-#   # In-memory channel (standalone mode):
-#   # type: channel
 
 # =============================================================================
 # Service Discovery & Endpoints
@@ -80,24 +92,39 @@ server:
 #   address: localhost:50051
 #   domain: orders
 
-# client logic services (gateway mode)
-# client_logic:
-#   - domain: orders
-#     address: localhost:50051
-#   - domain: inventory
-#     address: localhost:50052
+# Saga/PM/projector subscriptions come from ANGZARR_SUBSCRIPTIONS
+# ("domain:Type1,Type2;domain2"); the bus subscription is scoped to those
+# domains.
 
-# Projector endpoints
-# projectors:
-#   - name: ui_projector
-#     address: localhost:60001
-#     synchronous: false
-#   - name: reporting
-#     address: localhost:60002
-#     synchronous: true
+# =============================================================================
+# Dead Letter Queue
+# =============================================================================
+# dlq:
+#   targets:            # tried in order; empty = log and drop
+#     - type: database
+#       database:
+#         storage_type: postgres
+#         postgres:
+#           uri: postgres://localhost:5432/angzarr
+#   audit:              # what angzarr-status reads
+#     storage_type: postgres
+#     postgres:
+#       uri: postgres://localhost:5432/angzarr
 
-# Saga endpoints
-# sagas:
-#   - name: order_saga
-#     address: localhost:70001
-#     synchronous: false
+# ======================================================================
+# =============================================================================
+# Coordinator Outbox
+# =============================================================================
+# Compensation notifications (and PM commands that fail transiently after the
+# PM's events are persisted) are recorded in the coordinator's outbox and
+# delivered at least once with exponential backoff; after max_attempts the
+# entry is dead-lettered. Overrides are keyed by the coordinator's name.
+# outbox:
+#   max_attempts: 10
+#   initial_backoff_ms: 200
+#   max_backoff_ms: 30000
+#   jitter: true
+#   drain_interval_ms: 1000
+#   overrides:
+#     order-fulfillment:
+#       max_attempts: 5

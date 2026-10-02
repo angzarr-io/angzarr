@@ -6,7 +6,7 @@ Ensures minimum availability during voluntary disruptions (node drains, upgrades
 Strategy:
 - Aggregates: minAvailable based on replicaCount (critical for command handling)
 - Sagas/Projectors: maxUnavailable 1 (can tolerate brief interruption, events will replay)
-- Infrastructure: minAvailable 1 (gateway/stream should always have 1 available)
+- Infrastructure: minAvailable 1 (gateway/status should always have 1 available)
 */}}
 
 {{- /* Aggregate PDBs */}}
@@ -90,14 +90,14 @@ metadata:
   labels:
     {{- include "angzarr.labels" $ | nindent 4 }}
     app.kubernetes.io/component: process-manager
-    angzarr.io/pm: {{ .name }}
+    angzarr.io/pm: {{ include "angzarr.pm-domain" . }}
 spec:
   maxUnavailable: {{ $.Values.podDisruptionBudget.processManagerMaxUnavailable | default 1 }}
   selector:
     matchLabels:
       {{- include "angzarr.selectorLabels" $ | nindent 6 }}
       app.kubernetes.io/component: process-manager
-      angzarr.io/pm: {{ .name }}
+      angzarr.io/pm: {{ include "angzarr.pm-domain" . }}
 {{- end }}
 {{- end }}
 
@@ -118,25 +118,6 @@ spec:
     matchLabels:
       {{- include "angzarr.selectorLabels" $ | nindent 6 }}
       angzarr.io/service: gateway
-{{- end }}
-
-{{- /* Stream PDB */}}
-{{- if and .Values.infrastructure.stream.enabled (gt (int (.Values.infrastructure.stream.replicas | default 1)) 1) }}
----
-apiVersion: policy/v1
-kind: PodDisruptionBudget
-metadata:
-  name: {{ include "angzarr.fullname" $ }}-stream-pdb
-  labels:
-    {{- include "angzarr.labels" $ | nindent 4 }}
-    app.kubernetes.io/component: infrastructure
-    angzarr.io/service: stream
-spec:
-  minAvailable: 1
-  selector:
-    matchLabels:
-      {{- include "angzarr.selectorLabels" $ | nindent 6 }}
-      angzarr.io/service: stream
 {{- end }}
 
 {{- /* Status PDB — keeps the ops console reachable during rolling

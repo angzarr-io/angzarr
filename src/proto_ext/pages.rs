@@ -9,18 +9,19 @@ use crate::proto::{
 };
 use prost::Name;
 
+use super::enums::MergeStrategyExt;
+
 /// Extract the message-name suffix from a protobuf `Any.type_url`.
 ///
-/// Three shapes appear in the wild:
+/// Two shapes appear in the wild:
 ///   - `type.googleapis.com/{full_name}` — the well-known default
 ///     emitted by `Any.Pack()` in every language SDK.
-///   - `/{full_name}` — prost's `prost::Name::type_url()` default; bare
-///     leading slash, no domain (proto3's canonical form).
-///   - `type.angzarr.io/{full_name}` — angzarr's framework prefix used
-///     for Confirmation / Revocation / Compensate / NoOp / Notification.
+///   - `/{full_name}` — prost's `prost::Name::type_url()` default (bare
+///     leading slash, no domain); also angzarr's canonical form for its
+///     own framework messages (Compensate / Notification / CommandBook).
 ///
-/// Stripping everything up to and including the LAST `/` collapses all
-/// three to `{full_name}`. Strings without a `/` fall back to the whole
+/// Stripping everything up to and including the LAST `/` collapses both
+/// to `{full_name}`. Strings without a `/` fall back to the whole
 /// value (permissive — same posture as prost's `Any.type_url`-relaxed
 /// decode).
 ///
@@ -145,8 +146,7 @@ impl EventPageExt for EventPage {
             _ => return None,
         };
         // H-41: compare the message-name SUFFIX, not the full URL. Accepts
-        // `type.googleapis.com/{name}`, `/{name}` (prost default), and
-        // `type.angzarr.io/{name}`.
+        // `type.googleapis.com/{name}` and `/{name}`
         if type_url_suffix(&event.type_url) != M::full_name() {
             return None;
         }
@@ -180,10 +180,11 @@ pub trait CommandPageExt {
     /// or decoding fails. The expected type URL is derived from M::full_name().
     fn decode_typed<M: prost::Message + Default + Name>(&self) -> Option<M>;
 
-    /// Get the merge strategy for this command.
-    ///
-    /// Returns the MergeStrategy enum value. Defaults to Commutative (0) if unset.
-    fn merge_strategy(&self) -> MergeStrategy;
+    /// The merge strategy this command runs under: MERGE_UNSPECIFIED (the
+    /// wire zero) and unknown wire ints resolve to Commutative, the
+    /// documented default. Named apart from prost's generated
+    /// `merge_strategy()` getter, which returns UNSPECIFIED raw.
+    fn effective_merge_strategy(&self) -> MergeStrategy;
 }
 
 impl CommandPageExt for CommandPage {
@@ -225,16 +226,15 @@ impl CommandPageExt for CommandPage {
             _ => return None,
         };
         // H-41: compare the message-name SUFFIX, not the full URL. Accepts
-        // `type.googleapis.com/{name}`, `/{name}` (prost default), and
-        // `type.angzarr.io/{name}`.
+        // `type.googleapis.com/{name}` and `/{name}`
         if type_url_suffix(&command.type_url) != M::full_name() {
             return None;
         }
         M::decode(command.value.as_slice()).ok()
     }
 
-    fn merge_strategy(&self) -> MergeStrategy {
-        MergeStrategy::try_from(self.merge_strategy).unwrap_or(MergeStrategy::MergeCommutative)
+    fn effective_merge_strategy(&self) -> MergeStrategy {
+        MergeStrategy::or_default_commutative(self.merge_strategy)
     }
 }
 
@@ -244,7 +244,8 @@ impl CommandPageExt for CommandPage {
 pub trait AngzarrDeferredSequenceExt {
     /// Generate the composite idempotency key for logging and display.
     ///
-    /// Format: `{source.edition}:{source.domain}:{source.root_hex}:{source_seq}`
+    /// Format: `{source.edition}:{source.domain}:{source.root_hex}:{source_seq}`;
+    /// a missing source contributes empty fields.
     ///
     /// Example: `angzarr:order:550e8400e29b41d4a716446655440000:7`
     fn idempotency_key(&self) -> String;
@@ -253,7 +254,7 @@ pub trait AngzarrDeferredSequenceExt {
 impl AngzarrDeferredSequenceExt for AngzarrDeferredSequence {
     fn idempotency_key(&self) -> String {
         use super::cover::CoverExt;
-        let source = self.source.as_ref().expect("source required");
+        let source = self.source.clone().unwrap_or_default();
         format!(
             "{}:{}:{}:{}",
             source.edition().unwrap_or_default(),

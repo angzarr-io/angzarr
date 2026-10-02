@@ -20,6 +20,7 @@ use tracing::info;
 use super::config::EventBusMode;
 use super::factory::BusBackend;
 use super::traits::EventBus;
+use crate::advice::InstrumentedBus;
 
 // Re-exports
 pub use bus::SnsSqsEventBus;
@@ -95,18 +96,12 @@ inventory::submit! {
                     EventBusMode::Publisher => {
                         SnsSqsConfig::publisher().with_topic_prefix(&topic_prefix)
                     }
-                    EventBusMode::Subscriber { queue, domain } => {
-                        SnsSqsConfig::subscriber(queue, vec![domain])
-                            .with_topic_prefix(&topic_prefix)
+                    EventBusMode::Subscriber { queue, domains } => {
+                        SnsSqsConfig::subscriber(queue, domains).with_topic_prefix(&topic_prefix)
                     }
                     EventBusMode::SubscriberAll { queue } => {
-                        let domains = domains.unwrap_or_default();
-                        if domains.is_empty() {
-                            SnsSqsConfig::subscriber_all(queue)
-                        } else {
-                            SnsSqsConfig::subscriber(queue, domains)
-                        }
-                        .with_topic_prefix(&topic_prefix)
+                        SnsSqsConfig::subscriber(queue, domains.unwrap_or_default())
+                            .with_topic_prefix(&topic_prefix)
                     }
                 };
 
@@ -118,7 +113,10 @@ inventory::submit! {
                 match SnsSqsEventBus::new(sns_sqs_config).await {
                     Ok(bus) => {
                         info!(messaging_type = "sns-sqs", "Event bus initialized");
-                        Some(Ok(Arc::new(bus) as Arc<dyn EventBus>))
+                        // R2-WIRE-ADVICE: wrap with `InstrumentedBus` under "sns-sqs".
+                        Some(Ok(
+                            Arc::new(InstrumentedBus::new(bus, "sns-sqs")) as Arc<dyn EventBus>
+                        ))
                     }
                     Err(e) => Some(Err(e)),
                 }

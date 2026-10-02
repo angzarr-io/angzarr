@@ -70,17 +70,12 @@ struct MockSagaContext {
 impl crate::orchestration::saga::SagaRetryContext for MockSagaContext {
     async fn handle(
         &self,
-        _destination_sequences: std::collections::HashMap<String, u32>,
         _sync_mode: crate::proto::SyncMode,
     ) -> Result<crate::proto::SagaResponse, Box<dyn std::error::Error + Send + Sync>> {
         Ok(crate::proto::SagaResponse {
             commands: self.commands.clone(),
             events: vec![],
         })
-    }
-
-    async fn on_command_rejected(&self, _command: &CommandBook, _reason: &str) {
-        // No-op for tests
     }
 
     fn source_cover(&self) -> Option<&Cover> {
@@ -120,6 +115,7 @@ impl crate::orchestration::command::CommandExecutor for MockCommandExecutor {
         crate::orchestration::command::CommandOutcome::Success(crate::proto::CommandResponse {
             events: None,
             projections: vec![],
+            ..Default::default()
         })
     }
 }
@@ -134,6 +130,7 @@ fn test_event_book() -> EventBook {
                 name: "v1".to_string(),
                 divergences: vec![],
             }),
+            ext: None,
         }),
         pages: vec![EventPage::default()],
         ..Default::default()
@@ -173,7 +170,6 @@ async fn test_execute_calls_saga_handler() {
         source: Some(test_event_book()),
         sync_mode: SyncMode::Cascade.into(),
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        destination_sequences: std::collections::HashMap::new(),
     });
 
     let response = service
@@ -206,7 +202,6 @@ async fn test_execute_propagates_sync_mode() {
         source: Some(test_event_book()),
         sync_mode: SyncMode::Cascade.into(),
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        destination_sequences: std::collections::HashMap::new(),
     });
 
     let _ = service.execute(request).await;
@@ -236,7 +231,6 @@ async fn test_execute_requires_source_events() {
         source: None,
         sync_mode: SyncMode::Cascade.into(),
         cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-        destination_sequences: std::collections::HashMap::new(),
     });
 
     let result = service.execute(request).await;
@@ -267,7 +261,6 @@ async fn test_execute_speculative_returns_commands_without_side_effects() {
             source: Some(test_event_book()),
             sync_mode: SyncMode::Cascade.into(),
             cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-            destination_sequences: std::collections::HashMap::new(),
         }),
     });
 
@@ -301,4 +294,106 @@ async fn test_execute_speculative_requires_request() {
     let result = service.execute_speculative(request).await;
 
     assert!(result.is_err(), "speculative should fail without request");
+}
+
+/// Executor that rejects every command.
+struct RejectingExecutor;
+
+#[async_trait::async_trait]
+impl crate::orchestration::command::CommandExecutor for RejectingExecutor {
+    async fn execute(
+        &self,
+        _command: CommandBook,
+        _sync_mode: SyncMode,
+    ) -> crate::orchestration::command::CommandOutcome {
+        crate::orchestration::command::CommandOutcome::Rejected {
+            code: tonic::Code::FailedPrecondition,
+            message: "insufficient funds".to_string(),
+            error_code: String::new(),
+        }
+    }
+}
+
+/// A CASCADE caller learns that a saga command was rejected: FAIL_FAST and
+/// COMPENSATE answer ABORTED with the reason; CONTINUE and DEAD_LETTER let the
+/// request succeed.
+#[tokio::test]
+async fn test_execute_reports_rejected_command_per_cascade_error_mode() {
+    for (mode, rejected) in [
+        (CascadeErrorMode::CascadeErrorFailFast, true),
+        (CascadeErrorMode::CascadeErrorContinue, false),
+        (CascadeErrorMode::CascadeErrorCompensate, true),
+        (CascadeErrorMode::CascadeErrorDeadLetter, false),
+    ] {
+        let factory = Arc::new(MockSagaContextFactory::new("test-saga"));
+        factory.set_commands(vec![test_command()]).await;
+        let service = SagaCoord::new(factory, Arc::new(RejectingExecutor))
+            .with_backoff(backon::ExponentialBuilder::default().with_max_times(0));
+        let result = service
+            .execute(Request::new(SagaHandleRequest {
+                source: Some(test_event_book()),
+                sync_mode: SyncMode::Cascade.into(),
+                cascade_error_mode: mode.into(),
+            }))
+            .await;
+        match (rejected, result) {
+            (true, Err(status)) => {
+                assert_eq!(status.code(), tonic::Code::Aborted, "{mode:?}");
+                assert!(status.message().contains("insufficient funds"));
+            }
+            (false, Ok(_)) => {}
+            (expected, other) => panic!("{mode:?}: expected rejected={expected}, got {other:?}"),
+        }
+    }
+}
+
+/// Non-gRPC orchestration failures map to INTERNAL; gRPC ones keep their code.
+#[test]
+fn test_orchestration_status_preserves_grpc_code() {
+    let status = crate::services::orchestration_status(
+        "Saga",
+        crate::bus::BusError::Grpc(Status::unavailable("fetch failed")),
+    );
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert_eq!(status.message(), "Saga orchestration failed: fetch failed");
+    let status = crate::services::orchestration_status(
+        "PM",
+        crate::bus::BusError::Publish("bus down".to_string()),
+    );
+    assert_eq!(status.code(), tonic::Code::Internal);
+    assert!(status.message().starts_with("PM orchestration failed: "));
+}
+
+/// A COMPENSATE caller learns which reaction commands this saga executed,
+/// so it can compensate them if another reaction fails; other modes carry
+/// no such report.
+#[tokio::test]
+async fn test_execute_reports_executed_reactions_to_compensate_callers() {
+    for (mode, reported) in [
+        (CascadeErrorMode::CascadeErrorCompensate, 1),
+        (CascadeErrorMode::CascadeErrorFailFast, 0),
+        (CascadeErrorMode::CascadeErrorContinue, 0),
+    ] {
+        let factory = Arc::new(MockSagaContextFactory::new("ReserveSaga"));
+        factory.set_commands(vec![test_command()]).await;
+        let service = SagaCoord::new(factory, Arc::new(MockCommandExecutor::new()));
+        let response = service
+            .execute(Request::new(SagaHandleRequest {
+                source: Some(test_event_book()),
+                sync_mode: SyncMode::Cascade.into(),
+                cascade_error_mode: mode.into(),
+            }))
+            .await
+            .unwrap();
+        let executed = crate::orchestration::shared::read_executed_reactions(response.metadata());
+        assert_eq!(executed.len(), reported, "{mode:?}");
+        if reported == 1 {
+            let cover = executed[0].command.cover.as_ref().unwrap();
+            assert_eq!(cover.domain, "target");
+            assert_eq!(
+                cover.correlation_id, "corr-456",
+                "workflow correlation filled"
+            );
+        }
+    }
 }

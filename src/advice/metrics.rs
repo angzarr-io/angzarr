@@ -286,6 +286,8 @@ pub const OP_EVENT_GET: &str = "event_get";
 pub const OP_EVENT_GET_FROM: &str = "event_get_from";
 /// Operation: get events in sequence range.
 pub const OP_EVENT_GET_FROM_TO: &str = "event_get_from_to";
+/// Operation: get events for an edition branched at an explicit divergence.
+pub const OP_EVENT_GET_WITH_DIVERGENCE: &str = "event_get_with_divergence";
 /// Operation: list aggregate roots.
 pub const OP_EVENT_LIST_ROOTS: &str = "event_list_roots";
 /// Operation: list domains.

@@ -7,8 +7,7 @@
 //! or local (in-process) — enabling deploy-anywhere saga code.
 //!
 //! Supports:
-//! - Two-phase saga protocol (prepare → fetch destinations → execute)
-//! - Retry with backoff on sequence conflicts
+//! - Retry with backoff on transient delivery failures
 //! - Output domain validation
 //! - Compensation flow for rejected commands (via gRPC factory)
 
@@ -20,7 +19,6 @@ use tracing::{error, Instrument};
 
 use crate::bus::{BusError, CommandBus, EventHandler};
 use crate::orchestration::command::CommandExecutor;
-use crate::orchestration::destination::DestinationFetcher;
 use crate::orchestration::saga::{orchestrate_saga, OutputDomainValidator, SagaContextFactory};
 use crate::orchestration::FactExecutor;
 use crate::proto::{EventBook, SyncMode};
@@ -31,13 +29,12 @@ use crate::utils::retry::saga_backoff;
 ///
 /// Uses `SagaContextFactory` to create per-invocation contexts, enabling
 /// the same handler code for both distributed (gRPC) and in-process (local) modes.
-/// Command execution and destination fetching are passed directly to
-/// orchestration functions, matching the PM handler pattern.
+/// Command execution is passed directly to orchestration functions, matching
+/// the PM handler pattern.
 pub struct SagaEventHandler {
     context_factory: Arc<dyn SagaContextFactory>,
     command_executor: Arc<dyn CommandExecutor>,
     command_bus: Option<Arc<dyn CommandBus>>,
-    destination_fetcher: Option<Arc<dyn DestinationFetcher>>,
     fact_executor: Option<Arc<dyn FactExecutor>>,
     output_domain_validator: Option<Arc<OutputDomainValidator>>,
     backoff: ExponentialBuilder,
@@ -61,17 +58,22 @@ impl SagaEventHandler {
     pub fn from_factory(
         context_factory: Arc<dyn SagaContextFactory>,
         command_executor: Arc<dyn CommandExecutor>,
-        destination_fetcher: Option<Arc<dyn DestinationFetcher>>,
     ) -> Self {
         Self {
             context_factory,
             command_executor,
             command_bus: None,
-            destination_fetcher,
             fact_executor: None,
             output_domain_validator: None,
             backoff: saga_backoff(),
-            propagate_errors: false,
+            // D-3 (review decision): sagas are at-least-once by DEFAULT.
+            // The old `false` default acked transient orchestration
+            // failures (saga service blip, retry exhaustion, H-15 fact
+            // errors) and silently lost the cross-domain translation —
+            // the one job a saga has. PM and aggregate handlers already
+            // default to propagation; set `with_error_propagation(false)`
+            // explicitly to opt back into ack-on-failure.
+            propagate_errors: true,
         }
     }
 
@@ -80,7 +82,6 @@ impl SagaEventHandler {
     /// # Parameters
     ///
     /// - `command_bus`: For async command delivery (alternative to sync executor)
-    /// - `destination_fetcher`: For looking up command destinations from service discovery
     /// - `fact_executor`: For injecting facts (external events) into aggregates
     /// - `output_domain_validator`: For validating saga output commands target allowed domains
     /// - `backoff`: Custom retry configuration for transient failures
@@ -90,14 +91,12 @@ impl SagaEventHandler {
     /// | Dependency | Use Case |
     /// |------------|----------|
     /// | `command_bus` | Saga outputs async commands (fire-and-forget) |
-    /// | `destination_fetcher` | Distributed mode with dynamic service discovery |
     /// | `fact_executor` | Saga injects external facts (e.g., webhook events) |
     /// | `output_domain_validator` | Enforce saga can only command specific domains |
     pub fn from_factory_with_validator(
         context_factory: Arc<dyn SagaContextFactory>,
         command_executor: Arc<dyn CommandExecutor>,
         command_bus: Option<Arc<dyn CommandBus>>,
-        destination_fetcher: Option<Arc<dyn DestinationFetcher>>,
         fact_executor: Option<Arc<dyn FactExecutor>>,
         output_domain_validator: Option<Arc<OutputDomainValidator>>,
         backoff: ExponentialBuilder,
@@ -106,19 +105,27 @@ impl SagaEventHandler {
             context_factory,
             command_executor,
             command_bus,
-            destination_fetcher,
             fact_executor,
             output_domain_validator,
             backoff,
-            propagate_errors: false,
+            // D-3 (review decision): sagas are at-least-once by DEFAULT.
+            // The old `false` default acked transient orchestration
+            // failures (saga service blip, retry exhaustion, H-15 fact
+            // errors) and silently lost the cross-domain translation —
+            // the one job a saga has. PM and aggregate handlers already
+            // default to propagation; set `with_error_propagation(false)`
+            // explicitly to opt back into ack-on-failure.
+            propagate_errors: true,
         }
     }
 
     /// Configure error propagation behavior.
     ///
-    /// When enabled, orchestration errors are returned to the caller, which
-    /// may trigger message redelivery depending on the bus implementation.
-    /// When disabled (default), errors are logged but the handler returns Ok(()).
+    /// When enabled (the DEFAULT since D-3), orchestration errors are
+    /// returned to the caller, which triggers message redelivery on the
+    /// bus — sagas are at-least-once. When disabled, errors are logged
+    /// but the handler returns Ok(()) and the source event is acked
+    /// (at-most-once; the translation is lost on any transient failure).
     pub fn with_error_propagation(mut self, propagate: bool) -> Self {
         self.propagate_errors = propagate;
         self
@@ -134,7 +141,6 @@ impl EventHandler for SagaEventHandler {
         let factory = self.context_factory.clone();
         let executor = self.command_executor.clone();
         let command_bus = self.command_bus.clone();
-        let fetcher = self.destination_fetcher.clone();
         let fact_executor = self.fact_executor.clone();
         let validator = self.output_domain_validator.clone();
         let backoff = self.backoff;
@@ -146,7 +152,6 @@ impl EventHandler for SagaEventHandler {
 
                 let validator_ref: Option<&OutputDomainValidator> = validator.as_deref();
                 let command_bus_ref: Option<&dyn CommandBus> = command_bus.as_deref();
-                let fetcher_ref: Option<&dyn DestinationFetcher> = fetcher.as_deref();
                 let fact_executor_ref: Option<&dyn FactExecutor> = fact_executor.as_deref();
 
                 // Events received from bus are always async mode.
@@ -156,13 +161,13 @@ impl EventHandler for SagaEventHandler {
                     ctx.as_ref(),
                     executor.as_ref(),
                     command_bus_ref,
-                    fetcher_ref,
                     fact_executor_ref,
                     &saga_name,
                     &correlation_id,
                     validator_ref,
                     SyncMode::Async,
                     backoff,
+                    None,
                 )
                 .await
                 {

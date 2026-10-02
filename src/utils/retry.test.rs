@@ -1,63 +1,184 @@
 //! Tests for gRPC error classification and retry semantics.
 //!
 //! The retry system distinguishes between:
-//! - **Retryable errors** (FailedPrecondition): Sequence mismatches where
-//!   the client can fetch fresh state and retry with correct sequence.
-//! - **Non-retryable errors** (Aborted, InvalidArgument, etc.): Either
-//!   business rejections or errors requiring human intervention.
+//! - **Retryable errors**: 5xx-class transient codes plus sequence-conflict
+//!   `FailedPrecondition`. The handler can backoff and retry; on retry
+//!   exhaustion the caller publishes to the DLQ.
+//! - **Non-retryable errors**: 4xx-class permanent codes plus
+//!   non-sequence-conflict `FailedPrecondition` (business guard
+//!   rejections). The DLQ layer takes the entry immediately.
 //!
-//! Why this matters: Correct classification is critical — retrying non-retryable
-//! errors wastes resources, while failing to retry transient errors causes
-//! unnecessary failures.
-//!
-//! Key behaviors verified:
-//! - FailedPrecondition is retryable (sequence mismatches with STRICT/COMMUTATIVE)
-//! - Aborted is NOT retryable (MERGE_MANUAL conflicts go to DLQ)
-//! - Other error codes are NOT retryable (business rejections, validation, etc.)
+//! Why this matters: classification governs both the retry loop AND
+//! whether a failure becomes a dead letter immediately vs. after retry
+//! exhaustion. The classifier stays aligned with
+//! `crate::dlq::trigger::CodeDlqExt::classify_for_dlq` so the four
+//! handler types (aggregate, saga, PM, projector) share one operator
+//! contract per R2-15 decision #2.
 
 use super::*;
 
-/// FailedPrecondition is retryable — client fetches fresh state and retries.
+/// Exhaustive: every 5xx-class transient code is retryable.
 ///
-/// Sequence mismatches with STRICT or COMMUTATIVE merge strategy return
-/// FailedPrecondition. The fix is: fetch current aggregate state, rebuild
-/// command with correct sequence, and retry.
-///
-/// Aborted is NOT retryable — it signals MERGE_MANUAL conflicts that
-/// require human review via DLQ.
+/// R2-15 decision #2 retry list — these are the codes where backoff
+/// has a meaningful chance of succeeding on the next attempt. Each
+/// arm is asserted independently so a regression on one code is
+/// localized in the failure.
 #[test]
-fn test_is_retryable_status() {
-    // Sequence mismatch (STRICT/COMMUTATIVE) is retryable - client fetches fresh state
+fn test_is_retryable_5xx_class_codes_are_all_retryable() {
+    assert!(
+        is_retryable_status(&Status::unavailable("broker down")),
+        "Unavailable should be retryable (transient broker issue)"
+    );
+    assert!(
+        is_retryable_status(&Status::deadline_exceeded("timed out")),
+        "DeadlineExceeded should be retryable (transient slow path)"
+    );
+    assert!(
+        is_retryable_status(&Status::resource_exhausted("rate limited")),
+        "ResourceExhausted should be retryable (backpressure)"
+    );
+    assert!(
+        is_retryable_status(&Status::internal("Internal error")),
+        "Internal should be retryable (server-side fault may be transient)"
+    );
+    assert!(
+        is_retryable_status(&Status::unknown("unknown")),
+        "Unknown should be retryable (no information either way → retry)"
+    );
+    assert!(
+        is_retryable_status(&Status::data_loss("data loss")),
+        "DataLoss should be retryable (storage transient hiccup)"
+    );
+    assert!(
+        is_retryable_status(&Status::cancelled("client cancel")),
+        "Cancelled should be retryable (upstream / shutdown recovers next tick)"
+    );
+}
+
+/// FailedPrecondition is retryable ONLY for sequence conflicts.
+///
+/// FailedPrecondition is overloaded in this codebase:
+/// - sequence-conflict messages from `single_sequence_check` /
+///   `storage::error::SEQUENCE_CONFLICT` are transient races and should
+///   retry with fresh state (event-sourcing idempotency makes this safe);
+/// - business-guard rejections from aggregate handlers (e.g.
+///   "Hand already dealt") are permanent — refresh just re-hits the
+///   guard. These must NOT retry.
+#[test]
+fn test_is_retryable_failed_precondition_only_for_sequence_messages() {
+    // Sequence mismatch (STRICT/COMMUTATIVE merge) is retryable.
     assert!(is_retryable_status(&Status::failed_precondition(
         "Sequence mismatch: command expects 0, aggregate at 5"
     )));
 
-    // Storage-level sequence conflict is also retryable
+    // Storage-level sequence conflict is retryable.
     assert!(is_retryable_status(&Status::failed_precondition(
         "Sequence conflict: expected 0, got 3"
     )));
 
-    // FailedPrecondition from a business guard (e.g. aggregate handler
-    // rejection) is NOT retryable — the same guard would re-fail on
-    // refresh. Only sequence-shaped messages are eligible.
+    // Business-guard FailedPrecondition is NOT retryable.
     assert!(!is_retryable_status(&Status::failed_precondition(
         "Hand already dealt"
     )));
     assert!(!is_retryable_status(&Status::failed_precondition(
         "Player does not exist"
     )));
+}
 
-    // ABORTED (DLQ routing with MERGE_MANUAL) is NOT retryable
-    assert!(!is_retryable_status(&Status::aborted(
-        "Sent to DLQ for manual review"
-    )));
+/// Exhaustive: every 4xx-class permanent code is non-retryable.
+///
+/// These all map to `DlqTrigger::Immediate` — they require human
+/// intervention or operator/code fixes, not automated retry. Asserted
+/// per-code so a regression on any single arm is localized.
+#[test]
+fn test_is_retryable_4xx_class_codes_are_all_non_retryable() {
+    assert!(
+        !is_retryable_status(&Status::invalid_argument("bad arg")),
+        "InvalidArgument should NOT be retryable (caller bug)"
+    );
+    assert!(
+        !is_retryable_status(&Status::not_found("missing")),
+        "NotFound should NOT be retryable (resource doesn't exist)"
+    );
+    assert!(
+        !is_retryable_status(&Status::aborted("DLQ for manual review")),
+        "Aborted should NOT be retryable (MERGE_MANUAL routing)"
+    );
+    assert!(
+        !is_retryable_status(&Status::unimplemented("missing handler")),
+        "Unimplemented should NOT be retryable (code fix required)"
+    );
+    assert!(
+        !is_retryable_status(&Status::permission_denied("denied")),
+        "PermissionDenied should NOT be retryable (authz)"
+    );
+    assert!(
+        !is_retryable_status(&Status::unauthenticated("no creds")),
+        "Unauthenticated should NOT be retryable (auth)"
+    );
+    assert!(
+        !is_retryable_status(&Status::out_of_range("out of range")),
+        "OutOfRange should NOT be retryable (caller bug)"
+    );
+    assert!(
+        !is_retryable_status(&Status::already_exists("dup")),
+        "AlreadyExists should NOT be retryable (idempotency conflict)"
+    );
+}
 
-    // Other errors are NOT retryable
-    assert!(!is_retryable_status(&Status::invalid_argument(
-        "Invalid command"
-    )));
-    assert!(!is_retryable_status(&Status::not_found("Not found")));
-    assert!(!is_retryable_status(&Status::internal("Internal error")));
+/// `is_retryable_status` MUST stay aligned with
+/// `classify_for_dlq`'s transient bucket, with one documented exception:
+/// `FailedPrecondition`. The DLQ classifier sends ALL
+/// `FailedPrecondition` to `Immediate`; the retry classifier sends
+/// sequence-conflict messages to retryable. This alignment test pins
+/// the invariant — if a future change adds a new `tonic::Code` variant
+/// or moves an existing one between the buckets, exactly one of the
+/// two classifiers must change to match the other, and this test will
+/// catch the drift.
+#[test]
+fn test_is_retryable_status_aligned_with_classify_for_dlq() {
+    use crate::dlq::trigger::{CodeDlqExt, DlqTrigger};
+
+    // Codes whose retry-classification can be inferred from
+    // classify_for_dlq alone (i.e. all codes EXCEPT FailedPrecondition,
+    // which depends on message content and is tested separately above).
+    let codes_no_message_dependence: &[Code] = &[
+        Code::Ok,
+        Code::Cancelled,
+        Code::Unknown,
+        Code::InvalidArgument,
+        Code::DeadlineExceeded,
+        Code::NotFound,
+        Code::AlreadyExists,
+        Code::PermissionDenied,
+        Code::ResourceExhausted,
+        Code::Aborted,
+        Code::OutOfRange,
+        Code::Unimplemented,
+        Code::Internal,
+        Code::Unavailable,
+        Code::DataLoss,
+        Code::Unauthenticated,
+    ];
+
+    for code in codes_no_message_dependence {
+        let status = Status::new(*code, "test");
+        let expected_retry = matches!(code.classify_for_dlq(), DlqTrigger::RetryThenDlq(_))
+            // Defensive carve-out: classify_for_dlq sends Ok to RetryThenDlq
+            // (so a phantom-success can't slip through as a dead letter),
+            // but Ok is not retryable from is_retryable_status' perspective
+            // — a successful response shouldn't reach this helper, and if
+            // it did we want false.
+            && *code != Code::Ok;
+        assert_eq!(
+            is_retryable_status(&status),
+            expected_retry,
+            "drift for {:?}: classify_for_dlq says {:?}, is_retryable_status says {}",
+            code,
+            code.classify_for_dlq(),
+            is_retryable_status(&status),
+        );
+    }
 }
 
 // ============================================================================

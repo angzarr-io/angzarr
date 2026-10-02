@@ -78,6 +78,18 @@ impl KafkaEventBusConfig {
         }
     }
 
+    /// Derive a subscriber config that shares this config's brokers, topic
+    /// prefix and security settings, so a subscriber created from a
+    /// publisher reads the topics that publisher writes over the same
+    /// authenticated connection. `None` subscribes to every domain.
+    pub fn subscriber_config(&self, group_id: &str, domain: Option<&str>) -> Self {
+        Self {
+            group_id: Some(group_id.to_string()),
+            domains: domain.map(|d| vec![d.to_string()]),
+            ..self.clone()
+        }
+    }
+
     /// Add SASL authentication.
     pub fn with_sasl(
         mut self,
@@ -133,6 +145,13 @@ impl KafkaEventBusConfig {
         config.set("bootstrap.servers", &self.bootstrap_servers);
         config.set("enable.auto.commit", "false");
         config.set("auto.offset.reset", "earliest");
+        // SubscriberAll uses a regex subscription, and librdkafka only
+        // discovers NEWLY CREATED matching topics on metadata refresh —
+        // default 5 MINUTES. A domain that publishes its first event after
+        // the consumer attached would be invisible for that long (contract:
+        // test_multi_domain_subscription). 5s bounds discovery latency at
+        // negligible metadata cost for this consumer count.
+        config.set("topic.metadata.refresh.interval.ms", "5000");
 
         if let Some(ref group_id) = self.group_id {
             config.set("group.id", group_id);

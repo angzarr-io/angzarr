@@ -10,8 +10,8 @@ use deadpool_lapin::{Manager, Pool, PoolError};
 use hex;
 use lapin::{
     options::{
-        BasicConsumeOptions, BasicNackOptions, BasicPublishOptions, ConfirmSelectOptions,
-        ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
+        BasicConsumeOptions, BasicNackOptions, BasicPublishOptions, BasicQosOptions,
+        ConfirmSelectOptions, ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions,
     },
     publisher_confirm::Confirmation,
     types::FieldTable,
@@ -19,12 +19,13 @@ use lapin::{
 };
 use prost::Message;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, Instrument};
+use tracing::{debug, error, info, warn, Instrument};
 
 use super::config::EventBusMode;
 use super::error::{BusError, Result};
 use super::factory::BusBackend;
 use super::traits::{EventBus, EventHandler, PublishResult};
+use crate::advice::InstrumentedBus;
 use crate::proto::EventBook;
 use crate::proto_ext::CoverExt;
 
@@ -55,8 +56,8 @@ inventory::submit! {
 
                 let amqp_config = match mode {
                     EventBusMode::Publisher => AmqpConfig::publisher(&amqp_url),
-                    EventBusMode::Subscriber { queue, domain } => {
-                        AmqpConfig::subscriber(&amqp_url, queue, &domain)
+                    EventBusMode::Subscriber { queue, domains } => {
+                        AmqpConfig::subscriber(&amqp_url, queue, &domains)
                     }
                     EventBusMode::SubscriberAll { queue } => {
                         AmqpConfig::subscriber_all(&amqp_url, queue)
@@ -66,7 +67,12 @@ inventory::submit! {
                 match AmqpEventBus::new(amqp_config).await {
                     Ok(bus) => {
                         info!(messaging_type = "amqp", "Event bus initialized");
-                        Some(Ok(Arc::new(bus) as Arc<dyn EventBus>))
+                        // R2-WIRE-ADVICE: wrap with `InstrumentedBus`
+                        // under the "amqp" label so BUS_PUBLISH_*
+                        // metrics fire. No-op when `otel` is off.
+                        Some(Ok(
+                            Arc::new(InstrumentedBus::new(bus, "amqp")) as Arc<dyn EventBus>
+                        ))
                     }
                     Err(e) => Some(Err(e)),
                 }
@@ -78,6 +84,18 @@ inventory::submit! {
 /// Exchange name for angzarr events.
 const EVENTS_EXCHANGE: &str = "angzarr.events";
 
+/// Unacknowledged deliveries a consumer may hold.
+///
+/// One: the consumer handles deliveries sequentially, and a delivery that
+/// is nacked with requeue returns to the head of the queue. With a larger
+/// prefetch, later deliveries for the same aggregate root are already
+/// buffered in the consumer and get handled before the requeued one,
+/// reordering that root's events.
+pub(crate) const CONSUMER_PREFETCH: u16 = 1;
+
+/// Topic-exchange binding key that matches every routing key.
+const ALL_DOMAINS_ROUTING_KEY: &str = "#";
+
 /// Configuration for AMQP connection.
 #[derive(Clone, Debug)]
 pub struct AmqpConfig {
@@ -87,8 +105,9 @@ pub struct AmqpConfig {
     pub exchange: String,
     /// Queue name for consuming (used by subscribers).
     pub queue: Option<String>,
-    /// Routing key pattern for binding (e.g., "orders.*").
-    pub routing_key: Option<String>,
+    /// Routing key patterns the queue is bound with (e.g., `orders.*`, or
+    /// `#` for every domain). Empty for publishers.
+    pub routing_keys: Vec<String>,
     /// Message TTL in milliseconds. Default: 1 hour (3,600,000ms).
     /// Messages older than this are automatically discarded.
     pub message_ttl_ms: Option<i32>,
@@ -109,19 +128,26 @@ impl AmqpConfig {
             url: url.into(),
             exchange: EVENTS_EXCHANGE.to_string(),
             queue: None,
-            routing_key: None,
+            routing_keys: Vec::new(),
             message_ttl_ms: None,
             max_queue_length: None,
         }
     }
 
-    /// Create config for subscribing to a domain.
-    pub fn subscriber(url: impl Into<String>, queue: impl Into<String>, domain: &str) -> Self {
+    /// Create config for subscribing to a set of domains.
+    ///
+    /// Routing keys are `{domain}.{hex(root)}`; validated domains contain
+    /// no `.`, so `{domain}.*` matches exactly that domain's events.
+    pub fn subscriber(
+        url: impl Into<String>,
+        queue: impl Into<String>,
+        domains: &[String],
+    ) -> Self {
         Self {
             url: url.into(),
             exchange: EVENTS_EXCHANGE.to_string(),
             queue: Some(queue.into()),
-            routing_key: Some(format!("{}.*", domain)),
+            routing_keys: domains.iter().map(|d| format!("{}.*", d)).collect(),
             message_ttl_ms: Some(DEFAULT_MESSAGE_TTL_MS),
             max_queue_length: Some(DEFAULT_MAX_QUEUE_LENGTH),
         }
@@ -133,7 +159,7 @@ impl AmqpConfig {
             url: url.into(),
             exchange: EVENTS_EXCHANGE.to_string(),
             queue: Some(queue.into()),
-            routing_key: Some("#".to_string()),
+            routing_keys: vec![ALL_DOMAINS_ROUTING_KEY.to_string()],
             message_ttl_ms: Some(DEFAULT_MESSAGE_TTL_MS),
             max_queue_length: Some(DEFAULT_MAX_QUEUE_LENGTH),
         }
@@ -198,7 +224,7 @@ impl AmqpEventBus {
 
         info!(
             exchange = %config.exchange,
-            url = %config.url,
+            url = %crate::utils::redact::redact_uri(&config.url),
             "Connected to AMQP"
         );
 
@@ -285,11 +311,12 @@ impl AmqpEventBus {
             .clone()
             .ok_or_else(|| BusError::Subscribe("No queue configured".to_string()))?;
 
-        let routing_key = self
-            .config
-            .routing_key
-            .clone()
-            .ok_or_else(|| BusError::Subscribe("No routing key configured".to_string()))?;
+        let routing_keys = self.config.routing_keys.clone();
+        if routing_keys.is_empty() {
+            return Err(BusError::Subscribe(
+                "No routing keys configured".to_string(),
+            ));
+        }
 
         let exchange = self.config.exchange.clone();
         let pool = self.pool.clone();
@@ -297,41 +324,58 @@ impl AmqpEventBus {
         let message_ttl_ms = self.config.message_ttl_ms;
         let max_queue_length = self.config.max_queue_length;
 
-        // Spawn consumer task with reconnection loop
+        // Spawn consumer task with reconnection loop. The oneshot reports
+        // the FIRST successful consumer setup back to this call.
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             Self::consume_with_reconnect(
                 pool,
                 exchange,
                 queue,
-                routing_key,
+                routing_keys,
                 handlers,
                 message_ttl_ms,
                 max_queue_length,
+                ready_tx,
             )
             .await;
         });
+
+        // T10: `start_consuming` contract — the consumer is ESTABLISHED when
+        // this returns. Without this, queue declare + bind happen inside the
+        // spawned task, and a publish issued right after start_consuming()
+        // could be dropped for lack of a bound queue (silent loss in any
+        // service that publishes immediately after starting its subscriber).
+        // If the broker is unreachable, this waits through the reconnect
+        // backoff until the first successful attach.
+        ready_rx.await.map_err(|_| {
+            BusError::Subscribe("consumer task exited before establishing".to_string())
+        })?;
 
         Ok(())
     }
 
     /// Consumer loop with automatic reconnection and exponential backoff with jitter.
+    #[allow(clippy::too_many_arguments)]
     async fn consume_with_reconnect(
         pool: Pool,
         exchange: String,
         queue: String,
-        routing_key: String,
+        routing_keys: Vec<String>,
         handlers: Arc<RwLock<Vec<Box<dyn EventHandler>>>>,
         message_ttl_ms: Option<i32>,
         max_queue_length: Option<i32>,
+        ready_tx: tokio::sync::oneshot::Sender<()>,
     ) {
         use futures::StreamExt;
         use std::time::Duration;
 
+        // Signals the FIRST successful setup back to start_consuming (T10
+        // readiness contract). Subsequent reconnects have no one to notify.
+        let mut ready_tx = Some(ready_tx);
+
         // Exponential backoff with jitter to prevent thundering herd
-        let backoff_builder = ExponentialBuilder::default()
-            .with_min_delay(Duration::from_millis(100))
-            .with_max_delay(Duration::from_secs(30))
-            .with_jitter();
+        let backoff_builder = crate::bus::reconnect_backoff();
 
         let mut backoff_iter = backoff_builder.build();
 
@@ -341,7 +385,7 @@ impl AmqpEventBus {
                 &pool,
                 &exchange,
                 &queue,
-                &routing_key,
+                &routing_keys,
                 message_ttl_ms,
                 max_queue_length,
             )
@@ -350,9 +394,14 @@ impl AmqpEventBus {
                 Ok(mut consumer) => {
                     info!(
                         queue = %queue,
-                        routing_key = %routing_key,
+                        routing_keys = ?routing_keys,
                         "Consumer connected, processing messages"
                     );
+                    if let Some(tx) = ready_tx.take() {
+                        // Receiver may have been dropped (caller gave up);
+                        // consuming proceeds either way.
+                        let _ = tx.send(());
+                    }
                     // H-07: do NOT reset backoff on `setup_consumer` success
                     // — only after the stream has actually produced at
                     // least one delivery. A consumer that handshakes and
@@ -488,7 +537,7 @@ impl AmqpEventBus {
         pool: &Pool,
         exchange: &str,
         queue: &str,
-        routing_key: &str,
+        routing_keys: &[String],
         message_ttl_ms: Option<i32>,
         max_queue_length: Option<i32>,
     ) -> Result<lapin::Consumer> {
@@ -559,23 +608,30 @@ impl AmqpEventBus {
             .await
             .map_err(|e| BusError::Subscribe(format!("Failed to declare queue: {}", e)))?;
 
-        // Bind queue to exchange
-        channel
-            .queue_bind(
-                queue,
-                exchange,
-                routing_key,
-                QueueBindOptions::default(),
-                FieldTable::default(),
-            )
-            .await
-            .map_err(|e| BusError::Subscribe(format!("Failed to bind queue: {}", e)))?;
+        // Bind queue to exchange, one binding per routing key.
+        for routing_key in routing_keys {
+            channel
+                .queue_bind(
+                    queue,
+                    exchange,
+                    routing_key,
+                    QueueBindOptions::default(),
+                    FieldTable::default(),
+                )
+                .await
+                .map_err(|e| BusError::Subscribe(format!("Failed to bind queue: {}", e)))?;
+        }
 
         info!(
             queue = %queue,
-            routing_key = %routing_key,
+            routing_keys = ?routing_keys,
             "Bound queue to exchange"
         );
+
+        channel
+            .basic_qos(CONSUMER_PREFETCH, BasicQosOptions::default())
+            .await
+            .map_err(|e| BusError::Subscribe(format!("Failed to set prefetch: {}", e)))?;
 
         // Create consumer
         let consumer = channel
@@ -732,18 +788,48 @@ impl EventBus for AmqpEventBus {
                 .basic_publish(
                     &self.config.exchange,
                     &routing_key,
-                    BasicPublishOptions::default(),
+                    // B2: `mandatory` makes the broker RETURN unroutable
+                    // messages instead of silently discarding them. Without
+                    // it, a publish that routes to ZERO queues (no subscriber
+                    // queue bound yet — first deploy, binding race) is
+                    // confirmed as success and the event vanishes.
+                    BasicPublishOptions {
+                        mandatory: true,
+                        ..Default::default()
+                    },
                     &payload,
                     properties,
                 )
                 .await
             {
                 Ok(confirm) => match confirm.await {
-                    Ok(Confirmation::Ack(_)) => {
+                    Ok(Confirmation::Ack(None)) => {
                         debug!(
                             exchange = %self.config.exchange,
                             routing_key = %routing_key,
                             "Published event book"
+                        );
+                        return Ok(PublishResult::default());
+                    }
+                    Ok(Confirmation::Ack(Some(returned))) => {
+                        // B2: broker accepted the publish but routed it to
+                        // ZERO queues (basic.return + ack). Publishing into
+                        // the void is a legitimate topology state (an
+                        // aggregate with no downstream subscriber — the
+                        // `test_publish_only` contract), so this is NOT an
+                        // error — but it must never be SILENT: if a
+                        // subscriber was expected, this warn is the only
+                        // trace the event ever existed. Durable subscriber
+                        // queues keep messages routable across consumer
+                        // restarts; this fires only when no queue is bound
+                        // at all.
+                        warn!(
+                            exchange = %self.config.exchange,
+                            routing_key = %routing_key,
+                            reply_code = returned.reply_code,
+                            reply_text = %returned.reply_text,
+                            "Publish UNROUTABLE: no queue bound — event was \
+                             not delivered to any subscriber (B2)"
                         );
                         return Ok(PublishResult::default());
                     }
@@ -829,7 +915,7 @@ impl EventBus for AmqpEventBus {
         domain_filter: Option<&str>,
     ) -> Result<Arc<dyn EventBus>> {
         let config = match domain_filter {
-            Some(d) => AmqpConfig::subscriber(&self.config.url, name, d),
+            Some(d) => AmqpConfig::subscriber(&self.config.url, name, &[d.to_string()]),
             None => AmqpConfig::subscriber_all(&self.config.url, name),
         };
         let bus = AmqpEventBus::new(config).await?;

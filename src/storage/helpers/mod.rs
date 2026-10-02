@@ -21,30 +21,35 @@ pub fn is_main_timeline(edition: &str) -> bool {
     edition.is_empty() || edition == DEFAULT_EDITION
 }
 
-/// Resolve target edition for fallback queries.
+/// Reconstruction inputs for a single EventBook.
 ///
-/// When a named edition has no events, queries fall back to the main timeline.
-/// Returns the edition to use for that fallback.
-pub fn fallback_edition(edition: &str) -> &str {
-    if is_main_timeline(edition) {
-        edition
-    } else {
-        DEFAULT_EDITION
-    }
+/// Groups the ordered pages of one aggregate write with its parent-routing
+/// cover (`ext`, a packed parent `Cover`). Keeping `ext` alongside `pages` in
+/// the same map entry makes it impossible to desync the two during the
+/// row-grouping loops in each backend's `get_by_correlation`.
+#[derive(Default)]
+pub struct BookParts {
+    /// Ordered event pages for the aggregate.
+    pub pages: Vec<EventPage>,
+    /// Parent-aggregate routing cover (`Cover.ext`), if the write carried one.
+    /// All pages in a write share the same `ext`; the first non-empty value
+    /// seen for the book key wins.
+    pub ext: Option<prost_types::Any>,
 }
 
 /// Assemble EventBooks from grouped events.
 ///
-/// Takes a HashMap of (domain, edition, root) -> Vec<EventPage> and
-/// converts it to Vec<EventBook>. Used by get_by_correlation implementations
-/// across all storage backends.
+/// Takes a HashMap of (domain, edition, root) -> [`BookParts`] and converts it
+/// to Vec<EventBook>. Used by get_by_correlation implementations across all
+/// storage backends. The book's `ext` is reconstructed from [`BookParts::ext`]
+/// so the parent-routing cover survives the storage round-trip.
 pub fn assemble_event_books(
-    books_map: HashMap<(String, String, Uuid), Vec<EventPage>>,
+    books_map: HashMap<(String, String, Uuid), BookParts>,
     correlation_id: &str,
 ) -> Vec<EventBook> {
     books_map
         .into_iter()
-        .map(|((domain, edition, root), pages)| EventBook {
+        .map(|((domain, edition, root), parts)| EventBook {
             cover: Some(Cover {
                 domain,
                 root: Some(ProtoUuid {
@@ -55,34 +60,13 @@ pub fn assemble_event_books(
                     name: edition,
                     divergences: vec![],
                 }),
+                ext: parts.ext,
             }),
-            pages,
+            pages: parts.pages,
             snapshot: None,
             ..Default::default()
         })
         .collect()
-}
-
-/// Resolve the sequence number for an event.
-///
-/// Validates that the sequence is >= base_sequence.
-///
-/// H-21: an earlier signature took `auto_sequence: &mut u32` for an
-/// auto-assign dispatch path that was never implemented; the parameter
-/// was read by zero callers and ignored by this body. The framework's
-/// invariant is that the caller always provides an explicit sequence
-/// (the aggregate pipeline stamps it from `get_next_sequence`), so the
-/// parameter has been dropped rather than implementing a feature no
-/// caller asked for.
-pub fn resolve_sequence(event: &EventPage, base_sequence: u32) -> Result<u32> {
-    let seq = event.sequence_num();
-    if seq < base_sequence {
-        return Err(StorageError::SequenceConflict {
-            expected: base_sequence,
-            actual: seq,
-        });
-    }
-    Ok(seq)
 }
 
 /// Parse event timestamp to RFC3339 string, defaulting to now.
@@ -124,7 +108,7 @@ pub fn timestamp_to_rfc3339(
 ///
 /// Backends that build composite row keys with `#` as the separator
 /// (Bigtable row keys, DynamoDB partition keys) must escape `#` inside
-/// each component or any `#` in `domain`, `edition`, `cascade_id`, etc.
+/// each component or any `#` in `domain`, `edition`, etc.
 /// silently mis-parses on the way back out.
 ///
 /// We escape only the minimal set of characters needed to make the

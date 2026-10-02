@@ -25,7 +25,9 @@
 //! framework descriptors only. The UI degrades to JSON+base64 for
 //! unknown `Any` payloads — never crashes.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+
+use tracing::warn;
 
 /// Environment variable the Helm chart sets when the operator mounts
 /// a `descriptors` ConfigMap. Empty / unset → no pre-staged mount.
@@ -47,6 +49,51 @@ pub fn descriptors_dir_from_env() -> Option<PathBuf> {
         Ok(s) if !s.is_empty() => Some(PathBuf::from(s)),
         _ => None,
     }
+}
+
+/// Read `.protoset` (FileDescriptorSet) blobs from a mounted directory.
+///
+/// Tolerant per the scaffold's resilience contract:
+/// - Missing directory → empty vec + warning (operator didn't mount,
+///   or the mount hasn't appeared yet).
+/// - Per-file read failure (permission, mid-scan removal, a
+///   `.protoset` that's actually a directory) → skip that file with a
+///   warning; continue the scan.
+/// - Non-`.protoset` files in the directory are silently ignored.
+///
+/// Returns the raw bytes of each file; the caller decodes them into a
+/// `DescriptorPool` so this helper stays I/O-only and easy to unit-test.
+pub fn load_protoset_files(dir: &Path) -> Vec<Vec<u8>> {
+    let read_dir = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) => {
+            warn!(
+                path = %dir.display(),
+                error = %e,
+                "descriptors dir not readable; proceeding without pre-staged descriptors"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut out = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some(PROTOSET_EXTENSION) {
+            continue;
+        }
+        match std::fs::read(&path) {
+            Ok(bytes) => out.push(bytes),
+            Err(e) => {
+                warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "failed to read protoset; skipping"
+                );
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]

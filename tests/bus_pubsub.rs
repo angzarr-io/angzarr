@@ -22,6 +22,9 @@ use angzarr::bus::pubsub::build_subscription_config;
 use std::time::Duration;
 
 #[cfg(feature = "test-utils")]
+use angzarr::bus::EventBus;
+
+#[cfg(feature = "test-utils")]
 use angzarr::bus::pubsub::{PubSubConfig, PubSubEventBus};
 #[cfg(feature = "test-utils")]
 use testcontainers::{
@@ -65,10 +68,16 @@ async fn start_pubsub_emulator() -> (testcontainers::ContainerAsync<GenericImage
         .await
         .expect("Failed to get mapped port");
 
-    let host = container
-        .get_host()
-        .await
-        .expect("Failed to get container host");
+    // See storage_postgres.rs: dind wrapper sets TESTCONTAINERS_HOST because
+    // the bridge-gateway fallback is unreachable under rootless docker.
+    let host = match std::env::var("TESTCONTAINERS_HOST") {
+        Ok(h) => h,
+        Err(_) => container
+            .get_host()
+            .await
+            .expect("Failed to get container host")
+            .to_string(),
+    };
 
     let emulator_host = format!("{}:{}", host, host_port);
 
@@ -129,6 +138,40 @@ async fn test_pubsub_event_bus() {
 
     run_event_bus_tests!(&bus, &prefix);
 
+    bus::event_bus_tests::test_all_domains_subscription_refused(
+        &bus,
+        &format!("{}-sub-all", prefix),
+    )
+    .await;
+    println!("  test_all_domains_subscription_refused: PASSED");
+
+    let (d1, d2) = (format!("{}-md1", prefix), format!("{}-md2", prefix));
+    let multi: std::sync::Arc<dyn angzarr::bus::EventBus> = std::sync::Arc::new(
+        PubSubEventBus::new(PubSubConfig::subscriber(
+            "test-project",
+            format!("{}-sub-md", prefix),
+            vec![d1.clone(), d2.clone()],
+        ))
+        .await
+        .expect("multi-domain subscriber"),
+    );
+    bus::event_bus_tests::test_explicit_multi_domain_subscription(multi, &bus, &d1, &d2).await;
+    println!("  test_explicit_multi_domain_subscription: PASSED");
+
+    let domain = format!("{}-order-after-fail", prefix);
+    let subscriber = bus
+        .create_subscriber(&format!("{}-sub-order-after-fail", prefix), Some(&domain))
+        .await
+        .expect("create subscriber");
+    bus::event_bus_tests::test_root_order_preserved_after_handler_failure(
+        subscriber,
+        &bus,
+        &domain,
+        Duration::from_secs(60),
+    )
+    .await;
+    println!("  test_root_order_preserved_after_handler_failure: PASSED");
+
     // H-11: per-root ordering contract test. Re-create the bus inside an
     // Arc so the helper can clone it across concurrent producer tasks
     // (`PubSubEventBus` does not implement `Clone`).
@@ -140,4 +183,37 @@ async fn test_pubsub_event_bus() {
     run_per_root_ordering_test!(bus_arc, &prefix);
 
     println!("=== All Pub/Sub EventBus tests PASSED ===");
+}
+
+/// C-10 contract on Pub/Sub: a failed handler must lead to redelivery.
+///
+/// T7 (review remediation): a failed message must be nacked (or left to
+/// the ack deadline) and redelivered — never acked. The deadline covers
+/// the emulator's ack-deadline expiry path.
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn test_pubsub_handler_failure_redelivery() {
+    println!("=== Pub/Sub handler-failure redelivery test (C-10) ===");
+    let (_container, emulator_host) = start_pubsub_emulator().await;
+    let prefix = test_prefix();
+    let domain = format!("{}-c10-domain", prefix);
+    let subscription = format!("{}-c10-sub", prefix);
+
+    std::env::set_var("PUBSUB_EMULATOR_HOST", &emulator_host);
+
+    let publisher = PubSubEventBus::new(PubSubConfig::publisher("test-project"))
+        .await
+        .expect("Failed to create Pub/Sub publisher");
+
+    bus::event_bus_tests::test_handler_err_triggers_redelivery(
+        &publisher,
+        &domain,
+        &subscription,
+        // Nack redelivers quickly; ack-deadline expiry takes ~10s on the
+        // emulator default — allow for either path.
+        Duration::from_secs(30),
+    )
+    .await;
+
+    println!("=== Pub/Sub handler-failure redelivery: PASSED ===");
 }

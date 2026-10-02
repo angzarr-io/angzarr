@@ -1,0 +1,14 @@
+bundles:
+    - ctxloom-default/ai-coding-general
+    - ctxloom-default/rust-ai-practices
+    - ctxloom-default/testing
+    - ctxloom-default/rust-development
+    - ctxloom-default/git
+    - ctxloom-default/ast-grep
+    - ctxloom-default/lsp
+description: Rust development profile with AI coding practices
+tags:
+    - rust
+    - development
+    - systems
+version: 1.0.0

@@ -16,6 +16,10 @@
 .plan/
 .tasks/
 
+# llm-tool-killer: config.yaml is tracked (hand-maintained rules); state.json
+# is the ephemeral confirm-window state written by the PreToolUse hook.
+.ltk/state.json
+
 # Secrets - never commit
 .env
 *.tfvars
@@ -101,6 +105,7 @@ build/images/build.json
 # Mutation testing output
 mutants.out/
 mutants.out.*
+git.diff
 **/mutants/
 .mutants-cache/
 
@@ -116,12 +121,14 @@ dist/
 *.tar.gz
 *.egg-info/
 
-# Docusaurus
-docs/node_modules/
-docs/build/
-docs/.docusaurus/
 .docs-backup/
 .claude/settings.local.json
 
 # SCM memory (local session data, not shared)
 .scm/memory/
+
+# ctxloom local-only data: cached remote clones + materialized bundles
+# (regenerable via `ctxloom pull`), and ephemeral session/context files.
+# The declarative state (config.yaml, remotes.yaml, profiles/) is tracked.
+.ctxloom/cache/
+.ctxloom/ephemeral/

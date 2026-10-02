@@ -186,16 +186,18 @@ fn stamp_replay_metadata(
     dlq_id: i64,
     original_correlation_id: &str,
     new_correlation_id: &str,
+    mode: ReplayMode,
 ) -> (crate::proto::CommandBook, ReplayMetadata) {
     if let Some(cover) = command.cover.as_mut() {
         cover.correlation_id = new_correlation_id.to_string();
     }
-    // We do NOT modify `command.pages` for FRESH_SEQUENCE here —
-    // that's the publisher's contract, since it needs the live
-    // EventQueryService client to look up the current next_sequence.
+    // `command.pages` is not modified for FRESH_SEQUENCE here — the
+    // publisher rewrites sequences, since it holds the EventQueryService
+    // client that knows the aggregate's current next_sequence.
     let metadata = ReplayMetadata {
         replayed_from_dlq_id: dlq_id,
         original_correlation_id: original_correlation_id.to_string(),
+        mode,
     };
     tracing::debug!(
         replayed_from_dlq_id = dlq_id,
@@ -325,17 +327,23 @@ impl DlqAdminService for DlqAdminHandler {
         &self,
         request: Request<DeleteDeadLetterRequest>,
     ) -> Result<Response<DeleteDeadLetterResponse>, Status> {
+        let peer = request.remote_addr();
         let req = request.into_inner();
         let (checked_at, source) = self.envelope_fields();
 
         match self.reader.delete(req.id).await {
-            Ok(deleted) => Ok(Response::new(DeleteDeadLetterResponse {
-                state: Some(delete_dead_letter_response::State::Ok(DeleteDeadLetterOk {
-                    deleted,
-                })),
-                checked_at: Some(checked_at),
-                source,
-            })),
+            Ok(deleted) => {
+                // Deletion is irreversible: leave an operator-visible
+                // trail of who removed which dead letter.
+                warn!(id = req.id, deleted, peer = ?peer, "dead letter deleted by operator");
+                Ok(Response::new(DeleteDeadLetterResponse {
+                    state: Some(delete_dead_letter_response::State::Ok(DeleteDeadLetterOk {
+                        deleted,
+                    })),
+                    checked_at: Some(checked_at),
+                    source,
+                }))
+            }
             Err(e) => {
                 warn!(error = %e, id = %req.id, "DeleteDeadLetter backend error — degraded");
                 Ok(Response::new(DeleteDeadLetterResponse {
@@ -410,18 +418,17 @@ impl DlqAdminService for DlqAdminHandler {
         };
 
         // 3. Stamp metadata + new correlation_id. Sequence rewriting
-        //    for FRESH_SEQUENCE is the publisher's concern (it needs
-        //    the EventQueryService client) and lands when the real
-        //    publisher impl is wired. The handler always builds the
-        //    audit-trail metadata; the publisher decides how to
-        //    transmit it on the wire (out-of-band metadata until the
-        //    proto-level `Cover.metadata` field lands).
+        //    for FRESH_SEQUENCE is the publisher's concern (it holds the
+        //    EventQueryService client). The handler builds the
+        //    audit-trail metadata; the publisher transmits it on the
+        //    wire as request metadata.
         let new_correlation_id = uuid::Uuid::new_v4().to_string();
         let (rewritten, replay_metadata) = stamp_replay_metadata(
             command,
             stored.id,
             stored.correlation_id.as_deref().unwrap_or(""),
             &new_correlation_id,
+            mode,
         );
 
         // 4. Two-phase audit (H-31). INSERT a Pending row BEFORE
@@ -588,7 +595,7 @@ impl DlqAdminHandler {
 /// Fully-qualified proto type name of `AngzarrDeadLetter` —
 /// pinned here so a future rename surfaces as a build/test failure
 /// rather than silently producing empty `payload_view` strings.
-const ANGZARR_DEAD_LETTER_TYPE_NAME: &str = "angzarr_client.proto.angzarr.v1.AngzarrDeadLetter";
+const ANGZARR_DEAD_LETTER_TYPE_NAME: &str = "io.angzarr.v1.AngzarrDeadLetter";
 
 /// Map [`StoredDeadLetter`] (domain row) → proto wire type.
 ///

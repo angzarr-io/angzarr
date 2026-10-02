@@ -49,6 +49,7 @@ fn make_command(domain: &str, correlation_id: &str) -> CommandBook {
             }),
             correlation_id: correlation_id.to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
@@ -403,4 +404,65 @@ async fn malformed_page_token_returns_invalid_argument() {
         .await
         .unwrap_err();
     assert!(matches!(err, crate::dlq::DlqError::InvalidArgument(_)));
+}
+
+/// angzarr-status opens the reader against the audit store before any
+/// sidecar has published a dead letter there (fresh database, or a store
+/// only status uses). The reader creates the schema itself, so listing an
+/// empty store is an empty page rather than a query failure.
+#[tokio::test]
+async fn reader_on_fresh_store_creates_schema() {
+    let uri = format!(
+        "sqlite:file:dlq_reader_only_{}?mode=memory&cache=shared",
+        Uuid::new_v4().simple()
+    );
+    let reader = SqliteDlqReader::new(&uri).await.expect("reader init");
+
+    let page = reader
+        .list(ListFilter::default())
+        .await
+        .expect("empty store lists as an empty page");
+    assert!(page.entries.is_empty());
+
+    // A publisher opened afterwards finds the same, compatible table.
+    let publisher = SqliteDlqPublisher::new(&uri).await.expect("publisher init");
+    publisher
+        .publish(dead_letter("order", "c-1", "late writer"))
+        .await
+        .expect("publish into reader-created table");
+    assert_eq!(
+        reader
+            .list(ListFilter::default())
+            .await
+            .unwrap()
+            .entries
+            .len(),
+        1
+    );
+}
+
+/// Retention deletes only dead letters that occurred before the cutoff,
+/// so the store does not grow forever while recent failures stay
+/// inspectable.
+#[tokio::test]
+async fn delete_older_than_removes_only_expired_entries() {
+    let (publisher, reader) = fresh_pair().await;
+    let mut old = dead_letter("order", "c-old", "old");
+    old.occurred_at = Some(prost_types::Timestamp {
+        seconds: 1_000_000_000, // 2001
+        nanos: 0,
+    });
+    publisher.publish(old).await.unwrap();
+    publisher
+        .publish(dead_letter("order", "c-new", "new"))
+        .await
+        .unwrap();
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    let removed = reader.delete_older_than(cutoff).await.unwrap();
+
+    assert_eq!(removed, 1);
+    let left = reader.list(ListFilter::default()).await.unwrap().entries;
+    assert_eq!(left.len(), 1);
+    assert_eq!(left[0].correlation_id.as_deref(), Some("c-new"));
 }

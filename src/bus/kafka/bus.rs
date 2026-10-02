@@ -195,15 +195,13 @@ impl KafkaEventBus {
 
                                 let book = Arc::new(book);
                                 let all_succeeded = async {
-                                    crate::bus::dispatch_to_handlers(&handlers, &book).await
+                                    crate::bus::dispatch::dispatch_to_handlers(&handlers, &book)
+                                        .await
                                 }
                                 .instrument(consume_span)
                                 .await;
 
                                 // Only commit offset after successful handler dispatch.
-                                // If handlers fail, don't commit - Kafka will redeliver.
-                                // Existing idempotency (sequence numbers, external_id)
-                                // handles duplicates from async commit failures.
                                 if all_succeeded {
                                     if let Err(e) = consumer.commit_message(
                                         &message,
@@ -212,12 +210,44 @@ impl KafkaEventBus {
                                         error!(error = %e, "Failed to commit offset");
                                     }
                                 } else {
+                                    // B3: merely skipping the commit is NOT
+                                    // redelivery — continuing the loop lets a
+                                    // LATER message's commit implicitly commit
+                                    // past this failure, silently losing it
+                                    // (at-most-once behind an at-least-once
+                                    // trait). Seek the partition back to the
+                                    // failed offset so the stream redelivers
+                                    // it; the failed message blocks its
+                                    // partition until the handler succeeds —
+                                    // which per-root ordering requires anyway.
                                     warn!(
                                         topic = %message.topic(),
                                         partition = message.partition(),
                                         offset = message.offset(),
-                                        "Handler failed, not committing offset for redelivery"
+                                        "Handler failed; seeking back for in-place redelivery"
                                     );
+                                    if let Err(e) = consumer.seek(
+                                        message.topic(),
+                                        message.partition(),
+                                        rdkafka::Offset::Offset(message.offset()),
+                                        Duration::from_secs(5),
+                                    ) {
+                                        // Seek failure (e.g. rebalance mid-
+                                        // flight) leaves the uncommitted
+                                        // offset as the only recovery path —
+                                        // redelivery then happens on the next
+                                        // rebalance/restart instead of now.
+                                        error!(
+                                            error = %e,
+                                            topic = %message.topic(),
+                                            partition = message.partition(),
+                                            offset = message.offset(),
+                                            "Seek-back failed; redelivery deferred to next rebalance"
+                                        );
+                                    }
+                                    // Backoff so a deterministically failing
+                                    // handler doesn't hot-loop the partition.
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
                                 }
                             }
                             Err(e) => {
@@ -278,7 +308,8 @@ impl EventBus for KafkaEventBus {
             "Published event book to Kafka"
         );
 
-        // Kafka is async-only, no synchronous projections
+        // Kafka is async-only; PublishResult carries no data for any
+        // transport (see `PublishResult`'s docs in `bus::traits`).
         Ok(PublishResult::default())
     }
 
@@ -305,14 +336,7 @@ impl EventBus for KafkaEventBus {
         name: &str,
         domain_filter: Option<&str>,
     ) -> Result<Arc<dyn EventBus>> {
-        let config = match domain_filter {
-            Some(d) => KafkaEventBusConfig::subscriber(
-                &self.config.bootstrap_servers,
-                name,
-                vec![d.to_string()],
-            ),
-            None => KafkaEventBusConfig::subscriber_all(&self.config.bootstrap_servers, name),
-        };
+        let config = self.config.subscriber_config(name, domain_filter);
         let bus = KafkaEventBus::new(config).await?;
         Ok(Arc::new(bus))
     }

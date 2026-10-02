@@ -44,6 +44,7 @@ fn book_without_root(domain: &str) -> EventBook {
             root: None,
             correlation_id: String::new(),
             edition: None,
+            ..Default::default()
         }),
         pages: vec![make_event_page(0)],
         snapshot: None,
@@ -58,6 +59,7 @@ fn book_with_empty_root(domain: &str) -> EventBook {
             root: Some(ProtoUuid { value: Vec::new() }),
             correlation_id: String::new(),
             edition: None,
+            ..Default::default()
         }),
         pages: vec![make_event_page(0)],
         snapshot: None,

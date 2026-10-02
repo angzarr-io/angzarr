@@ -2,7 +2,7 @@
 //!
 //! Table schema:
 //! - PK: `{handler}#{domain}#{edition}#{root_hex}` (String)
-//! - sequence: last processed sequence number (Number)
+//! - sequence: last processed sequence number (Number); only ever advances
 
 use async_trait::async_trait;
 use aws_sdk_dynamodb::types::AttributeValue;
@@ -48,7 +48,9 @@ impl DynamoPositionStore {
             "{}#{}#{}#{}",
             crate::storage::helpers::pct_encode_component(handler),
             crate::storage::helpers::pct_encode_component(domain),
-            crate::storage::helpers::pct_encode_component(edition),
+            crate::storage::helpers::pct_encode_component(
+                crate::storage::timeline::storage_edition(edition),
+            ),
             root_hex
         )
     }
@@ -72,9 +74,7 @@ impl PositionStore for DynamoPositionStore {
             .key("pk", AttributeValue::S(pk))
             .send()
             .await
-            .map_err(|e| {
-                StorageError::NotImplemented(format!("DynamoDB get_item failed: {}", e))
-            })?;
+            .map_err(|e| StorageError::Backend(format!("DynamoDB get_item failed: {}", e)))?;
 
         if let Some(item) = result.item {
             if let Some(AttributeValue::N(seq_str)) = item.get("sequence") {
@@ -111,15 +111,29 @@ impl PositionStore for DynamoPositionStore {
             AttributeValue::N(sequence.to_string()),
         );
 
-        self.client
+        // Monotonic: the write only lands when it advances the checkpoint.
+        // A stale or replayed put fails the condition and is a no-op.
+        let result = self
+            .client
             .put_item()
             .table_name(&self.table_name)
             .set_item(Some(item))
+            .condition_expression("attribute_not_exists(pk) OR #seq < :seq")
+            .expression_attribute_names("#seq", "sequence")
+            .expression_attribute_values(":seq", AttributeValue::N(sequence.to_string()))
             .send()
-            .await
-            .map_err(|e| {
-                StorageError::NotImplemented(format!("DynamoDB put_item failed: {}", e))
-            })?;
+            .await;
+        if let Err(err) = result {
+            let stale = err
+                .as_service_error()
+                .is_some_and(|svc| svc.is_conditional_check_failed_exception());
+            if !stale {
+                return Err(StorageError::Backend(format!(
+                    "DynamoDB put_item failed: {}",
+                    err
+                )));
+            }
+        }
 
         debug!(
             handler = %handler,

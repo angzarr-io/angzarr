@@ -20,6 +20,11 @@ static TRACER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::trace::SdkTracerP
 static LOG_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::logs::SdkLoggerProvider> =
     std::sync::OnceLock::new();
 
+/// Meter provider kept so `shutdown_telemetry` can flush pending metrics.
+#[cfg(feature = "otel")]
+static METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterProvider> =
+    std::sync::OnceLock::new();
+
 /// Initialize tracing and metrics with LOG_ENV_VAR environment variable.
 ///
 /// Defaults to "info" level if LOG_ENV_VAR is not set.
@@ -115,6 +120,7 @@ pub fn init_tracing() {
                     .with_resource(otel_resource())
                     .build();
 
+                let _ = METER_PROVIDER.set(meter_provider.clone());
                 opentelemetry::global::set_meter_provider(meter_provider);
             }
             Err(e) => {
@@ -201,6 +207,11 @@ pub fn shutdown_telemetry() {
         if let Some(provider) = LOG_PROVIDER.get() {
             if let Err(e) = provider.shutdown() {
                 eprintln!("Failed to shut down log provider: {e}");
+            }
+        }
+        if let Some(provider) = METER_PROVIDER.get() {
+            if let Err(e) = provider.shutdown() {
+                eprintln!("Failed to shut down meter provider: {e}");
             }
         }
         tracing::info!("OpenTelemetry providers shut down");

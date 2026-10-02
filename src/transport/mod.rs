@@ -35,9 +35,9 @@
 //! export ANGZARR_GRPC_MESSAGE_SIZE_KB=51200
 //! ```
 //!
-//! This affects connections made via [`connect_to_address`] and
-//! [`connect_with_transport`]. Servers must also set limits on their services
-//! using the generated service's `max_decoding_message_size` method.
+//! Servers set the limit on each generated service with
+//! `max_decoding_message_size` / `max_encoding_message_size`; clients apply
+//! it with [`GrpcMessageLimits::with_message_limits`].
 
 mod client;
 mod config;
@@ -59,7 +59,8 @@ pub use server::{serve_with_transport, serve_with_transport_and_shutdown};
 
 // Re-exports: client
 pub use client::{
-    connect_to_address, connect_with_transport, is_uds_address, ServiceEndpointConfig,
+    connect_to_address, connect_with_transport, is_uds_address, GrpcMessageLimits,
+    ServiceEndpointConfig,
 };
 
 // Re-exports: trace

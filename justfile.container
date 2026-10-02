@@ -5,7 +5,7 @@
 set shell := ["bash", "-c"]
 
 default:
-    @just --list
+    @{{just_executable()}} -f {{justfile()}} --list
 
 # Build all workspace crates
 build:
@@ -18,6 +18,26 @@ build-release:
 # Check code compiles
 check:
     cargo check
+
+# Check code compiles with all feature-gated backends enabled.
+# Used to verify changes that touch backend-registration sites
+# (postgres / dynamo / bigtable / nats / kafka / etc.) without
+# requiring the full test suite.
+check-full:
+    cargo check --features full
+
+# Check code compiles for a single named feature set. Useful when
+# `check-full` fails on a pre-existing breakage in an unrelated
+# feature and you want to validate a specific backend.
+check-features FEATURES:
+    cargo check --features "{{FEATURES}}"
+
+# Compile-check EVERY test target with the backend features the contract
+# suites need. This is the CI gate that catches "test binary references a
+# deleted helper" rot (review finding T1) — `cargo test` alone never
+# compiles feature-gated test targets that no recipe invokes.
+check-tests:
+    cargo check --tests --features "test-utils amqp kafka pubsub sns-sqs postgres redis immudb dynamo bigtable"
 
 # Check formatting (use fmt-fix to auto-format)
 fmt:
@@ -35,8 +55,53 @@ lint:
 test:
     cargo test --lib --features "test-utils"
 
+# Run unit tests with extra (comma-separated) backend features.
+test-features FEATURES:
+    cargo test --lib --features "test-utils,{{FEATURES}}"
+
 # Run all checks (build + test + lint + fmt)
 check-all: build test lint fmt
+
+# === Code complexity (lizard) ===
+# lizard is a multi-language per-function cyclomatic complexity analyzer,
+# installed in the angzarr-rust image. Generated proto code, build output, and
+# the vendored container cargo cache are excluded so the numbers reflect
+# hand-written source. Globs are single-quoted so the host shell doesn't expand
+# them before lizard sees them.
+# Generated code excluded so the numbers reflect hand-written source:
+# Rust prost output (*.pb.rs and prost's src/gen/ dirs, e.g. sererr-proto),
+# Go gateway gRPC/gw output (*.pb.go / *.pb.gw.go), proto/generated dirs, and
+# build / vendored-cargo output.
+LIZARD_EXCLUDES := "-x '*.pb.rs' -x '*.pb.go' -x '*.pb.gw.go' -x '*/proto/*' -x '*/gen/*' -x '*/generated/*' -x '*/target/*' -x '*/.cargo-container/*'"
+
+# Default scan scope: the Rust framework (src, crates) and the Go gRPC gateway.
+# The sererr submodule is intentionally excluded — it's a separate repo with its
+# own tooling. Pass it explicitly (`just complexity sererr`) to scan it.
+COMPLEXITY_PATHS := "src crates gateway"
+
+# Per-function cyclomatic complexity as a human-readable table + warnings.
+# Defaults to COMPLEXITY_PATHS; pass paths/flags to scope. Leading `-` ignores
+# lizard's non-zero exit when functions exceed the threshold, so this stays a
+# report rather than a gate.
+complexity *ARGS:
+    -lizard {{LIZARD_EXCLUDES}} {{ if ARGS == "" { COMPLEXITY_PATHS } else { ARGS } }}
+
+# Per-function complexity as CSV (header prepended) for LLM/tooling ingest.
+# Columns: nloc,ccn,tokens,params,length,location,file,function,long_name,start,end
+complexity-csv *ARGS:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    echo "nloc,ccn,tokens,params,length,location,file,function,long_name,start,end"
+    lizard {{LIZARD_EXCLUDES}} --csv {{ if ARGS == "" { COMPLEXITY_PATHS } else { ARGS } }} || true
+
+# Per-function COGNITIVE complexity (clippy). This is the authoritative Rust
+# complexity gate: unlike lizard's cyclomatic count it does not penalize the `?`
+# operator, so it tracks the complexity a reader actually experiences. Threshold
+# lives in clippy.toml. The lint is nursery/allow-by-default, enabled here
+# explicitly. Leading `-` keeps this a report — it does NOT fail the build (that
+# is deferred to a future enforcement phase; see doc/complexity-remediation.md).
+cognitive:
+    -cargo clippy --all-targets --features test-utils -- -A clippy::all -W clippy::cognitive_complexity
 
 # Pre-commit gate: fmt-check + lint + test in a SINGLE container/cargo
 # invocation. Avoids the inter-container `.cargo-lock` race that bites
@@ -59,8 +124,62 @@ test-config:
 test-grpc:
     cargo test --test grpc_connection --features "test-utils"
 
+# Run DLQ publish->read round-trip against tempfile-backed SQLite.
+# Mirrors test-storage-sqlite: no Docker needed, runs in CI. The
+# Postgres+AMQP testcontainer variants stay out of CI for the same
+# reason storage_postgres does.
+test-dlq-sqlite:
+    cargo test --test dlq_round_trip_sqlite --features "test-utils"
+
+# Run DLQ Gherkin acceptance harness (cucumber-rs against
+# features/client/dlq.feature). Drives saga/PM/projector/aggregate
+# orchestration through real SqliteDlqPublisher+Reader; no Docker
+# needed, runs in CI.
+test-dlq-features:
+    cargo test --test dlq_features --features "test-utils"
+
+# Run the aggregate pipeline -> SqliteEventStore integration suite.
+# Closes the Category B drift gap between MockEventStore-based unit
+# tests and storage_sqlite.rs's direct EventStore.add tests.
+test-aggregate-pipeline:
+    cargo test --test aggregate_pipeline_event_store --features "test-utils"
+
+# Run the PM persist -> SqliteEventStore integration suite. Exercises
+# persist_pm_event_book (extracted from GrpcPMContext::persist_pm_events
+# for testability) against a real event store + recording bus.
+test-pm-persist:
+    cargo test --test pm_persist_event_store --features "test-utils"
+
+# Run the status DLQ admin gRPC -> Reader -> DB integration suite.
+# Drives DlqAdminService trait methods against a populated SQLite-
+# backed reader.
+test-status-dlq-admin:
+    cargo test --test status_dlq_admin_grpc --features "test-utils"
+
+# Run the aggregate pipeline -> SnapshotRepository integration suite.
+# AggregateService.handle_command + real SqliteSnapshotStore.
+test-pipeline-snapshot:
+    cargo test --test aggregate_pipeline_snapshot --features "test-utils"
+
+# Run the projector publish -> EventBus shape-verification suite.
+# Inspects the projection EventBook (domain prefix, correlation_id,
+# edition, decoded projection payload, sequence).
+test-projector-publish:
+    cargo test --test projector_publish_event_bus --features "test-utils"
+
+# Run the deployed-cluster acceptance harness (T14). Opt-in: the binary
+# exits 0 with a notice unless ANGZARR_ACCEPTANCE=1 and a deployed
+# angzarr system is reachable, so this is safe in CI and `test-integration`.
+test-acceptance:
+    cargo test --test acceptance_features --features "test-utils"
+
+# Live variant: requires a deployed angzarr system (just kind up + skaffold)
+# reachable from the container (--network=host => localhost NodePort works).
+test-acceptance-live:
+    ANGZARR_ACCEPTANCE=1 cargo test --test acceptance_features --features "test-utils"
+
 # Run all CI integration tests
-test-integration: test-storage-sqlite test-config test-grpc
+test-integration: test-storage-sqlite test-config test-grpc test-dlq-sqlite test-dlq-features test-aggregate-pipeline test-pm-persist test-status-dlq-admin test-pipeline-snapshot test-projector-publish test-acceptance
 
 # Run coverage for CI (unit + contract tests)
 cov-ci:
@@ -69,16 +188,55 @@ cov-ci:
         --fail-under-lines 70 \
         --codecov --output-path codecov.json
 
-# Run mutation tests on changed code (CI uses git.diff file)
-mutants-ci:
+# Feature-gated modules the lib-test mutation run does not compile (storage
+# and bus backends, DLQ publishers, payload stores, k8s discovery): their
+# contract suites cover them, and a mutant in uncompiled code always
+# "survives".
+MUTANTS_FEATURE_GATED := "-e 'src/storage/bigtable/**' -e 'src/storage/dynamo/**' -e 'src/storage/immudb/**' -e 'src/storage/postgres/**' -e 'src/storage/redis/**' -e 'src/bus/amqp/**' -e 'src/bus/kafka/**' -e 'src/bus/pubsub/**' -e 'src/bus/sns_sqs/**' -e 'src/dlq/publishers/amqp.rs' -e 'src/dlq/publishers/kafka.rs' -e 'src/dlq/publishers/pubsub.rs' -e 'src/dlq/publishers/sns_sqs.rs' -e 'src/payload_store/gcs.rs' -e 'src/payload_store/s3.rs' -e 'src/discovery/k8s/**' -e 'src/advice/lossy.rs'"
+
+# Mutation-test the code a diff changes (CI: git.diff against the PR base),
+# one shard of the mutant set: SHARD is k/N (0-based). Survivors are a
+# result, not a failure: the kill-rate gate is `mutants-ci-gate`.
+mutants-ci SHARD="0/1" DIFF="git.diff":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -s git.diff ]; then
-        cargo install cargo-mutants --locked
-        cargo mutants --in-place --in-diff git.diff --no-shuffle -vV
-    else
+    if [ ! -s "{{DIFF}}" ]; then
         echo "No changes to test"
+        mkdir -p mutants.out
+        exit 0
     fi
+    command -v cargo-mutants >/dev/null || cargo install cargo-mutants --locked
+    rc=0
+    cargo mutants --in-place --in-diff "{{DIFF}}" --shard "{{SHARD}}" \
+        --no-shuffle --timeout {{MUTANTS_TIMEOUT}} {{MUTANTS_FEATURE_GATED}} -vV || rc=$?
+    # 2 = surviving mutants (judged by the gate); 3 = timeouts (counted as
+    # caught by the gate); anything else is a tooling failure.
+    case $rc in 0|2|3) exit 0 ;; *) exit $rc ;; esac
+
+# Kill-rate gate over one or more outcomes.json files (all shards of a
+# run): caught / (caught + missed) must reach THRESHOLD percent. Timeouts
+# count as caught; unviable mutants are not counted.
+mutants-ci-gate THRESHOLD="90" +OUTCOMES="mutants.out/outcomes.json":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    files=({{OUTCOMES}})
+    count() { jq -s "[.[].outcomes[] | select(.summary == \"$1\")] | length" "${files[@]}"; }
+    caught=$(( $(count CaughtMutant) + $(count Timeout) ))
+    missed=$(count MissedMutant)
+    unviable=$(count Unviable)
+    total=$((caught + missed))
+    echo "Caught: $caught  Missed: $missed  Unviable: $unviable  (from ${#files[@]} outcome file(s))"
+    if [ "$total" -eq 0 ]; then
+        echo "No viable mutants in the changed code"
+        exit 0
+    fi
+    rate=$((100 * caught / total))
+    echo "Kill rate: ${rate}% (threshold {{THRESHOLD}}%)"
+    if [ "$missed" -gt 0 ]; then
+        echo "=== Surviving mutants ==="
+        jq -rs '.[].outcomes[] | select(.summary == "MissedMutant") | .scenario.Mutant.name // .scenario' "${files[@]}"
+    fi
+    [ "$rate" -ge {{THRESHOLD}} ]
 
 # === Storage Contract Tests ===
 # =============================================================================
@@ -96,7 +254,6 @@ mutants-ci:
 #   just storage postgres test     # PostgreSQL only (testcontainers)
 #   just storage redis test        # Redis only (testcontainers)
 #   just storage immudb test       # ImmuDB only (testcontainers)
-#   just storage nats test         # NATS JetStream only (testcontainers)
 # =============================================================================
 
 # Storage contract tests - run all backends or a specific one
@@ -106,29 +263,46 @@ storage *ARGS:
     set -euo pipefail
     args="{{ARGS}}"
     if [[ "$args" == "test" ]] || [[ -z "$args" ]]; then
-        just _storage-all
+        {{just_executable()}} -f {{justfile()}} _storage-all
     else
         backend="${args%% *}"
-        just "_storage-${backend}"
+        {{just_executable()}} -f {{justfile()}} "_storage-${backend}"
     fi
 
 # Private: Run all storage backend tests
-_storage-all: _storage-sqlite _storage-postgres _storage-redis _storage-immudb _storage-nats
+_storage-all: _storage-sqlite _storage-mock _storage-postgres _storage-redis _storage-immudb _storage-dynamo _storage-bigtable
     @echo "All storage contract tests passed"
 
 # Private: SQLite storage tests (in-memory, no containers)
 # WHY: Default local development backend. Fast, no setup. Validates all
-# storage contracts in under a minute via Gherkin interface tests.
+# storage contracts in under a minute via the macro contract suite.
+# NOTE: `sqlite` is NOT a cargo feature (always compiled) — see the
+# mutants section for the same trap.
 _storage-sqlite:
-    @echo "=== Storage: SQLite (Gherkin interface tests) ==="
-    cargo test --test interfaces --features "sqlite test-utils"
+    @echo "=== Storage: SQLite (macro contract tests) ==="
+    cargo test --test storage_sqlite --features test-utils -- --nocapture
+
+# Private: Mock storage tests (in-memory, no containers)
+# WHY: Unit tests across the crate use the Mock stores as stand-ins for the
+# production backends; the Mock must pass the same contract suites.
+_storage-mock:
+    @echo "=== Storage: Mock (macro contract tests) ==="
+    cargo test --test storage_mock --features test-utils -- --nocapture
 
 # Private: PostgreSQL storage tests (testcontainers)
 # WHY: Production-grade RDBMS. Tests verify SQL schema correctness,
-# transaction isolation, and ACID guarantees via Gherkin interface tests.
+# transaction isolation, and ACID guarantees via the macro contract suite.
+# NOTE: --test-threads=1 — each test starts its own Postgres container;
+# running four in parallel under rootless docker port-forwarding starves
+# connections (PoolTimedOut). Same rationale as the bus suites.
 _storage-postgres:
-    @echo "=== Storage: PostgreSQL (Gherkin interface tests) ==="
-    STORAGE_BACKEND=postgres cargo test --test interfaces --features "postgres test-utils"
+    @echo "=== Storage: PostgreSQL (macro contract tests) ==="
+    cargo test --test storage_postgres --features "postgres test-utils" -- --test-threads=1 --nocapture
+
+# DLQ round-trip against real Postgres (testcontainers). Companion to
+# test-dlq-sqlite; exercised by the CI contract job.
+test-dlq-postgres:
+    cargo test --test dlq_round_trip_postgres --features "postgres test-utils" -- --nocapture
 
 # Private: Redis storage tests (testcontainers)
 # WHY: High-performance snapshot caching. Tests verify snapshot serialization,
@@ -144,12 +318,21 @@ _storage-immudb:
     @echo "=== Storage: ImmuDB (direct contract tests) ==="
     cargo test --test storage_immudb --features immudb -- --nocapture
 
-# Private: NATS JetStream storage tests (testcontainers)
-# WHY: Distributed event storage with replay capability. Tests verify events,
-# snapshots, and positions work correctly in JetStream KV store.
-_storage-nats:
-    @echo "=== Storage: NATS JetStream (direct contract tests) ==="
-    cargo test --test storage_nats --features nats -- --nocapture
+# Private: DynamoDB storage tests (testcontainers, DynamoDB Local)
+# WHY: AWS deployments store events, snapshots and positions in DynamoDB. The
+# contract macros run against DynamoDB Local, which enforces the same
+# conditional-write, transaction and 1 MB page semantics as the service.
+_storage-dynamo:
+    @echo "=== Storage: DynamoDB (macro contract tests, DynamoDB Local) ==="
+    cargo test --test storage_dynamo --features "dynamo test-utils" -- --nocapture
+
+# Private: Bigtable storage tests (testcontainers, Cloud Bigtable emulator)
+# WHY: GCP deployments store events, snapshots and positions in Bigtable. The
+# contract macros run against the emulator, which implements the same
+# conditional-mutation and row-range semantics as the service.
+_storage-bigtable:
+    @echo "=== Storage: Bigtable (macro contract tests, emulator) ==="
+    cargo test --test storage_bigtable --features "bigtable test-utils" -- --nocapture
 
 # === Bus Contract Tests ===
 # =============================================================================
@@ -165,12 +348,10 @@ _storage-nats:
 #
 # Usage:
 #   just bus test                  # All backends (default)
-#   just bus channel test          # Channel only (no containers)
 #   just bus amqp test             # RabbitMQ only (testcontainers)
 #   just bus kafka test            # Kafka only (testcontainers)
 #   just bus pubsub test           # GCP Pub/Sub only (testcontainers)
 #   just bus sns-sqs test          # AWS SNS/SQS only (testcontainers)
-#   just bus nats test             # NATS JetStream only (testcontainers)
 # =============================================================================
 
 # Bus contract tests - run all backends or a specific one
@@ -180,58 +361,51 @@ bus *ARGS:
     set -euo pipefail
     args="{{ARGS}}"
     if [[ "$args" == "test" ]] || [[ -z "$args" ]]; then
-        just _bus-all
+        {{just_executable()}} -f {{justfile()}} _bus-all
     else
         backend="${args%% *}"
-        just "_bus-${backend}"
+        {{just_executable()}} -f {{justfile()}} "_bus-${backend}"
     fi
 
 # Private: Run all bus backend tests (with container cleanup between runs)
 # WHY: Cleanup prevents port conflicts and resource exhaustion from accumulated containers.
-_bus-all: _bus-channel clean-containers _bus-amqp clean-containers _bus-kafka clean-containers _bus-pubsub clean-containers _bus-sns-sqs clean-containers _bus-nats
+_bus-all: _bus-amqp clean-containers _bus-kafka clean-containers _bus-pubsub clean-containers _bus-sns-sqs
     @echo "All bus contract tests passed"
 
-# Private: Channel bus tests (in-memory, no containers)
-# WHY: Default local development bus. Validates bus contract without external deps.
-# Uses Gherkin interface tests with BUS_BACKEND=channel.
-_bus-channel:
-    @echo "=== Bus: Channel (Gherkin interface tests) ==="
-    BUS_BACKEND=channel cargo test --test interfaces --features "sqlite test-utils"
+# NOTE: every bus test binary needs `test-utils` — tests/bus/event_bus_tests.rs
+# uses CapturingHandler unconditionally. Cargo.toml required-features mirror this.
 
 # Private: AMQP/RabbitMQ bus tests (testcontainers)
 # WHY: Default production broker for k8s. Tests verify exchange/queue bindings,
 # message routing, prefetch limits, acknowledgment, and dead-letter exchanges.
 _bus-amqp:
     @echo "=== Bus: AMQP/RabbitMQ (direct contract tests) ==="
-    cargo test --test bus_amqp --features amqp -- --test-threads=1
+    cargo test --test bus_amqp --features "amqp test-utils" -- --test-threads=1
+    @echo "=== Bus: AMQP B1 interleave-publish e2e ==="
+    cargo test --test interleave_publish_amqp --features "amqp test-utils" -- --test-threads=1
 
 # Private: Kafka bus tests (testcontainers)
 # WHY: High-throughput partitioned streaming. Tests verify topic creation,
 # consumer group coordination, offset management, and at-least-once delivery.
 _bus-kafka:
     @echo "=== Bus: Kafka (direct contract tests) ==="
-    cargo test --test bus_kafka --features kafka -- --test-threads=1
+    cargo test --test bus_kafka --features "kafka test-utils" -- --test-threads=1
+    @echo "=== Bus: Kafka via init_event_bus -> real aggregate pipeline (C02) ==="
+    cargo test --test aggregate_pipeline_kafka_bus --features "kafka test-utils" -- --test-threads=1
 
 # Private: GCP Pub/Sub bus tests (testcontainers emulator)
 # WHY: Event bus for GCP deployments. Tests verify topic/subscription management,
 # message ordering keys, and acknowledgment deadline extensions.
 _bus-pubsub:
     @echo "=== Bus: GCP Pub/Sub (direct contract tests) ==="
-    cargo test --test bus_pubsub --features pubsub -- --test-threads=1
+    cargo test --test bus_pubsub --features "pubsub test-utils" -- --test-threads=1
 
 # Private: AWS SNS/SQS bus tests (LocalStack testcontainer)
 # WHY: Event bus for AWS deployments. Tests verify SNS fan-out to SQS queues,
 # message attribute filtering, visibility timeout, and DLQ redrive policies.
 _bus-sns-sqs:
     @echo "=== Bus: AWS SNS/SQS (direct contract tests) ==="
-    cargo test --test bus_sns_sqs --features sns-sqs -- --test-threads=1
-
-# Private: NATS JetStream bus tests (testcontainers)
-# WHY: Distributed event bus with at-least-once delivery. Tests verify
-# publish/subscribe, consumer groups, acknowledgment, and redelivery.
-_bus-nats:
-    @echo "=== Bus: NATS JetStream (direct contract tests) ==="
-    cargo test --test bus_nats --features nats,test-utils -- --nocapture
+    cargo test --test bus_sns_sqs --features "sns-sqs test-utils" -- --test-threads=1
 
 # Clean up zombie containers from failed test runs
 clean-containers:
@@ -262,9 +436,6 @@ clean-all:
     rm -rf .venv client/*/.venv
     @echo "=== Cleaning stale extracted directories ==="
     rm -rf client/ examples/
-    @echo "=== Cleaning docs ==="
-    rm -rf docs/build docs/.docusaurus docs/node_modules
-    rm -f docs/static/container-overlay.tar.gz
     @echo "=== Cleaning OpenTofu provider caches ==="
     find deploy/tofu -name ".terraform" -type d -exec rm -rf {} + 2>/dev/null || true
     @echo "=== Cleaning vector search ==="
@@ -283,22 +454,28 @@ clean-all:
 # Excludes: proto generated code, build.rs, main.rs binaries.
 
 COV_IGNORE := "--ignore-filename-regex '(proto/|build\\.rs|main\\.rs)'"
-COV_FEATURES := "--features 'sqlite test-utils'"
+# `sqlite` is NOT a cargo feature (always compiled) — see the mutants
+# section note. Only test-utils is needed for the local suites.
+COV_FEATURES := "--features test-utils"
+# Local (container-free) test targets: SQLite contract suite + the DLQ
+# Gherkin harness. `--test interfaces` no longer exists (replaced by the
+# per-backend storage_*/bus_* macro suites).
+COV_LOCAL_TESTS := "--test storage_sqlite --test dlq_features"
 
 # Run unit tests with coverage
 cov-unit:
     cargo llvm-cov --lib {{COV_FEATURES}} {{COV_IGNORE}}
 
-# Run interface/Gherkin tests with coverage
+# Run Gherkin acceptance harness with coverage (cucumber DLQ features)
 cov-gherkin:
-    cargo llvm-cov --test interfaces {{COV_FEATURES}} {{COV_IGNORE}}
+    cargo llvm-cov --test dlq_features {{COV_FEATURES}} {{COV_IGNORE}}
 
-# Run all local tests with coverage (unit + integration + gherkin + client)
+# Run all local tests with coverage (unit + sqlite contracts + gherkin)
 cov:
     cargo llvm-cov \
         --workspace \
         --lib \
-        --test interfaces \
+        {{COV_LOCAL_TESTS}} \
         {{COV_FEATURES}} \
         {{COV_IGNORE}}
 
@@ -307,7 +484,7 @@ cov-summary:
     cargo llvm-cov \
         --workspace \
         --lib \
-        --test interfaces \
+        {{COV_LOCAL_TESTS}} \
         {{COV_FEATURES}} \
         {{COV_IGNORE}} \
         --summary-only
@@ -317,7 +494,7 @@ cov-html:
     cargo llvm-cov \
         --workspace \
         --lib \
-        --test interfaces \
+        {{COV_LOCAL_TESTS}} \
         {{COV_FEATURES}} \
         {{COV_IGNORE}} \
         --html
@@ -328,7 +505,7 @@ cov-lcov:
     cargo llvm-cov \
         --workspace \
         --lib \
-        --test interfaces \
+        {{COV_LOCAL_TESTS}} \
         {{COV_FEATURES}} \
         {{COV_IGNORE}} \
         --lcov --output-path target/llvm-cov/lcov.info
@@ -337,26 +514,26 @@ cov-lcov:
 
 # Run PostgreSQL contract tests with coverage
 cov-contract-postgres:
-    cargo llvm-cov --test interfaces --features "postgres test-utils" {{COV_IGNORE}}
+    cargo llvm-cov --test storage_postgres --features "postgres test-utils" {{COV_IGNORE}}
 
 # Run Redis contract tests with coverage
 cov-contract-redis:
-    cargo llvm-cov --test interfaces --features "redis test-utils" {{COV_IGNORE}}
+    cargo llvm-cov --test storage_redis --features "redis test-utils" {{COV_IGNORE}}
 
 # Run AMQP bus contract tests with coverage
 cov-contract-amqp:
-    cargo llvm-cov --test bus_amqp --features amqp {{COV_IGNORE}} -- --test-threads=1
+    cargo llvm-cov --test bus_amqp --features "amqp test-utils" {{COV_IGNORE}} -- --test-threads=1
 
 # Run Kafka bus contract tests with coverage
 cov-contract-kafka:
-    cargo llvm-cov --test bus_kafka --features kafka {{COV_IGNORE}} -- --test-threads=1
+    cargo llvm-cov --test bus_kafka --features "kafka test-utils" {{COV_IGNORE}} -- --test-threads=1
 
 # Run all contract tests with combined coverage (requires docker socket)
 cov-contracts:
     cargo llvm-cov \
-        --test interfaces \
+        --test storage_postgres \
         --test bus_amqp \
-        --features "postgres test-utils amqp" \
+        --features "postgres amqp test-utils" \
         {{COV_IGNORE}} \
         -- --test-threads=1
 
@@ -366,18 +543,20 @@ cov-contracts:
 cov-full:
     cargo llvm-cov \
         --lib \
-        --test interfaces \
+        {{COV_LOCAL_TESTS}} \
+        --test storage_postgres \
         --test bus_amqp \
-        --features "sqlite postgres test-utils amqp" \
+        --features "postgres amqp test-utils" \
         {{COV_IGNORE}}
 
 # Full coverage with HTML report (requires docker socket)
 cov-full-html:
     cargo llvm-cov \
         --lib \
-        --test interfaces \
+        {{COV_LOCAL_TESTS}} \
+        --test storage_postgres \
         --test bus_amqp \
-        --features "sqlite postgres test-utils amqp" \
+        --features "postgres amqp test-utils" \
         {{COV_IGNORE}} \
         --html
     @echo "Full coverage report generated at target/llvm-cov/html/index.html"
@@ -386,9 +565,10 @@ cov-full-html:
 cov-full-summary:
     cargo llvm-cov \
         --lib \
-        --test interfaces \
+        {{COV_LOCAL_TESTS}} \
+        --test storage_postgres \
         --test bus_amqp \
-        --features "sqlite postgres test-utils amqp" \
+        --features "postgres amqp test-utils" \
         {{COV_IGNORE}} \
         --summary-only
 
@@ -406,6 +586,16 @@ MUTANTS_TIMEOUT := "600"
 # --features sqlite errors with "package 'angzarr' does not contain this
 # feature: sqlite" and breaks every mutants run. Match the plain test
 # recipe (just `--features test-utils`).
+#
+# `--lib` scoping for cargo-mutants (so it doesn't try to link the
+# binary crates, which fail under the dev profile's `strip = true`
+# setting — see `.cargo/mutants.toml::additional_cargo_args` for the
+# full rationale) lives in `.cargo/mutants.toml`, not here. Note that
+# `additional_cargo_test_args = ["--features", "test-utils"]` is
+# already in that file too, so `MUTANTS_FEATURES` is technically
+# redundant — kept for readability + to match the operator-facing
+# "what features does this run with" question without forcing them to
+# open `.cargo/mutants.toml`.
 MUTANTS_FEATURES := "--features test-utils"
 
 # Regenerate exclude_re patterns from #[trivial_delegation] attributes
@@ -413,11 +603,14 @@ gen-mutants-exclude:
     cargo xtask gen-mutants-exclude
 
 # Run mutation tests on a specific file
-mutants FILE: gen-mutants-exclude
+# EXTRA forwards additional cargo-mutants flags (e.g. `--re <fn-regex>`
+# to scope a run to specific functions within the file).
+mutants FILE *EXTRA: gen-mutants-exclude
     cargo mutants \
         --in-place \
         --timeout {{MUTANTS_TIMEOUT}} \
         -f {{FILE}} \
+        {{EXTRA}} \
         -- {{MUTANTS_FEATURES}}
 
 # Run mutation tests on handlers/core (aggregate, projector, saga, PM)
@@ -430,7 +623,7 @@ mutants-core: gen-mutants-exclude
         -f src/handlers/core/saga.rs \
         -f src/handlers/core/process_manager.rs \
         -- {{MUTANTS_FEATURES}}
-    @just mutants-summary
+    @{{just_executable()}} -f {{justfile()}} mutants-summary
 
 # Alias for backwards compatibility
 mutants-handlers: mutants-core
@@ -455,37 +648,47 @@ mutants-orchestration: gen-mutants-exclude
         -- {{MUTANTS_FEATURES}}
 
 # Show mutation testing summary
+#
+# Shebang form (not single-line `@if ... fi`) because cargo-mutants'
+# outcomes.json needs real `$(jq ...)` command substitution. just does
+# NOT escape `$$` -> `$` for the default `bash -c` shell, so the
+# previous non-shebang form shipped literal `$$(...)` to bash, which
+# parsed it as `<pid>(...)` and died with a syntax error.
 mutants-summary:
-    @if [ -f mutants.out/outcomes.json ]; then \
-        caught=$$(jq '[.outcomes[] | select(.summary == "CaughtMutant")] | length' mutants.out/outcomes.json); \
-        missed=$$(jq '[.outcomes[] | select(.summary == "MissedMutant")] | length' mutants.out/outcomes.json); \
-        unviable=$$(jq '[.outcomes[] | select(.summary == "Unviable")] | length' mutants.out/outcomes.json); \
-        total=$$((caught + missed)); \
-        if [ $$total -gt 0 ]; then \
-            rate=$$((100 * caught / total)); \
-        else \
-            rate=0; \
-        fi; \
-        echo ""; \
-        echo "=== Mutation Testing Summary ==="; \
-        echo "Caught (killed): $$caught"; \
-        echo "Missed (survived): $$missed"; \
-        echo "Unviable (won't compile): $$unviable"; \
-        echo "Kill rate: $$rate% ($$caught/$$total viable)"; \
-        echo ""; \
-        if [ $$missed -gt 0 ]; then \
-            echo "=== Surviving Mutants ==="; \
-            jq -r '.outcomes[] | select(.summary == "MissedMutant") | .scenario' mutants.out/outcomes.json; \
-        fi; \
-    else \
-        echo "No mutation results found. Run 'just mutants-core' first."; \
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f mutants.out/outcomes.json ]; then
+        echo "No mutation results found. Run 'just mutants-core' first."
+        exit 0
+    fi
+    caught=$(jq '[.outcomes[] | select(.summary == "CaughtMutant")] | length' mutants.out/outcomes.json)
+    missed=$(jq '[.outcomes[] | select(.summary == "MissedMutant")] | length' mutants.out/outcomes.json)
+    unviable=$(jq '[.outcomes[] | select(.summary == "Unviable")] | length' mutants.out/outcomes.json)
+    total=$((caught + missed))
+    if [ "$total" -gt 0 ]; then
+        rate=$((100 * caught / total))
+    else
+        rate=0
+    fi
+    echo ""
+    echo "=== Mutation Testing Summary ==="
+    echo "Caught (killed): $caught"
+    echo "Missed (survived): $missed"
+    echo "Unviable (won't compile): $unviable"
+    echo "Kill rate: ${rate}% (${caught}/${total} viable)"
+    if [ "$missed" -gt 0 ]; then
+        echo ""
+        echo "=== Surviving Mutants ==="
+        jq -r '.outcomes[] | select(.summary == "MissedMutant") | .scenario' mutants.out/outcomes.json
     fi
 
 # List surviving mutants (mutations not caught by tests)
 mutants-survivors:
-    @if [ -f mutants.out/outcomes.json ]; then \
-        jq -r '.outcomes[] | select(.summary == "MissedMutant") | .scenario' mutants.out/outcomes.json; \
-    else \
-        echo "No mutation results found. Run 'just mutants-core' first."; \
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ ! -f mutants.out/outcomes.json ]; then
+        echo "No mutation results found. Run 'just mutants-core' first."
+        exit 0
     fi
+    jq -r '.outcomes[] | select(.summary == "MissedMutant") | .scenario' mutants.out/outcomes.json
 

@@ -18,28 +18,48 @@ type JSONSchema struct {
 	Format      string                 `json:"format,omitempty"`
 }
 
-// GenerateSchemas converts discovered types to JSON schemas.
-func GenerateSchemas(types []DiscoveredType) map[string]*JSONSchema {
-	schemas := make(map[string]*JSONSchema)
+// DefinitionPrefix namespaces discovered types among the OpenAPI
+// definitions generated for the framework API.
+const DefinitionPrefix = "discovered."
 
+// DefinitionNames maps each discovered type's full name to its OpenAPI
+// definition name: `discovered.<Short>`, or `discovered.<full_name>` (dots
+// as underscores) for every type whose short name is shared.
+func DefinitionNames(types []DiscoveredType) map[string]string {
+	count := make(map[string]int)
 	for _, t := range types {
-		schema := typeToSchema(t)
-		// Use short name for schema key (last part of full name)
-		parts := strings.Split(t.FullName, ".")
-		shortName := parts[len(parts)-1]
-
-		// If collision, use full name
-		key := shortName
-		if _, exists := schemas[key]; exists {
-			key = strings.ReplaceAll(t.FullName, ".", "_")
-		}
-		schemas[key] = schema
+		count[shortName(t.FullName)]++
 	}
+	names := make(map[string]string, len(types))
+	for _, t := range types {
+		short := shortName(t.FullName)
+		if count[short] > 1 {
+			names[t.FullName] = DefinitionPrefix + strings.ReplaceAll(t.FullName, ".", "_")
+		} else {
+			names[t.FullName] = DefinitionPrefix + short
+		}
+	}
+	return names
+}
 
+func shortName(fullName string) string {
+	parts := strings.Split(fullName, ".")
+	return parts[len(parts)-1]
+}
+
+// GenerateSchemas converts discovered types to JSON schemas keyed by
+// definition name (see DefinitionNames); every `$ref` they contain points
+// at one of those keys.
+func GenerateSchemas(types []DiscoveredType) map[string]*JSONSchema {
+	names := DefinitionNames(types)
+	schemas := make(map[string]*JSONSchema, len(types))
+	for _, t := range types {
+		schemas[names[t.FullName]] = typeToSchema(t, names)
+	}
 	return schemas
 }
 
-func typeToSchema(t DiscoveredType) *JSONSchema {
+func typeToSchema(t DiscoveredType, names map[string]string) *JSONSchema {
 	schema := &JSONSchema{
 		Type:        "object",
 		Description: fmt.Sprintf("Proto message: %s", t.FullName),
@@ -49,7 +69,7 @@ func typeToSchema(t DiscoveredType) *JSONSchema {
 	var required []string
 
 	for _, f := range t.Fields {
-		prop := fieldToSchema(f)
+		prop := fieldToSchema(f, names)
 		schema.Properties[f.JSONName] = prop
 
 		if !f.Optional && !f.Repeated {
@@ -64,8 +84,14 @@ func typeToSchema(t DiscoveredType) *JSONSchema {
 	return schema
 }
 
-func fieldToSchema(f FieldDef) *JSONSchema {
-	base := primitiveSchema(f.Type)
+func fieldToSchema(f FieldDef, names map[string]string) *JSONSchema {
+	var base *JSONSchema
+	if f.Enum {
+		// Proto3 JSON renders enums as their value names.
+		base = &JSONSchema{Type: "string", Description: fmt.Sprintf("Enum: %s", f.Type)}
+	} else {
+		base = primitiveSchema(f.Type, names)
+	}
 
 	if f.Repeated {
 		return &JSONSchema{
@@ -77,7 +103,7 @@ func fieldToSchema(f FieldDef) *JSONSchema {
 	return base
 }
 
-func primitiveSchema(typeName string) *JSONSchema {
+func primitiveSchema(typeName string, names map[string]string) *JSONSchema {
 	switch typeName {
 	case "string":
 		return &JSONSchema{Type: "string"}
@@ -110,27 +136,24 @@ func primitiveSchema(typeName string) *JSONSchema {
 			},
 		}
 	default:
-		// Reference to another message type
-		parts := strings.Split(typeName, ".")
-		shortName := parts[len(parts)-1]
-		return &JSONSchema{
-			Ref: "#/definitions/" + shortName,
+		if name, ok := names[typeName]; ok {
+			return &JSONSchema{Ref: "#/definitions/" + name}
 		}
+		// A message outside the discovered set (framework or
+		// well-known type) has no definition to reference.
+		return &JSONSchema{Type: "object", Description: fmt.Sprintf("Proto message: %s", typeName)}
 	}
 }
 
 // BuildAnyOneOf creates a oneOf schema for google.protobuf.Any with discovered types.
 func BuildAnyOneOf(types []DiscoveredType, filter func(DiscoveredType) bool) *JSONSchema {
 	var oneOf []*JSONSchema
+	names := DefinitionNames(types)
 
 	for _, t := range types {
 		if filter != nil && !filter(t) {
 			continue
 		}
-
-		// Each option includes @type discriminator
-		parts := strings.Split(t.FullName, ".")
-		shortName := parts[len(parts)-1]
 
 		oneOf = append(oneOf, &JSONSchema{
 			Type:        "object",
@@ -141,7 +164,7 @@ func BuildAnyOneOf(types []DiscoveredType, filter func(DiscoveredType) bool) *JS
 					Description: fmt.Sprintf("Must be '%s'", t.TypeURL),
 				},
 			},
-			Ref: "#/definitions/" + shortName,
+			Ref: "#/definitions/" + names[t.FullName],
 		})
 	}
 

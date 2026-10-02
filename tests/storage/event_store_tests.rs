@@ -5,8 +5,10 @@
 //!
 //! `#![allow(dead_code)]` because each backend's integration-test binary
 //! only invokes the subset of contract tests its implementation actually
-//! supports (e.g. the mock backend skips cascade-query tests).
+//! supports (e.g. ImmuDB skips the delete group).
 
+// Each backend binary compiles only the subset it runs; the inventory
+// test at the bottom of this file (T12) guards against silent unwiring.
 #![allow(dead_code)]
 
 use prost_types::Any;
@@ -14,7 +16,7 @@ use uuid::Uuid;
 
 use angzarr::proto::{event_page, page_header::SequenceType, EventPage, PageHeader};
 use angzarr::proto_ext::EventPageExt;
-use angzarr::storage::EventStore;
+use angzarr::storage::{AddMeta, AddOutcome, EventStore, StorageError};
 
 /// Create a test event with given sequence and type.
 pub fn make_event(seq: u32, event_type: &str) -> EventPage {
@@ -28,7 +30,6 @@ pub fn make_event(seq: u32, event_type: &str) -> EventPage {
             type_url: format!("type.example/{}", event_type),
             value: vec![1, 2, 3, seq as u8],
         })),
-        ..Default::default()
     }
 }
 
@@ -53,9 +54,12 @@ pub async fn test_add_single_event<S: EventStore>(store: &S) {
             "test",
             root,
             vec![make_event(0, "Created")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
@@ -72,7 +76,18 @@ pub async fn test_add_multiple_events<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 5), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 5),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -88,7 +103,18 @@ pub async fn test_add_empty_events<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, vec![], "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            vec![],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("empty add should succeed");
 
@@ -105,13 +131,35 @@ pub async fn test_add_sequential_batches<S: EventStore>(store: &S) {
 
     // First batch: events 0, 1
     store
-        .add(domain, "test", root, make_events(0, 2), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 2),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("first batch should succeed");
 
     // Second batch: events 2, 3, 4
     store
-        .add(domain, "test", root, make_events(2, 3), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(2, 3),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("second batch should succeed");
 
@@ -138,7 +186,18 @@ pub async fn test_add_sequence_conflict<S: EventStore>(store: &S) {
 
     // Add events 0, 1, 2
     store
-        .add(domain, "test", root, make_events(0, 3), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 3),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("first add should succeed");
 
@@ -150,9 +209,12 @@ pub async fn test_add_sequence_conflict<S: EventStore>(store: &S) {
             "test",
             root,
             vec![make_event(1, "Rewind")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await;
     assert!(result.is_err(), "sequence lower than current should fail");
@@ -163,7 +225,18 @@ pub async fn test_add_duplicate_sequence<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 3), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 3),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("first add should succeed");
 
@@ -174,9 +247,12 @@ pub async fn test_add_duplicate_sequence<S: EventStore>(store: &S) {
             "test",
             root,
             vec![make_event(0, "Dup")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await;
     assert!(result.is_err(), "duplicate sequence should fail");
@@ -205,7 +281,18 @@ pub async fn test_add_rejects_duplicate_sequences<S: EventStore>(store: &S) {
         let domain = "test_h24_duplicate";
         let root = Uuid::new_v4();
         store
-            .add(domain, "test", root, make_events(0, 3), "", None, None)
+            .add(
+                domain,
+                "test",
+                root,
+                make_events(0, 3),
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
+            )
             .await
             .expect("first add should succeed");
 
@@ -215,9 +302,12 @@ pub async fn test_add_rejects_duplicate_sequences<S: EventStore>(store: &S) {
                 "test",
                 root,
                 vec![make_event(2, "DuplicateOfSeq2")],
-                "",
-                None,
-                None,
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
             )
             .await;
         assert!(
@@ -233,7 +323,18 @@ pub async fn test_add_rejects_duplicate_sequences<S: EventStore>(store: &S) {
         let domain = "test_h24_rewind";
         let root = Uuid::new_v4();
         store
-            .add(domain, "test", root, make_events(0, 5), "", None, None)
+            .add(
+                domain,
+                "test",
+                root,
+                make_events(0, 5),
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
+            )
             .await
             .expect("first add should succeed");
 
@@ -243,9 +344,12 @@ pub async fn test_add_rejects_duplicate_sequences<S: EventStore>(store: &S) {
                 "test",
                 root,
                 vec![make_event(1, "Rewind")],
-                "",
-                None,
-                None,
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
             )
             .await;
         assert!(
@@ -266,9 +370,12 @@ pub async fn test_add_rejects_duplicate_sequences<S: EventStore>(store: &S) {
                 "test",
                 root,
                 vec![make_event(0, "First"), make_event(0, "Duplicate")],
-                "",
-                None,
-                None,
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
             )
             .await;
         assert!(
@@ -280,6 +387,57 @@ pub async fn test_add_rejects_duplicate_sequences<S: EventStore>(store: &S) {
 }
 
 // =============================================================================
+// Cover.ext round-trip
+// =============================================================================
+
+/// The parent-aggregate routing slot (`Cover.ext`, a packed parent `Cover`) must
+/// survive a storage round-trip: an aggregate stored with a non-empty `ext`
+/// reconstructs with the identical `ext` on read. Dropping it to `None` loses
+/// the routing metadata the framework stamps onto every emitted book.
+///
+/// Backend-agnostic contract — runs against every EventStore implementation.
+pub async fn test_cover_ext_round_trips<S: EventStore>(store: &S) {
+    let domain = "test_ext_roundtrip";
+    let root = Uuid::new_v4();
+    let ext = Any {
+        type_url: "type.example/ParentCover".to_string(),
+        value: vec![0xCA, 0xFE, 0xBA, 0xBE],
+    };
+
+    store
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 2),
+            &AddMeta {
+                correlation_id: "corr-ext-roundtrip",
+                external_id: None,
+                source_info: None,
+                ext: Some(&ext),
+            },
+        )
+        .await
+        .expect("add with ext should succeed");
+
+    let books = store
+        .get_by_correlation("corr-ext-roundtrip")
+        .await
+        .expect("get_by_correlation should succeed");
+
+    let book = books
+        .iter()
+        .find(|b| b.cover.as_ref().map(|c| c.domain.as_str()) == Some(domain))
+        .expect("a book for the aggregate should be returned");
+    let cover = book.cover.as_ref().expect("book has a cover");
+    assert_eq!(
+        cover.ext.as_ref(),
+        Some(&ext),
+        "Cover.ext must round-trip through storage, not be dropped to None"
+    );
+}
+
+// =============================================================================
 // EventStore::get tests
 // =============================================================================
 
@@ -288,7 +446,18 @@ pub async fn test_get_all_events<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 10), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 10),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -329,11 +498,21 @@ pub async fn test_get_preserves_event_data<S: EventStore>(store: &S) {
             type_url: "type.example/TestEvent".to_string(),
             value: vec![10, 20, 30, 40, 50, 100, 200],
         })),
-        ..Default::default()
     };
 
     store
-        .add(domain, "test", root, vec![original], "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            vec![original],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -361,7 +540,18 @@ pub async fn test_get_from_zero<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 5), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 5),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -377,7 +567,18 @@ pub async fn test_get_from_middle<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 10), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 10),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -398,7 +599,18 @@ pub async fn test_get_from_end<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 5), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 5),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -414,7 +626,18 @@ pub async fn test_get_from_last<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 5), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 5),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -434,7 +657,18 @@ pub async fn test_get_from_to_full_range<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 5), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 5),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -450,7 +684,18 @@ pub async fn test_get_from_to_partial<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 10), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 10),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -469,7 +714,18 @@ pub async fn test_get_from_to_single<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 5), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 5),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -486,7 +742,18 @@ pub async fn test_get_from_to_empty<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 5), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 5),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -508,7 +775,18 @@ pub async fn test_get_from_to_zero_to<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 3), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 3),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -538,9 +816,12 @@ pub async fn test_list_roots_single<S: EventStore>(store: &S) {
             "test",
             root,
             vec![make_event(0, "E")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
@@ -565,9 +846,12 @@ pub async fn test_list_roots_multiple<S: EventStore>(store: &S) {
             "test",
             root1,
             vec![make_event(0, "E1")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .unwrap();
@@ -577,9 +861,12 @@ pub async fn test_list_roots_multiple<S: EventStore>(store: &S) {
             "test",
             root2,
             vec![make_event(0, "E2")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .unwrap();
@@ -589,9 +876,12 @@ pub async fn test_list_roots_multiple<S: EventStore>(store: &S) {
             "test",
             root3,
             vec![make_event(0, "E3")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .unwrap();
@@ -626,9 +916,12 @@ pub async fn test_list_roots_domain_isolation<S: EventStore>(store: &S) {
             "test",
             root1,
             vec![make_event(0, "E1")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .unwrap();
@@ -638,9 +931,12 @@ pub async fn test_list_roots_domain_isolation<S: EventStore>(store: &S) {
             "test",
             root2,
             vec![make_event(0, "E2")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .unwrap();
@@ -670,9 +966,12 @@ pub async fn test_list_domains_contains<S: EventStore>(store: &S) {
             "test",
             root,
             vec![make_event(0, "E")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
@@ -696,9 +995,12 @@ pub async fn test_list_domains_multiple<S: EventStore>(store: &S) {
                 "test",
                 Uuid::new_v4(),
                 vec![make_event(0, "E")],
-                "",
-                None,
-                None,
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
             )
             .await
             .unwrap();
@@ -730,7 +1032,18 @@ pub async fn test_get_next_sequence_after_events<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 7), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 7),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -756,9 +1069,12 @@ pub async fn test_get_next_sequence_increments<S: EventStore>(store: &S) {
             "test",
             root,
             vec![make_event(0, "E0")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .unwrap();
@@ -768,7 +1084,18 @@ pub async fn test_get_next_sequence_increments<S: EventStore>(store: &S) {
     );
 
     store
-        .add(domain, "test", root, make_events(1, 3), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(1, 3),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -787,11 +1114,33 @@ pub async fn test_aggregate_isolation<S: EventStore>(store: &S) {
     let root2 = Uuid::new_v4();
 
     store
-        .add(domain, "test", root1, make_events(0, 3), "", None, None)
+        .add(
+            domain,
+            "test",
+            root1,
+            make_events(0, 3),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .unwrap();
     store
-        .add(domain, "test", root2, make_events(0, 5), "", None, None)
+        .add(
+            domain,
+            "test",
+            root2,
+            make_events(0, 5),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .unwrap();
 
@@ -822,7 +1171,18 @@ pub async fn test_large_batch<S: EventStore>(store: &S) {
     let root = Uuid::new_v4();
 
     store
-        .add(domain, "test", root, make_events(0, 100), "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            make_events(0, 100),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("large batch should succeed");
 
@@ -855,9 +1215,12 @@ pub async fn test_correlation_id_query<S: EventStore>(store: &S) {
             "test",
             root1,
             vec![make_event(0, "E1")],
-            &correlation_id,
-            None,
-            None,
+            &AddMeta {
+                correlation_id: &correlation_id,
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
@@ -868,9 +1231,12 @@ pub async fn test_correlation_id_query<S: EventStore>(store: &S) {
             "test",
             root2,
             vec![make_event(0, "E2")],
-            &correlation_id,
-            None,
-            None,
+            &AddMeta {
+                correlation_id: &correlation_id,
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
@@ -921,9 +1287,12 @@ pub async fn test_correlation_id_query_main_timeline_null_edition<S: EventStore>
             "",
             root,
             vec![make_event(0, "MainEvent")],
-            &correlation_id,
-            None,
-            None,
+            &AddMeta {
+                correlation_id: &correlation_id,
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add to main timeline should succeed");
@@ -964,9 +1333,12 @@ pub async fn test_correlation_id_preserved<S: EventStore>(store: &S) {
             "test",
             root,
             vec![make_event(0, "E")],
-            &correlation_id,
-            None,
-            None,
+            &AddMeta {
+                correlation_id: &correlation_id,
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
@@ -1000,9 +1372,12 @@ pub async fn test_edition_isolation<S: EventStore>(store: &S) {
             "angzarr",
             root,
             vec![make_event(0, "Main")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add to main should succeed");
@@ -1014,9 +1389,12 @@ pub async fn test_edition_isolation<S: EventStore>(store: &S) {
             "v2",
             root,
             vec![make_event(0, "V2")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add to v2 should succeed");
@@ -1054,13 +1432,35 @@ pub async fn test_edition_sequences_independent<S: EventStore>(store: &S) {
 
     // Add 3 events to main edition
     store
-        .add(domain, "angzarr", root, make_events(0, 3), "", None, None)
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 3),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
     // Add 5 events to v2 edition (sequence starts at 0)
     store
-        .add(domain, "v2", root, make_events(0, 5), "", None, None)
+        .add(
+            domain,
+            "v2",
+            root,
+            make_events(0, 5),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -1084,7 +1484,18 @@ pub async fn test_edition_divergence_read<S: EventStore>(store: &S) {
 
     // Add events to main edition (0, 1, 2)
     store
-        .add(domain, "angzarr", root, make_events(0, 3), "", None, None)
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 3),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add to main should succeed");
 
@@ -1096,9 +1507,12 @@ pub async fn test_edition_divergence_read<S: EventStore>(store: &S) {
             "branch-div",
             root,
             make_events(1, 2),
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add to branch should succeed");
@@ -1126,7 +1540,18 @@ pub async fn test_edition_divergence_from_middle<S: EventStore>(store: &S) {
 
     // Add events to main edition (0, 1, 2, 3, 4)
     store
-        .add(domain, "angzarr", root, make_events(0, 5), "", None, None)
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 5),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add to main should succeed");
 
@@ -1137,9 +1562,12 @@ pub async fn test_edition_divergence_from_middle<S: EventStore>(store: &S) {
             "mid-branch",
             root,
             make_events(3, 2),
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add to mid-branch should succeed");
@@ -1164,7 +1592,18 @@ pub async fn test_edition_divergence_get_from<S: EventStore>(store: &S) {
 
     // Main has 0-4
     store
-        .add(domain, "angzarr", root, make_events(0, 5), "", None, None)
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 5),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add to main should succeed");
 
@@ -1175,9 +1614,12 @@ pub async fn test_edition_divergence_get_from<S: EventStore>(store: &S) {
             "from-branch",
             root,
             make_events(2, 3),
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add to branch should succeed");
@@ -1191,6 +1633,187 @@ pub async fn test_edition_divergence_get_from<S: EventStore>(store: &S) {
     assert_eq!(from_events.len(), 2, "should have events 3, 4");
     assert_eq!(from_events[0].sequence_num(), 3);
     assert_eq!(from_events[1].sequence_num(), 4);
+}
+
+/// Finding #10: `get_from_to` on a diverged edition must include the
+/// pre-divergence main-timeline prefix, exactly as `get`/`get_from` do.
+///
+/// Pre-fix, the SQL backends built `get_from_to` as a single query filtered
+/// only on `edition_predicate(edition)` — it never merged in the main
+/// timeline. So a ranged read on a diverged edition returned ONLY the
+/// edition-tagged rows in range, dropping every main-timeline event before
+/// the divergence point. This is the range-read half of #10 (the temporal
+/// read is `test_edition_get_until_timestamp_includes_main_prefix`).
+pub async fn test_edition_get_from_to_includes_main_prefix<S: EventStore>(store: &S) {
+    let domain = "test_range_prefix";
+    let root = Uuid::new_v4();
+
+    // Main timeline: 0, 1, 2, 3, 4.
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 5),
+            &AddMeta::default(),
+        )
+        .await
+        .expect("add to main should succeed");
+
+    // Branch diverges at seq 3 (branch owns 3, 4; inherits main 0,1,2).
+    store
+        .add(
+            domain,
+            "range-branch",
+            root,
+            make_events(3, 2),
+            &AddMeta::default(),
+        )
+        .await
+        .expect("add to branch should succeed");
+
+    // get_from_to(1, 4) over the branch spans the divergence: it must
+    // return main[1], main[2] (pre-divergence prefix) + branch[3].
+    let ranged = store
+        .get_from_to(domain, "range-branch", root, 1, 4)
+        .await
+        .expect("get_from_to should succeed");
+
+    let seqs: Vec<u32> = ranged.iter().map(|e| e.sequence_num()).collect();
+    assert_eq!(
+        seqs,
+        vec![1, 2, 3],
+        "get_from_to on a diverged edition must include the pre-divergence \
+         main-timeline prefix (seqs 1,2) alongside the branch event (seq 3); \
+         got {:?} — dropping the prefix is finding #10",
+        seqs
+    );
+}
+
+/// Finding #10: `get_until_timestamp` on a diverged edition must include the
+/// pre-divergence main-timeline prefix.
+///
+/// This is the path `EventBookRepository::get_temporal_by_sequence` takes
+/// on its full-replay branch: a "state as of T" read that, pre-fix, filtered
+/// only on `edition_predicate(edition)` and so reconstructed corrupt state
+/// from post-divergence rows only. Whole-second timestamps keep the test
+/// valid on ImmuDB (whose TIMESTAMP column floors sub-second precision).
+pub async fn test_edition_get_until_timestamp_includes_main_prefix<S: EventStore>(store: &S) {
+    use prost_types::Timestamp;
+
+    let domain = "test_temporal_prefix";
+    let root = Uuid::new_v4();
+
+    // Main timeline events 0,1,2 at t0<t1<t2 (whole seconds).
+    let base = 1_700_000_000i64;
+    let main: Vec<EventPage> = (0..3)
+        .map(|i| {
+            let mut e = make_event(i, &format!("Main{i}"));
+            e.created_at = Some(Timestamp {
+                seconds: base + i as i64,
+                nanos: 0,
+            });
+            e
+        })
+        .collect();
+    store
+        .add(domain, "angzarr", root, main, &AddMeta::default())
+        .await
+        .expect("add to main should succeed");
+
+    // Branch diverges at seq 3; branch events 3,4 at strictly later instants.
+    let branch: Vec<EventPage> = (3..5)
+        .map(|i| {
+            let mut e = make_event(i, &format!("Branch{i}"));
+            e.created_at = Some(Timestamp {
+                seconds: base + i as i64,
+                nanos: 0,
+            });
+            e
+        })
+        .collect();
+    store
+        .add(domain, "temporal-branch", root, branch, &AddMeta::default())
+        .await
+        .expect("add to branch should succeed");
+
+    // "State as of t3": inclusive of main[0,1,2] (t0,t1,t2 <= t3) and
+    // branch[3] (t3 <= t3), excluding branch[4] (t4 > t3).
+    let until = Timestamp {
+        seconds: base + 3,
+        nanos: 0,
+    };
+    let as_of = store
+        .get_until_timestamp(domain, "temporal-branch", root, &until)
+        .await
+        .expect("get_until_timestamp should succeed");
+
+    let seqs: Vec<u32> = as_of.iter().map(|e| e.sequence_num()).collect();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2, 3],
+        "get_until_timestamp on a diverged edition must include the \
+         pre-divergence main-timeline prefix (seqs 0,1,2); got {:?} — \
+         dropping it corrupts temporal reconstruction (finding #10)",
+        seqs
+    );
+}
+
+/// Finding #12 (LOCKED: inherit main timeline): a named edition with NO
+/// events of its own and no explicit divergence must read as its base — the
+/// entire main timeline — until it explicitly diverges.
+///
+/// SQLite, ImmuDB, and the mock already behave this way. Postgres did NOT:
+/// its composite stored procedure computed the divergence point as
+/// `COALESCE(explicit, MIN(edition.seq), 0)`, so with no edition rows the
+/// point was the literal `0`, the main-timeline filter `sequence < 0` was
+/// never true, and the read returned ZERO rows. This contract test pins the
+/// uniform behavior across all SQL backends (RED on pre-fix Postgres).
+pub async fn test_eventless_edition_inherits_main_timeline<S: EventStore>(store: &S) {
+    let domain = "test_eventless_inherit";
+    let root = Uuid::new_v4();
+
+    // Main timeline: 0, 1, 2. The named edition below writes nothing.
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 3),
+            &AddMeta::default(),
+        )
+        .await
+        .expect("add to main should succeed");
+
+    // Read an eventless named edition — must inherit the whole main timeline.
+    let inherited = store
+        .get(domain, "ghost-edition", root)
+        .await
+        .expect("get on eventless edition should succeed");
+
+    let seqs: Vec<u32> = inherited.iter().map(|e| e.sequence_num()).collect();
+    assert_eq!(
+        seqs,
+        vec![0, 1, 2],
+        "an eventless named edition must inherit the full main timeline \
+         (LOCKED #12 contract); got {:?}. Zero rows here is the pre-fix \
+         Postgres 'divergence=0 → sequence<0' bug",
+        seqs
+    );
+
+    // The same must hold for get_from from the middle of the inherited range.
+    let from_mid = store
+        .get_from(domain, "ghost-edition", root, 1)
+        .await
+        .expect("get_from on eventless edition should succeed");
+    let from_seqs: Vec<u32> = from_mid.iter().map(|e| e.sequence_num()).collect();
+    assert_eq!(
+        from_seqs,
+        vec![1, 2],
+        "get_from on an eventless edition must inherit the main-timeline \
+         tail from the requested sequence; got {:?}",
+        from_seqs
+    );
 }
 
 /// Test explicit divergence for NEW edition branches (no prior edition events).
@@ -1211,7 +1834,18 @@ pub async fn test_edition_explicit_divergence_new_branch<S: EventStore>(store: &
 
     // Add events to main timeline (0, 1, 2, 3, 4)
     store
-        .add(domain, "angzarr", root, make_events(0, 5), "", None, None)
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 5),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add to main should succeed");
 
@@ -1245,9 +1879,12 @@ pub async fn test_edition_filtered_roots<S: EventStore>(store: &S) {
             "angzarr",
             root_main,
             vec![make_event(0, "Main")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .unwrap();
@@ -1257,9 +1894,12 @@ pub async fn test_edition_filtered_roots<S: EventStore>(store: &S) {
             "v2",
             root_v2,
             vec![make_event(0, "V2")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .unwrap();
@@ -1314,9 +1954,12 @@ pub async fn test_main_timeline_sentinel_write_empty_read_both<S: EventStore>(st
             "",
             root,
             vec![make_event(0, "MainEmpty")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add with empty-string main-timeline sentinel should succeed");
@@ -1355,9 +1998,12 @@ pub async fn test_main_timeline_sentinel_write_angzarr_read_both<S: EventStore>(
             "angzarr",
             root,
             vec![make_event(0, "MainAngzarr")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add with 'angzarr' main-timeline sentinel should succeed");
@@ -1397,9 +2043,12 @@ pub async fn test_main_timeline_external_id_sentinel_polarity<S: EventStore>(sto
             "",
             root,
             vec![make_event(0, "ExtClaim")],
-            "",
-            Some(&external_id),
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: Some(&external_id),
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add with external_id on empty sentinel should succeed");
@@ -1435,9 +2084,12 @@ pub async fn test_delete_edition_events_rejects_main_timeline_sentinels<S: Event
             "",
             root,
             vec![make_event(0, "Main")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("seed main-timeline event");
@@ -1485,9 +2137,12 @@ pub async fn test_add_with_external_id_returns_duplicate<S: EventStore>(store: &
             "test",
             root,
             make_events(0, 3),
-            "",
-            Some("ext-123"),
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: Some("ext-123"),
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("first add should succeed");
@@ -1510,10 +2165,10 @@ pub async fn test_add_with_external_id_returns_duplicate<S: EventStore>(store: &
             domain,
             "test",
             root,
-            make_events(3, 2), // Different events
-            "",
-            Some("ext-123"), // Same external_id
-            None,
+            make_events(3, 2),
+            &AddMeta { correlation_id: // Different events
+            "", external_id: Some("ext-123"), source_info: // Same external_id
+            None, ext: None },
         )
         .await
         .expect("duplicate add should succeed");
@@ -1544,9 +2199,12 @@ pub async fn test_add_different_external_ids_allowed<S: EventStore>(store: &S) {
             "test",
             root,
             make_events(0, 2),
-            "",
-            Some("ext-aaa"),
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: Some("ext-aaa"),
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("first add should succeed");
@@ -1557,9 +2215,12 @@ pub async fn test_add_different_external_ids_allowed<S: EventStore>(store: &S) {
             "test",
             root,
             make_events(2, 2),
-            "",
-            Some("ext-bbb"),
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: Some("ext-bbb"),
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("second add with different external_id should succeed");
@@ -1598,7 +2259,6 @@ pub async fn test_get_until_timestamp_filters<S: EventStore>(store: &S) {
             type_url: "type.example/Old".to_string(),
             value: vec![1],
         })),
-        ..Default::default()
     };
 
     let event_new = EventPage {
@@ -1611,7 +2271,6 @@ pub async fn test_get_until_timestamp_filters<S: EventStore>(store: &S) {
             type_url: "type.example/New".to_string(),
             value: vec![2],
         })),
-        ..Default::default()
     };
 
     store
@@ -1620,17 +2279,23 @@ pub async fn test_get_until_timestamp_filters<S: EventStore>(store: &S) {
             "test",
             root,
             vec![event_old, event_new],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
 
     // Query with timestamp between old and new
-    let until = "2024-01-01T00:00:00Z"; // After old, before new
+    let until = Timestamp {
+        seconds: 1704067200, // 2024-01-01T00:00:00Z — after old, before new
+        nanos: 0,
+    };
     let filtered = store
-        .get_until_timestamp(domain, "test", root, until)
+        .get_until_timestamp(domain, "test", root, &until)
         .await
         .expect("get_until_timestamp should succeed");
 
@@ -1659,22 +2324,125 @@ pub async fn test_get_until_timestamp_returns_all_when_recent<S: EventStore>(sto
             type_url: "type.example/E".to_string(),
             value: vec![1],
         })),
-        ..Default::default()
     };
 
     store
-        .add(domain, "test", root, vec![event], "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            vec![event],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
     // Query with timestamp far in the future
-    let until = "2030-01-01T00:00:00Z";
+    let until = Timestamp {
+        seconds: 1893456000, // 2030-01-01T00:00:00Z
+        nanos: 0,
+    };
     let all = store
-        .get_until_timestamp(domain, "test", root, until)
+        .get_until_timestamp(domain, "test", root, &until)
         .await
         .expect("get_until_timestamp should succeed");
 
     assert_eq!(all.len(), 1, "should return all events");
+}
+
+/// C10 (finding #26) regression: the pre-fix `get_until_timestamp(until:
+/// &str)` compared a caller-formatted string lexically against the SQL
+/// backends' TEXT `created_at` column. A caller-chosen `Z` suffix instead
+/// of the producer's uniform `+00:00` corrupted the comparison — the
+/// stored fractional-second marker `.` (0x2E) sorts BELOW `Z` (0x5A) but
+/// ABOVE `+` (0x2B), so a `Z`-suffixed boundary leaked a strictly-later
+/// event into a "state as of T" read (confirmed red against the pre-fix
+/// SQLite backend: 2 events returned via `Z`, 1 via `+00:00`, for the
+/// identical instant).
+///
+/// The typed `until: &prost_types::Timestamp` signature removes the
+/// possibility structurally — there is no second string spelling of the
+/// same instant for a caller to pick, and every backend derives its own
+/// comparable form from the SAME typed value through exactly one function
+/// (`storage::helpers::timestamp_to_rfc3339` for TEXT-column SQL
+/// backends). This test pins the resulting nanosecond-precision boundary
+/// behavior: an event exactly AT `until` is included (inclusive `<=`); an
+/// event one nanosecond-granularity tick AFTER `until` is excluded.
+///
+/// Every backend runs it: ImmuDB's whole-second `TIMESTAMP` column only
+/// narrows the candidates; the exact cut uses each page's own timestamp.
+pub async fn test_get_until_timestamp_nanosecond_boundary_precision<S: EventStore>(store: &S) {
+    use prost_types::Timestamp;
+
+    let domain = "test_ts_boundary";
+    let root = Uuid::new_v4();
+
+    let boundary = Timestamp {
+        seconds: 1704153600, // 2024-01-02T00:00:00Z
+        nanos: 0,
+    };
+    let one_micro_after = Timestamp {
+        seconds: 1704153600,
+        nanos: 1_000, // +1 microsecond — strictly after the boundary
+    };
+
+    let event_at_boundary = EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(SequenceType::Sequence(0)),
+        }),
+        created_at: Some(boundary),
+        payload: Some(event_page::Payload::Event(Any {
+            type_url: "type.example/AtBoundary".to_string(),
+            value: vec![1],
+        })),
+    };
+    let event_after_boundary = EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(SequenceType::Sequence(1)),
+        }),
+        created_at: Some(one_micro_after),
+        payload: Some(event_page::Payload::Event(Any {
+            type_url: "type.example/AfterBoundary".to_string(),
+            value: vec![2],
+        })),
+    };
+
+    store
+        .add(
+            domain,
+            "test",
+            root,
+            vec![event_at_boundary, event_after_boundary],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
+        .await
+        .expect("add should succeed");
+
+    let filtered = store
+        .get_until_timestamp(domain, "test", root, &boundary)
+        .await
+        .expect("get_until_timestamp should succeed");
+
+    assert_eq!(
+        filtered.len(),
+        1,
+        "boundary query must include the at-boundary event and exclude the \
+         strictly-later (+1us) event — a regression here means the typed \
+         boundary reopened the C10 lexical-comparison footgun"
+    );
+    assert_eq!(filtered[0].sequence_num(), 0);
 }
 
 pub async fn test_timestamp_preservation<S: EventStore>(store: &S) {
@@ -1698,11 +2466,21 @@ pub async fn test_timestamp_preservation<S: EventStore>(store: &S) {
             type_url: "type.example/TimestampTest".to_string(),
             value: vec![1, 2, 3],
         })),
-        ..Default::default()
     };
 
     store
-        .add(domain, "test", root, vec![event], "", None, None)
+        .add(
+            domain,
+            "test",
+            root,
+            vec![event],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -1742,9 +2520,12 @@ pub async fn test_large_aggregate_10k<S: EventStore>(store: &S) {
                 "test",
                 root,
                 make_events(start, 1000),
-                "",
-                None,
-                None,
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
             )
             .await
             .expect("batch add should succeed");
@@ -1787,11 +2568,33 @@ pub async fn test_delete_edition_events_removes_all<S: EventStore>(store: &S) {
 
     // Add events to two aggregates in the same edition
     store
-        .add(domain, "branch-1", root1, make_events(0, 3), "", None, None)
+        .add(
+            domain,
+            "branch-1",
+            root1,
+            make_events(0, 3),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
     store
-        .add(domain, "branch-1", root2, make_events(0, 2), "", None, None)
+        .add(
+            domain,
+            "branch-1",
+            root2,
+            make_events(0, 2),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .expect("add should succeed");
 
@@ -1820,9 +2623,12 @@ pub async fn test_delete_edition_events_scoped<S: EventStore>(store: &S) {
             "angzarr",
             root,
             vec![make_event(0, "Main")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
@@ -1834,9 +2640,12 @@ pub async fn test_delete_edition_events_scoped<S: EventStore>(store: &S) {
             "branch-1",
             root,
             vec![make_event(0, "Branch")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
@@ -1867,6 +2676,9 @@ pub async fn test_find_by_source_returns_match<S: EventStore>(store: &S) {
         edition: "angzarr".to_string(),
         root: source_root,
         seq: 5,
+        component: "saga-orders-test".to_string(),
+        command_index: 0,
+        kind: angzarr::storage::ProvenanceKind::Command,
     };
 
     store
@@ -1875,9 +2687,12 @@ pub async fn test_find_by_source_returns_match<S: EventStore>(store: &S) {
             "angzarr",
             root,
             vec![make_event(0, "Derived")],
-            "",
-            None,
-            Some(&source_info),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: Some(&source_info),
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
@@ -1901,6 +2716,9 @@ pub async fn test_find_by_source_no_match<S: EventStore>(store: &S) {
         edition: "angzarr".to_string(),
         root: source_root,
         seq: 5,
+        component: "saga-orders-test".to_string(),
+        command_index: 0,
+        kind: angzarr::storage::ProvenanceKind::Command,
     };
 
     store
@@ -1909,9 +2727,12 @@ pub async fn test_find_by_source_no_match<S: EventStore>(store: &S) {
             "angzarr",
             root,
             vec![make_event(0, "NoSource")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
@@ -1946,9 +2767,12 @@ pub async fn test_find_by_external_id_round_trip<S: EventStore>(store: &S) {
             "angzarr",
             root,
             vec![make_event(0, "Claimed")],
-            "",
-            Some(external_id),
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: Some(external_id),
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add with external_id should succeed");
@@ -1982,9 +2806,12 @@ pub async fn test_find_by_external_id_no_match<S: EventStore>(store: &S) {
             "angzarr",
             root,
             vec![make_event(0, "NoClaim")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
@@ -2010,9 +2837,12 @@ pub async fn test_find_by_external_id_empty_returns_none<S: EventStore>(store: &
             "angzarr",
             root,
             vec![make_event(0, "NoClaim")],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .expect("add should succeed");
@@ -2033,7 +2863,7 @@ pub async fn test_find_by_external_id_empty_returns_none<S: EventStore>(store: &
 //
 // Distinct from `test_find_by_source_returns_match` above: this variant pins
 // the **multi-field** round trip — every field of `SourceInfo` (edition,
-// domain, root, seq) must survive `add()` and be matched on by
+// domain, root, seq, component, command_index) must survive `add()` and be matched on by
 // `find_by_source`. Backends that drop `_source_info` at add() time pass
 // `test_find_by_source_no_match` (None is correctly returned for a
 // non-existent claim) but fail this test (the claim that SHOULD have been
@@ -2051,6 +2881,9 @@ pub async fn test_find_by_source_round_trip<S: EventStore>(store: &S) {
         edition: "angzarr".to_string(),
         root: source_root,
         seq: 42,
+        component: "saga-orders-test".to_string(),
+        command_index: 1,
+        kind: angzarr::storage::ProvenanceKind::Command,
     };
 
     store
@@ -2059,9 +2892,12 @@ pub async fn test_find_by_source_round_trip<S: EventStore>(store: &S) {
             "angzarr",
             root,
             vec![make_event(0, "Translated")],
-            "",
-            None,
-            Some(&source_info),
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: Some(&source_info),
+                ext: None,
+            },
         )
         .await
         .expect("add with source_info should succeed");
@@ -2091,151 +2927,219 @@ pub async fn test_find_by_source_round_trip<S: EventStore>(store: &S) {
         result_wrong.is_none(),
         "different source seq must not match — backend isn't storing seq correctly"
     );
+
+    // O1: mismatch on component must NOT match — a different component
+    // reacting to the same source event is a distinct idempotency claim.
+    let mismatched_component = angzarr::storage::SourceInfo {
+        component: "saga-orders-other".to_string(),
+        ..source_info.clone()
+    };
+    let result_wrong = store
+        .find_by_source(domain, "angzarr", root, &mismatched_component)
+        .await
+        .expect("find_by_source should succeed");
+    assert!(
+        result_wrong.is_none(),
+        "different source component must not match — backend isn't storing component correctly"
+    );
+
+    // O1: mismatch on command_index must NOT match — a different command of
+    // the same invocation is a distinct idempotency claim.
+    let mismatched_index = angzarr::storage::SourceInfo {
+        command_index: source_info.command_index + 1,
+        ..source_info.clone()
+    };
+    let result_wrong = store
+        .find_by_source(domain, "angzarr", root, &mismatched_index)
+        .await
+        .expect("find_by_source should succeed");
+    assert!(
+        result_wrong.is_none(),
+        "different command_index must not match — backend isn't storing command_index correctly"
+    );
 }
 
-// =============================================================================
-// query_stale_cascades tests
-// =============================================================================
+/// Main-timeline source round trip: a claim whose source cover spells the
+/// main timeline as `""` (how covers actually arrive — `Cover.edition` is
+/// `None` on the main timeline) must persist and be found again. Pins the
+/// write-side polarity: SQLite's insert used to gate the source columns on
+/// `!source_edition.is_empty()`, silently dropping every main-timeline
+/// claim while the `"angzarr"`-spelled tests above kept passing (C-15 class).
+pub async fn test_find_by_source_round_trip_main_timeline_source<S: EventStore>(store: &S) {
+    let domain = "test_find_src_main_tl";
+    let root = Uuid::new_v4();
+    let source_root = Uuid::new_v4();
 
-/// Create a test event with cascade tracking fields.
-pub fn make_cascade_event(
-    seq: u32,
-    no_commit: bool,
-    cascade_id: Option<&str>,
-    timestamp_secs: i64,
-) -> EventPage {
-    EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(SequenceType::Sequence(seq)),
-        }),
-        created_at: Some(prost_types::Timestamp {
-            seconds: timestamp_secs,
-            nanos: 0,
-        }),
-        payload: Some(event_page::Payload::Event(Any {
-            type_url: format!("type.example/CascadeEvent{}", seq),
-            value: vec![seq as u8],
-        })),
-        no_commit,
-        cascade_id: cascade_id.map(String::from),
+    let source_info = angzarr::storage::SourceInfo {
+        domain: "orders".to_string(),
+        edition: String::new(),
+        root: source_root,
+        seq: 3,
+        component: "saga-orders-test".to_string(),
+        command_index: 0,
+        kind: angzarr::storage::ProvenanceKind::Command,
+    };
+
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(0, "MainTimelineSourced")],
+            &AddMeta {
+                source_info: Some(&source_info),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("add with main-timeline source_info should succeed");
+
+    let result = store
+        .find_by_source(domain, "angzarr", root, &source_info)
+        .await
+        .expect("find_by_source should succeed");
+    assert!(
+        result.is_some(),
+        "main-timeline (\"\") source claim was dropped at add() time — \
+         write-side edition polarity bug"
+    );
+}
+
+/// The deferred-idempotency key includes what the provenance tuple is
+/// attached to: a command, a rejection-notification or a
+/// compensate-notification. A Compensate notification carries the provenance
+/// tuple of the command it undoes and must never be dropped as a duplicate
+/// of that command (compensation_delivery.feature C-0473).
+pub async fn test_find_by_source_distinguishes_provenance_kind<S: EventStore>(store: &S) {
+    use angzarr::storage::ProvenanceKind;
+    let domain = "test_find_src_kind";
+    let root = Uuid::new_v4();
+    let command_claim = angzarr::storage::SourceInfo::new(
+        "angzarr",
+        "orders",
+        Uuid::new_v4(),
+        3,
+        "OrderFulfillment",
+        0,
+    );
+    let compensate_claim = command_claim
+        .clone()
+        .with_kind(ProvenanceKind::CompensateNotification);
+    let rejection_claim = command_claim
+        .clone()
+        .with_kind(ProvenanceKind::RejectionNotification);
+
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(0, "StockReserved")],
+            &AddMeta {
+                source_info: Some(&command_claim),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("command's events should persist");
+
+    for claim in [&compensate_claim, &rejection_claim] {
+        let premature = store
+            .find_by_source(domain, "angzarr", root, claim)
+            .await
+            .expect("find_by_source should succeed");
+        assert!(
+            premature.is_none(),
+            "a {:?} claim matched the command's claim with the same tuple",
+            claim.kind
+        );
     }
-}
-
-pub async fn test_query_stale_cascades_finds_old_uncommitted<S: EventStore>(store: &S) {
-    let domain = "test_stale_cascade";
-    let root = Uuid::new_v4();
-
-    // Add uncommitted event from 2 hours ago
-    let old_time = chrono::Utc::now() - chrono::Duration::hours(2);
-    let event = make_cascade_event(0, true, Some("cascade-stale-1"), old_time.timestamp());
 
     store
-        .add(domain, "angzarr", root, vec![event], "", None, None)
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(1, "StockReleased")],
+            &AddMeta {
+                source_info: Some(&compensate_claim),
+                ..Default::default()
+            },
+        )
         .await
-        .expect("add should succeed");
+        .expect("compensation's events should persist");
 
-    // Query with 1-hour threshold
-    let threshold = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-    let stale = store
-        .query_stale_cascades(&threshold)
+    let command_pages = store
+        .find_by_source(domain, "angzarr", root, &command_claim)
         .await
-        .expect("query should succeed");
+        .expect("find_by_source should succeed")
+        .expect("command claim should be found");
+    let compensate_pages = store
+        .find_by_source(domain, "angzarr", root, &compensate_claim)
+        .await
+        .expect("find_by_source should succeed")
+        .expect("compensate claim should be found");
+    assert_eq!(command_pages.len(), 1);
+    assert_eq!(command_pages[0].sequence_num(), 0);
+    assert_eq!(compensate_pages.len(), 1);
+    assert_eq!(compensate_pages[0].sequence_num(), 1);
+    assert!(store
+        .find_by_source(domain, "angzarr", root, &rejection_claim)
+        .await
+        .expect("find_by_source should succeed")
+        .is_none());
+}
 
+/// O1 collision regression at the storage contract level: two commands of ONE
+/// invocation — identical (source edition/domain/root/seq), differing only in
+/// command_index — persist as DISTINCT idempotency claims and each lookup
+/// returns only its own events. Pre-fix the key excluded command_index, so the
+/// second command's lookup matched the first's events and the pipeline
+/// swallowed the second command as an already-processed duplicate.
+pub async fn test_find_by_source_distinguishes_invocation_commands<S: EventStore>(store: &S) {
+    let domain = "test_find_src_o1";
+    let root = Uuid::new_v4();
+    let source_root = Uuid::new_v4();
+
+    let claim_first = angzarr::storage::SourceInfo {
+        domain: "orders".to_string(),
+        edition: "angzarr".to_string(),
+        root: source_root,
+        seq: 7,
+        component: "pm-fulfillment".to_string(),
+        command_index: 0,
+        kind: angzarr::storage::ProvenanceKind::Command,
+    };
+    let claim_second = angzarr::storage::SourceInfo {
+        command_index: 1,
+        ..claim_first.clone()
+    };
+
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(0, "FirstCommandEvent")],
+            &AddMeta {
+                source_info: Some(&claim_first),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("first command's events should persist");
+
+    // Before the second command executes, its idempotency lookup must MISS:
+    // this is exactly the lookup that pre-fix returned the first command's
+    // events and silently dropped the second command.
+    let premature = store
+        .find_by_source(domain, "angzarr", root, &claim_second)
+        .await
+        .expect("find_by_source should succeed");
     assert!(
-        stale.contains(&"cascade-stale-1".to_string()),
-        "should find stale cascade"
-    );
-}
-
-pub async fn test_query_stale_cascades_ignores_resolved<S: EventStore>(store: &S) {
-    let domain = "test_resolved_cascade";
-    let root = Uuid::new_v4();
-
-    // Add uncommitted event from 2 hours ago
-    let old_time = chrono::Utc::now() - chrono::Duration::hours(2);
-    let uncommitted = make_cascade_event(0, true, Some("cascade-resolved-1"), old_time.timestamp());
-
-    store
-        .add(domain, "angzarr", root, vec![uncommitted], "", None, None)
-        .await
-        .expect("add should succeed");
-
-    // Add committed event with same cascade_id (resolves the cascade)
-    let committed = make_cascade_event(
-        1,
-        false,
-        Some("cascade-resolved-1"),
-        chrono::Utc::now().timestamp(),
-    );
-    store
-        .add(domain, "angzarr", root, vec![committed], "", None, None)
-        .await
-        .expect("add should succeed");
-
-    // Query with 1-hour threshold
-    let threshold = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-    let stale = store
-        .query_stale_cascades(&threshold)
-        .await
-        .expect("query should succeed");
-
-    assert!(
-        !stale.contains(&"cascade-resolved-1".to_string()),
-        "resolved cascade should not be stale"
-    );
-}
-
-pub async fn test_query_stale_cascades_ignores_fresh<S: EventStore>(store: &S) {
-    let domain = "test_fresh_cascade";
-    let root = Uuid::new_v4();
-
-    // Add uncommitted event from just now
-    let event = make_cascade_event(
-        0,
-        true,
-        Some("cascade-fresh-1"),
-        chrono::Utc::now().timestamp(),
-    );
-
-    store
-        .add(domain, "angzarr", root, vec![event], "", None, None)
-        .await
-        .expect("add should succeed");
-
-    // Query with 1-hour threshold
-    let threshold = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
-    let stale = store
-        .query_stale_cascades(&threshold)
-        .await
-        .expect("query should succeed");
-
-    assert!(
-        !stale.contains(&"cascade-fresh-1".to_string()),
-        "fresh cascade should not be stale"
-    );
-}
-
-// =============================================================================
-// query_cascade_participants tests
-// =============================================================================
-
-pub async fn test_query_cascade_participants_finds_uncommitted<S: EventStore>(store: &S) {
-    let domain = "test_cascade_parts";
-    let root = Uuid::new_v4();
-
-    // Add uncommitted events with cascade_id
-    let event1 = make_cascade_event(
-        0,
-        true,
-        Some("cascade-parts-1"),
-        chrono::Utc::now().timestamp(),
-    );
-    let event2 = make_cascade_event(
-        1,
-        true,
-        Some("cascade-parts-1"),
-        chrono::Utc::now().timestamp(),
+        premature.is_none(),
+        "second command of the invocation matched the FIRST command's claim — \
+         command_index is not part of the idempotency key (O1 collision)"
     );
 
     store
@@ -2243,91 +3147,311 @@ pub async fn test_query_cascade_participants_finds_uncommitted<S: EventStore>(st
             domain,
             "angzarr",
             root,
-            vec![event1, event2],
-            "",
-            None,
-            None,
+            vec![make_event(1, "SecondCommandEvent")],
+            &AddMeta {
+                source_info: Some(&claim_second),
+                ..Default::default()
+            },
         )
         .await
-        .expect("add should succeed");
+        .expect("second command's events should persist");
 
-    let participants = store
-        .query_cascade_participants("cascade-parts-1")
+    // Each claim now resolves to exactly its own single event.
+    let first = store
+        .find_by_source(domain, "angzarr", root, &claim_first)
         .await
-        .expect("query should succeed");
-
-    assert_eq!(participants.len(), 1, "should find one participant");
-    assert_eq!(participants[0].domain, domain);
-    assert_eq!(participants[0].root, root);
+        .expect("find_by_source should succeed")
+        .expect("first claim should be found");
+    let second = store
+        .find_by_source(domain, "angzarr", root, &claim_second)
+        .await
+        .expect("find_by_source should succeed")
+        .expect("second claim should be found");
+    assert_eq!(first.len(), 1, "first claim must return only its own event");
     assert_eq!(
-        participants[0].sequences.len(),
-        2,
-        "should have 2 sequences"
+        second.len(),
+        1,
+        "second claim must return only its own event"
     );
 }
 
-pub async fn test_query_cascade_participants_ignores_committed<S: EventStore>(store: &S) {
-    let domain = "test_cascade_committed";
+/// An aggregate history larger than one backend result page (DynamoDB pages
+/// at 1 MB) must be read completely by every read path, and the external-id
+/// probe must see claims written before the page boundary.
+pub async fn test_history_larger_than_one_result_page<S: EventStore>(store: &S) {
+    let domain = "test_large_history";
+    let root = Uuid::new_v4();
+    // 1200 x 1 KiB = 1.2 MB: past one DynamoDB page, with rows small enough
+    // for ImmuDB's single-statement inserts. Batches of 150 exceed one
+    // DynamoDB transaction (100 items).
+    const EVENTS: u32 = 1200;
+    const BATCH: u32 = 150;
+    const PAYLOAD: usize = 1024;
+
+    let event = |seq: u32| {
+        let mut page = make_event(seq, "Bulky");
+        if let Some(event_page::Payload::Event(ref mut any)) = page.payload {
+            any.value = vec![(seq % 251) as u8; PAYLOAD];
+        }
+        page
+    };
+
+    for batch_start in (0..EVENTS).step_by(BATCH as usize) {
+        let external_id = format!("bulk-{batch_start}");
+        store
+            .add(
+                domain,
+                "angzarr",
+                root,
+                (batch_start..batch_start + BATCH).map(event).collect(),
+                &AddMeta {
+                    external_id: Some(&external_id),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("bulky add should succeed");
+    }
+
+    let all = store
+        .get(domain, "angzarr", root)
+        .await
+        .expect("get should succeed");
+    let seqs: Vec<u32> = all.iter().map(|e| e.sequence_num()).collect();
+    assert_eq!(
+        seqs,
+        (0..EVENTS).collect::<Vec<_>>(),
+        "get must return every event"
+    );
+    for page in &all {
+        match &page.payload {
+            Some(event_page::Payload::Event(any)) => assert_eq!(
+                any.value,
+                vec![(page.sequence_num() % 251) as u8; PAYLOAD],
+                "payload must round-trip intact"
+            ),
+            other => panic!("unexpected payload {other:?}"),
+        }
+    }
+
+    let tail = store
+        .get_from(domain, "angzarr", root, 6)
+        .await
+        .expect("get_from should succeed");
+    assert_eq!(tail.len(), 1194, "get_from must return the whole tail");
+
+    let range = store
+        .get_from_to(domain, "angzarr", root, 1, 1199)
+        .await
+        .expect("get_from_to should succeed");
+    assert_eq!(range.len(), 1198, "get_from_to must return the whole range");
+
+    let duplicate = store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![event(EVENTS)],
+            &AddMeta {
+                external_id: Some("bulk-0"),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("duplicate add should succeed");
+    assert_eq!(
+        duplicate,
+        AddOutcome::Duplicate {
+            first_sequence: 0,
+            last_sequence: BATCH - 1
+        },
+        "the external-id probe must find the first batch's claim"
+    );
+
+    assert_eq!(
+        store
+            .get_next_sequence(domain, "angzarr", root)
+            .await
+            .expect("get_next_sequence should succeed"),
+        EVENTS
+    );
+    assert!(
+        store
+            .list_roots(domain, "angzarr")
+            .await
+            .expect("list_roots should succeed")
+            .contains(&root),
+        "list_roots must see the aggregate"
+    );
+}
+
+/// Every batch must continue the stream exactly: a first sequence past the
+/// next free one, or a gap inside the batch, is a sequence conflict.
+pub async fn test_add_rejects_sequence_gaps<S: EventStore>(store: &S) {
+    let domain = "test_seq_gaps";
     let root = Uuid::new_v4();
 
-    // Add committed event (should not be returned as participant)
-    let event = make_cascade_event(
-        0,
-        false,
-        Some("cascade-committed-1"),
-        chrono::Utc::now().timestamp(),
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 2),
+            &AddMeta::default(),
+        )
+        .await
+        .expect("initial add should succeed");
+
+    let skipped = store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(3, "Skipped")],
+            &AddMeta::default(),
+        )
+        .await;
+    assert!(
+        matches!(
+            skipped,
+            Err(StorageError::SequenceConflict {
+                expected: 2,
+                actual: 3
+            })
+        ),
+        "a first sequence past the next free one must conflict; got {skipped:?}"
     );
 
-    store
-        .add(domain, "angzarr", root, vec![event], "", None, None)
-        .await
-        .expect("add should succeed");
-
-    let participants = store
-        .query_cascade_participants("cascade-committed-1")
-        .await
-        .expect("query should succeed");
-
+    let holed = store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            vec![make_event(2, "A"), make_event(4, "B")],
+            &AddMeta::default(),
+        )
+        .await;
     assert!(
-        participants.is_empty(),
-        "committed events should not be participants"
+        matches!(
+            holed,
+            Err(StorageError::SequenceConflict {
+                expected: 3,
+                actual: 4
+            })
+        ),
+        "a gap inside the batch must conflict; got {holed:?}"
+    );
+
+    let events = store.get(domain, "angzarr", root).await.unwrap();
+    assert_eq!(
+        events.iter().map(|e| e.sequence_num()).collect::<Vec<_>>(),
+        vec![0, 1],
+        "rejected batches must write nothing"
     );
 }
 
-pub async fn test_query_cascade_participants_multiple_aggregates<S: EventStore>(store: &S) {
-    let domain = "test_cascade_multi";
-    let root1 = Uuid::new_v4();
-    let root2 = Uuid::new_v4();
-
-    // Add uncommitted events to two aggregates with same cascade_id
-    let event1 = make_cascade_event(
-        0,
-        true,
-        Some("cascade-multi-1"),
-        chrono::Utc::now().timestamp(),
-    );
-    let event2 = make_cascade_event(
-        0,
-        true,
-        Some("cascade-multi-1"),
-        chrono::Utc::now().timestamp(),
-    );
+/// A new edition may branch below the main timeline's head: its first event
+/// sits at the divergence point, and reads compose the main prefix with it.
+pub async fn test_edition_first_write_branches_below_main_head<S: EventStore>(store: &S) {
+    let domain = "test_branch_below_head";
+    let root = Uuid::new_v4();
 
     store
-        .add(domain, "angzarr", root1, vec![event1], "", None, None)
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 5),
+            &AddMeta::default(),
+        )
         .await
-        .expect("add should succeed");
+        .expect("main add should succeed");
+
     store
-        .add(domain, "angzarr", root2, vec![event2], "", None, None)
+        .add(
+            domain,
+            "branch",
+            root,
+            vec![make_event(2, "Branch2"), make_event(3, "Branch3")],
+            &AddMeta::default(),
+        )
         .await
-        .expect("add should succeed");
+        .expect("a branch may start at a divergence point below the main head");
 
-    let participants = store
-        .query_cascade_participants("cascade-multi-1")
+    let events = store.get(domain, "branch", root).await.unwrap();
+    let shape: Vec<(u32, String)> = events
+        .iter()
+        .map(|e| {
+            let type_url = match &e.payload {
+                Some(event_page::Payload::Event(any)) => any.type_url.clone(),
+                _ => String::new(),
+            };
+            (e.sequence_num(), type_url)
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            (0, "type.example/Event0".to_string()),
+            (1, "type.example/Event1".to_string()),
+            (2, "type.example/Branch2".to_string()),
+            (3, "type.example/Branch3".to_string()),
+        ],
+        "branch reads main[0,1] then its own events"
+    );
+    assert_eq!(
+        store
+            .get_next_sequence(domain, "branch", root)
+            .await
+            .unwrap(),
+        4
+    );
+    assert_eq!(
+        store
+            .get_next_sequence(domain, "angzarr", root)
+            .await
+            .unwrap(),
+        5,
+        "the branch must not move the main timeline"
+    );
+}
+
+/// A new edition cannot start past the main timeline's next sequence (that
+/// would leave a gap between the inherited prefix and the branch).
+pub async fn test_edition_first_write_past_main_head_rejected<S: EventStore>(store: &S) {
+    let domain = "test_branch_past_head";
+    let root = Uuid::new_v4();
+
+    store
+        .add(
+            domain,
+            "angzarr",
+            root,
+            make_events(0, 3),
+            &AddMeta::default(),
+        )
         .await
-        .expect("query should succeed");
+        .expect("main add should succeed");
 
-    assert_eq!(participants.len(), 2, "should find two participants");
+    let result = store
+        .add(
+            domain,
+            "branch",
+            root,
+            vec![make_event(5, "TooFar")],
+            &AddMeta::default(),
+        )
+        .await;
+    assert!(
+        matches!(
+            result,
+            Err(StorageError::SequenceConflict {
+                expected: 3,
+                actual: 5
+            })
+        ),
+        "a branch must start at or below main's next sequence; got {result:?}"
+    );
 }
 
 // =============================================================================
@@ -2362,7 +3486,8 @@ pub async fn test_query_cascade_participants_multiple_aggregates<S: EventStore>(
 /// Each writer:
 ///   1. Reads `get_next_sequence` to pick the next available slot.
 ///   2. Constructs an event at that slot.
-///   3. Calls `add()`. On error (race lost), retries.
+///   3. Calls `add()`. A lost race must be `StorageError::SequenceConflict`
+///      (retryable), on which the writer retries; any other error fails.
 ///
 /// After all writers complete, the aggregate must have exactly N events at
 /// sequences `0..N`, and every sequence must contain the writer's unique
@@ -2388,20 +3513,37 @@ where
         handles.push(tokio::spawn(async move {
             for _attempt in 0..MAX_RETRIES {
                 // Read the next free sequence.
-                let next = match store.get_next_sequence(&domain, "test", root).await {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
+                let next = store
+                    .get_next_sequence(&domain, "test", root)
+                    .await
+                    .expect("get_next_sequence must not fail under contention");
                 // Tag the event payload with this writer's id so an overwrite
                 // is detectable post-hoc by inspecting the stored payload.
                 let event_type = format!("Writer{}@Seq{}", writer_id, next);
                 let event = make_event(next, &event_type);
                 match store
-                    .add(&domain, "test", root, vec![event], "", None, None)
+                    .add(
+                        &domain,
+                        "test",
+                        root,
+                        vec![event],
+                        &AddMeta {
+                            correlation_id: "",
+                            external_id: None,
+                            source_info: None,
+                            ext: None,
+                        },
+                    )
                     .await
                 {
                     Ok(_) => return Some((writer_id, next, event_type)),
-                    Err(_) => continue, // race lost; retry
+                    // A lost race must surface as a retryable sequence
+                    // conflict; any other error (e.g. a raw unique-key
+                    // violation) fails the contract.
+                    Err(StorageError::SequenceConflict { .. }) => continue,
+                    Err(other) => panic!(
+                        "writer {writer_id}: a lost race must be SequenceConflict, got {other:?}"
+                    ),
                 }
             }
             None
@@ -2410,8 +3552,10 @@ where
 
     let mut successes: Vec<(u32, u32, String)> = Vec::new();
     for h in handles {
-        if let Ok(Some(record)) = h.await {
-            successes.push(record);
+        match h.await {
+            Ok(Some(record)) => successes.push(record),
+            Ok(None) => {}
+            Err(join_error) => std::panic::resume_unwind(join_error.into_panic()),
         }
     }
 
@@ -2497,228 +3641,151 @@ where
 }
 
 // =============================================================================
-// Test runner macro
+// Test generator macros (T11)
 // =============================================================================
+//
+// One `#[tokio::test]` is generated PER contract fn, so a failure in one
+// contract surfaces individually instead of fail-fasting the rest of the
+// suite inside a single mega-test. `$fixture` is an async fn returning a
+// fresh store handle; each generated test calls it once. Backends with
+// expensive setup share a container behind the fixture (see
+// storage_postgres.rs / storage_immudb.rs); SQLite builds a fresh
+// in-memory store per test.
 
-/// Run all EventStore interface tests against a store implementation.
+/// Emit one `#[tokio::test]` per listed contract fn.
+#[doc(hidden)]
 #[macro_export]
-macro_rules! run_event_store_tests {
-    ($store:expr) => {
-        use $crate::storage::event_store_tests::*;
-
-        // add tests
-        test_add_single_event($store).await;
-        println!("  test_add_single_event: PASSED");
-
-        test_add_multiple_events($store).await;
-        println!("  test_add_multiple_events: PASSED");
-
-        test_add_empty_events($store).await;
-        println!("  test_add_empty_events: PASSED");
-
-        test_add_sequential_batches($store).await;
-        println!("  test_add_sequential_batches: PASSED");
-
-        test_add_sequence_conflict($store).await;
-        println!("  test_add_sequence_conflict: PASSED");
-
-        test_add_duplicate_sequence($store).await;
-        println!("  test_add_duplicate_sequence: PASSED");
-
-        test_add_rejects_duplicate_sequences($store).await;
-        println!("  test_add_rejects_duplicate_sequences: PASSED");
-
-        // get tests
-        test_get_all_events($store).await;
-        println!("  test_get_all_events: PASSED");
-
-        test_get_empty_aggregate($store).await;
-        println!("  test_get_empty_aggregate: PASSED");
-
-        test_get_preserves_event_data($store).await;
-        println!("  test_get_preserves_event_data: PASSED");
-
-        // get_from tests
-        test_get_from_zero($store).await;
-        println!("  test_get_from_zero: PASSED");
-
-        test_get_from_middle($store).await;
-        println!("  test_get_from_middle: PASSED");
-
-        test_get_from_end($store).await;
-        println!("  test_get_from_end: PASSED");
-
-        test_get_from_last($store).await;
-        println!("  test_get_from_last: PASSED");
-
-        // get_from_to tests
-        test_get_from_to_full_range($store).await;
-        println!("  test_get_from_to_full_range: PASSED");
-
-        test_get_from_to_partial($store).await;
-        println!("  test_get_from_to_partial: PASSED");
-
-        test_get_from_to_single($store).await;
-        println!("  test_get_from_to_single: PASSED");
-
-        test_get_from_to_empty($store).await;
-        println!("  test_get_from_to_empty: PASSED");
-
-        test_get_from_to_zero_to($store).await;
-        println!("  test_get_from_to_zero_to: PASSED");
-
-        // list_roots tests
-        test_list_roots_single($store).await;
-        println!("  test_list_roots_single: PASSED");
-
-        test_list_roots_multiple($store).await;
-        println!("  test_list_roots_multiple: PASSED");
-
-        test_list_roots_empty_domain($store).await;
-        println!("  test_list_roots_empty_domain: PASSED");
-
-        test_list_roots_domain_isolation($store).await;
-        println!("  test_list_roots_domain_isolation: PASSED");
-
-        // list_domains tests
-        test_list_domains_contains($store).await;
-        println!("  test_list_domains_contains: PASSED");
-
-        test_list_domains_multiple($store).await;
-        println!("  test_list_domains_multiple: PASSED");
-
-        // get_next_sequence tests
-        test_get_next_sequence_empty($store).await;
-        println!("  test_get_next_sequence_empty: PASSED");
-
-        test_get_next_sequence_after_events($store).await;
-        println!("  test_get_next_sequence_after_events: PASSED");
-
-        test_get_next_sequence_increments($store).await;
-        println!("  test_get_next_sequence_increments: PASSED");
-
-        // integration tests
-        test_aggregate_isolation($store).await;
-        println!("  test_aggregate_isolation: PASSED");
-
-        test_large_batch($store).await;
-        println!("  test_large_batch: PASSED");
-
-        // correlation_id tests
-        test_correlation_id_query($store).await;
-        println!("  test_correlation_id_query: PASSED");
-
-        test_correlation_id_empty_query($store).await;
-        println!("  test_correlation_id_empty_query: PASSED");
-
-        test_correlation_id_query_main_timeline_null_edition($store).await;
-        println!("  test_correlation_id_query_main_timeline_null_edition: PASSED");
-
-        test_correlation_id_preserved($store).await;
-        println!("  test_correlation_id_preserved: PASSED");
-
-        // edition tests
-        test_edition_isolation($store).await;
-        println!("  test_edition_isolation: PASSED");
-
-        test_edition_sequences_independent($store).await;
-        println!("  test_edition_sequences_independent: PASSED");
-
-        test_edition_divergence_read($store).await;
-        println!("  test_edition_divergence_read: PASSED");
-
-        test_edition_divergence_from_middle($store).await;
-        println!("  test_edition_divergence_from_middle: PASSED");
-
-        test_edition_divergence_get_from($store).await;
-        println!("  test_edition_divergence_get_from: PASSED");
-
-        test_edition_filtered_roots($store).await;
-        println!("  test_edition_filtered_roots: PASSED");
-
-        test_edition_explicit_divergence_new_branch($store).await;
-        println!("  test_edition_explicit_divergence_new_branch: PASSED");
-
-        // main-timeline sentinel polarity tests (C-15)
-        test_main_timeline_sentinel_write_empty_read_both($store).await;
-        println!("  test_main_timeline_sentinel_write_empty_read_both: PASSED");
-
-        test_main_timeline_sentinel_write_angzarr_read_both($store).await;
-        println!("  test_main_timeline_sentinel_write_angzarr_read_both: PASSED");
-
-        test_main_timeline_external_id_sentinel_polarity($store).await;
-        println!("  test_main_timeline_external_id_sentinel_polarity: PASSED");
-
-        test_delete_edition_events_rejects_main_timeline_sentinels($store).await;
-        println!("  test_delete_edition_events_rejects_main_timeline_sentinels: PASSED");
-
-        // idempotency tests
-        test_add_with_external_id_returns_duplicate($store).await;
-        println!("  test_add_with_external_id_returns_duplicate: PASSED");
-
-        test_add_different_external_ids_allowed($store).await;
-        println!("  test_add_different_external_ids_allowed: PASSED");
-
-        // timestamp tests
-        test_get_until_timestamp_filters($store).await;
-        println!("  test_get_until_timestamp_filters: PASSED");
-
-        test_get_until_timestamp_returns_all_when_recent($store).await;
-        println!("  test_get_until_timestamp_returns_all_when_recent: PASSED");
-
-        test_timestamp_preservation($store).await;
-        println!("  test_timestamp_preservation: PASSED");
-
-        // large scale tests
-        test_large_aggregate_10k($store).await;
-        println!("  test_large_aggregate_10k: PASSED");
-
-        // delete_edition_events tests
-        test_delete_edition_events_removes_all($store).await;
-        println!("  test_delete_edition_events_removes_all: PASSED");
-
-        test_delete_edition_events_scoped($store).await;
-        println!("  test_delete_edition_events_scoped: PASSED");
-
-        // find_by_source tests
-        test_find_by_source_returns_match($store).await;
-        println!("  test_find_by_source_returns_match: PASSED");
-
-        test_find_by_source_no_match($store).await;
-        println!("  test_find_by_source_no_match: PASSED");
-
-        // C-18: round-trip tests for external_id + source_info. These pin the
-        // claim-survives-add() contract that several backends silently violated.
-        test_find_by_source_round_trip($store).await;
-        println!("  test_find_by_source_round_trip: PASSED");
-
-        test_find_by_external_id_round_trip($store).await;
-        println!("  test_find_by_external_id_round_trip: PASSED");
-
-        test_find_by_external_id_no_match($store).await;
-        println!("  test_find_by_external_id_no_match: PASSED");
-
-        test_find_by_external_id_empty_returns_none($store).await;
-        println!("  test_find_by_external_id_empty_returns_none: PASSED");
-
-        // cascade tests
-        test_query_stale_cascades_finds_old_uncommitted($store).await;
-        println!("  test_query_stale_cascades_finds_old_uncommitted: PASSED");
-
-        test_query_stale_cascades_ignores_resolved($store).await;
-        println!("  test_query_stale_cascades_ignores_resolved: PASSED");
-
-        test_query_stale_cascades_ignores_fresh($store).await;
-        println!("  test_query_stale_cascades_ignores_fresh: PASSED");
-
-        test_query_cascade_participants_finds_uncommitted($store).await;
-        println!("  test_query_cascade_participants_finds_uncommitted: PASSED");
-
-        test_query_cascade_participants_ignores_committed($store).await;
-        println!("  test_query_cascade_participants_ignores_committed: PASSED");
-
-        test_query_cascade_participants_multiple_aggregates($store).await;
-        println!("  test_query_cascade_participants_multiple_aggregates: PASSED");
+macro_rules! __gen_event_store_tests {
+    ($fixture:path, $($name:ident),+ $(,)?) => {
+        $(
+            #[tokio::test]
+            async fn $name() {
+                let store = $fixture().await;
+                $crate::storage::event_store_tests::$name(&store).await;
+            }
+        )+
+    };
+}
+
+/// Generate the CORE EventStore contract tests — everything except the
+/// `delete_edition_events` group, which is split into
+/// `generate_event_store_delete_tests!` because ImmuDB is append-only and
+/// asserts NotImplemented in its own suite instead. Fully-featured backends
+/// should invoke `generate_event_store_tests!`, which composes both groups.
+#[macro_export]
+macro_rules! generate_event_store_core_tests {
+    ($fixture:path) => {
+        $crate::__gen_event_store_tests!(
+            $fixture,
+            // add tests
+            test_add_single_event,
+            test_add_multiple_events,
+            test_add_empty_events,
+            test_add_sequential_batches,
+            test_add_sequence_conflict,
+            test_add_duplicate_sequence,
+            test_add_rejects_duplicate_sequences,
+            test_add_rejects_sequence_gaps,
+            // get tests
+            test_get_all_events,
+            test_get_empty_aggregate,
+            test_get_preserves_event_data,
+            // get_from tests
+            test_get_from_zero,
+            test_get_from_middle,
+            test_get_from_end,
+            test_get_from_last,
+            // get_from_to tests
+            test_get_from_to_full_range,
+            test_get_from_to_partial,
+            test_get_from_to_single,
+            test_get_from_to_empty,
+            test_get_from_to_zero_to,
+            // list_roots tests
+            test_list_roots_single,
+            test_list_roots_multiple,
+            test_list_roots_empty_domain,
+            test_list_roots_domain_isolation,
+            // list_domains tests
+            test_list_domains_contains,
+            test_list_domains_multiple,
+            // get_next_sequence tests
+            test_get_next_sequence_empty,
+            test_get_next_sequence_after_events,
+            test_get_next_sequence_increments,
+            // integration tests
+            test_aggregate_isolation,
+            test_large_batch,
+            // correlation_id tests
+            test_correlation_id_query,
+            test_correlation_id_empty_query,
+            test_correlation_id_query_main_timeline_null_edition,
+            test_correlation_id_preserved,
+            test_cover_ext_round_trips,
+            // edition tests
+            test_edition_isolation,
+            test_edition_sequences_independent,
+            test_edition_divergence_read,
+            test_edition_divergence_from_middle,
+            test_edition_divergence_get_from,
+            test_edition_get_from_to_includes_main_prefix,
+            test_edition_get_until_timestamp_includes_main_prefix,
+            test_eventless_edition_inherits_main_timeline,
+            test_edition_filtered_roots,
+            test_edition_explicit_divergence_new_branch,
+            test_edition_first_write_branches_below_main_head,
+            test_edition_first_write_past_main_head_rejected,
+            // main-timeline sentinel polarity tests (C-15)
+            test_main_timeline_sentinel_write_empty_read_both,
+            test_main_timeline_sentinel_write_angzarr_read_both,
+            test_main_timeline_external_id_sentinel_polarity,
+            // idempotency tests
+            test_add_with_external_id_returns_duplicate,
+            test_add_different_external_ids_allowed,
+            // timestamp tests
+            test_get_until_timestamp_filters,
+            test_get_until_timestamp_returns_all_when_recent,
+            test_get_until_timestamp_nanosecond_boundary_precision,
+            test_timestamp_preservation,
+            // large scale tests
+            test_large_aggregate_10k,
+            test_history_larger_than_one_result_page,
+            // find_by_source / find_by_external_id tests (C-18 round trips)
+            test_find_by_source_returns_match,
+            test_find_by_source_no_match,
+            test_find_by_source_round_trip,
+            test_find_by_source_round_trip_main_timeline_source,
+            test_find_by_source_distinguishes_invocation_commands,
+            test_find_by_source_distinguishes_provenance_kind,
+            test_find_by_external_id_round_trip,
+            test_find_by_external_id_no_match,
+            test_find_by_external_id_empty_returns_none,
+        );
+    };
+}
+
+/// `delete_edition_events` group — only for backends with hard-delete
+/// support. ImmuDB is append-only: its suite asserts NotImplemented via
+/// `test_immudb_delete_not_supported` instead of generating these.
+#[macro_export]
+macro_rules! generate_event_store_delete_tests {
+    ($fixture:path) => {
+        $crate::__gen_event_store_tests!(
+            $fixture,
+            test_delete_edition_events_rejects_main_timeline_sentinels,
+            test_delete_edition_events_removes_all,
+            test_delete_edition_events_scoped,
+        );
+    };
+}
+
+/// Generate ALL EventStore contract tests (core + delete) — the
+/// full contract for fully-featured backends (SQLite, Postgres).
+#[macro_export]
+macro_rules! generate_event_store_tests {
+    ($fixture:path) => {
+        $crate::generate_event_store_core_tests!($fixture);
+        $crate::generate_event_store_delete_tests!($fixture);
     };
 }
 
@@ -2738,4 +3805,24 @@ macro_rules! run_event_store_concurrent_tests {
         test_add_concurrent_writes_unique_sequences($arc_store).await;
         println!("  test_add_concurrent_writes_unique_sequences: PASSED");
     };
+}
+
+/// T12: every contract fn in this module must be wired somewhere — see
+/// `crate::storage::assert_contract_inventory`.
+#[test]
+fn event_store_contract_inventory_is_fully_wired() {
+    crate::storage::assert_contract_inventory(
+        include_str!("event_store_tests.rs"),
+        "// Test generator macros (T11)",
+        &[
+            include_str!("../storage_sqlite.rs"),
+            include_str!("../storage_postgres.rs"),
+            include_str!("../storage_immudb.rs"),
+            include_str!("../storage_redis.rs"),
+            include_str!("../storage_mock.rs"),
+            include_str!("../storage_dynamo.rs"),
+            include_str!("../storage_bigtable.rs"),
+        ],
+        &[],
+    );
 }

@@ -41,7 +41,7 @@ fn test_extract_type_name_googleapis() {
 fn test_extract_type_name_angzarr() {
     use crate::proto_ext::type_url;
     let result = extract_type_name(type_url::SAGA_COMPENSATION_FAILED).unwrap();
-    assert_eq!(result, "angzarr.SagaCompensationFailed");
+    assert_eq!(result, "io.angzarr.v1.SagaCompensationFailed");
 }
 
 /// Edge case: bare type name without prefix still works.
@@ -224,10 +224,7 @@ fn decode_to_json_unknown_type_returns_empty() {
 #[test]
 fn decode_to_json_garbage_bytes_returns_empty() {
     let _ = ensure_initialized();
-    let result = decode_to_json(
-        "angzarr_client.proto.angzarr.v1.AngzarrDeadLetter",
-        &[0xff, 0xff, 0xff, 0xff],
-    );
+    let result = decode_to_json("io.angzarr.v1.AngzarrDeadLetter", &[0xff, 0xff, 0xff, 0xff]);
     assert_eq!(result, "");
 }
 
@@ -243,6 +240,7 @@ fn decode_to_json_roundtrip_angzarr_dead_letter() {
             root: None,
             correlation_id: "trace-xyz".to_string(),
             edition: None,
+            ext: None,
         }),
         rejection_reason: "test failure".to_string(),
         source_component: "agg-player".to_string(),
@@ -250,7 +248,7 @@ fn decode_to_json_roundtrip_angzarr_dead_letter() {
         ..Default::default()
     };
     let bytes = dl.encode_to_vec();
-    let json = decode_to_json("angzarr_client.proto.angzarr.v1.AngzarrDeadLetter", &bytes);
+    let json = decode_to_json("io.angzarr.v1.AngzarrDeadLetter", &bytes);
 
     assert!(!json.is_empty(), "json must be non-empty on happy path");
     // Field-name spot checks against the proto3 JSON encoding.
@@ -306,9 +304,10 @@ fn decode_any_to_json_roundtrip_known_type() {
         root: None,
         correlation_id: "trace-cover".to_string(),
         edition: None,
+        ext: None,
     };
     let any = Any {
-        type_url: "type.googleapis.com/angzarr_client.proto.angzarr.v1.Cover".to_string(),
+        type_url: "type.googleapis.com/io.angzarr.v1.Cover".to_string(),
         value: cover.encode_to_vec(),
     };
     let json = decode_any_to_json(&any);
@@ -339,7 +338,7 @@ fn decode_any_to_json_garbage_bytes_returns_empty() {
     use prost_types::Any;
     let _ = ensure_initialized();
     let any = Any {
-        type_url: "type.googleapis.com/angzarr_client.proto.angzarr.v1.Cover".to_string(),
+        type_url: "type.googleapis.com/io.angzarr.v1.Cover".to_string(),
         value: vec![0xff; 16],
     };
     assert_eq!(decode_any_to_json(&any), "");
@@ -359,11 +358,12 @@ fn decode_any_to_json_matches_decode_to_json() {
         root: None,
         correlation_id: "trace-sym".to_string(),
         edition: None,
+        ext: None,
     };
     let bytes = cover.encode_to_vec();
-    let from_bytes = decode_to_json("angzarr_client.proto.angzarr.v1.Cover", &bytes);
+    let from_bytes = decode_to_json("io.angzarr.v1.Cover", &bytes);
     let from_any = decode_any_to_json(&Any {
-        type_url: "type.googleapis.com/angzarr_client.proto.angzarr.v1.Cover".to_string(),
+        type_url: "type.googleapis.com/io.angzarr.v1.Cover".to_string(),
         value: bytes,
     });
     assert!(!from_bytes.is_empty());
@@ -377,7 +377,7 @@ fn decode_any_to_json_matches_decode_to_json() {
 // `EMBEDDED_DESCRIPTOR` (full set) is used by the in-process pool for
 // payload rendering — DLQ admin, event-store browsing, and the
 // upcoming GraphQL gateway all need to decode framework-internal
-// messages (Confirmation, Revocation, NoOp, AngzarrDeferredSequence,
+// messages (Notification, Compensate, AngzarrDeferredSequence,
 // PMState, etc.) on the wire.
 //
 // `EMBEDDED_DESCRIPTOR_PUBLIC` (new) is what gRPC reflection clients
@@ -385,7 +385,7 @@ fn decode_any_to_json_matches_decode_to_json() {
 // services on the binary surface (DlqAdminService and its transitive
 // imports). Framework "command-handler", "saga", "projector", "PM",
 // "query", "stream", "upcaster", "meta", "cloudevents", and the
-// internal `types.proto` (which defines Revocation/Confirmation/NoOp/
+// internal `types.proto` (which defines Notification/Compensate/
 // AngzarrDeferredSequence/PMState/...) are absent.
 //
 // Why split it: reflection clients enumerate every type they can see,
@@ -407,7 +407,9 @@ fn public_files() -> Vec<String> {
 fn h33_public_descriptor_includes_dlq_admin() {
     let files = public_files();
     assert!(
-        files.iter().any(|f| f == "angzarr/status/dlq_admin.proto"),
+        files
+            .iter()
+            .any(|f| f == "io/angzarr/status/v1/dlq_admin.proto"),
         "Public descriptor must include dlq_admin.proto. Got: {:?}",
         files
     );
@@ -415,7 +417,7 @@ fn h33_public_descriptor_includes_dlq_admin() {
 
 /// The public descriptor set MUST NOT contain framework protos whose
 /// messages are internal (command/event-bus headers, deferred-sequence
-/// markers, two-phase confirmation/revocation, etc.).
+/// markers, compensation notifications, etc.).
 #[test]
 fn h33_public_descriptor_excludes_framework_internals() {
     let files = public_files();
@@ -423,14 +425,14 @@ fn h33_public_descriptor_excludes_framework_internals() {
     // These proto files declare internal types or services that we
     // don't advertise via reflection.
     const INTERNAL_PROTOS: &[&str] = &[
-        "angzarr_client/proto/angzarr/types.proto",
-        "angzarr_client/proto/angzarr/command_handler.proto",
-        "angzarr_client/proto/angzarr/process_manager.proto",
-        "angzarr_client/proto/angzarr/saga.proto",
-        "angzarr_client/proto/angzarr/projector.proto",
-        "angzarr_client/proto/angzarr/query.proto",
-        "angzarr_client/proto/angzarr/stream.proto",
-        "angzarr_client/proto/angzarr/upcaster.proto",
+        "io/angzarr/v1/types.proto",
+        "io/angzarr/v1/command_handler.proto",
+        "io/angzarr/v1/process_manager.proto",
+        "io/angzarr/v1/saga.proto",
+        "io/angzarr/v1/projector.proto",
+        "io/angzarr/v1/query.proto",
+        "io/angzarr/v1/stream.proto",
+        "io/angzarr/v1/upcaster.proto",
     ];
 
     for internal in INTERNAL_PROTOS {
@@ -454,9 +456,7 @@ fn h33_full_descriptor_still_contains_internals() {
         .expect("EMBEDDED_DESCRIPTOR must remain a valid FileDescriptorSet");
     let files: Vec<String> = set.file.iter().map(|f| f.name().to_string()).collect();
     assert!(
-        files
-            .iter()
-            .any(|f| f == "angzarr_client/proto/angzarr/v1/types.proto"),
+        files.iter().any(|f| f == "io/angzarr/v1/types.proto"),
         "Full descriptor pool source must retain types.proto for in-process \
          payload decoding. Got: {:?}",
         files
@@ -472,3 +472,48 @@ fn h33_full_descriptor_still_contains_internals() {
 // 2. Test proto messages with known field structures
 //
 // These will be added as integration tests in tests/standalone_integration/state_diff.rs
+
+// ============================================================================
+// build_pool_with_extras — R2-WIRE-STATUS-DESCRIPTORS
+// ============================================================================
+//
+// `build_pool_with_extras` returns a `DescriptorPool` containing the
+// framework's embedded descriptors plus any operator-mounted
+// `.protoset` files. Tests verify the merge succeeds, that the
+// framework types remain reachable, and that the helper is tolerant
+// of malformed extras (per the scaffold's resilience contract).
+
+use super::{build_pool_with_extras, EMBEDDED_DESCRIPTOR};
+
+/// Framework types are present after a no-extras build — sanity check.
+#[test]
+fn build_pool_with_extras_empty_extras_contains_framework_types() {
+    let pool =
+        build_pool_with_extras(EMBEDDED_DESCRIPTOR, &[]).expect("framework descriptors must build");
+    // Snapshot is a known framework message — its presence proves the
+    // embedded set loaded successfully.
+    assert!(
+        pool.get_message_by_name("io.angzarr.v1.Snapshot").is_some(),
+        "framework Snapshot type must be in the pool"
+    );
+}
+
+/// Malformed extras are skipped (logged), not fatal — tolerance contract.
+#[test]
+fn build_pool_with_extras_skips_malformed_bytes() {
+    let extras = vec![vec![0xff, 0xff, 0xff]]; // not a valid FileDescriptorSet
+    let pool = build_pool_with_extras(EMBEDDED_DESCRIPTOR, &extras)
+        .expect("malformed extras must not abort the build");
+    // Framework types still reachable.
+    assert!(pool.get_message_by_name("io.angzarr.v1.Snapshot").is_some());
+}
+
+/// Duplicate extras (same bytes as embedded) are silently de-duped
+/// by prost-reflect — no error, framework types unchanged.
+#[test]
+fn build_pool_with_extras_handles_duplicate_extras() {
+    let extras = vec![EMBEDDED_DESCRIPTOR.to_vec()];
+    let pool = build_pool_with_extras(EMBEDDED_DESCRIPTOR, &extras)
+        .expect("duplicate extras must not error");
+    assert!(pool.get_message_by_name("io.angzarr.v1.Snapshot").is_some());
+}

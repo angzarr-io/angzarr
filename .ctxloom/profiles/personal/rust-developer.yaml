@@ -1,0 +1,21 @@
+version: "1.0.0"
+description: "Rust development profile with personal practices and tooling"
+tags:
+  - rust
+  - development
+  - systems
+
+parents:
+  - https://github.com/ctxloom/ctxloom-default@v1/profiles/rust-developer
+
+bundles:
+  # Personal practices
+  - personal/core-practices
+  - personal/developer-mindset
+
+  # Rust patterns
+  - personal/rust-test-support-pattern
+
+  # Personal tooling preferences
+  - personal/just
+  - personal/containers

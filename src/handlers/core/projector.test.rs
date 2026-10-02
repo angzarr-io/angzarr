@@ -26,6 +26,7 @@ fn make_cover(domain: &str) -> Cover {
         root: None,
         correlation_id: String::new(),
         edition: None,
+        ext: None,
     }
 }
 
@@ -451,6 +452,7 @@ fn make_event_book(domain: &str) -> EventBook {
             root: None,
             correlation_id: "test-corr".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,
@@ -723,6 +725,206 @@ async fn publishing_condition_requires_negation_on_is_empty() {
         publisher2.publish_calls(),
         0,
         "Should NOT publish when projector name is empty"
+    );
+}
+
+// ============================================================================
+// DLQ Wiring Tests (R2-15 step 6)
+// ============================================================================
+//
+// The projector has one DLQ-relevant failure site: when
+// `ProjectorHandler::handle` returns Err(Status). The contract per
+// R2-15 step 6:
+//
+// - 4xx-class (`DlqTrigger::Immediate`): publish a DLQ entry and ack
+//   the message (return Ok) — re-delivering would just re-fail.
+// - 5xx-class (`DlqTrigger::RetryThenDlq`): no DLQ; propagate Err so
+//   the bus's own retry / dead-letter mechanism handles it.
+// - No `dlq_publisher` configured: preserve pre-R2-15 behavior of
+//   propagating Err on every failure.
+
+use crate::dlq::{
+    AngzarrDeadLetter, DeadLetterPayload, DeadLetterPublisher, DlqError, RejectionDetails,
+};
+use tonic::Status;
+
+/// Projector handler that always returns a given Status error.
+struct FailingProjectorHandler {
+    code: tonic::Code,
+    message: String,
+}
+
+#[async_trait::async_trait]
+impl ProjectorHandler for FailingProjectorHandler {
+    async fn handle(
+        &self,
+        _events: &EventBook,
+        _mode: ProjectionMode,
+    ) -> Result<Projection, Status> {
+        Err(Status::new(self.code, self.message.clone()))
+    }
+}
+
+/// Captures published dead letters for assertions.
+struct CapturingDlqPublisher {
+    captured: TokioMutex<Vec<AngzarrDeadLetter>>,
+}
+
+impl CapturingDlqPublisher {
+    fn new() -> Self {
+        Self {
+            captured: TokioMutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl DeadLetterPublisher for CapturingDlqPublisher {
+    async fn publish(&self, dead_letter: AngzarrDeadLetter) -> Result<(), DlqError> {
+        self.captured.lock().await.push(dead_letter);
+        Ok(())
+    }
+}
+
+/// 4xx-class projector failure publishes a DLQ entry and acks (returns Ok).
+#[tokio::test]
+async fn projector_4xx_status_publishes_dead_letter_and_acks() {
+    let failing = Arc::new(FailingProjectorHandler {
+        code: tonic::Code::InvalidArgument,
+        message: "schema mismatch".to_string(),
+    });
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let handler = ProjectorEventHandler::from_handler(failing, "test-projector".to_string())
+        .with_dlq_publisher(publisher.clone());
+
+    let book = Arc::new(make_event_book("orders"));
+    let result = handler.handle(book).await;
+
+    assert!(
+        result.is_ok(),
+        "permanent failure with DLQ wired should ack (return Ok), got: {result:?}"
+    );
+    let captured = publisher.captured.lock().await;
+    assert_eq!(captured.len(), 1, "expected one DLQ entry");
+    let dl = &captured[0];
+    assert_eq!(dl.source_component_type, "projector");
+    assert_eq!(dl.source_component, "test-projector");
+    // Projector DLQ payload is the source EventBook (so operators can
+    // replay the events through a fixed handler).
+    assert!(matches!(dl.payload, DeadLetterPayload::Events(_)));
+    match &dl.rejection_details {
+        Some(RejectionDetails::EventProcessingFailed(details)) => {
+            assert_eq!(details.retry_count, 0);
+            assert!(!details.is_transient);
+            assert!(details.error.contains("schema mismatch"));
+        }
+        other => panic!("expected EventProcessingFailed, got {other:?}"),
+    }
+}
+
+/// 5xx-class projector failure propagates Err (no DLQ) so the bus's
+/// own retry/redelivery mechanism takes over.
+#[tokio::test]
+async fn projector_5xx_status_propagates_err_without_dlq() {
+    let failing = Arc::new(FailingProjectorHandler {
+        code: tonic::Code::Unavailable,
+        message: "broker down".to_string(),
+    });
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let handler = ProjectorEventHandler::from_handler(failing, "test-projector".to_string())
+        .with_dlq_publisher(publisher.clone());
+
+    let book = Arc::new(make_event_book("orders"));
+    let result = handler.handle(book).await;
+
+    assert!(
+        result.is_err(),
+        "transient failure should propagate Err so bus retries; got Ok"
+    );
+    let captured = publisher.captured.lock().await;
+    assert!(
+        captured.is_empty(),
+        "transient failures must not publish to our DLQ (bus handles them), got {} entries",
+        captured.len()
+    );
+}
+
+/// Without a `dlq_publisher` wired, ALL failures (4xx and 5xx) propagate
+/// DLQ publisher that always fails — drives the D2 double-fault test.
+struct FailingDlqPublisher;
+
+#[async_trait::async_trait]
+impl DeadLetterPublisher for FailingDlqPublisher {
+    async fn publish(&self, _dead_letter: AngzarrDeadLetter) -> Result<(), DlqError> {
+        Err(DlqError::PublishFailed("all DLQ targets down".to_string()))
+    }
+}
+
+/// D2 regression: when the DLQ write ITSELF fails on the immediate path,
+/// the handler must NOT ack — acking loses both the event and its dead
+/// letter (double fault → total, silent loss). Propagating Err lets the
+/// bus redeliver so a later attempt can capture the failure.
+///
+/// Baseline (pre-D2) logged the DLQ error and returned Ok unconditionally.
+#[tokio::test]
+async fn projector_4xx_with_failing_dlq_publisher_propagates_err() {
+    let failing = Arc::new(FailingProjectorHandler {
+        code: tonic::Code::InvalidArgument,
+        message: "schema mismatch".to_string(),
+    });
+    let handler = ProjectorEventHandler::from_handler(failing, "test-projector".to_string())
+        .with_dlq_publisher(Arc::new(FailingDlqPublisher));
+
+    let book = Arc::new(make_event_book("orders"));
+    let result = handler.handle(book).await;
+
+    assert!(
+        result.is_err(),
+        "a failed DLQ write must NOT be acked — the event would be lost \
+         with no dead letter (D2); got Ok"
+    );
+}
+
+/// Without a `dlq_publisher` wired, ALL failures (4xx and 5xx) propagate
+/// as Err — preserves pre-R2-15 behavior so unwired projectors keep
+/// their current contract instead of silently acking permanent failures.
+#[tokio::test]
+async fn projector_4xx_without_dlq_publisher_propagates_err() {
+    let failing = Arc::new(FailingProjectorHandler {
+        code: tonic::Code::InvalidArgument,
+        message: "schema mismatch".to_string(),
+    });
+    // No .with_dlq_publisher(...) call.
+    let handler = ProjectorEventHandler::from_handler(failing, "test-projector".to_string());
+
+    let book = Arc::new(make_event_book("orders"));
+    let result = handler.handle(book).await;
+
+    assert!(
+        result.is_err(),
+        "without dlq_publisher, permanent failures must propagate Err (preserve pre-R2-15 behavior)"
+    );
+}
+
+/// Successful projector handle does not publish a DLQ entry (no false
+/// positives — the entire R2-15 step 6 wiring is silent on the happy
+/// path).
+#[tokio::test]
+async fn projector_success_does_not_publish_to_dlq() {
+    let mock = Arc::new(MockProjectorHandler::new());
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let handler = ProjectorEventHandler::from_handler(mock, "test-projector".to_string())
+        .with_dlq_publisher(publisher.clone());
+
+    let book = Arc::new(make_event_book("orders"));
+    let result = handler.handle(book).await;
+
+    assert!(result.is_ok());
+    let captured = publisher.captured.lock().await;
+    assert!(
+        captured.is_empty(),
+        "success path must not publish dead letters, got {} entries",
+        captured.len()
     );
 }
 

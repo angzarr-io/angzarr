@@ -35,7 +35,8 @@ locals {
         requests = { cpu = "100m", memory = "128Mi" }
         limits   = { cpu = "1", memory = "512Mi" }
       })
-      env = [for k, v in var.aggregate.env : { name = k, value = v }]
+      env      = [for k, v in var.aggregate.env : { name = k, value = v }]
+      upcaster = { enabled = var.aggregate.upcaster.enabled }
     }
     ] : (var.process_manager.enabled ? [
       {
@@ -121,19 +122,6 @@ resource "helm_release" "domain" {
   set {
     name  = "images.projector.repository"
     value = var.images.coordinator_projector
-  }
-
-  # Upcaster
-  set {
-    name  = "upcaster.enabled"
-    value = var.aggregate.upcaster.enabled
-  }
-  dynamic "set" {
-    for_each = var.aggregate.upcaster.enabled && var.images.upcaster != null ? [1] : []
-    content {
-      name  = "images.upcaster.repository"
-      value = var.images.upcaster
-    }
   }
 
   # Storage configuration

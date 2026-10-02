@@ -45,7 +45,6 @@ fn make_event_book(payload_size: usize) -> EventBook {
                 type_url: "test.Event".to_string(),
                 value: vec![0u8; payload_size],
             })),
-            ..Default::default()
         }],
         snapshot: None,
         next_sequence: 1,
@@ -89,10 +88,10 @@ async fn test_large_payload_gets_offloaded() {
     let (store, _temp) = create_test_store().await;
     let mock_bus = Arc::new(MockEventBus::new());
     let inner: Arc<dyn EventBus> = Arc::clone(&mock_bus) as Arc<dyn EventBus>;
-    let config = OffloadingConfig::new(store).with_threshold(100);
+    let config = OffloadingConfig::new(store).with_threshold(1024);
     let bus = OffloadingEventBus::wrap(inner, config);
 
-    let book = make_event_book(500); // Large payload
+    let book = make_event_book(4096); // Large payload
     bus.publish(Arc::new(book.clone())).await.unwrap();
 
     // Should have been offloaded
@@ -113,11 +112,11 @@ async fn test_resolve_external_payload() {
     let (store, _temp) = create_test_store().await;
     let mock_bus = Arc::new(MockEventBus::new());
     let inner: Arc<dyn EventBus> = Arc::clone(&mock_bus) as Arc<dyn EventBus>;
-    let config = OffloadingConfig::new(Arc::clone(&store)).with_threshold(100);
+    let config = OffloadingConfig::new(Arc::clone(&store)).with_threshold(1024);
     let bus = OffloadingEventBus::wrap(inner, config);
 
     // Create and publish large event
-    let original = make_event_book(500);
+    let original = make_event_book(4096);
     bus.publish(Arc::new(original.clone())).await.unwrap();
 
     // Get the offloaded version
@@ -228,7 +227,6 @@ async fn test_resolving_handler_resolves_external_payloads() {
             }),
             created_at: None,
             payload: Some(event_page::Payload::External(reference)),
-            ..Default::default()
         }],
         snapshot: None,
         next_sequence: 1,
@@ -488,11 +486,11 @@ async fn test_publish_propagates_store_put_failure_as_error() {
     let failing_store = Arc::new(FailingPayloadStore::fail_put_only());
     let mock_bus = Arc::new(MockEventBus::new());
     let inner: Arc<dyn EventBus> = Arc::clone(&mock_bus) as Arc<dyn EventBus>;
-    let config = OffloadingConfig::new(failing_store).with_threshold(100);
+    let config = OffloadingConfig::new(failing_store).with_threshold(1024);
     let bus = OffloadingEventBus::wrap(inner, config);
 
-    // Large enough to engage offloading (page > threshold/2).
-    let book = make_event_book(500);
+    // Over the threshold, so offloading engages.
+    let book = make_event_book(4096);
     let result = bus.publish(Arc::new(book)).await;
 
     // Must be an explicit error, not Ok with silent inline fallback.
@@ -547,7 +545,6 @@ async fn test_resolving_handler_propagates_store_get_failure_as_error() {
             }),
             created_at: None,
             payload: Some(event_page::Payload::External(reference)),
-            ..Default::default()
         }],
         snapshot: None,
         next_sequence: 1,
@@ -577,4 +574,132 @@ async fn test_resolving_handler_propagates_store_get_failure_as_error() {
          payloads cannot be resolved (saw {} books)",
         captured.len()
     );
+}
+
+// ============================================================================
+// Greedy offload: largest payloads first, until the book fits
+// ============================================================================
+
+fn event_page(seq: u32, payload_size: usize) -> EventPage {
+    EventPage {
+        header: Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(seq)),
+        }),
+        payload: Some(event_page::Payload::Event(prost_types::Any {
+            type_url: "test.Event".to_string(),
+            value: vec![1u8; payload_size],
+        })),
+        ..Default::default()
+    }
+}
+
+fn is_external(page: &EventPage) -> bool {
+    matches!(page.payload, Some(event_page::Payload::External(_)))
+}
+
+/// Only as many payloads as needed are offloaded, largest first: small
+/// pages stay inline and the published book fits the threshold.
+#[tokio::test]
+async fn test_offloads_largest_pages_until_book_fits() {
+    let (store, _temp) = create_test_store().await;
+    let mock_bus = Arc::new(MockEventBus::new());
+    let inner: Arc<dyn EventBus> = Arc::clone(&mock_bus) as Arc<dyn EventBus>;
+    let bus = OffloadingEventBus::wrap(inner, OffloadingConfig::new(store).with_threshold(2048));
+
+    let book = EventBook {
+        pages: vec![event_page(0, 300), event_page(1, 3000), event_page(2, 300)],
+        ..Default::default()
+    };
+    bus.publish(Arc::new(book)).await.unwrap();
+
+    let published = mock_bus.take_published().await;
+    let pages = &published[0].pages;
+    assert!(!is_external(&pages[0]), "small page stays inline");
+    assert!(is_external(&pages[1]), "largest page is offloaded");
+    assert!(!is_external(&pages[2]), "small page stays inline");
+    assert!(published[0].encoded_len() <= 2048);
+}
+
+/// Many medium pages, none over half the threshold, still get offloaded
+/// when together they exceed it (the old per-page heuristic skipped them).
+#[tokio::test]
+async fn test_offloads_many_medium_pages() {
+    let (store, _temp) = create_test_store().await;
+    let mock_bus = Arc::new(MockEventBus::new());
+    let inner: Arc<dyn EventBus> = Arc::clone(&mock_bus) as Arc<dyn EventBus>;
+    let bus = OffloadingEventBus::wrap(inner, OffloadingConfig::new(store).with_threshold(4096));
+
+    let book = EventBook {
+        pages: (0..8).map(|i| event_page(i, 1500)).collect(),
+        ..Default::default()
+    };
+    bus.publish(Arc::new(book)).await.unwrap();
+
+    let published = mock_bus.take_published().await;
+    assert!(published[0].encoded_len() <= 4096);
+    assert!(published[0].pages.iter().any(is_external));
+}
+
+/// A book still over the limit after every event payload is offloaded
+/// (here: an oversized snapshot) is rejected, not handed to the transport.
+#[tokio::test]
+async fn test_rejects_book_that_cannot_fit() {
+    let (store, _temp) = create_test_store().await;
+    let mock_bus = Arc::new(MockEventBus::new());
+    let inner: Arc<dyn EventBus> = Arc::clone(&mock_bus) as Arc<dyn EventBus>;
+    let bus = OffloadingEventBus::wrap(inner, OffloadingConfig::new(store).with_threshold(2048));
+
+    let book = EventBook {
+        pages: vec![event_page(0, 3000)],
+        snapshot: Some(crate::proto::Snapshot {
+            state: Some(prost_types::Any {
+                type_url: "test.State".into(),
+                value: vec![2u8; 4096],
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let result = bus.publish(Arc::new(book)).await;
+
+    assert!(
+        matches!(result, Err(BusError::Publish(ref m)) if m.contains("snapshot")),
+        "{result:?}"
+    );
+    assert!(mock_bus.take_published().await.is_empty());
+}
+
+/// A bus-derived threshold keeps room for the transport envelope: a book
+/// just under the raw limit is still offloaded.
+#[tokio::test]
+async fn test_bus_derived_threshold_reserves_envelope_room() {
+    let (store, _temp) = create_test_store().await;
+    let limit = 64 * 1024;
+    let mock_bus = Arc::new(MockEventBus::with_max_message_size(limit));
+    let inner: Arc<dyn EventBus> = Arc::clone(&mock_bus) as Arc<dyn EventBus>;
+    let bus = OffloadingEventBus::wrap(inner, OffloadingConfig::new(store));
+
+    // 4 KiB under the raw limit: within the 8 KiB envelope reserve.
+    let book = make_event_book(limit - 4 * 1024);
+    assert!(book.encoded_len() < limit);
+    bus.publish(Arc::new(book)).await.unwrap();
+
+    let published = mock_bus.take_published().await;
+    assert!(is_external(&published[0].pages[0]));
+}
+
+/// The factory's store comes back as `Arc<dyn PayloadStore>`; the wrapper
+/// must accept it (round trip through publish and resolve).
+#[tokio::test]
+async fn test_wraps_trait_object_store() {
+    let (store, _temp) = create_test_store().await;
+    let dyn_store: Arc<dyn PayloadStore> = store;
+    let mock_bus = Arc::new(MockEventBus::new());
+    let inner: Arc<dyn EventBus> = Arc::clone(&mock_bus) as Arc<dyn EventBus>;
+    let bus = crate::bus::wrap_with_offloading(inner, Some(dyn_store), Some(1024));
+
+    bus.publish(Arc::new(make_event_book(4096))).await.unwrap();
+    let published = mock_bus.take_published().await;
+    assert!(is_external(&published[0].pages[0]));
 }

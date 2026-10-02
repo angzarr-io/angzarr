@@ -21,8 +21,12 @@ use testcontainers::{
 
 /// Start PostgreSQL container.
 ///
-/// Returns (container, pool) where pool is ready to use.
-async fn start_postgres() -> (testcontainers::ContainerAsync<GenericImage>, sqlx::PgPool) {
+/// Returns (container, pool, url) where pool is ready to use.
+async fn start_postgres() -> (
+    testcontainers::ContainerAsync<GenericImage>,
+    sqlx::PgPool,
+    String,
+) {
     let image = GenericImage::new("postgres", "16")
         .with_exposed_port(5432.tcp())
         .with_wait_for(WaitFor::message_on_stdout(
@@ -46,7 +50,18 @@ async fn start_postgres() -> (testcontainers::ContainerAsync<GenericImage>, sqlx
         .await
         .expect("Failed to get port");
 
-    let host = container.get_host().await.expect("Failed to get host");
+    // TESTCONTAINERS_HOST is set by `just _container-dind` (--network=host ⇒
+    // published ports are on loopback). Without it, testcontainers detects
+    // /.dockerenv and returns the bridge gateway — which has no port
+    // forwards under ROOTLESS docker, hanging until PoolTimedOut.
+    let host = match std::env::var("TESTCONTAINERS_HOST") {
+        Ok(h) => h,
+        Err(_) => container
+            .get_host()
+            .await
+            .expect("Failed to get host")
+            .to_string(),
+    };
 
     let connection_string = format!("postgres://testuser:testpass@{}:{}/testdb", host, host_port);
 
@@ -64,25 +79,75 @@ async fn start_postgres() -> (testcontainers::ContainerAsync<GenericImage>, sqlx
 
     println!("PostgreSQL available at: {}", connection_string);
 
-    (container, pool)
+    (container, pool, connection_string)
+}
+
+/// Shared container for the per-contract-fn tests (T11).
+///
+/// One container serves every test in this binary. The static holds the
+/// container handle (kept alive until process exit; ryuk reaps it) plus
+/// the connection STRING rather than a pool: a pool created inside one
+/// `#[tokio::test]` runtime holds connections registered with that
+/// runtime's reactor, which die when the test's runtime shuts down —
+/// each test builds its own small pool instead.
+static POSTGRES: tokio::sync::OnceCell<(testcontainers::ContainerAsync<GenericImage>, String)> =
+    tokio::sync::OnceCell::const_new();
+
+async fn shared_pg_url() -> String {
+    let (_container, url) = POSTGRES
+        .get_or_init(|| async {
+            let (container, pool, url) = start_postgres().await;
+            // Migrations already ran in start_postgres; that pool was
+            // created on the initializing test's runtime — close it so no
+            // cross-runtime connections linger.
+            pool.close().await;
+            (container, url)
+        })
+        .await;
+    url.clone()
+}
+
+/// Fresh per-test pool against the shared container.
+async fn shared_pool() -> sqlx::PgPool {
+    PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&shared_pg_url().await)
+        .await
+        .expect("Failed to connect to shared PostgreSQL")
 }
 
 // =============================================================================
 // EventStore Tests
 // =============================================================================
 
+/// T11: one generated `#[tokio::test]` per EventStore contract fn — a
+/// failing contract surfaces individually instead of fail-fasting the
+/// rest of the suite. All tests share one container via `shared_pool`.
+mod event_store_contract {
+    use angzarr::storage::PostgresEventStore;
+
+    async fn fixture() -> PostgresEventStore {
+        PostgresEventStore::new(super::shared_pool().await)
+    }
+
+    crate::generate_event_store_tests!(fixture);
+}
+
+// =============================================================================
+// EventStore Concurrent-Write Tests (C-19)
+// =============================================================================
+
+/// T6: the concurrent-write contract previously ran ONLY against SQLite,
+/// leaving Postgres's transactional fencing under concurrent add() — the
+/// production write path — unverified.
 #[tokio::test]
-async fn test_postgres_event_store() {
-    println!("=== PostgreSQL EventStore Tests ===");
-    println!("Starting PostgreSQL container...");
+async fn test_postgres_event_store_concurrent() {
+    println!("=== PostgreSQL EventStore Concurrent-Write Tests ===");
+    let store = std::sync::Arc::new(PostgresEventStore::new(shared_pool().await));
 
-    let (_container, pool) = start_postgres().await;
-    let store = PostgresEventStore::new(pool);
+    run_event_store_concurrent_tests!(store);
 
-    println!("Running EventStore tests...");
-    run_event_store_tests!(&store);
-
-    println!("=== All PostgreSQL EventStore tests PASSED ===");
+    println!("=== PostgreSQL EventStore Concurrent-Write Tests PASSED ===");
 }
 
 // =============================================================================
@@ -92,10 +157,7 @@ async fn test_postgres_event_store() {
 #[tokio::test]
 async fn test_postgres_snapshot_store() {
     println!("=== PostgreSQL SnapshotStore Tests ===");
-    println!("Starting PostgreSQL container...");
-
-    let (_container, pool) = start_postgres().await;
-    let store = PostgresSnapshotStore::new(pool);
+    let store = PostgresSnapshotStore::new(shared_pool().await);
 
     println!("Running SnapshotStore tests...");
     run_snapshot_store_tests!(&store);
@@ -110,10 +172,7 @@ async fn test_postgres_snapshot_store() {
 #[tokio::test]
 async fn test_postgres_position_store() {
     println!("=== PostgreSQL PositionStore Tests ===");
-    println!("Starting PostgreSQL container...");
-
-    let (_container, pool) = start_postgres().await;
-    let store = PostgresPositionStore::new(pool);
+    let store = PostgresPositionStore::new(shared_pool().await);
 
     println!("Running PositionStore tests...");
     run_position_store_tests!(&store);

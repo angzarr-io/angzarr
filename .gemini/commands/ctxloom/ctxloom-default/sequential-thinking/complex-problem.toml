@@ -1,0 +1,1 @@
+prompt = "Analyze problem via sequential thinking:\n\n{{problem}}\n\nSteps:\n1. ID core issue\n2. List factors\n3. Map dependencies\n4. Propose solutions w/ trade-offs\n5. Recommend best approach + rationale"

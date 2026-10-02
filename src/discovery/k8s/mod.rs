@@ -10,7 +10,7 @@
 //! # Aggregate coordinator
 //! labels:
 //!   app.kubernetes.io/component: aggregate
-//!   angzarr.io/domain: cart
+//!   angzarr.io/domain: cart        # the aggregate's domain (its event stream)
 //!
 //! # Projector coordinator
 //! labels:
@@ -25,11 +25,18 @@
 //! # Process manager coordinator (multiple source domains)
 //! labels:
 //!   app.kubernetes.io/component: process-manager
+//!   angzarr.io/pm: checkout        # the PM's domain (its own event stream), not its name
+//! annotations:
 //!   angzarr.io/subscriptions: order,inventory,fulfillment
 //! ```
 //!
+//! `angzarr.io/domain` and `angzarr.io/pm` both name the stream a component
+//! owns (`ComponentOptions.domain`): the aggregate's domain and the process
+//! manager's domain respectively.
+//!
 //! Saga services that are missing the source-domain label are skipped with
-//! a warning — same for PM services missing subscriptions. The aggregate
+//! a warning — same for PM services missing their domain label or
+//! subscriptions annotation. The aggregate
 //! sidecar's `call_sync_sagas`/`call_sync_pms` paths can only route by
 //! source domain, so an unlabeled component can't be reached synchronously
 //! and would silently degrade CASCADE mode if registered without the data.
@@ -61,15 +68,19 @@ use super::{DiscoveredService, DiscoveryError};
 /// Label for component type.
 const COMPONENT_LABEL: &str = "app.kubernetes.io/component";
 
-/// Label for domain (aggregate and projector).
+/// Label carrying an aggregate's domain (also read for projectors).
 const DOMAIN_LABEL: &str = "angzarr.io/domain";
+
+/// Label carrying a process manager's domain — the event stream the PM
+/// owns (its correlation-keyed state), not its component name.
+const PM_DOMAIN_LABEL: &str = "angzarr.io/pm";
 
 /// Label for the source domain a saga subscribes to (single value).
 const SOURCE_DOMAIN_LABEL: &str = "angzarr.io/source-domain";
 
-/// Label for the source domains a process manager subscribes to
-/// (comma-separated list).
-const SUBSCRIPTIONS_LABEL: &str = "angzarr.io/subscriptions";
+/// Annotation naming the source domains a process manager subscribes to,
+/// comma-separated (an annotation: label values cannot hold commas).
+const SUBSCRIPTIONS_ANNOTATION: &str = "angzarr.io/subscriptions";
 
 /// Component values.
 const COMPONENT_AGGREGATE: &str = "aggregate";
@@ -271,21 +282,27 @@ impl K8sServiceDiscovery {
                 // stream yields anything — used to decide whether the
                 // next reconnect-cycle should reset its backoff.
                 let observed_event = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                // Entries seen during a (re)list, swapped in on InitDone.
+                let relist: Arc<Mutex<Option<HashMap<String, DiscoveredService>>>> =
+                    Arc::new(Mutex::new(None));
                 let outcome = {
                     let observed_event = observed_event.clone();
                     let cache = cache.clone();
                     let health = health.clone();
                     let namespace = namespace.clone();
+                    let relist = relist.clone();
                     stream
                         .try_for_each(|event| {
                             let cache = cache.clone();
                             let health = health.clone();
                             let observed_event = observed_event.clone();
                             let namespace = namespace.clone();
+                            let relist = relist.clone();
                             async move {
                                 observed_event.store(true, std::sync::atomic::Ordering::Release);
                                 health.record_event(Instant::now());
-                                Self::handle_event(component, &cache, &namespace, event).await;
+                                Self::handle_event(component, &cache, &relist, &namespace, event)
+                                    .await;
                                 Ok(())
                             }
                         })
@@ -343,21 +360,26 @@ impl K8sServiceDiscovery {
                 info!(component = COMPONENT_SAGA, "Starting saga watcher");
 
                 let observed_event = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                // Entries seen during a (re)list, swapped in on InitDone.
+                let relist: Arc<Mutex<Option<HashMap<String, SagaService>>>> =
+                    Arc::new(Mutex::new(None));
                 let outcome = {
                     let observed_event = observed_event.clone();
                     let cache = cache.clone();
                     let health = health.clone();
                     let namespace = namespace.clone();
+                    let relist = relist.clone();
                     stream
                         .try_for_each(|event| {
                             let cache = cache.clone();
                             let health = health.clone();
                             let observed_event = observed_event.clone();
                             let namespace = namespace.clone();
+                            let relist = relist.clone();
                             async move {
                                 observed_event.store(true, std::sync::atomic::Ordering::Release);
                                 health.record_event(Instant::now());
-                                Self::handle_saga_event(&cache, &namespace, event).await;
+                                Self::handle_saga_event(&cache, &relist, &namespace, event).await;
                                 Ok(())
                             }
                         })
@@ -417,21 +439,26 @@ impl K8sServiceDiscovery {
                 );
 
                 let observed_event = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                // Entries seen during a (re)list, swapped in on InitDone.
+                let relist: Arc<Mutex<Option<HashMap<String, PmService>>>> =
+                    Arc::new(Mutex::new(None));
                 let outcome = {
                     let observed_event = observed_event.clone();
                     let cache = cache.clone();
                     let health = health.clone();
                     let namespace = namespace.clone();
+                    let relist = relist.clone();
                     stream
                         .try_for_each(|event| {
                             let cache = cache.clone();
                             let health = health.clone();
                             let observed_event = observed_event.clone();
                             let namespace = namespace.clone();
+                            let relist = relist.clone();
                             async move {
                                 observed_event.store(true, std::sync::atomic::Ordering::Release);
                                 health.record_event(Instant::now());
-                                Self::handle_pm_event(&cache, &namespace, event).await;
+                                Self::handle_pm_event(&cache, &relist, &namespace, event).await;
                                 Ok(())
                             }
                         })
@@ -461,56 +488,26 @@ impl K8sServiceDiscovery {
 
     async fn handle_saga_event(
         cache: &RwLock<HashMap<String, SagaService>>,
+        relist: &Mutex<Option<HashMap<String, SagaService>>>,
         namespace: &str,
         event: Event<Service>,
     ) {
-        match event {
-            Event::Apply(svc) | Event::InitApply(svc) => {
-                if let Some(saga) = Self::extract_saga_with_namespace(&svc, namespace) {
-                    debug!(
-                        service = %saga.service.name,
-                        source_domain = %saga.source_domain,
-                        "Saga discovered/updated"
-                    );
-                    cache.write().await.insert(saga.service.name.clone(), saga);
-                }
-            }
-            Event::Delete(svc) => {
-                if let Some(name) = svc.metadata.name {
-                    debug!(service = %name, "Saga deleted");
-                    cache.write().await.remove(&name);
-                }
-            }
-            Event::Init => debug!(component = COMPONENT_SAGA, "Watcher initialized"),
-            Event::InitDone => debug!(component = COMPONENT_SAGA, "Watcher init done"),
-        }
+        apply_watch_event(COMPONENT_SAGA, cache, relist, event, |svc| {
+            Self::extract_saga_with_namespace(svc, namespace).map(|s| (s.service.name.clone(), s))
+        })
+        .await;
     }
 
     async fn handle_pm_event(
         cache: &RwLock<HashMap<String, PmService>>,
+        relist: &Mutex<Option<HashMap<String, PmService>>>,
         namespace: &str,
         event: Event<Service>,
     ) {
-        match event {
-            Event::Apply(svc) | Event::InitApply(svc) => {
-                if let Some(pm) = Self::extract_pm_with_namespace(&svc, namespace) {
-                    debug!(
-                        service = %pm.service.name,
-                        subscriptions = ?pm.subscriptions,
-                        "PM discovered/updated"
-                    );
-                    cache.write().await.insert(pm.service.name.clone(), pm);
-                }
-            }
-            Event::Delete(svc) => {
-                if let Some(name) = svc.metadata.name {
-                    debug!(service = %name, "PM deleted");
-                    cache.write().await.remove(&name);
-                }
-            }
-            Event::Init => debug!(component = COMPONENT_PROCESS_MANAGER, "Watcher initialized"),
-            Event::InitDone => debug!(component = COMPONENT_PROCESS_MANAGER, "Watcher init done"),
-        }
+        apply_watch_event(COMPONENT_PROCESS_MANAGER, cache, relist, event, |svc| {
+            Self::extract_pm_with_namespace(svc, namespace).map(|p| (p.service.name.clone(), p))
+        })
+        .await;
     }
 
     fn extract_saga(&self, svc: &Service) -> Option<SagaService> {
@@ -539,13 +536,32 @@ impl K8sServiceDiscovery {
     }
 
     fn extract_pm_with_namespace(svc: &Service, namespace: &str) -> Option<PmService> {
-        let service = Self::extract_service_with_namespace(svc, namespace)?;
-        let labels = svc.metadata.labels.as_ref();
-        let raw = labels.and_then(|l| l.get(SUBSCRIPTIONS_LABEL)).cloned();
+        let mut service = Self::extract_service_with_namespace(svc, namespace)?;
+        let pm_domain = svc
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(PM_DOMAIN_LABEL))
+            .filter(|d| !d.is_empty())
+            .cloned();
+        let Some(pm_domain) = pm_domain else {
+            tracing::warn!(
+                service = %service.name,
+                "PM service missing {PM_DOMAIN_LABEL} label (the PM's domain) — skipping registration"
+            );
+            return None;
+        };
+        service.domain = Some(pm_domain);
+        let raw = svc
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get(SUBSCRIPTIONS_ANNOTATION))
+            .cloned();
         let Some(raw) = raw else {
             tracing::warn!(
                 service = %service.name,
-                "PM service missing {SUBSCRIPTIONS_LABEL} label — skipping registration"
+                "PM service missing {SUBSCRIPTIONS_ANNOTATION} annotation — skipping registration"
             );
             return None;
         };
@@ -558,7 +574,7 @@ impl K8sServiceDiscovery {
             tracing::warn!(
                 service = %service.name,
                 raw = %raw,
-                "PM service has empty {SUBSCRIPTIONS_LABEL} label — skipping registration"
+                "PM service has empty {SUBSCRIPTIONS_ANNOTATION} annotation — skipping registration"
             );
             return None;
         }
@@ -569,39 +585,16 @@ impl K8sServiceDiscovery {
     }
 
     async fn handle_event(
-        component: &str,
+        component: &'static str,
         cache: &RwLock<HashMap<String, DiscoveredService>>,
+        relist: &Mutex<Option<HashMap<String, DiscoveredService>>>,
         namespace: &str,
         event: Event<Service>,
     ) {
-        match event {
-            Event::Apply(svc) | Event::InitApply(svc) => {
-                if let Some(discovered) = Self::extract_service_with_namespace(&svc, namespace) {
-                    debug!(
-                        component = component,
-                        service = %discovered.name,
-                        domain = ?discovered.domain,
-                        "Service discovered/updated"
-                    );
-                    cache
-                        .write()
-                        .await
-                        .insert(discovered.name.clone(), discovered);
-                }
-            }
-            Event::Delete(svc) => {
-                if let Some(name) = svc.metadata.name {
-                    debug!(component = component, service = %name, "Service deleted");
-                    cache.write().await.remove(&name);
-                }
-            }
-            Event::Init => {
-                debug!(component = component, "Watcher initialized");
-            }
-            Event::InitDone => {
-                debug!(component = component, "Watcher init done");
-            }
-        }
+        apply_watch_event(component, cache, relist, event, |svc| {
+            Self::extract_service_with_namespace(svc, namespace).map(|d| (d.name.clone(), d))
+        })
+        .await;
     }
 
     fn extract_service(&self, svc: &Service) -> Option<DiscoveredService> {
@@ -646,6 +639,33 @@ impl K8sServiceDiscovery {
         })
     }
 
+    /// Mirror the watched aggregate Services into the inner registry, so a
+    /// deleted Service stops resolving and its cached clients are dropped.
+    async fn sync_aggregates_to_inner(&self) {
+        let services: Vec<DiscoveredService> = self
+            .aggregates
+            .read()
+            .await
+            .values()
+            .filter(|s| s.domain.is_some())
+            .cloned()
+            .collect();
+        self.inner.replace_aggregates(services).await;
+    }
+
+    /// Mirror the watched projector Services into the inner registry.
+    async fn sync_projectors_to_inner(&self) {
+        let services: Vec<DiscoveredService> = self
+            .projectors
+            .read()
+            .await
+            .values()
+            .filter(|s| s.domain.is_some())
+            .cloned()
+            .collect();
+        self.inner.replace_projectors(services).await;
+    }
+
     /// Register a discovered service with inner for client caching.
     async fn sync_to_inner(&self, component: &str, service: &DiscoveredService) {
         if let Some(domain) = &service.domain {
@@ -662,6 +682,68 @@ impl K8sServiceDiscovery {
                         service.port,
                     )
                     .await;
+            }
+        }
+    }
+}
+
+/// Apply one watcher event to a Service cache.
+///
+/// `Apply` upserts (or removes the entry when the Service no longer
+/// qualifies, e.g. a required label was dropped); `Delete` removes. A
+/// (re)list — `Init`, `InitApply`*, `InitDone` — is collected in `relist`
+/// and replaces the cache wholesale on `InitDone`, so Services deleted
+/// while the watch was disconnected are evicted instead of lingering.
+async fn apply_watch_event<T>(
+    component: &str,
+    cache: &RwLock<HashMap<String, T>>,
+    relist: &Mutex<Option<HashMap<String, T>>>,
+    event: Event<Service>,
+    extract: impl Fn(&Service) -> Option<(String, T)>,
+) {
+    match event {
+        Event::Init => {
+            debug!(component = component, "Watcher relist started");
+            *relist.lock().unwrap_or_else(|p| p.into_inner()) = Some(HashMap::new());
+        }
+        Event::InitApply(svc) => {
+            if let Some((name, entry)) = extract(&svc) {
+                relist
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .get_or_insert_with(HashMap::new)
+                    .insert(name, entry);
+            }
+        }
+        Event::InitDone => {
+            let fresh = relist.lock().unwrap_or_else(|p| p.into_inner()).take();
+            if let Some(fresh) = fresh {
+                debug!(
+                    component = component,
+                    services = fresh.len(),
+                    "Watcher relist done"
+                );
+                *cache.write().await = fresh;
+            }
+        }
+        Event::Apply(svc) => match extract(&svc) {
+            Some((name, entry)) => {
+                debug!(component = component, service = %name, "Service discovered/updated");
+                cache.write().await.insert(name, entry);
+            }
+            None => {
+                if let Some(name) = svc.metadata.name.as_ref() {
+                    cache.write().await.remove(name);
+                }
+            }
+        },
+        Event::Delete(svc) => {
+            if let Some(name) = svc.metadata.name {
+                debug!(component = component, service = %name, "Service deleted");
+                if let Some(pending) = relist.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+                    pending.remove(&name);
+                }
+                cache.write().await.remove(&name);
             }
         }
     }
@@ -711,17 +793,7 @@ impl ServiceDiscovery for K8sServiceDiscovery {
         &self,
         domain: &str,
     ) -> Result<CommandHandlerCoordinatorServiceClient<Channel>, DiscoveryError> {
-        // Sync any unsynced services from local cache to inner
-        let aggregates = self.aggregates.read().await;
-        for service in aggregates.values() {
-            if let Some(d) = &service.domain {
-                // This is idempotent - inner will skip if already registered
-                self.inner
-                    .register_aggregate(d, &service.service_address, service.port)
-                    .await;
-            }
-        }
-        drop(aggregates);
+        self.sync_aggregates_to_inner().await;
 
         // Delegate to inner
         self.inner.get_aggregate(domain).await
@@ -731,16 +803,7 @@ impl ServiceDiscovery for K8sServiceDiscovery {
         &self,
         domain: &str,
     ) -> Result<EventQueryServiceClient<Channel>, DiscoveryError> {
-        // Sync any unsynced services from local cache to inner
-        let aggregates = self.aggregates.read().await;
-        for service in aggregates.values() {
-            if let Some(d) = &service.domain {
-                self.inner
-                    .register_aggregate(d, &service.service_address, service.port)
-                    .await;
-            }
-        }
-        drop(aggregates);
+        self.sync_aggregates_to_inner().await;
 
         // Delegate to inner
         self.inner.get_event_query(domain).await
@@ -749,16 +812,7 @@ impl ServiceDiscovery for K8sServiceDiscovery {
     async fn get_all_projectors(
         &self,
     ) -> Result<Vec<ProjectorCoordinatorServiceClient<Channel>>, DiscoveryError> {
-        // Sync any unsynced services from local cache to inner
-        let projectors = self.projectors.read().await;
-        for service in projectors.values() {
-            if let Some(d) = &service.domain {
-                self.inner
-                    .register_projector(&service.name, d, &service.service_address, service.port)
-                    .await;
-            }
-        }
-        drop(projectors);
+        self.sync_projectors_to_inner().await;
 
         // Delegate to inner
         self.inner.get_all_projectors().await
@@ -768,16 +822,7 @@ impl ServiceDiscovery for K8sServiceDiscovery {
         &self,
         name: &str,
     ) -> Result<ProjectorCoordinatorServiceClient<Channel>, DiscoveryError> {
-        // Sync any unsynced services from local cache to inner
-        let projectors = self.projectors.read().await;
-        for service in projectors.values() {
-            if let Some(d) = &service.domain {
-                self.inner
-                    .register_projector(&service.name, d, &service.service_address, service.port)
-                    .await;
-            }
-        }
-        drop(projectors);
+        self.sync_projectors_to_inner().await;
 
         // Delegate to inner
         self.inner.get_projector_by_name(name).await

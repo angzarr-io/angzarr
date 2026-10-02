@@ -51,11 +51,11 @@ pub fn parse_event_cover(event_book: &EventBook) -> Result<(String, Uuid), Statu
     Ok((domain, root_uuid))
 }
 
-/// Extract expected sequence from the first command page.
+/// Extract the expected sequence from the first command page.
 ///
-/// Handles both explicit sequences and deferred sequences:
 /// - Explicit sequence: returns the sequence number
-/// - Deferred sequences: returns 0 (framework will stamp on receipt)
+/// - `AngzarrDeferred` / `ExternalDeferred`: returns 0 — a deferred command
+///   claims no sequence; the framework appends it at the head
 pub fn extract_command_sequence(command: &CommandBook) -> u32 {
     command
         .pages
@@ -64,8 +64,7 @@ pub fn extract_command_sequence(command: &CommandBook) -> u32 {
         .and_then(|h| h.sequence_type.as_ref())
         .map(|st| match st {
             SequenceType::Sequence(seq) => *seq,
-            // Deferred sequences don't have a fixed sequence yet
-            SequenceType::ExternalDeferred(_) | SequenceType::AngzarrDeferred(_) => 0,
+            SequenceType::AngzarrDeferred(_) | SequenceType::ExternalDeferred(_) => 0,
         })
         .unwrap_or(0)
 }
@@ -110,6 +109,9 @@ pub fn extract_angzarr_deferred(command: &CommandBook) -> Option<&AngzarrDeferre
 ///
 /// Converts deferred sequences to explicit sequences while preserving
 /// the provenance information in the header.
+///
+/// This rewrite erases the deferred header, including the idempotency
+/// provenance: callers extract it (`extract_source_info`) before stamping.
 pub fn stamp_deferred_sequences(command: &mut CommandBook, actual_sequence: u32) {
     for (i, page) in command.pages.iter_mut().enumerate() {
         if let Some(header) = &mut page.header {
@@ -127,13 +129,22 @@ pub fn stamp_deferred_sequences(command: &mut CommandBook, actual_sequence: u32)
     }
 }
 
+/// The storage key for an edition name: every spelling of the main timeline
+/// (unset, `""`, `"angzarr"`) is `""`; a named edition is itself.
+pub fn edition_key(name: &str) -> &str {
+    if name == crate::proto_ext::constants::DEFAULT_EDITION {
+        ""
+    } else {
+        name
+    }
+}
+
 /// Extract and validate edition name from a CommandBook's Cover.
 ///
-/// Returns the explicit edition name, or the empty string `""` for the
-/// default/main timeline. The storage layer translates `""` to SQL NULL
-/// — the empty string never reaches the database.
+/// Returns the explicit edition name, or `""` for the main timeline however
+/// it was spelled (see [`edition_key`]).
 pub fn extract_edition(command_book: &CommandBook) -> Result<String, Status> {
-    let edition = command_book.edition().unwrap_or("").to_string();
+    let edition = edition_key(command_book.edition().unwrap_or("")).to_string();
     if !edition.is_empty() {
         crate::validation::validate_edition(&edition)?;
     }
@@ -165,11 +176,46 @@ pub fn extract_explicit_divergence(command_book: &CommandBook, domain: &str) -> 
 
 /// Extract edition from an EventBook's Cover.
 ///
-/// Returns the explicit edition name, or `""` for the default timeline.
+/// Returns the explicit edition name, or `""` for the main timeline however
+/// it was spelled (see [`edition_key`]).
 pub fn extract_event_edition(event_book: &EventBook) -> Result<String, Status> {
-    let edition = event_book.edition().unwrap_or("").to_string();
+    let edition = edition_key(event_book.edition().unwrap_or("")).to_string();
     if !edition.is_empty() {
         crate::validation::validate_edition(&edition)?;
     }
     Ok(edition)
+}
+
+/// The storage provenance of a saga/PM command, from its deferred header.
+///
+/// `Ok(None)` when the header names no source (nothing to deduplicate on);
+/// an unparseable source root is `InvalidArgument`, since a command whose
+/// provenance cannot be recorded could never be recognised as a replay.
+pub(crate) fn deferred_source_info(
+    deferred: &AngzarrDeferredSequence,
+) -> Result<Option<crate::storage::SourceInfo>, Status> {
+    let Some(source) = deferred.source.as_ref() else {
+        return Ok(None);
+    };
+    if source.domain.is_empty() {
+        return Ok(None);
+    }
+    let Some(root) = source.root.as_ref() else {
+        return Ok(None);
+    };
+    let source_root = Uuid::from_slice(&root.value).map_err(|e| {
+        Status::invalid_argument(format!("deferred source root is not a valid UUID: {e}"))
+    })?;
+    Ok(Some(crate::storage::SourceInfo::new(
+        source
+            .edition
+            .as_ref()
+            .map(|e| e.name.as_str())
+            .unwrap_or(""),
+        source.domain.as_str(),
+        source_root,
+        deferred.source_seq,
+        deferred.source_component.as_str(),
+        deferred.command_index,
+    )))
 }

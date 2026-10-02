@@ -25,12 +25,13 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use tonic::Status;
 use tracing::{debug, warn};
 
 use crate::proto::{Cover, EventBook};
 use crate::proto_ext::CoverExt;
-use crate::repository::EventBookRepository;
-use crate::storage::{EventStore, SnapshotStore};
+use crate::repository::{EventBookRepository, SnapshotRepository};
+use crate::storage::EventStore;
 
 use super::DestinationFetcher;
 
@@ -41,22 +42,22 @@ use super::DestinationFetcher;
 pub struct HybridDestinationFetcher {
     local_domain: String,
     local_event_store: Arc<dyn EventStore>,
-    local_snapshot_store: Arc<dyn SnapshotStore>,
+    local_snapshot_repo: Arc<SnapshotRepository>,
     remote: Arc<dyn DestinationFetcher>,
 }
 
 impl HybridDestinationFetcher {
-    /// Create with the local domain name, stores, and remote fetcher for other domains.
+    /// Create with the local domain name, repositories, and remote fetcher for other domains.
     pub fn new(
         local_domain: String,
         local_event_store: Arc<dyn EventStore>,
-        local_snapshot_store: Arc<dyn SnapshotStore>,
+        local_snapshot_repo: Arc<SnapshotRepository>,
         remote: Arc<dyn DestinationFetcher>,
     ) -> Self {
         Self {
             local_domain,
             local_event_store,
-            local_snapshot_store,
+            local_snapshot_repo,
             remote,
         }
     }
@@ -64,18 +65,26 @@ impl HybridDestinationFetcher {
 
 #[async_trait]
 impl DestinationFetcher for HybridDestinationFetcher {
-    async fn fetch(&self, cover: &Cover) -> Option<EventBook> {
+    async fn fetch(&self, cover: &Cover) -> Result<Option<EventBook>, Status> {
         if cover.domain == self.local_domain {
-            let root = cover
-                .root
-                .as_ref()
-                .and_then(|r| uuid::Uuid::from_slice(&r.value).ok())?;
+            // A malformed cover or a storage failure is an error, not "no
+            // state": Ok(None) would make a PM restart a live workflow.
+            let root = cover.root.as_ref().ok_or_else(|| {
+                Status::invalid_argument(crate::orchestration::errmsg::COVER_MISSING_ROOT)
+            })?;
+            let root = uuid::Uuid::from_slice(&root.value).map_err(|e| {
+                Status::invalid_argument(format!(
+                    "{}{}",
+                    crate::orchestration::errmsg::INVALID_UUID,
+                    e
+                ))
+            })?;
             let edition = cover.edition().unwrap_or_default();
 
             // Use EventBookRepository to properly load snapshot + subsequent events
             let repo = EventBookRepository::new(
                 self.local_event_store.clone(),
-                self.local_snapshot_store.clone(),
+                self.local_snapshot_repo.clone(),
             );
 
             match repo.get(&self.local_domain, edition, root).await {
@@ -88,7 +97,7 @@ impl DestinationFetcher for HybridDestinationFetcher {
                     if let Some(ref mut book_cover) = book.cover {
                         book_cover.correlation_id = cover.correlation_id.clone();
                     }
-                    Some(book)
+                    Ok(Some(book))
                 }
                 Err(e) => {
                     warn!(
@@ -96,7 +105,9 @@ impl DestinationFetcher for HybridDestinationFetcher {
                         error = %e,
                         "Failed to fetch local domain EventBook"
                     );
-                    None
+                    // Same storage-error → Status mapping the EventQuery
+                    // service applies for remote reads.
+                    Err(Status::internal(e.to_string()))
                 }
             }
         } else {
@@ -104,7 +115,48 @@ impl DestinationFetcher for HybridDestinationFetcher {
         }
     }
 
-    async fn fetch_by_correlation(&self, domain: &str, correlation_id: &str) -> Option<EventBook> {
+    /// The PM's state lives in the local store under the correlation-derived
+    /// root (the same derivation the PM persist path uses) on the trigger's
+    /// edition — no correlation scan, so no arbitrary pick between editions.
+    /// An aggregate with neither events nor a snapshot is a new workflow.
+    async fn fetch_pm_state(
+        &self,
+        pm_domain: &str,
+        edition: &str,
+        correlation_id: &str,
+    ) -> Result<Option<EventBook>, Status> {
+        use crate::orchestration::shared::CorrelationRootExt;
+        if pm_domain != self.local_domain {
+            return self
+                .remote
+                .fetch_pm_state(pm_domain, edition, correlation_id)
+                .await;
+        }
+        let repo = EventBookRepository::new(
+            self.local_event_store.clone(),
+            self.local_snapshot_repo.clone(),
+        );
+        let mut book = repo
+            .get(pm_domain, edition, correlation_id.correlation_root())
+            .await
+            .map_err(|e| {
+                warn!(domain = %pm_domain, correlation_id = %correlation_id, error = %e, "Failed to fetch PM state");
+                Status::internal(e.to_string())
+            })?;
+        if book.pages.is_empty() && book.snapshot.is_none() {
+            return Ok(None);
+        }
+        if let Some(cover) = book.cover.as_mut() {
+            cover.correlation_id = correlation_id.to_string();
+        }
+        Ok(Some(book))
+    }
+
+    async fn fetch_by_correlation(
+        &self,
+        domain: &str,
+        correlation_id: &str,
+    ) -> Result<Option<EventBook>, Status> {
         if domain == self.local_domain {
             debug!(
                 domain = %domain,
@@ -112,23 +164,23 @@ impl DestinationFetcher for HybridDestinationFetcher {
                 "Fetching PM state from local store"
             );
 
-            // First find the aggregate by correlation_id
-            let books = match self
+            // First find the aggregate by correlation_id.
+            //
+            // A storage failure propagates as Err: as Ok(None) the PM would
+            // treat a live workflow as brand new.
+            let books = self
                 .local_event_store
                 .get_by_correlation(correlation_id)
                 .await
-            {
-                Ok(books) => books,
-                Err(e) => {
+                .map_err(|e| {
                     warn!(
                         domain = %domain,
                         correlation_id = %correlation_id,
                         error = %e,
                         "Failed to fetch local domain state by correlation"
                     );
-                    return None;
-                }
-            };
+                    Status::internal(e.to_string())
+                })?;
 
             // Find the first book matching this domain.
             //
@@ -137,11 +189,17 @@ impl DestinationFetcher for HybridDestinationFetcher {
             // together events from order, inventory, fulfillment, AND the PM itself.
             // We only want the PM's own state here — other domains would be fetched
             // via the remote fetcher if needed.
-            let book = books.into_iter().find(|b| {
+            //
+            // No matching book is the ONE case that genuinely means "no
+            // state": the store answered and holds nothing for this
+            // (domain, correlation) — a new workflow. Hence Ok(None).
+            let Some(book) = books.into_iter().find(|b| {
                 b.cover
                     .as_ref()
                     .is_some_and(|c| c.domain == self.local_domain)
-            })?;
+            }) else {
+                return Ok(None);
+            };
 
             // Re-fetch using EventBookRepository to get snapshot-optimized version.
             //
@@ -158,20 +216,28 @@ impl DestinationFetcher for HybridDestinationFetcher {
             //
             // The first lookup is just to find the root UUID — we need to know which
             // aggregate instance has this correlation_id before we can do a proper fetch.
-            let cover = book.cover.as_ref()?;
-            let edition = cover
-                .edition
-                .as_ref()
-                .map(|e| e.name.as_str())
-                .unwrap_or("main");
-            let root_uuid = cover
-                .root
-                .as_ref()
-                .and_then(|r| uuid::Uuid::from_slice(&r.value).ok())?;
+            //
+            // State for the workflow exists here; a book we cannot interpret
+            // (missing cover/root, unparseable root) is corrupt data, not
+            // absence, so it is an internal error.
+            let cover = book.cover.as_ref().ok_or_else(|| {
+                Status::internal(crate::orchestration::errmsg::EVENT_BOOK_MISSING_COVER)
+            })?;
+            let edition = cover.edition().unwrap_or_default();
+            let root = cover.root.as_ref().ok_or_else(|| {
+                Status::internal(crate::orchestration::errmsg::COVER_MISSING_ROOT)
+            })?;
+            let root_uuid = uuid::Uuid::from_slice(&root.value).map_err(|e| {
+                Status::internal(format!(
+                    "{}{}",
+                    crate::orchestration::errmsg::INVALID_UUID,
+                    e
+                ))
+            })?;
 
             let repo = EventBookRepository::new(
                 self.local_event_store.clone(),
-                self.local_snapshot_store.clone(),
+                self.local_snapshot_repo.clone(),
             );
 
             match repo.get(domain, edition, root_uuid).await {
@@ -180,7 +246,7 @@ impl DestinationFetcher for HybridDestinationFetcher {
                     if let Some(ref mut fetched_cover) = fetched_book.cover {
                         fetched_cover.correlation_id = correlation_id.to_string();
                     }
-                    Some(fetched_book)
+                    Ok(Some(fetched_book))
                 }
                 Err(e) => {
                     warn!(
@@ -189,7 +255,7 @@ impl DestinationFetcher for HybridDestinationFetcher {
                         error = %e,
                         "Failed to re-fetch local domain with snapshot"
                     );
-                    None
+                    Err(Status::internal(e.to_string()))
                 }
             }
         } else {

@@ -1,6 +1,12 @@
-//! Shared utilities for integration tests.
+//! Shared fixture layer for the acceptance harness (T14 / D-10).
 //!
-//! Provides gRPC client helpers for testing against a deployed Kind cluster.
+//! gRPC client helpers for testing against a DEPLOYED angzarr system
+//! (kind cluster or compose stack) through its public surface: the
+//! command-handler coordinator and the event query service.
+//!
+//! Compiled by `tests/acceptance_features.rs`; the inventory rule from T12
+//! applies — if this module loses its harness, delete it rather than letting
+//! it rot (it sat orphaned with pre-v1 client names for months).
 #![allow(unused)]
 
 use prost::Message;
@@ -8,9 +14,10 @@ use tonic::transport::Channel;
 use uuid::Uuid;
 
 pub use angzarr::proto::{
-    aggregate_coordinator_service_client::AggregateCoordinatorServiceClient,
-    event_query_service_client::EventQueryServiceClient, page_header, CommandBook, CommandPage,
-    CommandResponse, Cover, EventBook, PageHeader, Query, Uuid as ProtoUuid,
+    command_handler_coordinator_service_client::CommandHandlerCoordinatorServiceClient,
+    command_page, event_query_service_client::EventQueryServiceClient, page_header, CommandBook,
+    CommandPage, CommandRequest, CommandResponse, Cover, EventBook, MergeStrategy, PageHeader,
+    Query, SyncMode, Uuid as ProtoUuid,
 };
 
 /// Default Angzarr gateway port - exposed via NodePort 30084 -> hostPort 9084
@@ -18,7 +25,7 @@ pub const DEFAULT_ANGZARR_PORT: u16 = 9084;
 
 /// Builds the gateway endpoint URL from environment or default.
 /// Uses ANGZARR_PORT as the standard env var.
-fn get_gateway_endpoint() -> String {
+pub fn get_gateway_endpoint() -> String {
     // Check for explicit endpoint first (full URL)
     if let Ok(endpoint) = std::env::var("ANGZARR_ENDPOINT") {
         return endpoint;
@@ -34,9 +41,9 @@ fn get_gateway_endpoint() -> String {
     format!("http://{}:{}", host, port)
 }
 
-/// Creates an AggregateCoordinatorServiceClient connected to the gateway.
-/// Gateway consolidates all gRPC services on ANGZARR_PORT.
-pub async fn create_gateway_client() -> AggregateCoordinatorServiceClient<Channel> {
+/// Creates a CommandHandlerCoordinatorServiceClient connected to the gateway.
+/// The gateway consolidates all gRPC services on ANGZARR_PORT.
+pub async fn create_gateway_client() -> CommandHandlerCoordinatorServiceClient<Channel> {
     let endpoint = get_gateway_endpoint();
 
     let channel = Channel::from_shared(endpoint.clone())
@@ -45,11 +52,11 @@ pub async fn create_gateway_client() -> AggregateCoordinatorServiceClient<Channe
         .await
         .unwrap_or_else(|e| panic!("Failed to connect to gateway at {}: {}", endpoint, e));
 
-    AggregateCoordinatorServiceClient::new(channel)
+    CommandHandlerCoordinatorServiceClient::new(channel)
 }
 
 /// Creates an EventQueryServiceClient connected to the query service.
-/// Gateway consolidates all gRPC services on ANGZARR_PORT.
+/// The gateway consolidates all gRPC services on ANGZARR_PORT.
 pub async fn create_query_client() -> EventQueryServiceClient<Channel> {
     let endpoint = get_gateway_endpoint();
 
@@ -80,8 +87,6 @@ pub fn build_command_book_at_sequence(
     type_url: &str,
     sequence: u32,
 ) -> CommandBook {
-    use angzarr::proto::{command_page, MergeStrategy};
-
     let correlation_id = Uuid::new_v4().to_string();
     CommandBook {
         cover: Some(Cover {
@@ -91,14 +96,15 @@ pub fn build_command_book_at_sequence(
             }),
             correlation_id,
             edition: None,
+            ..Default::default()
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
                 sync_mode: None,
-                sequence_type: Some(page_header::SequenceType::Sequence(0)),
+                sequence_type: Some(page_header::SequenceType::Sequence(sequence)),
             }),
             payload: Some(command_page::Payload::Command(prost_types::Any {
-                type_url: format!("type.googleapis.com/{}", type_url),
+                type_url: format!("/{}", type_url),
                 value: command.encode_to_vec(),
             })),
             merge_strategy: MergeStrategy::MergeCommutative as i32,
@@ -106,9 +112,21 @@ pub fn build_command_book_at_sequence(
     }
 }
 
-/// Extracts the sequence number from an event page.
+/// Wraps a CommandBook in a CommandRequest with the given sync mode.
+pub fn build_command_request(command: CommandBook, sync_mode: SyncMode) -> CommandRequest {
+    CommandRequest {
+        command: Some(command),
+        sync_mode: sync_mode as i32,
+        ..Default::default()
+    }
+}
+
+/// Extracts the sequence number from an event page header.
 pub fn extract_sequence(page: &angzarr::proto::EventPage) -> u32 {
-    page.sequence
+    match page.header.as_ref().and_then(|h| h.sequence_type.as_ref()) {
+        Some(page_header::SequenceType::Sequence(seq)) => *seq,
+        _ => 0,
+    }
 }
 
 /// Builds a Query for retrieving events from an aggregate.
@@ -121,8 +139,9 @@ pub fn build_query(domain: &str, root: Uuid) -> Query {
             }),
             correlation_id: String::new(),
             edition: None,
+            ..Default::default()
         }),
-        selection: None,
+        ..Default::default()
     }
 }
 

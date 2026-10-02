@@ -6,7 +6,7 @@
 //! - `PositionStore` trait: Handler checkpoint tracking
 //! - `DomainStorage`: Per-domain storage wrapper
 //! - Storage configuration types
-//! - Implementations: PostgreSQL, SQLite, Redis, Bigtable, DynamoDB, NATS, ImmuDB
+//! - Implementations: PostgreSQL, SQLite, Redis, Bigtable, DynamoDB, ImmuDB
 
 use std::sync::Arc;
 
@@ -22,16 +22,24 @@ mod event_store;
 mod position_store;
 mod snapshot_store;
 
-pub use event_store::{AddOutcome, CascadeParticipant, EventStore, SourceInfo};
+pub use event_store::{AddMeta, AddOutcome, EventStore, ProvenanceKind, SourceInfo};
 pub use position_store::PositionStore;
-pub use snapshot_store::SnapshotStore;
+pub use snapshot_store::{is_superseded, SnapshotStore};
 
 // Re-export from submodules
-pub use config::{PostgresConfig, RedisConfig, SnapshotsEnableConfig, SqliteConfig, StorageConfig};
+pub use config::{
+    PostgresConfig, RedisConfig, SnapshotsEnableConfig, SqliteConfig, StorageConfig,
+    StorageRegistryConfig,
+};
 pub use error::{errmsg, Result, StorageError};
-pub use factory::{init_position_store, init_storage, PositionBackend, StoresBackend};
+pub use factory::{
+    init_event_store, init_position_store, init_position_store_registry, init_snapshot_store,
+    init_storage, PositionBackend, StoresBackend,
+};
 
 // Implementation modules
+// All-or-nothing multi-unit writes for backends without multi-row transactions
+pub mod batch_write;
 #[cfg(feature = "bigtable")]
 pub mod bigtable;
 #[cfg(feature = "dynamo")]
@@ -40,8 +48,6 @@ pub mod helpers;
 #[cfg(feature = "immudb")]
 pub mod immudb;
 pub mod mock;
-#[cfg(feature = "nats")]
-pub mod nats;
 #[cfg(feature = "postgres")]
 pub mod postgres;
 #[cfg(feature = "redis")]
@@ -52,6 +58,8 @@ pub mod schema;
 pub mod sqlite;
 // Unified SQL implementations (shared by postgres and sqlite)
 pub mod sql;
+// Backend-neutral timeline rules (edition spelling, composite reads, append windows)
+pub mod timeline;
 
 // Backend re-exports
 #[cfg(feature = "bigtable")]
@@ -63,8 +71,6 @@ pub use dynamo::{DynamoConfig, DynamoEventStore, DynamoPositionStore, DynamoSnap
 #[cfg(feature = "immudb")]
 pub use immudb::ImmudbEventStore;
 pub use mock::{MockEventStore, MockPositionStore, MockSnapshotStore};
-#[cfg(feature = "nats")]
-pub use nats::{NatsEventStore, NatsPositionStore, NatsSnapshotStore};
 #[cfg(feature = "postgres")]
 pub use postgres::{PostgresEventStore, PostgresPositionStore, PostgresSnapshotStore};
 #[cfg(feature = "redis")]
@@ -99,10 +105,14 @@ impl DomainStorage {
 
     /// Create an EventBookRepository for this domain's stores.
     ///
-    /// Consolidates the repeated pattern of creating repositories from
-    /// event_store and snapshot_store Arcs.
+    /// Wraps the snapshot store in a default-policy
+    /// `SnapshotRepository` (both reads and writes enabled). Callers
+    /// needing explicit policy should build the `SnapshotRepository`
+    /// themselves and construct `EventBookRepository::new` directly.
     pub fn event_book_repo(&self) -> EventBookRepository {
-        EventBookRepository::new(self.event_store.clone(), self.snapshot_store.clone())
+        use crate::repository::SnapshotRepository;
+        let snapshot_repo = Arc::new(SnapshotRepository::new(self.snapshot_store.clone()));
+        EventBookRepository::new(self.event_store.clone(), snapshot_repo)
     }
 }
 

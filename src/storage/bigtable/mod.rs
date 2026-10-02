@@ -27,6 +27,7 @@ use tracing::info;
 
 use super::factory::{PositionBackend, StoresBackend};
 use super::{EventStore, PositionStore, SnapshotStore};
+use crate::advice::Instrumented;
 
 mod event_store;
 mod position_store;
@@ -91,6 +92,8 @@ inventory::submit! {
 
                 let emulator_host = bigtable_config.emulator_host.as_deref();
 
+                // R2-WIRE-ADVICE: wrap with `Instrumented<_>` under the
+                // "bigtable" label so advice/metrics statics fire.
                 let event_store = match BigtableEventStore::new(
                     &bigtable_config.project_id,
                     &bigtable_config.instance_id,
@@ -99,7 +102,9 @@ inventory::submit! {
                 )
                 .await
                 {
-                    Ok(store) => Arc::new(store) as Arc<dyn EventStore>,
+                    Ok(store) => {
+                        Arc::new(Instrumented::new(store, "bigtable")) as Arc<dyn EventStore>
+                    }
                     Err(e) => return Some(Err(e)),
                 };
 
@@ -111,7 +116,9 @@ inventory::submit! {
                 )
                 .await
                 {
-                    Ok(store) => Arc::new(store) as Arc<dyn SnapshotStore>,
+                    Ok(store) => {
+                        Arc::new(Instrumented::new(store, "bigtable")) as Arc<dyn SnapshotStore>
+                    }
                     Err(e) => return Some(Err(e)),
                 };
 
@@ -144,7 +151,9 @@ inventory::submit! {
                 )
                 .await
                 {
-                    Ok(store) => Arc::new(store) as Arc<dyn PositionStore>,
+                    Ok(store) => {
+                        Arc::new(Instrumented::new(store, "bigtable")) as Arc<dyn PositionStore>
+                    }
                     Err(e) => return Some(Err(e)),
                 };
 

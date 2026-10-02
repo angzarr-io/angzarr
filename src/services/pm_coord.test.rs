@@ -94,6 +94,7 @@ impl crate::orchestration::process_manager::ProcessManagerContext for MockPmCont
         CommandOutcome::Success(CommandResponse {
             events: None,
             projections: vec![],
+            ..Default::default()
         })
     }
 }
@@ -103,25 +104,16 @@ struct MockDestinationFetcher;
 
 #[async_trait::async_trait]
 impl crate::orchestration::destination::DestinationFetcher for MockDestinationFetcher {
-    async fn fetch(&self, _cover: &Cover) -> Option<EventBook> {
-        Some(EventBook::default())
+    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(Some(EventBook::default()))
     }
 
     async fn fetch_by_correlation(
         &self,
         _domain: &str,
         _correlation_id: &str,
-    ) -> Option<EventBook> {
-        None
-    }
-
-    async fn fetch_by_root(
-        &self,
-        _domain: &str,
-        _root: &crate::proto::Uuid,
-        _edition: &str,
-    ) -> Option<EventBook> {
-        None
+    ) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(None)
     }
 }
 
@@ -149,6 +141,7 @@ impl crate::orchestration::command::CommandExecutor for MockCommandExecutor {
         CommandOutcome::Success(CommandResponse {
             events: None,
             projections: vec![],
+            ..Default::default()
         })
     }
 }
@@ -163,6 +156,7 @@ fn test_event_book() -> EventBook {
                 name: String::new(),
                 divergences: vec![],
             }),
+            ext: None,
         }),
         pages: vec![EventPage::default()],
         ..Default::default()
@@ -294,7 +288,6 @@ async fn test_handle_speculative_returns_commands_without_side_effects() {
         request: Some(ProcessManagerHandleRequest {
             trigger: Some(test_event_book()),
             process_state: None,
-            destination_sequences: std::collections::HashMap::new(),
         }),
     });
 
@@ -329,4 +322,32 @@ async fn test_handle_speculative_requires_request() {
     let result = service.handle_speculative(request).await;
 
     assert!(result.is_err(), "speculative should fail without request");
+}
+
+/// A COMPENSATE caller learns which reaction commands this PM executed; other
+/// modes carry no such report.
+#[tokio::test]
+async fn test_handle_reports_executed_reactions_to_compensate_callers() {
+    for (mode, reported) in [
+        (CascadeErrorMode::CascadeErrorCompensate, 1),
+        (CascadeErrorMode::CascadeErrorFailFast, 0),
+    ] {
+        let factory = Arc::new(MockPmContextFactory::new("test-pm", "pm-domain"));
+        factory.set_commands(vec![test_command()]).await;
+        let service = PmCoord::new(
+            factory,
+            Arc::new(MockDestinationFetcher),
+            Arc::new(MockCommandExecutor::new()),
+        );
+        let response = service
+            .handle(Request::new(ProcessManagerCoordinatorRequest {
+                trigger: Some(test_event_book()),
+                sync_mode: SyncMode::Cascade.into(),
+                cascade_error_mode: mode.into(),
+            }))
+            .await
+            .unwrap();
+        let executed = crate::orchestration::shared::read_executed_reactions(response.metadata());
+        assert_eq!(executed.len(), reported, "{mode:?}");
+    }
 }

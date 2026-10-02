@@ -1,35 +1,12 @@
-//! Tests for server and networking configuration.
+//! Tests for sidecar target configuration.
 //!
-//! Server config controls how angzarr binds to ports and where services
-//! connect. ServiceConfig supports both inline definitions and file
-//! references for modular configuration.
-//!
-//! Why this matters: Server binding affects security (localhost vs all
-//! interfaces) and connectivity (port conflicts). ServiceConfig resolution
-//! enables modular config files for complex deployments.
-//!
-//! Security: Default host is localhost (127.0.0.1), not 0.0.0.0.
-//! External access requires explicit configuration.
+//! ServiceConfig supports both inline definitions and file references for
+//! modular configuration, and resolves the client-logic address from the
+//! transport.
 
 use std::path::PathBuf;
 
 use super::*;
-
-// ============================================================================
-// ServerConfig Tests
-// ============================================================================
-
-/// Server defaults to standard ports and localhost binding.
-///
-/// Security: localhost binding prevents accidental network exposure.
-/// Must explicitly set host = "0.0.0.0" for external access.
-#[test]
-fn test_server_config_default() {
-    let server = ServerConfig::default();
-    assert_eq!(server.ch_port, 1313);
-    assert_eq!(server.event_query_port, 1314);
-    assert_eq!(server.host, "127.0.0.1");
-}
 
 // ============================================================================
 // ServiceConfigRef Tests

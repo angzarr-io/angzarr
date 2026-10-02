@@ -6,7 +6,7 @@
 //! - Event storage (requires strong durability guarantees)
 //! - Position tracking (use database-backed stores for consistency)
 //!
-//! Use Postgres, SQLite, or NATS for events and positions.
+//! Use Postgres or SQLite for events and positions.
 
 mod snapshot_store;
 

@@ -34,11 +34,15 @@ pub enum Events {
     SourceRoot,
     #[iden = "source_seq"]
     SourceSeq,
-    // Cascade tracking for 2PC (Phase 5)
-    #[iden = "committed"]
-    Committed,
-    #[iden = "cascade_id"]
-    CascadeId,
+    #[iden = "source_component"]
+    SourceComponent,
+    #[iden = "source_command_index"]
+    SourceCommandIndex,
+    #[iden = "source_kind"]
+    SourceKind,
+    // Parent-aggregate routing cover (Cover.ext), serialized google.protobuf.Any.
+    #[iden = "ext"]
+    Ext,
 }
 
 /// Snapshots table schema.
@@ -83,24 +87,4 @@ pub enum Positions {
     Sequence,
     #[iden = "updated_at"]
     UpdatedAt,
-}
-
-/// Editions table schema.
-///
-/// Stores metadata for diverged timelines. Each edition forks the main
-/// timeline at a divergence point (sequence number or timestamp) and
-/// continues independently.
-#[derive(Iden)]
-pub enum Editions {
-    Table,
-    #[iden = "name"]
-    Name,
-    #[iden = "divergence_point_type"]
-    DivergencePointType,
-    #[iden = "divergence_point_value"]
-    DivergencePointValue,
-    #[iden = "description"]
-    Description,
-    #[iden = "created_at"]
-    CreatedAt,
 }

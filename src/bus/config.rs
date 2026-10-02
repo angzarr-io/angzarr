@@ -2,55 +2,112 @@
 
 use serde::Deserialize;
 
-// Outbox is always available (sqlite always compiled)
-use super::outbox;
-use crate::dlq::config::DlqConfig;
+use crate::descriptor::Target;
 
 /// Messaging configuration.
 ///
 /// The `messaging_type` field is a string that identifies which backend to use.
 /// Each backend module checks if the type matches and handles creation.
 ///
-/// Known types: "amqp", "kafka", "channel", "ipc", "nats", "pubsub", "sns-sqs"
-#[derive(Debug, Clone, Deserialize)]
+/// Known types: "amqp", "kafka", "pubsub", "sns-sqs"
+///
+/// # No in-process default (C14)
+///
+/// There is no in-process/embedded transport. A `ChannelEventBus` existed
+/// once and was removed, but this field's default value ("channel") and
+/// scattered doc references to it were left behind, so an unconfigured
+/// deployment silently pointed at a nonexistent backend. `messaging_type`
+/// now defaults to an empty string, which `init_event_bus` (see
+/// `src/bus/factory.rs`) rejects with an actionable error naming the
+/// supported types — an operator who forgets to set `messaging.type` gets a
+/// clear startup failure instead of a confusing `UnknownType("channel")`.
+///
+/// # DLQ schema (R2-15)
+///
+/// DLQ configuration is **not** carried on `MessagingConfig`. The single
+/// canonical location is the top-level `Config.dlq` field. A previous
+/// `MessagingConfig.dlq` field existed but was never read by any code path;
+/// it was removed in R2-15 to eliminate the foot-gun of operators setting
+/// `messaging.dlq:` in YAML and getting silently ignored values.
+///
+/// Compile-time guard against accidental re-introduction (runs under
+/// `cargo test --doc`):
+///
+/// ```compile_fail
+/// use angzarr::bus::config::MessagingConfig;
+/// let cfg = MessagingConfig::default();
+/// // R2-15 removed this field; touching it must not compile.
+/// let _ = cfg.dlq;
+/// ```
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct MessagingConfig {
-    /// Messaging type identifier (e.g., "amqp", "kafka", "channel").
+    /// Messaging type identifier (e.g., "amqp", "kafka", "pubsub", "sns-sqs").
+    ///
+    /// No default transport — an empty value is rejected by
+    /// `init_event_bus` with an actionable error instead of resolving to a
+    /// nonexistent in-process bus. See "No in-process default (C14)" above.
     #[serde(rename = "type")]
     pub messaging_type: String,
     /// AMQP-specific configuration.
     pub amqp: AmqpBusConfig,
     /// Kafka-specific configuration.
     pub kafka: KafkaConfig,
-    /// IPC-specific configuration (for embedded mode).
-    #[cfg(unix)]
-    pub ipc: IpcBusConfig,
-    /// NATS-specific configuration.
-    pub nats: NatsBusConfig,
     /// Google Pub/Sub-specific configuration.
     pub pubsub: PubSubBusConfig,
     /// AWS SNS/SQS-specific configuration.
     pub sns_sqs: SnsSqsBusConfig,
-    /// Outbox pattern configuration for guaranteed delivery.
-    pub outbox: outbox::OutboxConfig,
-    /// Dead letter queue configuration.
-    pub dlq: DlqConfig,
+    /// Consumer-side redelivery limits for handler failures.
+    pub delivery: DeliveryConfig,
 }
 
-impl Default for MessagingConfig {
+/// Consumer-side redelivery policy for events whose handler fails.
+///
+/// Every transport redelivers a message whose handler returned `Err`.
+/// Without a cap, one poison event blocks its key/partition/group forever.
+/// After `max_attempts` failed deliveries the event is dead-lettered
+/// through the component's DLQ publisher and acknowledged; between
+/// attempts the consumer waits an exponential backoff
+/// (`initial_backoff_ms` doubling up to `max_backoff_ms`).
+///
+/// `max_attempts = 0` disables the cap. When no DLQ target is configured
+/// the event is never dropped: it keeps retrying at `max_backoff_ms`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct DeliveryConfig {
+    /// Failed deliveries before the event is dead-lettered (0 = unlimited).
+    pub max_attempts: u32,
+    /// Backoff after the first failed delivery, in milliseconds.
+    pub initial_backoff_ms: u64,
+    /// Upper bound on the backoff between deliveries, in milliseconds.
+    pub max_backoff_ms: u64,
+}
+
+impl Default for DeliveryConfig {
     fn default() -> Self {
         Self {
-            messaging_type: "channel".to_string(),
-            amqp: AmqpBusConfig::default(),
-            kafka: KafkaConfig::default(),
-            #[cfg(unix)]
-            ipc: IpcBusConfig::default(),
-            nats: NatsBusConfig::default(),
-            pubsub: PubSubBusConfig::default(),
-            sns_sqs: SnsSqsBusConfig::default(),
-            outbox: outbox::OutboxConfig::default(),
-            dlq: DlqConfig::default(),
+            max_attempts: 10,
+            initial_backoff_ms: 200,
+            max_backoff_ms: 10_000,
         }
+    }
+}
+
+impl DeliveryConfig {
+    /// Whether `failed_attempts` failed deliveries exhaust the budget.
+    pub fn is_exhausted(&self, failed_attempts: u32) -> bool {
+        self.max_attempts != 0 && failed_attempts >= self.max_attempts
+    }
+
+    /// Backoff to wait after the `failed_attempts`-th failed delivery
+    /// (1-based): `initial * 2^(n-1)`, capped at `max_backoff_ms`.
+    pub fn backoff(&self, failed_attempts: u32) -> std::time::Duration {
+        let exponent = failed_attempts.saturating_sub(1).min(32);
+        let millis = self
+            .initial_backoff_ms
+            .saturating_mul(1u64 << exponent)
+            .min(self.max_backoff_ms);
+        std::time::Duration::from_millis(millis)
     }
 }
 
@@ -59,18 +116,39 @@ impl Default for MessagingConfig {
 pub enum EventBusMode {
     /// Publisher-only mode (no consuming).
     Publisher,
-    /// Subscriber mode for a specific domain.
+    /// Subscriber mode for an explicit set of domains.
     Subscriber {
         /// Queue/group name.
         queue: String,
-        /// Domain to subscribe to.
-        domain: String,
+        /// Domains to subscribe to (at least one).
+        domains: Vec<String>,
     },
     /// Subscriber mode for all domains.
     SubscriberAll {
         /// Queue/group name.
         queue: String,
     },
+}
+
+impl EventBusMode {
+    /// Subscriber mode covering the domains named by `targets`.
+    ///
+    /// Domains are de-duplicated in first-seen order. An empty target list
+    /// means "every domain" and yields [`EventBusMode::SubscriberAll`].
+    pub fn for_targets(queue: impl Into<String>, targets: &[Target]) -> Self {
+        let queue = queue.into();
+        let mut domains: Vec<String> = Vec::new();
+        for target in targets {
+            if !domains.contains(&target.domain) {
+                domains.push(target.domain.clone());
+            }
+        }
+        if domains.is_empty() {
+            EventBusMode::SubscriberAll { queue }
+        } else {
+            EventBusMode::Subscriber { queue, domains }
+        }
+    }
 }
 
 // ============================================================================
@@ -135,83 +213,6 @@ impl Default for KafkaConfig {
             sasl_mechanism: None,
             security_protocol: None,
             ssl_ca_location: None,
-        }
-    }
-}
-
-/// IPC-specific configuration (for embedded mode).
-#[cfg(unix)]
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct IpcBusConfig {
-    /// Base path for pipes.
-    pub base_path: String,
-    /// Subscriber name (for subscriber mode).
-    pub subscriber_name: Option<String>,
-    /// Single domain to subscribe to (simpler env var).
-    pub domain: Option<String>,
-    /// Domains to subscribe to (for subscriber mode) - comma-separated when set via env var.
-    pub domains: Option<Vec<String>>,
-}
-
-#[cfg(unix)]
-impl IpcBusConfig {
-    /// Get domains as a Vec, preferring `domains` over `domain`.
-    pub fn get_domains(&self) -> Vec<String> {
-        self.domains
-            .clone()
-            .or_else(|| {
-                self.domain.as_ref().map(|d| {
-                    // Support comma-separated domains in the single domain field
-                    d.split(',').map(|s| s.trim().to_string()).collect()
-                })
-            })
-            .unwrap_or_default()
-    }
-}
-
-#[cfg(unix)]
-impl Default for IpcBusConfig {
-    fn default() -> Self {
-        Self {
-            base_path: "/tmp/angzarr".to_string(),
-            subscriber_name: None,
-            domain: None,
-            domains: None,
-        }
-    }
-}
-
-/// NATS JetStream-specific configuration.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(default)]
-pub struct NatsBusConfig {
-    /// NATS server URL.
-    pub url: String,
-    /// Stream prefix for topics.
-    pub stream_prefix: String,
-    /// Consumer name for subscriptions.
-    pub consumer_name: Option<String>,
-    /// Number of stream replicas.
-    pub replicas: u32,
-    /// Retention policy: "limits", "interest", "workqueue".
-    pub retention: String,
-    /// Maximum age for messages in hours.
-    pub max_age_hours: u64,
-    /// Domains to subscribe to.
-    pub domains: Option<Vec<String>>,
-}
-
-impl Default for NatsBusConfig {
-    fn default() -> Self {
-        Self {
-            url: "nats://localhost:4222".to_string(),
-            stream_prefix: "angzarr".to_string(),
-            consumer_name: None,
-            replicas: 1,
-            retention: "limits".to_string(),
-            max_age_hours: 168, // 7 days
-            domains: None,
         }
     }
 }

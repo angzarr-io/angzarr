@@ -3,14 +3,52 @@
 use async_trait::async_trait;
 use uuid::Uuid;
 
+use prost_types::Any;
+
 use super::Result;
 use crate::proto::EventPage;
+
+/// What a deferred provenance tuple is attached to.
+///
+/// The deferred-idempotency key is (kind, source, source_seq,
+/// source_component, command_index): a Notification delivery envelope
+/// carries the provenance tuple of the command it concerns, so the kind keeps
+/// a notification from being deduplicated against that command (or a
+/// rejection notification against a compensate notification).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum ProvenanceKind {
+    /// A deferred (saga/PM-emitted) command.
+    #[default]
+    Command,
+    /// A Notification delivery envelope carrying a RejectionNotification.
+    RejectionNotification,
+    /// A Notification delivery envelope carrying a Compensate.
+    CompensateNotification,
+}
+
+impl ProvenanceKind {
+    /// The stored spelling of the kind.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProvenanceKind::Command => "command",
+            ProvenanceKind::RejectionNotification => "rejection-notification",
+            ProvenanceKind::CompensateNotification => "compensate-notification",
+        }
+    }
+}
 
 /// Source tracking info for saga-produced events.
 ///
 /// Used for idempotency: if events exist with matching source info,
-/// the saga command was already processed.
-#[derive(Debug, Clone, Default)]
+/// the saga command (or notification) was already processed.
+///
+/// The full key is (kind, edition, domain, root, seq, component,
+/// command_index). edition/domain/root/seq identify only the triggering
+/// event; component and command_index identify which emission of that
+/// trigger this is — one invocation emitting several commands at the same
+/// destination (or two components reacting to the same event) must not share
+/// a key (O1); kind separates a command from the notifications about it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SourceInfo {
     /// Source edition (usually "angzarr")
     pub edition: String,
@@ -20,28 +58,64 @@ pub struct SourceInfo {
     pub root: Uuid,
     /// Source event sequence that triggered the saga
     pub seq: u32,
+    /// Registered name of the producing component (saga/PM).
+    pub component: String,
+    /// Position of the command within the invocation's emitted command list.
+    pub command_index: u32,
+    /// What the provenance tuple is attached to.
+    pub kind: ProvenanceKind,
 }
 
 impl SourceInfo {
-    /// Create new source info from saga origin.
+    /// Create new source info for a deferred command.
     pub fn new(
         edition: impl Into<String>,
         domain: impl Into<String>,
         root: Uuid,
         seq: u32,
+        component: impl Into<String>,
+        command_index: u32,
     ) -> Self {
         Self {
             edition: edition.into(),
             domain: domain.into(),
             root,
             seq,
+            component: component.into(),
+            command_index,
+            kind: ProvenanceKind::Command,
         }
+    }
+
+    /// The same provenance tuple attached to a different kind.
+    pub fn with_kind(mut self, kind: ProvenanceKind) -> Self {
+        self.kind = kind;
+        self
     }
 
     /// Check if this source info is empty/unset.
     pub fn is_empty(&self) -> bool {
         self.edition.is_empty() && self.domain.is_empty()
     }
+}
+
+/// Metadata bundled with an [`EventStore::add`] call.
+///
+/// Groups the book-cover fields that travel with a write so `add` keeps a small
+/// signature and new cover/metadata fields (e.g. `ext`) are additive rather than
+/// signature-breaking. Borrowed; construct with `..Default::default()` for the
+/// fields a caller doesn't set.
+#[derive(Debug, Clone, Default)]
+pub struct AddMeta<'a> {
+    /// Workflow correlation id (propagates across commands/events).
+    pub correlation_id: &'a str,
+    /// External id for fact idempotency (exactly-once), if any.
+    pub external_id: Option<&'a str>,
+    /// Saga source-event tracking for idempotency, if saga-produced.
+    pub source_info: Option<&'a SourceInfo>,
+    /// Parent-aggregate routing cover (`Cover.ext`), if present. Persisted and
+    /// reconstructed so it survives a storage round-trip.
+    pub ext: Option<&'a Any>,
 }
 
 /// Outcome of an `add()` operation.
@@ -93,9 +167,10 @@ impl AddOutcome {
 /// Interface for event persistence.
 ///
 /// All domain-scoped operations take `domain` as their first parameter,
-/// followed by `edition`. The edition identifies the timeline: `"angzarr"`
-/// for the main timeline, or a named edition (e.g., `"v2"`) for diverged
-/// timelines.
+/// followed by `edition`. The edition identifies the timeline: `""` or
+/// `"angzarr"` (interchangeable) for the main timeline, or a named edition
+/// (e.g., `"v2"`) for diverged timelines. Every backend keys all spellings
+/// of the main timeline identically and reports it in its wire form, `""`.
 ///
 /// The `(domain, edition, root, sequence)` tuple forms the unique key
 /// for stored events.
@@ -110,10 +185,21 @@ impl AddOutcome {
 ///
 /// Pass `None` or empty string for non-idempotent operations.
 ///
+/// # Appends
+///
+/// Each `add` batch must continue its stream exactly (see
+/// `storage::timeline::AppendWindow`): the main timeline and editions with
+/// events continue at `max + 1`; an edition's first batch may start at any
+/// divergence point up to the main timeline's next sequence. Pages within a
+/// batch are consecutive. A violation, or losing a concurrent race for the
+/// same sequence, is `StorageError::SequenceConflict`.
+///
 /// Implementations:
 /// - `SqliteEventStore`: SQLite storage
 /// - `PostgresEventStore`: PostgreSQL storage
-/// - `NatsEventStore`: NATS JetStream storage
+/// - `BigtableEventStore`: Bigtable storage
+/// - `DynamoEventStore`: DynamoDB storage
+/// - `ImmudbEventStore`: ImmuDB storage
 /// - `MockEventStore`: In-memory mock for testing
 #[async_trait]
 pub trait EventStore: Send + Sync {
@@ -137,16 +223,13 @@ pub trait EventStore: Send + Sync {
     /// If `source_info` is `Some(info)` where info is non-empty:
     /// - Source info is stored with each event for saga provenance tracking
     /// - Enables idempotency checking for saga-produced commands
-    #[allow(clippy::too_many_arguments)]
     async fn add(
         &self,
         domain: &str,
         edition: &str,
         root: Uuid,
         events: Vec<EventPage>,
-        correlation_id: &str,
-        external_id: Option<&str>,
-        source_info: Option<&SourceInfo>,
+        meta: &AddMeta<'_>,
     ) -> Result<AddOutcome>;
 
     /// Retrieve all events for an aggregate.
@@ -161,9 +244,13 @@ pub trait EventStore: Send + Sync {
     /// - `explicit_divergence = None`: Uses implicit divergence (first edition event).
     ///   This is the default behavior of `get()`.
     ///
-    /// This method is required for creating NEW branches that don't yet have
-    /// edition events. Without explicit divergence, a new branch would get NO
-    /// events (since implicit divergence requires existing edition events).
+    /// # Eventless-edition contract (finding #12 — inherit main timeline)
+    ///
+    /// A named edition with NO events of its own AND no explicit divergence
+    /// is "not diverged yet": it **inherits the entire main timeline** until
+    /// it explicitly diverges (by writing its first event, or by a
+    /// `Some(N)` divergence here). Every backend resolves this through
+    /// `storage::timeline::resolve_divergence`.
     ///
     /// # Example: Branch at sequence 3
     /// ```text
@@ -225,12 +312,27 @@ pub trait EventStore: Send + Sync {
     ///
     /// Returns events ordered by sequence ASC where created_at <= until.
     /// Used for temporal queries to reconstruct historical state.
+    ///
+    /// # Typed boundary (C10)
+    ///
+    /// `until` is a typed `prost_types::Timestamp`, not a caller-formatted
+    /// string. Prior to C10 this took `until: &str`, and every SQL backend
+    /// compared it lexically against a TEXT `created_at` column — a caller
+    /// that built the string with a `Z` suffix instead of the producer's
+    /// uniform `+00:00` corrupted the comparison (`'Z' > '+'` in ASCII),
+    /// silently returning the wrong event set. Accepting the typed value
+    /// here removes the possibility entirely: every backend derives its own
+    /// comparable form from `until` at exactly one point
+    /// (`storage::helpers::timestamp_to_rfc3339` for the TEXT-column SQL
+    /// backends; a direct `chrono::DateTime::from_timestamp` for the
+    /// semantic backends), so no caller-supplied string ever reaches the
+    /// comparison.
     async fn get_until_timestamp(
         &self,
         domain: &str,
         edition: &str,
         root: Uuid,
-        until: &str,
+        until: &prost_types::Timestamp,
     ) -> Result<Vec<EventPage>>;
 
     /// Retrieve all events with a given correlation ID across all domains.
@@ -279,57 +381,7 @@ pub trait EventStore: Send + Sync {
     ///
     /// Returns the number of events deleted.
     /// Note: This is a destructive operation - events cannot be recovered.
-    /// Main timeline ('angzarr' or empty edition) protection must be enforced
-    /// by the caller.
+    /// The main timeline (`""` or `"angzarr"`) is refused with
+    /// `StorageError::MainTimelineProtected`.
     async fn delete_edition_events(&self, domain: &str, edition: &str) -> Result<u32>;
-
-    // =========================================================================
-    // Cascade (2PC) Query Methods - Phase 5
-    // =========================================================================
-
-    /// Query cascade IDs that have at least one unresolved participant past
-    /// the threshold.
-    ///
-    /// Used by the CascadeReaper background job to find stale cascades that
-    /// need timeout-based revocation. Resolution is **per-participant** (per
-    /// `(cascade_id, domain, edition, root)` tuple) — a participant is
-    /// resolved when there is a committed cascade row (Confirmation or
-    /// Revocation) on the same `(domain, edition, root)` for that cascade.
-    /// A cascade is therefore "stale" when:
-    /// - It has at least one uncommitted (`committed=false`) row
-    /// - That row's `created_at` is older than `threshold`
-    /// - That participant's `(domain, edition, root)` has no committed
-    ///   cascade row for the same cascade_id
-    ///
-    /// Pre-C-02 semantics excluded the cascade globally when ANY committed
-    /// row existed for that cascade_id; that stranded participants 2..N
-    /// after participant 1's Revocation succeeded.
-    ///
-    /// # Arguments
-    /// * `threshold` - ISO 8601 timestamp string. Events older than this are considered stale.
-    async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>>;
-
-    /// Query unresolved participants (aggregates) in a cascade.
-    ///
-    /// Returns a list of `(domain, edition, root, sequences)` tuples for all
-    /// aggregates that have uncommitted events for the given cascade_id AND
-    /// have not yet been resolved (no committed cascade row on that
-    /// `(domain, edition, root)` for the same cascade_id). Used by the
-    /// CascadeReaper to write Revocation events without re-revoking
-    /// participants that previous reaper passes already resolved.
-    async fn query_cascade_participants(&self, cascade_id: &str)
-        -> Result<Vec<CascadeParticipant>>;
-}
-
-/// Information about an aggregate participating in a cascade.
-#[derive(Debug, Clone)]
-pub struct CascadeParticipant {
-    /// Domain name of the aggregate.
-    pub domain: String,
-    /// Edition (timeline) of the aggregate.
-    pub edition: String,
-    /// Root UUID of the aggregate.
-    pub root: Uuid,
-    /// Sequences of uncommitted events for this cascade.
-    pub sequences: Vec<u32>,
 }

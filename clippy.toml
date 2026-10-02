@@ -1,0 +1,15 @@
+# Clippy configuration.
+#
+# cognitive-complexity-threshold drives the `clippy::cognitive_complexity` lint,
+# which is the authoritative per-function complexity gate for the Rust sources
+# here. We prefer it over lizard's cyclomatic count because lizard counts every
+# `?` operator as a branch (proven: a function with 6 `?` and no branches reports
+# CCN 7), which massively inflates idiomatic fallible Rust. clippy's cognitive
+# complexity penalizes nesting and control flow but not `?`, so it tracks the
+# complexity a reader actually experiences. See doc/complexity-remediation.md.
+#
+# clippy's default is 25. We start at 15 as the remediation bar; tune as the
+# backlog is worked down. The lint is allow-by-default (nursery), so it only
+# fires when explicitly enabled (the `lint` recipe passes
+# `-W clippy::cognitive_complexity`).
+cognitive-complexity-threshold = 10

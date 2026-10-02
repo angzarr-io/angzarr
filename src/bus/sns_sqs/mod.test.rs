@@ -82,3 +82,19 @@ fn test_endpoint_config() {
         Some("http://localhost:4566".to_string())
     );
 }
+
+/// A subscriber derived from a publisher keeps region, endpoint and topic
+/// prefix, so it reads the topics that publisher writes.
+#[test]
+fn test_subscriber_config_keeps_region_endpoint_prefix() {
+    let publisher = SnsSqsConfig::publisher()
+        .with_region("eu-west-1")
+        .with_endpoint("http://floci:4566")
+        .with_topic_prefix("tenant-a");
+    let sub = publisher.subscriber_config("audit", Some("orders"));
+    assert_eq!(sub.region.as_deref(), Some("eu-west-1"));
+    assert_eq!(sub.endpoint_url.as_deref(), Some("http://floci:4566"));
+    assert_eq!(sub.topic_prefix, "tenant-a");
+    assert_eq!(sub.subscription_id.as_deref(), Some("audit"));
+    assert_eq!(sub.domains, vec!["orders".to_string()]);
+}

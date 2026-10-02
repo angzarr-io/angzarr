@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use backon::ExponentialBuilder;
 
-use crate::proto::{CommandResponse, SyncMode};
+use crate::proto::{CommandResponse, Cover, SyncMode, Uuid as ProtoUuid};
 
 // ============================================================================
 // Test Doubles
@@ -92,20 +92,21 @@ impl ProcessManagerContext for PmWithEvents {
     }
 }
 
-/// Destination fetcher that returns no state — simulates missing aggregates.
+/// Destination fetcher that returns no state — simulates missing aggregates
+/// (Ok(None) = the store answered and genuinely holds nothing).
 struct NoOpFetcher;
 
 #[async_trait]
 impl DestinationFetcher for NoOpFetcher {
-    async fn fetch(&self, _cover: &Cover) -> Option<EventBook> {
-        None
+    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(None)
     }
     async fn fetch_by_correlation(
         &self,
         _domain: &str,
         _correlation_id: &str,
-    ) -> Option<EventBook> {
-        None
+    ) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(None)
     }
 }
 
@@ -138,6 +139,7 @@ fn trigger_event() -> EventBook {
             root: None,
             correlation_id: "corr-1".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,
@@ -171,6 +173,7 @@ async fn test_orchestrate_pm_empty_response() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -203,6 +206,7 @@ async fn test_orchestrate_pm_persists_events() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -236,6 +240,7 @@ async fn test_orchestrate_pm_retries_on_sequence_conflict() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -275,6 +280,7 @@ async fn test_orchestrate_pm_exhausts_retries() {
         "corr-1",
         SyncMode::Async,
         backoff,
+        None,
     )
     .await;
 
@@ -342,6 +348,7 @@ impl ProcessManagerContext for PmWithSyncOverride {
             root: None,
             correlation_id: "corr-1".to_string(),
             edition: None,
+            ext: None,
         };
         Ok(PmHandleResponse {
             commands: vec![CommandBook {
@@ -383,6 +390,7 @@ async fn test_per_command_sync_mode_override_is_honored() {
         "corr-1",
         SyncMode::Async, // inherited mode is Async
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -411,6 +419,7 @@ async fn test_inherited_sync_mode_used_when_no_override() {
         "corr-1",
         SyncMode::Cascade, // inherited mode
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -469,8 +478,6 @@ fn event_page_with_seq(seq: u32) -> crate::proto::EventPage {
             sequence_type: Some(SequenceType::Sequence(seq)),
         }),
         created_at: None,
-        no_commit: false,
-        cascade_id: None,
         payload: Some(EvPayload::Event(prost_types::Any {
             type_url: "test.PmEvent".to_string(),
             value: vec![],
@@ -486,6 +493,7 @@ fn pm_book_for_root(root_bytes: Vec<u8>, first_seq: u32, last_seq: u32) -> Event
             root: Some(ProtoUuid { value: root_bytes }),
             correlation_id: "corr-1".to_string(),
             edition: None,
+            ext: None,
         }),
         pages,
         snapshot: None,
@@ -568,6 +576,7 @@ async fn test_orchestrate_pm_does_not_re_emit_earlier_books_after_retry() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -646,6 +655,7 @@ impl ProcessManagerContext for RejectionRecordingPm {
             root: None,
             correlation_id: "corr-1".to_string(),
             edition: None,
+            ext: None,
         };
         Ok(PmHandleResponse {
             commands: vec![CommandBook {
@@ -667,9 +677,10 @@ impl ProcessManagerContext for RejectionRecordingPm {
         &self,
         _command: &CommandBook,
         reason: &str,
-        _correlation_id: &str,
-    ) {
+        _code: &str,
+    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
         self.rejected.lock().await.push(reason.to_string());
+        Ok(())
     }
 }
 
@@ -710,6 +721,7 @@ async fn test_orchestrate_pm_decision_retryable_does_not_hang_caller() {
         "corr-1",
         SyncMode::Async, // inherited mode (Async); per-command header overrides to Decision
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -763,6 +775,7 @@ impl ProcessManagerContext for PmWithFact {
                 root: None,
                 correlation_id: "corr-1".to_string(),
                 edition: None,
+                ext: None,
             }),
             pages: vec![],
             snapshot: None,
@@ -780,6 +793,654 @@ impl ProcessManagerContext for PmWithFact {
         _correlation_id: &str,
     ) -> CommandOutcome {
         CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+// ============================================================================
+// DLQ Wiring Tests (R2-15 step 5b)
+// ============================================================================
+//
+// PM has four DLQ-relevant failure sites:
+//
+// 1. PM persist retry-exhausted (`CommandOutcome::Retryable` with the
+//    persistence backoff budget gone) -> DLQ with the failed PM event
+//    book, `is_transient=true`.
+// 2. PM persist immediate-Rejected (`CommandOutcome::Rejected` from the
+//    PM-state event store) -> DLQ with the failed PM event book,
+//    `is_transient=false`.
+// 3. PM command Rejected (the dispatch loop sees a permanent rejection
+//    from the destination aggregate or transport) -> DLQ with the
+//    failed `CommandBook` + compensation via `on_command_rejected`.
+// 4. PM H-14 Decision-mode degraded (executor returned Retryable but
+//    contract requires synchronous accept/reject) -> DLQ
+//    unconditionally with the degraded reason.
+//
+// The fakes below let each scenario be exercised in isolation.
+
+use std::sync::Arc;
+
+use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher, DlqError, RejectionDetails};
+
+/// Captures published dead letters for assertions.
+struct CapturingDlqPublisher {
+    captured: tokio::sync::Mutex<Vec<AngzarrDeadLetter>>,
+}
+
+impl CapturingDlqPublisher {
+    fn new() -> Self {
+        Self {
+            captured: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl DeadLetterPublisher for CapturingDlqPublisher {
+    async fn publish(&self, dead_letter: AngzarrDeadLetter) -> Result<(), DlqError> {
+        self.captured.lock().await.push(dead_letter);
+        Ok(())
+    }
+}
+
+/// PM context whose `persist_pm_events` outcome is parameterizable.
+/// Emits exactly one PM event book per handle so the persist site fires.
+struct DlqPersistPm {
+    persist_outcome: Box<dyn Fn() -> CommandOutcome + Send + Sync>,
+    dlq_publisher: Arc<dyn DeadLetterPublisher>,
+}
+
+#[async_trait]
+impl ProcessManagerContext for DlqPersistPm {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        _pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::EventPage;
+        Ok(PmHandleResponse {
+            commands: vec![],
+            process_events: vec![EventBook {
+                cover: None,
+                pages: vec![EventPage::default()],
+                snapshot: None,
+                ..Default::default()
+            }],
+            facts: vec![],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        _process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        (self.persist_outcome)()
+    }
+    fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
+        Some(&self.dlq_publisher)
+    }
+    fn component_name(&self) -> &str {
+        "pm-test"
+    }
+}
+
+/// PM context that emits one command and persists successfully. Used to
+/// exercise the command-dispatch DLQ sites — the executor decides the
+/// command outcome.
+struct DlqCommandPm {
+    rejection_count: AtomicU32,
+    dlq_publisher: Arc<dyn DeadLetterPublisher>,
+    decision_mode: bool,
+}
+
+impl DlqCommandPm {
+    fn new(publisher: Arc<dyn DeadLetterPublisher>, decision_mode: bool) -> Self {
+        Self {
+            rejection_count: AtomicU32::new(0),
+            dlq_publisher: publisher,
+            decision_mode,
+        }
+    }
+}
+
+#[async_trait]
+impl ProcessManagerContext for DlqCommandPm {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        _pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::{
+            command_page::Payload as CmdPayload, page_header::SequenceType, CommandPage,
+            MergeStrategy, PageHeader,
+        };
+        let sync_mode = if self.decision_mode {
+            Some(SyncMode::Decision as i32)
+        } else {
+            None
+        };
+        let header = PageHeader {
+            sequence_type: Some(SequenceType::Sequence(0)),
+            sync_mode,
+        };
+        let page = CommandPage {
+            header: Some(header),
+            merge_strategy: MergeStrategy::MergeCommutative as i32,
+            payload: Some(CmdPayload::Command(prost_types::Any {
+                type_url: "test.PmCommand".to_string(),
+                value: vec![],
+            })),
+        };
+        let cover = Cover {
+            domain: "fulfillment".to_string(),
+            root: None,
+            correlation_id: "corr-1".to_string(),
+            edition: None,
+            ext: None,
+        };
+        Ok(PmHandleResponse {
+            commands: vec![CommandBook {
+                cover: Some(cover),
+                pages: vec![page],
+            }],
+            process_events: vec![],
+            facts: vec![],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        _process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        CommandOutcome::Success(CommandResponse::default())
+    }
+    async fn on_command_rejected(
+        &self,
+        _command: &CommandBook,
+        _reason: &str,
+        _code: &str,
+    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
+        self.rejection_count.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+    fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
+        Some(&self.dlq_publisher)
+    }
+    fn component_name(&self) -> &str {
+        "pm-test"
+    }
+}
+
+/// PM context identical to `DlqCommandPm` but ALSO wires an outbox, so
+/// the C04 else arm takes the outbox (redelivery) branch rather than the DLQ
+/// fallback.
+struct OutboxCommandPm {
+    dlq_publisher: Arc<dyn DeadLetterPublisher>,
+    outbox: Arc<crate::orchestration::outbox::Outbox>,
+}
+
+#[async_trait]
+impl ProcessManagerContext for OutboxCommandPm {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        _pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::{
+            command_page::Payload as CmdPayload, page_header::SequenceType, CommandPage,
+            MergeStrategy, PageHeader,
+        };
+        let header = PageHeader {
+            sequence_type: Some(SequenceType::Sequence(0)),
+            sync_mode: None,
+        };
+        let page = CommandPage {
+            header: Some(header),
+            merge_strategy: MergeStrategy::MergeCommutative as i32,
+            payload: Some(CmdPayload::Command(prost_types::Any {
+                type_url: "test.PmCommand".to_string(),
+                value: vec![],
+            })),
+        };
+        let cover = Cover {
+            domain: "fulfillment".to_string(),
+            root: None,
+            correlation_id: "corr-1".to_string(),
+            edition: None,
+            ext: None,
+        };
+        Ok(PmHandleResponse {
+            commands: vec![CommandBook {
+                cover: Some(cover),
+                pages: vec![page],
+            }],
+            process_events: vec![],
+            facts: vec![],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        _process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        CommandOutcome::Success(CommandResponse::default())
+    }
+    fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
+        Some(&self.dlq_publisher)
+    }
+    fn outbox(&self) -> Option<&Arc<crate::orchestration::outbox::Outbox>> {
+        Some(&self.outbox)
+    }
+    fn component_name(&self) -> &str {
+        "pm-test"
+    }
+}
+
+/// Executor that returns a parameterized Rejected outcome.
+struct CodeRejectingExecutor {
+    code: tonic::Code,
+    message: String,
+    error_code: String,
+}
+
+#[async_trait]
+impl CommandExecutor for CodeRejectingExecutor {
+    async fn execute(&self, _command: CommandBook, _sync_mode: SyncMode) -> CommandOutcome {
+        CommandOutcome::Rejected {
+            code: self.code,
+            message: self.message.clone(),
+            error_code: self.error_code.clone(),
+        }
+    }
+}
+
+/// PM persist retry-exhaustion publishes a dead letter for the failed
+/// event book and `is_transient=true`.
+#[tokio::test]
+async fn pm_persist_retry_exhausted_publishes_dead_letter() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = DlqPersistPm {
+        persist_outcome: Box::new(|| CommandOutcome::Retryable {
+            reason: "Sequence conflict".to_string(),
+            current_state: None,
+        }),
+        dlq_publisher: publisher.clone(),
+    };
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &NoOpExecutor,
+        None,
+        &trigger,
+        "pm-test",
+        "pm-test",
+        "corr-1",
+        SyncMode::Simple,
+        fast_backoff(),
+        None,
+    )
+    .await;
+
+    assert!(result.is_err(), "retry exhaustion must propagate Err");
+    let captured = publisher.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "expected one persist retry-exhausted DLQ entry"
+    );
+    let dl = &captured[0];
+    assert_eq!(dl.source_component_type, "process_manager");
+    assert_eq!(dl.source_component, "pm-test");
+    match &dl.rejection_details {
+        Some(RejectionDetails::EventProcessingFailed(details)) => {
+            assert!(details.is_transient, "retry-exhausted is transient");
+            assert!(
+                details.retry_count > 0,
+                "retry-exhausted reports the attempt count, got {}",
+                details.retry_count
+            );
+            assert!(details.error.contains("Sequence conflict"));
+        }
+        other => panic!("expected EventProcessingFailed, got {other:?}"),
+    }
+}
+
+/// PM persist immediate-rejection publishes a dead letter for the failed
+/// event book with `retry_count=0`, `is_transient=false`.
+#[tokio::test]
+async fn pm_persist_immediate_rejection_publishes_dead_letter() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = DlqPersistPm {
+        persist_outcome: Box::new(|| CommandOutcome::Rejected {
+            code: tonic::Code::InvalidArgument,
+            message: "schema mismatch".to_string(),
+            error_code: String::new(),
+        }),
+        dlq_publisher: publisher.clone(),
+    };
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &NoOpExecutor,
+        None,
+        &trigger,
+        "pm-test",
+        "pm-test",
+        "corr-1",
+        SyncMode::Simple,
+        fast_backoff(),
+        None,
+    )
+    .await;
+
+    assert!(result.is_err(), "immediate rejection must propagate Err");
+    let captured = publisher.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "expected one persist immediate-rejection DLQ entry"
+    );
+    let dl = &captured[0];
+    assert_eq!(dl.source_component_type, "process_manager");
+    match &dl.rejection_details {
+        Some(RejectionDetails::EventProcessingFailed(details)) => {
+            assert_eq!(details.retry_count, 0, "immediate path: zero retries");
+            assert!(!details.is_transient, "immediate rejection is permanent");
+            assert!(details.error.contains("schema mismatch"));
+        }
+        other => panic!("expected EventProcessingFailed, got {other:?}"),
+    }
+}
+
+/// 4xx PM command rejection publishes a dead letter immediately alongside
+/// `on_command_rejected` for compensation.
+#[tokio::test]
+async fn pm_4xx_command_rejection_publishes_dead_letter_immediately() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = DlqCommandPm::new(publisher.clone(), false);
+    let executor = CodeRejectingExecutor {
+        code: tonic::Code::InvalidArgument,
+        message: "bad command".to_string(),
+        error_code: String::new(),
+    };
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger,
+        "pm-test",
+        "pm-test",
+        "corr-1",
+        SyncMode::Simple,
+        fast_backoff(),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "command rejection does not fail orchestrate_pm"
+    );
+    assert_eq!(
+        ctx.rejection_count.load(Ordering::SeqCst),
+        1,
+        "compensation still runs alongside DLQ publish"
+    );
+    let captured = publisher.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "expected one command-rejection DLQ entry"
+    );
+    let dl = &captured[0];
+    assert_eq!(dl.source_component_type, "process_manager");
+    match &dl.rejection_details {
+        Some(RejectionDetails::EventProcessingFailed(details)) => {
+            assert_eq!(details.retry_count, 0);
+            assert!(!details.is_transient);
+            assert!(details.error.contains("bad command"));
+        }
+        other => panic!("expected EventProcessingFailed, got {other:?}"),
+    }
+}
+
+/// H-14: a Decision-mode command whose executor returns Retryable must
+/// publish a dead letter unconditionally (no `tonic::Code` available,
+/// the contract loss IS the rejection).
+#[tokio::test]
+async fn pm_h14_decision_degraded_publishes_dead_letter() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = DlqCommandPm::new(publisher.clone(), true);
+    let executor = AlwaysRetryableExecutor;
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger,
+        "pm-test",
+        "pm-test",
+        "corr-1",
+        SyncMode::Simple,
+        fast_backoff(),
+        None,
+    )
+    .await;
+
+    assert!(result.is_err(), "H-14 degraded path surfaces an Err");
+    assert_eq!(
+        ctx.rejection_count.load(Ordering::SeqCst),
+        1,
+        "compensation runs alongside the H-14 DLQ publish"
+    );
+    let captured = publisher.captured.lock().await;
+    assert_eq!(captured.len(), 1, "expected one H-14 degraded DLQ entry");
+    let dl = &captured[0];
+    assert_eq!(dl.source_component_type, "process_manager");
+    match &dl.rejection_details {
+        Some(RejectionDetails::EventProcessingFailed(details)) => {
+            assert!(!details.is_transient);
+            assert!(
+                details.error.contains("SYNC_MODE_DECISION"),
+                "degraded reason should name the contract that was lost, got: {}",
+                details.error
+            );
+        }
+        other => panic!("expected EventProcessingFailed, got {other:?}"),
+    }
+}
+
+/// Successful orchestration emits no dead letters.
+#[tokio::test]
+async fn pm_2xx_success_does_not_publish() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = DlqCommandPm::new(publisher.clone(), false);
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &NoOpExecutor,
+        None,
+        &trigger,
+        "pm-test",
+        "pm-test",
+        "corr-1",
+        SyncMode::Simple,
+        fast_backoff(),
+        None,
+    )
+    .await;
+
+    assert!(result.is_ok());
+    let captured = publisher.captured.lock().await;
+    assert!(
+        captured.is_empty(),
+        "success path must not publish dead letters, got {} entries",
+        captured.len()
+    );
+}
+
+// ============================================================================
+// C04: non-Decision transient command failure after PM persist boundary
+// ============================================================================
+//
+// `execute_pm_commands` runs strictly AFTER the PM event book is persisted
+// (the module doc calls this "the point of no return"). Before this fix, a
+// `CommandOutcome::Retryable` on a *non*-Decision command (Simple/Cascade —
+// the overwhelmingly common case) fell into a bare `else { warn!(...) } `
+// arm: the log claimed the command "will be retried" but nothing in the
+// codebase ever retries it — no redelivery, no DLQ entry, no operator
+// signal. The workflow stalls forever with the PM believing its command was
+// dispatched.
+//
+// `CommandOutcome::Retryable` is constructed once, at the gRPC executor
+// boundary (`command/grpc/mod.rs`), by collapsing every
+// `is_retryable_status` code (`Unavailable`, `DeadlineExceeded`,
+// `ResourceExhausted`, `Internal`, `Unknown`, `DataLoss`, `Cancelled`, plus
+// the sequence-conflict `FailedPrecondition` case) into one `reason: String`
+// — the original `tonic::Code` is not preserved. So from the PM dispatch
+// loop's perspective there is exactly one shape to handle; re-deriving
+// per-code coverage here would just re-test `is_retryable_status`, which
+// already has its own exhaustive table in `utils/retry.test.rs`.
+//
+// Fix (reviewer decision: OUTBOX, not plain DLQ): route the else arm to the
+// PM's command outbox for at-least-once redelivery by the drain loop. If no
+// outbox is wired, fall back to DLQ *capture* (operator-visible, transient,
+// no redelivery) so nothing is ever silently dropped. No in-place retry is
+// attempted here — re-running the PM handler would duplicate the
+// already-persisted PM events (see the module persist-boundary doc); the
+// outbox owns redelivery, decoupled from the persist transaction.
+//
+// The two tests below pin both branches: outbox present -> enqueue (no DLQ);
+// outbox absent -> DLQ capture. The full drain/redelivery state machine is
+// covered in `orchestration/outbox/mod.test.rs`.
+
+/// C04 outbox path: a non-Decision command that fails transiently after the
+/// persist boundary is enqueued to the command outbox for redelivery — NOT
+/// dropped, and NOT sent straight to the DLQ (the drain loop still has a
+/// budget to spend).
+#[tokio::test]
+async fn pm_transient_command_after_persist_enqueues_to_outbox() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let (outbox, deliverer) = crate::orchestration::outbox::testing::recording_outbox("pm-test");
+    let ctx = OutboxCommandPm {
+        dlq_publisher: publisher.clone(),
+        outbox: outbox.clone(),
+    };
+    let executor = AlwaysRetryableExecutor;
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger,
+        "pm-test",
+        "pm-test",
+        "corr-1",
+        SyncMode::Simple,
+        fast_backoff(),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "a fire-and-forget command failure must not fail orchestrate_pm"
+    );
+
+    let pending = outbox.open_keys().await;
+    assert_eq!(
+        pending.len(),
+        1,
+        "the transient command must be captured in the outbox for redelivery"
+    );
+    let entry = outbox.open_entry(&pending[0]).await.unwrap();
+    assert_eq!(entry.kind, crate::storage::ProvenanceKind::Command);
+    assert_eq!(entry.attempts, 0, "no redelivery attempted yet at record");
+    assert!(
+        deliverer.attempted().is_empty(),
+        "the drain loop, not the dispatch, redelivers"
+    );
+
+    let captured = publisher.captured.lock().await;
+    assert!(
+        captured.is_empty(),
+        "with an outbox wired the DLQ is NOT used yet (redelivery budget remains), \
+         got {} entries",
+        captured.len()
+    );
+}
+
+/// C04 fallback path (also the original reproduction): with NO outbox wired, a
+/// non-Decision command that fails transiently after the persist boundary is
+/// captured to the DLQ (`is_transient=true`, `retry_count=0`) rather than
+/// silently dropped. Before the fix this assertion failed — the else arm only
+/// logged and `captured` was empty.
+#[tokio::test]
+async fn pm_transient_command_failure_after_persist_publishes_dead_letter() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    // DlqCommandPm wires a DLQ but NO outbox -> exercises the fallback.
+    let ctx = DlqCommandPm::new(publisher.clone(), false);
+    let executor = AlwaysRetryableExecutor;
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger,
+        "pm-test",
+        "pm-test",
+        "corr-1",
+        SyncMode::Simple,
+        fast_backoff(),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "a fire-and-forget (non-Decision) command failure must not fail \
+         orchestrate_pm — PM events are already persisted; the workflow \
+         proceeds and the operator resolves the DLQ entry out of band"
+    );
+
+    let captured = publisher.captured.lock().await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "expected one transient-command DLQ entry, got {}: {:?}",
+        captured.len(),
+        *captured
+    );
+    let dl = &captured[0];
+    assert_eq!(dl.source_component_type, "process_manager");
+    assert_eq!(dl.source_component, "pm-test");
+    match &dl.rejection_details {
+        Some(RejectionDetails::EventProcessingFailed(details)) => {
+            assert_eq!(
+                details.retry_count, 0,
+                "no in-place retry is attempted post-persist"
+            );
+            assert!(
+                details.is_transient,
+                "a Retryable outcome is transient by construction"
+            );
+            assert!(details.error.contains("transport conflict"));
+        }
+        other => panic!("expected EventProcessingFailed, got {other:?}"),
     }
 }
 
@@ -801,6 +1462,7 @@ async fn test_orchestrate_pm_refuses_facts_without_fact_executor() {
         "corr-1",
         SyncMode::Async,
         fast_backoff(),
+        None,
     )
     .await;
 
@@ -815,6 +1477,1191 @@ async fn test_orchestrate_pm_refuses_facts_without_fact_executor() {
             msg.to_lowercase().contains("fact"),
             "error message must name 'fact' so operators can diagnose the \
              missing wiring. Got: {msg}"
+        );
+    }
+}
+
+// ============================================================================
+// O1 + D-5/O13: provenance stamping (component + command_index) and
+// honoring handler-stamped explicit sequences
+// ============================================================================
+
+use crate::proto::{
+    command_page::Payload as CmdPayload, page_header::SequenceType, AngzarrDeferredSequence,
+    CommandPage, MergeStrategy, PageHeader,
+};
+
+/// Executor that captures each CommandBook so tests can inspect the
+/// rewritten page headers `execute_pm_commands` produced.
+struct BookCapturingExecutor {
+    seen: tokio::sync::Mutex<Vec<CommandBook>>,
+}
+
+impl BookCapturingExecutor {
+    fn new() -> Self {
+        Self {
+            seen: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl CommandExecutor for BookCapturingExecutor {
+    async fn execute(&self, command: CommandBook, _sync_mode: SyncMode) -> CommandOutcome {
+        self.seen.lock().await.push(command);
+        CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+/// PM context that emits one command per entry in `headers`, all to the
+/// same destination, so tests can drive each arm of the stamping rewrite.
+struct PmEmittingHeaders {
+    headers: Vec<Option<PageHeader>>,
+}
+
+#[async_trait]
+impl ProcessManagerContext for PmEmittingHeaders {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        _pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let commands = self
+            .headers
+            .iter()
+            .map(|header| CommandBook {
+                cover: Some(Cover {
+                    domain: "fulfillment".to_string(),
+                    root: None,
+                    correlation_id: "corr-1".to_string(),
+                    edition: None,
+                    ext: None,
+                }),
+                pages: vec![CommandPage {
+                    header: header.clone(),
+                    merge_strategy: MergeStrategy::MergeCommutative as i32,
+                    payload: Some(CmdPayload::Command(prost_types::Any {
+                        type_url: "test.PmCommand".to_string(),
+                        value: vec![],
+                    })),
+                }],
+            })
+            .collect();
+        Ok(PmHandleResponse {
+            commands,
+            process_events: vec![],
+            facts: vec![],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        _process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+fn captured_deferred(book: &CommandBook) -> &AngzarrDeferredSequence {
+    match book
+        .pages
+        .first()
+        .and_then(|p| p.header.as_ref())
+        .and_then(|h| h.sequence_type.as_ref())
+    {
+        Some(SequenceType::AngzarrDeferred(d)) => d,
+        other => panic!("expected AngzarrDeferred header, got {other:?}"),
+    }
+}
+
+/// O1: every command of one PM invocation gets the framework-stamped
+/// provenance — the PM's registered name and its position in the emitted
+/// command list. Without these, all commands of the invocation share one
+/// deferred-idempotency key and the destination swallows all but the first.
+#[tokio::test]
+async fn test_pm_stamps_component_and_command_index() {
+    let ctx = PmEmittingHeaders {
+        headers: vec![None, None],
+    };
+    let executor = BookCapturingExecutor::new();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger_event(),
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await;
+    assert!(result.is_ok(), "orchestrate_pm should succeed");
+
+    let captured = executor.seen.lock().await;
+    assert_eq!(captured.len(), 2, "expected both commands through executor");
+    for (i, book) in captured.iter().enumerate() {
+        let deferred = captured_deferred(book);
+        assert_eq!(
+            deferred.source_component, "pmg-fulfillment",
+            "command {i} must carry the PM's registered name"
+        );
+        assert_eq!(
+            deferred.command_index, i as u32,
+            "command {i} must carry its position in the invocation's output"
+        );
+        let source = deferred
+            .source
+            .as_ref()
+            .expect("default arm must stamp the trigger's cover");
+        assert_eq!(
+            source.domain, "order",
+            "commands are attributed to the triggering event's aggregate"
+        );
+    }
+}
+
+/// D-5/O13: a handler-stamped explicit destination sequence is HONORED —
+/// the rewrite must not overwrite it with AngzarrDeferred. The command
+/// travels as a plain sequenced command; the destination's
+/// optimistic-concurrency gate validates it and rejects on mismatch.
+/// Pre-fix the default match arm clobbered `Sequence(n)` silently.
+#[tokio::test]
+async fn test_pm_honors_handler_stamped_explicit_sequence() {
+    let ctx = PmEmittingHeaders {
+        headers: vec![Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(SequenceType::Sequence(9)),
+        })],
+    };
+    let executor = BookCapturingExecutor::new();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger_event(),
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await;
+    assert!(result.is_ok(), "orchestrate_pm should succeed");
+
+    let captured = executor.seen.lock().await;
+    let header = captured[0]
+        .pages
+        .first()
+        .and_then(|p| p.header.as_ref())
+        .expect("page should keep its header");
+    assert_eq!(
+        header.sequence_type,
+        Some(SequenceType::Sequence(9)),
+        "handler-stamped explicit sequence must travel to the destination untouched (D-5)"
+    );
+}
+
+/// A handler-stamped `AngzarrDeferred` entry is MERGED, not replaced: its
+/// `source` cover and `source_seq` (the handler's own provenance claim —
+/// e.g. re-attributing a compensating command to the PM state that made the
+/// original decision) survive the rewrite, while the framework still stamps
+/// what it alone owns — `source_component` and `command_index` (the O1
+/// idempotency-key parts). If this match arm fell through to the default
+/// arm, the handler's provenance would be silently overwritten with the PM
+/// cover + current `pm_source_seq`, so a later rejection would compensate
+/// against the WRONG source state.
+#[tokio::test]
+async fn test_pm_preserves_handler_stamped_deferred_source_and_seq() {
+    let upstream_cover = Cover {
+        domain: "upstream-agg".to_string(),
+        root: Some(ProtoUuid {
+            value: vec![0xAB; 16],
+        }),
+        correlation_id: "corr-1".to_string(),
+        edition: None,
+        ext: None,
+    };
+    let ctx = PmEmittingHeaders {
+        headers: vec![Some(PageHeader {
+            sync_mode: None,
+            sequence_type: Some(SequenceType::AngzarrDeferred(AngzarrDeferredSequence {
+                source: Some(upstream_cover.clone()),
+                // Distinct from pm_source_seq (0 here: no PM state, no PM
+                // events) so an overwrite is observable.
+                source_seq: 7,
+                // Handler-scribbled values for the framework-owned fields:
+                // these MUST be normalized by the rewrite.
+                source_component: "handler-scribble".to_string(),
+                command_index: 99,
+            })),
+        })],
+    };
+    let executor = BookCapturingExecutor::new();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger_event(),
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await;
+    assert!(result.is_ok(), "orchestrate_pm should succeed");
+
+    let captured = executor.seen.lock().await;
+    assert_eq!(captured.len(), 1);
+    let deferred = captured_deferred(&captured[0]);
+
+    // Handler-owned provenance survives the rewrite.
+    assert_eq!(
+        deferred.source_seq, 7,
+        "handler-stamped source_seq must be preserved — the default arm would \
+         overwrite it with pm_source_seq (0)"
+    );
+    assert_eq!(
+        deferred.source.as_ref().map(|s| s.domain.as_str()),
+        Some("upstream-agg"),
+        "handler-stamped source cover must be preserved — the default arm would \
+         overwrite it with the PM's own cover"
+    );
+
+    // Framework-owned provenance is stamped regardless of handler input (O1).
+    assert_eq!(
+        deferred.source_component, "pmg-fulfillment",
+        "source_component is framework provenance, never handler data"
+    );
+    assert_eq!(
+        deferred.command_index, 0,
+        "command_index is framework provenance, never handler data"
+    );
+}
+
+// ============================================================================
+// PM command provenance names the triggering event
+// ============================================================================
+
+fn trigger_at(domain: &str, root: u8, seq: u32, edition: &str) -> EventBook {
+    EventBook {
+        cover: Some(Cover {
+            domain: domain.to_string(),
+            root: Some(ProtoUuid {
+                value: vec![root; 16],
+            }),
+            correlation_id: "corr-1".to_string(),
+            edition: Some(crate::proto::Edition {
+                name: edition.to_string(),
+                divergences: vec![],
+            }),
+            ext: None,
+        }),
+        pages: vec![event_page_with_seq(seq)],
+        ..Default::default()
+    }
+}
+
+async fn stamped_for(trigger: &EventBook) -> AngzarrDeferredSequence {
+    let ctx = PmEmittingHeaders {
+        headers: vec![None],
+    };
+    let executor = BookCapturingExecutor::new();
+    orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        trigger,
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await
+    .unwrap();
+    let captured = executor.seen.lock().await;
+    captured_deferred(&captured[0]).clone()
+}
+
+/// Two triggers that make the PM emit commands without recording PM events
+/// must produce different idempotency keys; the PM's own (unchanged)
+/// sequence used to give both the same key, so the destination swallowed
+/// the second trigger's commands as replays.
+#[tokio::test]
+async fn test_pm_commands_from_distinct_triggers_have_distinct_keys() {
+    let first = stamped_for(&trigger_at("order", 1, 4, "")).await;
+    let second = stamped_for(&trigger_at("order", 1, 5, "")).await;
+    let other_root = stamped_for(&trigger_at("order", 2, 4, "")).await;
+    let key = |d: &AngzarrDeferredSequence| {
+        (
+            d.source
+                .as_ref()
+                .and_then(|c| c.root.clone())
+                .map(|r| r.value),
+            d.source_seq,
+            d.source_component.clone(),
+            d.command_index,
+        )
+    };
+    assert_ne!(key(&first), key(&second));
+    assert_ne!(key(&first), key(&other_root));
+    assert_eq!(first.source_seq, 4);
+    assert_eq!(first.source_component, "pmg-fulfillment");
+}
+
+/// The same trigger redelivered stamps the same key, so the destination
+/// recognises the replay.
+#[tokio::test]
+async fn test_pm_redelivered_trigger_has_same_key() {
+    let trigger = trigger_at("order", 7, 3, "");
+    assert_eq!(stamped_for(&trigger).await, stamped_for(&trigger).await);
+}
+
+/// Provenance keeps the trigger's edition, so a branch timeline's command is
+/// attributed to (and compensated on) that branch, not the main timeline.
+#[tokio::test]
+async fn test_pm_provenance_carries_trigger_edition() {
+    let deferred = stamped_for(&trigger_at("order", 1, 4, "branch-a")).await;
+    let source = deferred.source.expect("trigger cover stamped");
+    assert_eq!(source.edition.map(|e| e.name), Some("branch-a".to_string()));
+}
+
+// ============================================================================
+// O10: PM injected facts inherit the workflow correlation_id
+// ============================================================================
+//
+// Commands emitted by a PM get the correlation_id backfilled in
+// `execute_pm_commands`, but injected FACTS did not. Downstream PMs skip
+// events with an empty correlation_id, so a fact injected without the workflow
+// correlation silently fails to advance any correlated PM. The fix backfills
+// the correlation onto facts on the same rule used for commands.
+
+/// FactExecutor that captures injected facts so a test can inspect the
+/// correlation_id the coordinator stamped on them.
+struct CapturingFactExecutor {
+    injected: tokio::sync::Mutex<Vec<EventBook>>,
+}
+
+impl CapturingFactExecutor {
+    fn new() -> Self {
+        Self {
+            injected: tokio::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl FactExecutor for CapturingFactExecutor {
+    async fn inject(
+        &self,
+        fact: EventBook,
+        _delivery: crate::orchestration::FactDelivery,
+    ) -> Result<(), crate::orchestration::FactInjectionError> {
+        self.injected.lock().await.push(fact);
+        Ok(())
+    }
+}
+
+/// PM that emits one fact whose cover carries `fact_correlation`, so a test
+/// can drive both the empty (backfill) and explicit (preserve) cases.
+struct PmEmittingFact {
+    fact_correlation: String,
+}
+
+#[async_trait]
+impl ProcessManagerContext for PmEmittingFact {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        _pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(PmHandleResponse {
+            commands: vec![],
+            process_events: vec![],
+            facts: vec![EventBook {
+                cover: Some(Cover {
+                    domain: "inventory".to_string(),
+                    root: None,
+                    correlation_id: self.fact_correlation.clone(),
+                    edition: None,
+                    ext: None,
+                }),
+                pages: vec![],
+                snapshot: None,
+                ..Default::default()
+            }],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        _process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+/// O10 (PM side): a fact emitted with an empty correlation_id is backfilled
+/// with the workflow correlation_id before injection, so downstream PMs can
+/// correlate it. Pre-fix the fact was injected with an empty correlation and
+/// silently skipped by every correlated PM.
+#[tokio::test]
+async fn test_orchestrate_pm_backfills_correlation_id_on_facts() {
+    let ctx = PmEmittingFact {
+        fact_correlation: String::new(),
+    };
+    let fact_exec = CapturingFactExecutor::new();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &NoOpExecutor,
+        Some(&fact_exec),
+        &trigger_event(),
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-42",
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await;
+
+    assert!(result.is_ok(), "orchestrate_pm should succeed");
+    let injected = fact_exec.injected.lock().await;
+    assert_eq!(injected.len(), 1, "the fact must be injected");
+    assert_eq!(
+        injected[0].cover.as_ref().unwrap().correlation_id,
+        "corr-42",
+        "an empty fact correlation_id must be backfilled with the workflow \
+         correlation_id (O10) so downstream PMs don't skip it"
+    );
+}
+
+/// O10 (PM side): a fact that already carries an explicit correlation_id is
+/// preserved — a PM may deliberately route a fact into a different workflow.
+#[tokio::test]
+async fn test_orchestrate_pm_preserves_explicit_fact_correlation_id() {
+    let ctx = PmEmittingFact {
+        fact_correlation: "explicit-other".to_string(),
+    };
+    let fact_exec = CapturingFactExecutor::new();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &NoOpExecutor,
+        Some(&fact_exec),
+        &trigger_event(),
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-42",
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await;
+
+    assert!(result.is_ok());
+    let injected = fact_exec.injected.lock().await;
+    assert_eq!(
+        injected[0].cover.as_ref().unwrap().correlation_id,
+        "explicit-other",
+        "an explicitly-set fact correlation_id must be preserved (O10)"
+    );
+}
+
+// ============================================================================
+// O9: fetch ERRORS are not "no state" — a failed PM state fetch must fail
+// the orchestration attempt, never restart the workflow from empty
+// ============================================================================
+//
+// Pre-fix, `DestinationFetcher` returned `Option<EventBook>` and every impl
+// mapped transport/storage errors to `None`. `orchestrate_pm` reads `None`
+// as "brand-new workflow", so a gRPC blip mid-workflow silently re-ran the
+// PM handler with empty state — re-issuing commands and corrupting the
+// workflow. The trait now returns `Result<Option<EventBook>, Status>`:
+// Ok(None) = genuinely no state; Err = fetch failed, propagate.
+
+/// Fetcher whose every method fails — simulates a transient transport or
+/// storage outage while the workflow state still exists at the source.
+struct FailingFetcher;
+
+#[async_trait]
+impl DestinationFetcher for FailingFetcher {
+    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+        Err(tonic::Status::unavailable("event query connection refused"))
+    }
+    async fn fetch_by_correlation(
+        &self,
+        _domain: &str,
+        _correlation_id: &str,
+    ) -> Result<Option<EventBook>, tonic::Status> {
+        Err(tonic::Status::unavailable("event query connection refused"))
+    }
+}
+
+/// PM context that records how the coordinator drove it: how often handle()
+/// ran, what `pm_state` it was given, and how often persistence ran.
+struct StateObservingPm {
+    handle_calls: AtomicU32,
+    persist_calls: AtomicU32,
+    saw_state: std::sync::Mutex<Vec<bool>>, // pm_state.is_some() per handle()
+}
+
+impl StateObservingPm {
+    fn new() -> Self {
+        Self {
+            handle_calls: AtomicU32::new(0),
+            persist_calls: AtomicU32::new(0),
+            saw_state: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+}
+
+#[async_trait]
+impl ProcessManagerContext for StateObservingPm {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::EventPage;
+        self.handle_calls.fetch_add(1, Ordering::SeqCst);
+        self.saw_state.lock().unwrap().push(pm_state.is_some());
+        // Emit one PM event book so the persist site would fire if reached.
+        Ok(PmHandleResponse {
+            commands: vec![],
+            process_events: vec![EventBook {
+                cover: None,
+                pages: vec![EventPage::default()],
+                snapshot: None,
+                ..Default::default()
+            }],
+            facts: vec![],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        _process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        self.persist_calls.fetch_add(1, Ordering::SeqCst);
+        CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+/// O9 (the defect): when the PM state fetch FAILS, the orchestration attempt
+/// must fail with the propagated error — the handler must NOT run (it would
+/// see `None` and treat a live workflow as brand new) and nothing may be
+/// persisted. Bus redelivery then retries the trigger with state intact.
+#[tokio::test]
+async fn test_orchestrate_pm_fetch_error_fails_attempt_without_restarting_workflow() {
+    let ctx = StateObservingPm::new();
+    let fetcher = FailingFetcher;
+    let executor = NoOpExecutor;
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &fetcher,
+        &executor,
+        None,
+        &trigger,
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_err(),
+        "a failed PM state fetch must fail the orchestration attempt, not \
+         be treated as a new workflow (O9). Got Ok."
+    );
+    assert_eq!(
+        ctx.handle_calls.load(Ordering::SeqCst),
+        0,
+        "handler must NOT be invoked on fetch failure — invoking it with \
+         pm_state=None restarts a live workflow from empty (O9)"
+    );
+    assert_eq!(
+        ctx.persist_calls.load(Ordering::SeqCst),
+        0,
+        "nothing may be persisted when the state fetch failed (O9)"
+    );
+}
+
+/// O9 regression guard: Ok(None) still means "genuinely new workflow" — the
+/// handler runs exactly once with `pm_state = None` and orchestration
+/// succeeds. Error propagation must not break first-event workflows.
+#[tokio::test]
+async fn test_orchestrate_pm_fetch_none_still_means_new_workflow() {
+    let ctx = StateObservingPm::new();
+    let fetcher = NoOpFetcher; // Ok(None): store answered, holds nothing
+    let executor = NoOpExecutor;
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &fetcher,
+        &executor,
+        None,
+        &trigger,
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "Ok(None) is a valid new workflow: {result:?}"
+    );
+    assert_eq!(
+        ctx.handle_calls.load(Ordering::SeqCst),
+        1,
+        "handler runs once for a new workflow"
+    );
+    assert_eq!(
+        ctx.saw_state.lock().unwrap().as_slice(),
+        &[false],
+        "a genuinely-absent PM state must be handed to the handler as None"
+    );
+}
+
+/// O9 regression guard: Ok(Some(book)) hands the fetched workflow state to
+/// the handler — the Result migration must not drop existing state.
+#[tokio::test]
+async fn test_orchestrate_pm_fetch_some_hands_state_to_handler() {
+    /// Fetcher that returns existing PM state for the workflow.
+    struct StateFetcher;
+
+    #[async_trait]
+    impl DestinationFetcher for StateFetcher {
+        async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+            Ok(None)
+        }
+        async fn fetch_by_correlation(
+            &self,
+            _domain: &str,
+            _correlation_id: &str,
+        ) -> Result<Option<EventBook>, tonic::Status> {
+            Ok(Some(EventBook {
+                next_sequence: 3,
+                ..Default::default()
+            }))
+        }
+    }
+
+    let ctx = StateObservingPm::new();
+    let executor = NoOpExecutor;
+    let trigger = trigger_event();
+
+    let result = orchestrate_pm(
+        &ctx,
+        &StateFetcher,
+        &executor,
+        None,
+        &trigger,
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await;
+
+    assert!(
+        result.is_ok(),
+        "existing state must orchestrate: {result:?}"
+    );
+    assert_eq!(
+        ctx.saw_state.lock().unwrap().as_slice(),
+        &[true],
+        "fetched PM state must reach the handler as Some (in-flight \
+         workflow continues, not restarts)"
+    );
+}
+
+// ============================================================================
+// Delivery policy: the synchronous caller's CascadeErrorMode
+// ============================================================================
+
+/// PM emitting two commands (roots 1 and 2) to `fulfillment`.
+struct TwoCommandPm {
+    inner: DlqCommandPm,
+}
+
+#[async_trait]
+impl ProcessManagerContext for TwoCommandPm {
+    async fn handle(
+        &self,
+        trigger: &EventBook,
+        pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let mut response = self.inner.handle(trigger, pm_state).await?;
+        let mut second = response.commands[0].clone();
+        response.commands[0].cover.as_mut().unwrap().root =
+            Some(crate::proto::Uuid { value: vec![1; 16] });
+        second.cover.as_mut().unwrap().root = Some(crate::proto::Uuid { value: vec![2; 16] });
+        response.commands.push(second);
+        Ok(response)
+    }
+    async fn persist_pm_events(&self, events: &EventBook, correlation_id: &str) -> CommandOutcome {
+        self.inner.persist_pm_events(events, correlation_id).await
+    }
+    async fn on_command_rejected(
+        &self,
+        command: &CommandBook,
+        reason: &str,
+        code: &str,
+    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
+        self.inner.on_command_rejected(command, reason, code).await
+    }
+    fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
+        self.inner.dlq_publisher()
+    }
+}
+
+/// Fails the command addressed to root byte 1 (rejected or transiently),
+/// accepts the rest.
+struct FirstFailsExecutor {
+    executions: AtomicU32,
+    retryable: bool,
+}
+
+#[async_trait]
+impl CommandExecutor for FirstFailsExecutor {
+    async fn execute(&self, command: CommandBook, _sync_mode: SyncMode) -> CommandOutcome {
+        self.executions.fetch_add(1, Ordering::SeqCst);
+        let first = command
+            .cover
+            .as_ref()
+            .and_then(|c| c.root.as_ref())
+            .map(|r| r.value[0])
+            == Some(1);
+        match (first, self.retryable) {
+            (false, _) => CommandOutcome::Success(CommandResponse::default()),
+            (true, false) => CommandOutcome::Rejected {
+                code: tonic::Code::FailedPrecondition,
+                message: "out of stock".to_string(),
+                error_code: String::new(),
+            },
+            (true, true) => CommandOutcome::Retryable {
+                reason: "Unavailable".to_string(),
+                current_state: None,
+            },
+        }
+    }
+}
+
+struct PmPolicyRun {
+    result: Result<crate::orchestration::shared::ReactionReport, BusError>,
+    executions: u32,
+    compensations: u32,
+    dead_letters: usize,
+}
+
+async fn run_pm_policy(mode: Option<CascadeErrorMode>, retryable: bool) -> PmPolicyRun {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = TwoCommandPm {
+        inner: DlqCommandPm::new(publisher.clone(), false),
+    };
+    let executor = FirstFailsExecutor {
+        executions: AtomicU32::new(0),
+        retryable,
+    };
+    let result = orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger_event(),
+        "pm-policy",
+        "pm-domain",
+        "corr-1",
+        SyncMode::Cascade,
+        fast_backoff(),
+        mode,
+    )
+    .await;
+    let dead_letters = publisher.captured.lock().await.len();
+    PmPolicyRun {
+        result,
+        executions: executor.executions.load(Ordering::SeqCst),
+        compensations: ctx.inner.rejection_count.load(Ordering::SeqCst),
+        dead_letters,
+    }
+}
+
+fn pm_aborted(
+    result: &Result<crate::orchestration::shared::ReactionReport, BusError>,
+) -> &tonic::Status {
+    match result {
+        Err(BusError::Grpc(status)) => {
+            assert_eq!(status.code(), tonic::Code::Aborted);
+            status
+        }
+        other => panic!("expected an aborted orchestration, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn pm_background_rejection_compensates_dead_letters_and_continues() {
+    let run = run_pm_policy(None, false).await;
+    run.result.unwrap();
+    assert_eq!(run.executions, 2);
+    assert_eq!(run.compensations, 1);
+    assert_eq!(run.dead_letters, 1);
+}
+
+#[tokio::test]
+async fn pm_fail_fast_rejection_stops_and_reports() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorFailFast), false).await;
+    assert!(pm_aborted(&run.result).message().contains("out of stock"));
+    assert_eq!(run.executions, 1);
+    assert_eq!(
+        run.compensations, 1,
+        "a rejection reaches its source in every mode"
+    );
+    assert_eq!(run.dead_letters, 0);
+}
+
+#[tokio::test]
+async fn pm_compensate_rejection_stops_and_reports() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorCompensate), false).await;
+    pm_aborted(&run.result);
+    assert_eq!(run.executions, 1);
+    assert_eq!(
+        run.compensations, 1,
+        "a rejection reaches its source in every mode"
+    );
+    assert_eq!(run.dead_letters, 0);
+}
+
+#[tokio::test]
+async fn pm_continue_rejection_delivers_all_and_succeeds() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
+    run.result.unwrap();
+    assert_eq!(run.executions, 2);
+    assert_eq!(
+        run.compensations, 1,
+        "a rejection reaches its source in every mode"
+    );
+    assert_eq!(run.dead_letters, 0);
+}
+
+#[tokio::test]
+async fn pm_dead_letter_rejection_captures_and_succeeds() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorDeadLetter), false).await;
+    run.result.unwrap();
+    assert_eq!(run.executions, 2);
+    assert_eq!(
+        run.compensations, 1,
+        "a rejection reaches its source in every mode"
+    );
+    assert_eq!(run.dead_letters, 1);
+}
+
+/// A transient failure under a synchronous caller is reported, not parked
+/// in the outbox where the caller would never see it.
+#[tokio::test]
+async fn pm_fail_fast_transient_failure_reports() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorFailFast), true).await;
+    assert!(pm_aborted(&run.result).message().contains("Unavailable"));
+    assert_eq!(run.executions, 1);
+    assert_eq!(run.dead_letters, 0);
+}
+
+/// A transient failure under COMPENSATE is no rejection: nothing is routed
+/// to the source; the request fails.
+#[tokio::test]
+async fn pm_compensate_failure_does_not_compensate_source() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorCompensate), true).await;
+    pm_aborted(&run.result);
+    assert_eq!(run.compensations, 0);
+    assert_eq!(run.dead_letters, 0);
+}
+
+/// CONTINUE reports the undelivered command as a reaction error.
+#[tokio::test]
+async fn pm_continue_returns_reaction_errors() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorContinue), false).await;
+    let errors = run.result.unwrap().reaction_errors;
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].component, "pm-policy");
+    assert_eq!(errors[0].target.as_ref().unwrap().domain, "fulfillment");
+    assert_eq!(errors[0].command_type, "test.PmCommand");
+    assert_eq!(errors[0].message, "out of stock");
+}
+
+#[tokio::test]
+async fn pm_dead_letter_transient_failure_is_captured_as_transient() {
+    let publisher = Arc::new(CapturingDlqPublisher::new());
+    let ctx = TwoCommandPm {
+        inner: DlqCommandPm::new(publisher.clone(), false),
+    };
+    let executor = FirstFailsExecutor {
+        executions: AtomicU32::new(0),
+        retryable: true,
+    };
+    orchestrate_pm(
+        &ctx,
+        &NoOpFetcher,
+        &executor,
+        None,
+        &trigger_event(),
+        "pm-policy",
+        "pm-domain",
+        "corr-1",
+        SyncMode::Cascade,
+        fast_backoff(),
+        Some(CascadeErrorMode::CascadeErrorDeadLetter),
+    )
+    .await
+    .unwrap();
+    let captured = publisher.captured.lock().await;
+    assert_eq!(captured.len(), 1);
+    match &captured[0].rejection_details {
+        Some(RejectionDetails::EventProcessingFailed(d)) => assert!(d.is_transient),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+// ============================================================================
+// Trigger deduplication
+// ============================================================================
+
+/// PM context backed by an in-memory record of the triggers whose PM events
+/// were persisted.
+struct TriggerRecordingPm {
+    inner: StateObservingPm,
+    recorded: std::sync::Mutex<Vec<crate::storage::SourceInfo>>,
+}
+
+#[async_trait]
+impl ProcessManagerContext for TriggerRecordingPm {
+    async fn handle(
+        &self,
+        trigger: &EventBook,
+        pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        self.inner.handle(trigger, pm_state).await
+    }
+    async fn persist_pm_events(&self, events: &EventBook, correlation_id: &str) -> CommandOutcome {
+        self.inner.persist_pm_events(events, correlation_id).await
+    }
+    async fn persist_pm_events_for_trigger(
+        &self,
+        events: &EventBook,
+        correlation_id: &str,
+        trigger: &crate::storage::SourceInfo,
+    ) -> CommandOutcome {
+        self.recorded.lock().unwrap().push(trigger.clone());
+        self.inner.persist_pm_events(events, correlation_id).await
+    }
+    async fn trigger_handled(
+        &self,
+        trigger: &crate::storage::SourceInfo,
+        _edition: &str,
+        _correlation_id: &str,
+    ) -> Result<bool, tonic::Status> {
+        Ok(self.recorded.lock().unwrap().iter().any(|r| {
+            (
+                &r.edition,
+                &r.domain,
+                r.root,
+                r.seq,
+                &r.component,
+                r.command_index,
+            ) == (
+                &trigger.edition,
+                &trigger.domain,
+                trigger.root,
+                trigger.seq,
+                &trigger.component,
+                trigger.command_index,
+            )
+        }))
+    }
+}
+
+/// A trigger delivered twice (bus redelivery, or the bus copy of an event a
+/// CASCADE already ran through this PM) runs the PM handler once.
+#[tokio::test]
+async fn test_pm_trigger_delivered_twice_is_handled_once() {
+    let ctx = TriggerRecordingPm {
+        inner: StateObservingPm::new(),
+        recorded: Default::default(),
+    };
+    let trigger = trigger_at("order", 3, 8, "");
+    for _ in 0..2 {
+        orchestrate_pm(
+            &ctx,
+            &NoOpFetcher,
+            &NoOpExecutor,
+            None,
+            &trigger,
+            "pmg-fulfillment",
+            "fulfillment-pm",
+            "corr-1",
+            SyncMode::Async,
+            fast_backoff(),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(ctx.inner.handle_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(ctx.inner.persist_calls.load(Ordering::SeqCst), 1);
+    let recorded = ctx.recorded.lock().unwrap();
+    assert_eq!(recorded[0].domain, "order");
+    assert_eq!(recorded[0].seq, 8);
+    assert_eq!(recorded[0].component, "pmg-fulfillment");
+}
+
+/// A later event from the same aggregate is a new trigger.
+#[tokio::test]
+async fn test_pm_next_trigger_is_not_deduplicated() {
+    let ctx = TriggerRecordingPm {
+        inner: StateObservingPm::new(),
+        recorded: Default::default(),
+    };
+    for seq in [8, 9] {
+        orchestrate_pm(
+            &ctx,
+            &NoOpFetcher,
+            &NoOpExecutor,
+            None,
+            &trigger_at("order", 3, seq, ""),
+            "pmg-fulfillment",
+            "fulfillment-pm",
+            "corr-1",
+            SyncMode::Async,
+            fast_backoff(),
+            None,
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(ctx.inner.handle_calls.load(Ordering::SeqCst), 2);
+}
+
+// ============================================================================
+// Rejections reach their source through the outbox
+// ============================================================================
+
+/// PM emitting one deferred command (no header: the coordinator stamps the
+/// trigger as its source), with an outbox.
+struct DeferredCommandPm {
+    outbox: Arc<crate::orchestration::outbox::Outbox>,
+}
+
+#[async_trait]
+impl ProcessManagerContext for DeferredCommandPm {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        _pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        use crate::proto::{command_page::Payload as CmdPayload, CommandPage};
+        Ok(PmHandleResponse {
+            commands: vec![CommandBook {
+                cover: Some(Cover {
+                    domain: "fulfillment".to_string(),
+                    correlation_id: "corr-1".to_string(),
+                    ..Default::default()
+                }),
+                pages: vec![CommandPage {
+                    payload: Some(CmdPayload::Command(prost_types::Any {
+                        type_url: "/fulfillment.Ship".to_string(),
+                        value: vec![],
+                    })),
+                    ..Default::default()
+                }],
+            }],
+            process_events: vec![],
+            facts: vec![],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        _process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        CommandOutcome::Success(CommandResponse::default())
+    }
+    fn outbox(&self) -> Option<&Arc<crate::orchestration::outbox::Outbox>> {
+        Some(&self.outbox)
+    }
+}
+
+/// C-0472 (PM side): a rejected PM command's RejectionNotification is
+/// recorded in the outbox and delivered to the command's source — the
+/// trigger aggregate — whatever the caller's mode.
+#[tokio::test]
+async fn pm_rejection_is_delivered_to_its_source() {
+    use crate::storage::ProvenanceKind;
+    for mode in [
+        None,
+        Some(CascadeErrorMode::CascadeErrorFailFast),
+        Some(CascadeErrorMode::CascadeErrorContinue),
+    ] {
+        let (outbox, deliverer) =
+            crate::orchestration::outbox::testing::recording_outbox("pm-flow");
+        let ctx = DeferredCommandPm { outbox };
+        let executor = CodeRejectingExecutor {
+            code: tonic::Code::FailedPrecondition,
+            message: "no stock".to_string(),
+            error_code: "OUT_OF_STOCK".to_string(),
+        };
+        let _ = orchestrate_pm(
+            &ctx,
+            &NoOpFetcher,
+            &executor,
+            None,
+            &trigger_event(),
+            "pm-flow",
+            "pm-flow",
+            "corr-1",
+            SyncMode::Cascade,
+            fast_backoff(),
+            mode,
+        )
+        .await;
+
+        let rejections = deliverer.attempted_of(ProvenanceKind::RejectionNotification);
+        assert_eq!(rejections.len(), 1, "mode {mode:?}");
+        assert_eq!(
+            rejections[0].book.domain(),
+            "order",
+            "routed to the trigger"
+        );
+        assert_eq!(
+            crate::orchestration::outbox::testing::rejection_code_and_reason(&rejections[0].book),
+            ("OUT_OF_STOCK".to_string(), "no stock".to_string()),
+            "code and message travel separately (C-0505)"
         );
     }
 }

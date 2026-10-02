@@ -9,7 +9,6 @@ use std::sync::LazyLock;
 
 use tonic::Status;
 
-use crate::proto::CommandBook;
 use crate::proto_ext::CoverExt;
 use crate::validation;
 
@@ -19,7 +18,7 @@ use crate::validation;
 pub static ANGZARR_UUID_NAMESPACE: LazyLock<uuid::Uuid> =
     LazyLock::new(|| uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"angzarr.dev"));
 
-/// Extract and validate correlation ID from command.
+/// Extract and validate the correlation ID of a command or event book.
 ///
 /// Correlation IDs are client-provided for cross-domain workflows.
 /// Returns empty string if not provided—this is intentional:
@@ -27,8 +26,8 @@ pub static ANGZARR_UUID_NAMESPACE: LazyLock<uuid::Uuid> =
 /// - This enables opt-in cross-domain tracking without polluting single-domain flows
 ///
 /// Validates format if non-empty.
-pub fn extract_correlation_id(command_book: &CommandBook) -> Result<String, Status> {
-    let id = command_book.correlation_id().to_string();
+pub fn extract_correlation_id(book: &impl CoverExt) -> Result<String, Status> {
+    let id = book.correlation_id().to_string();
     validation::validate_correlation_id(&id)?;
     Ok(id)
 }

@@ -37,7 +37,7 @@ func PatchOpenAPISpec(specBytes []byte, types []DiscoveredType) ([]byte, error) 
 	// Generate schemas for discovered types
 	schemas := GenerateSchemas(types)
 
-	// Add discovered schemas to definitions
+	// Add discovered schemas to definitions (names carry DefinitionPrefix)
 	for name, schema := range schemas {
 		// Convert JSONSchema to map for embedding
 		schemaBytes, err := json.Marshal(schema)
@@ -49,9 +49,7 @@ func PatchOpenAPISpec(specBytes []byte, types []DiscoveredType) ([]byte, error) 
 			continue
 		}
 
-		// Prefix discovered types to avoid collision
-		defName := "discovered." + name
-		definitions[defName] = schemaMap
+		definitions[name] = schemaMap
 	}
 
 	// Add composite types for events and commands
@@ -59,16 +57,16 @@ func PatchOpenAPISpec(specBytes []byte, types []DiscoveredType) ([]byte, error) 
 	commandTypes := filterTypes(types, func(t DiscoveredType) bool { return t.IsCommand })
 
 	if len(eventTypes) > 0 {
-		definitions["discovered.AnyEvent"] = buildOneOfDefinition(eventTypes, "Event types discovered via gRPC reflection")
+		definitions["discovered.AnyEvent"] = buildOneOfDefinition(eventTypes, "Event types discovered from the descriptor file")
 	}
 	if len(commandTypes) > 0 {
-		definitions["discovered.AnyCommand"] = buildOneOfDefinition(commandTypes, "Command types discovered via gRPC reflection")
+		definitions["discovered.AnyCommand"] = buildOneOfDefinition(commandTypes, "Command types discovered from the descriptor file")
 	}
 
 	// Add metadata about discovery
 	if info, ok := raw["info"].(map[string]interface{}); ok {
 		desc, _ := info["description"].(string)
-		info["description"] = desc + "\n\n**Note:** This spec includes dynamically discovered types from the connected gRPC backend via server reflection."
+		info["description"] = desc + "\n\n**Note:** This spec includes types discovered from the configured proto descriptor file (DESCRIPTOR_PATH)."
 	}
 
 	return json.MarshalIndent(raw, "", "  ")

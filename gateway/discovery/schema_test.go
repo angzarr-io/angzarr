@@ -33,7 +33,7 @@ func TestPrimitiveSchema(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.typeName, func(t *testing.T) {
-			schema := primitiveSchema(tt.typeName)
+			schema := primitiveSchema(tt.typeName, nil)
 			if schema.Type != tt.wantType {
 				t.Errorf("Type = %q, want %q", schema.Type, tt.wantType)
 			}
@@ -48,7 +48,7 @@ func TestPrimitiveSchema(t *testing.T) {
 }
 
 func TestPrimitiveSchema_Any(t *testing.T) {
-	schema := primitiveSchema("google.protobuf.Any")
+	schema := primitiveSchema("google.protobuf.Any", nil)
 	if schema.Type != "object" {
 		t.Errorf("Any type = %q, want \"object\"", schema.Type)
 	}
@@ -65,26 +65,31 @@ func TestPrimitiveSchema_Any(t *testing.T) {
 }
 
 func TestPrimitiveSchema_MessageRef(t *testing.T) {
-	schema := primitiveSchema("examples.player.PlayerState")
-	if schema.Ref != "#/definitions/PlayerState" {
-		t.Errorf("Ref = %q, want \"#/definitions/PlayerState\"", schema.Ref)
+	names := map[string]string{"examples.player.PlayerState": "discovered.PlayerState"}
+	schema := primitiveSchema("examples.player.PlayerState", names)
+	if schema.Ref != "#/definitions/discovered.PlayerState" {
+		t.Errorf("Ref = %q, want \"#/definitions/discovered.PlayerState\"", schema.Ref)
 	}
 	if schema.Type != "" {
 		t.Errorf("Type should be empty for refs, got %q", schema.Type)
 	}
 }
 
-func TestPrimitiveSchema_SimpleMessageRef(t *testing.T) {
-	// Single-segment name (no dots)
-	schema := primitiveSchema("PlayerState")
-	if schema.Ref != "#/definitions/PlayerState" {
-		t.Errorf("Ref = %q, want \"#/definitions/PlayerState\"", schema.Ref)
+// A message outside the discovered set (e.g. a framework type) has no
+// definition, so it must not produce a dangling $ref.
+func TestPrimitiveSchema_UndiscoveredMessageIsInlineObject(t *testing.T) {
+	schema := primitiveSchema("io.angzarr.v1.Cover", map[string]string{})
+	if schema.Ref != "" {
+		t.Errorf("undiscovered message produced dangling Ref %q", schema.Ref)
+	}
+	if schema.Type != "object" {
+		t.Errorf("Type = %q, want object", schema.Type)
 	}
 }
 
 func TestFieldToSchema_Scalar(t *testing.T) {
 	f := FieldDef{Name: "id", JSONName: "id", Type: "string", Repeated: false}
-	schema := fieldToSchema(f)
+	schema := fieldToSchema(f, nil)
 	if schema.Type != "string" {
 		t.Errorf("Type = %q, want \"string\"", schema.Type)
 	}
@@ -95,7 +100,7 @@ func TestFieldToSchema_Scalar(t *testing.T) {
 
 func TestFieldToSchema_Repeated(t *testing.T) {
 	f := FieldDef{Name: "tags", JSONName: "tags", Type: "string", Repeated: true}
-	schema := fieldToSchema(f)
+	schema := fieldToSchema(f, nil)
 	if schema.Type != "array" {
 		t.Errorf("Type = %q, want \"array\"", schema.Type)
 	}
@@ -109,15 +114,25 @@ func TestFieldToSchema_Repeated(t *testing.T) {
 
 func TestFieldToSchema_RepeatedMessage(t *testing.T) {
 	f := FieldDef{Name: "items", JSONName: "items", Type: "examples.Order.Item", Repeated: true}
-	schema := fieldToSchema(f)
+	schema := fieldToSchema(f, map[string]string{"examples.Order.Item": "discovered.Item"})
 	if schema.Type != "array" {
 		t.Errorf("Type = %q, want \"array\"", schema.Type)
 	}
 	if schema.Items == nil {
 		t.Fatal("repeated field should have Items")
 	}
-	if schema.Items.Ref != "#/definitions/Item" {
-		t.Errorf("Items.Ref = %q, want \"#/definitions/Item\"", schema.Items.Ref)
+	if schema.Items.Ref != "#/definitions/discovered.Item" {
+		t.Errorf("Items.Ref = %q, want \"#/definitions/discovered.Item\"", schema.Items.Ref)
+	}
+}
+
+// Proto3 JSON renders enums as value names; an enum field is a string, not
+// a reference to a (non-existent) message definition.
+func TestFieldToSchema_EnumIsString(t *testing.T) {
+	f := FieldDef{Name: "status", JSONName: "status", Type: "examples.Status", Enum: true}
+	schema := fieldToSchema(f, map[string]string{})
+	if schema.Type != "string" || schema.Ref != "" {
+		t.Errorf("enum schema = %+v, want string without ref", schema)
 	}
 }
 
@@ -132,7 +147,7 @@ func TestTypeToSchema(t *testing.T) {
 		},
 	}
 
-	schema := typeToSchema(dt)
+	schema := typeToSchema(dt, nil)
 
 	if schema.Type != "object" {
 		t.Errorf("Type = %q, want \"object\"", schema.Type)
@@ -169,7 +184,7 @@ func TestTypeToSchema_NoRequired(t *testing.T) {
 			{Name: "rep", JSONName: "rep", Type: "string", Repeated: true},
 		},
 	}
-	schema := typeToSchema(dt)
+	schema := typeToSchema(dt, nil)
 	if schema.Required != nil {
 		t.Errorf("expected nil Required, got %v", schema.Required)
 	}
@@ -177,7 +192,7 @@ func TestTypeToSchema_NoRequired(t *testing.T) {
 
 func TestTypeToSchema_NoFields(t *testing.T) {
 	dt := DiscoveredType{FullName: "examples.Empty"}
-	schema := typeToSchema(dt)
+	schema := typeToSchema(dt, nil)
 	if schema.Type != "object" {
 		t.Errorf("Type = %q, want \"object\"", schema.Type)
 	}
@@ -210,11 +225,11 @@ func TestGenerateSchemas_Basic(t *testing.T) {
 	if len(schemas) != 2 {
 		t.Fatalf("expected 2 schemas, got %d", len(schemas))
 	}
-	if _, ok := schemas["PlayerRegistered"]; !ok {
-		t.Error("missing PlayerRegistered schema")
+	if _, ok := schemas["discovered.PlayerRegistered"]; !ok {
+		t.Error("missing discovered.PlayerRegistered schema")
 	}
-	if _, ok := schemas["OrderCreated"]; !ok {
-		t.Error("missing OrderCreated schema")
+	if _, ok := schemas["discovered.OrderCreated"]; !ok {
+		t.Error("missing discovered.OrderCreated schema")
 	}
 }
 
@@ -226,22 +241,45 @@ func TestGenerateSchemas_Collision(t *testing.T) {
 
 	schemas := GenerateSchemas(types)
 
-	// One should be "Event", the other "pkg2_Event" (second one collides)
+	// A shared short name is ambiguous, so every type sharing it is keyed
+	// by its full name.
 	if len(schemas) != 2 {
 		t.Fatalf("expected 2 schemas, got %d", len(schemas))
 	}
-
-	// At least one should use the full name key
-	_, hasShort := schemas["Event"]
-	_, hasFull := schemas["pkg2_Event"]
-	if !hasShort || !hasFull {
-		// The order may vary since we iterate a slice
-		// Just verify we have 2 distinct keys
-		keys := make([]string, 0, len(schemas))
-		for k := range schemas {
-			keys = append(keys, k)
+	for _, key := range []string{"discovered.pkg1_Event", "discovered.pkg2_Event"} {
+		if _, ok := schemas[key]; !ok {
+			t.Errorf("missing %s", key)
 		}
-		t.Logf("schema keys: %v", keys)
+	}
+}
+
+// Every $ref in the generated schemas names a generated definition.
+func TestGenerateSchemas_RefsResolve(t *testing.T) {
+	types := []DiscoveredType{
+		{FullName: "pkg1.Event", Fields: []FieldDef{{Name: "item", JSONName: "item", Type: "pkg1.Item"}}},
+		{FullName: "pkg2.Event", Fields: []FieldDef{{Name: "items", JSONName: "items", Type: "pkg1.Item", Repeated: true}}},
+		{FullName: "pkg1.Item"},
+	}
+	schemas := GenerateSchemas(types)
+
+	var refs []string
+	for _, s := range schemas {
+		for _, p := range s.Properties {
+			if p.Ref != "" {
+				refs = append(refs, p.Ref)
+			}
+			if p.Items != nil && p.Items.Ref != "" {
+				refs = append(refs, p.Items.Ref)
+			}
+		}
+	}
+	if len(refs) != 2 {
+		t.Fatalf("expected 2 refs, got %v", refs)
+	}
+	for _, ref := range refs {
+		if _, ok := schemas[ref[len("#/definitions/"):]]; !ok {
+			t.Errorf("dangling ref %s", ref)
+		}
 	}
 }
 
@@ -265,8 +303,8 @@ func TestBuildAnyOneOf_NoFilter(t *testing.T) {
 	if entry.Type != "object" {
 		t.Errorf("entry Type = %q, want \"object\"", entry.Type)
 	}
-	if entry.Ref != "#/definitions/TypeA" {
-		t.Errorf("entry Ref = %q, want \"#/definitions/TypeA\"", entry.Ref)
+	if entry.Ref != "#/definitions/discovered.TypeA" {
+		t.Errorf("entry Ref = %q, want \"#/definitions/discovered.TypeA\"", entry.Ref)
 	}
 }
 

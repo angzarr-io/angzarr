@@ -1,39 +1,41 @@
-//! Mock storage contract tests (H-24).
+//! Mock storage contract tests.
 //!
-//! Until H-24, the `MockEventStore` accepted duplicate / overlapping
-//! sequences that every SQL backend rejects via PRIMARY KEY. Tests
-//! that exercised "mock + some sequence assertion" therefore had a
-//! credibility gap: production stores would have rejected what the
-//! tests accepted.
-//!
-//! This file pins the sequence-rejection contract for mock and is the
-//! companion to the new shared `test_add_rejects_duplicate_sequences`
-//! in `tests/storage/event_store_tests.rs`. Other macro tests (edition
-//! sentinel polarity, explicit-divergence new branches, cascade
-//! reaper queries, etc.) are intentionally NOT exercised against mock
-//! here — those are SQL-backend contracts and the mock's coverage of
-//! them is tracked in `src/storage/mock/tests.rs`.
+//! The in-memory Mock stores stand in for the production backends in unit
+//! tests, so they run the same contract suites the production backends do:
+//! a test double that accepts what production rejects (or reads differently)
+//! gives unit tests a false pass.
 
 mod storage;
 
-use angzarr::storage::MockEventStore;
+use angzarr::storage::{MockEventStore, MockPositionStore, MockSnapshotStore};
+
+mod event_store_contract {
+    use angzarr::storage::MockEventStore;
+
+    async fn fixture() -> MockEventStore {
+        MockEventStore::new()
+    }
+
+    crate::generate_event_store_tests!(fixture);
+}
 
 #[tokio::test]
-async fn test_mock_event_store_sequence_rejection() {
-    use storage::event_store_tests::*;
+async fn test_mock_event_store_concurrent() {
+    let store = std::sync::Arc::new(MockEventStore::new());
+    run_event_store_concurrent_tests!(store);
+}
 
-    println!("=== Mock EventStore Sequence-Rejection Tests (H-24) ===");
+#[tokio::test]
+async fn test_mock_snapshot_store_contract() {
+    let store = MockSnapshotStore::new();
+    run_snapshot_store_tests!(&store);
+}
 
-    let store = MockEventStore::new();
-
-    test_add_sequence_conflict(&store).await;
-    println!("  test_add_sequence_conflict: PASSED");
-
-    test_add_duplicate_sequence(&store).await;
-    println!("  test_add_duplicate_sequence: PASSED");
-
-    test_add_rejects_duplicate_sequences(&store).await;
-    println!("  test_add_rejects_duplicate_sequences: PASSED");
-
-    println!("=== Mock EventStore Sequence-Rejection Tests PASSED ===");
+/// C-17: the mock PositionStore must honor the same checkpoint contract the
+/// SQL backends do — monotonic (no regression on stale/replayed puts), main-
+/// timeline sentinel normalization, and key isolation.
+#[tokio::test]
+async fn test_mock_position_store_contract() {
+    let store = MockPositionStore::new();
+    run_position_store_tests!(&store);
 }

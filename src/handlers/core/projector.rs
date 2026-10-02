@@ -16,9 +16,11 @@ use std::sync::Arc;
 use futures::future::BoxFuture;
 use prost::Message;
 use prost_types::Any;
-use tracing::{debug, info, Instrument};
+use tracing::{debug, error, info, Instrument};
 
 use crate::bus::{BusError, EventBus, EventHandler};
+use crate::dlq::trigger::{CodeDlqExt, DlqTrigger};
+use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher};
 use crate::orchestration::projector::{GrpcProjectorHandler, ProjectionMode, ProjectorHandler};
 use crate::proto::projector_service_client::ProjectorServiceClient;
 use crate::proto::{EventBook, Projection};
@@ -39,8 +41,11 @@ pub struct ProjectorEventHandler {
     /// If true, this projector is synchronous (handled inline by the aggregate pipeline).
     /// Async distribution should skip it.
     synchronous: bool,
-    /// Projector name (used for metrics and tracing).
+    /// Projector name (used for metrics, tracing, and DLQ `source_component`).
     name: String,
+    /// DLQ publisher for permanent (4xx-class) projector handler failures.
+    /// `None` = no DLQ publication (caller still gets `Err`). See R2-15 step 6.
+    dlq_publisher: Option<Arc<dyn DeadLetterPublisher>>,
 }
 
 impl ProjectorEventHandler {
@@ -52,6 +57,7 @@ impl ProjectorEventHandler {
             domains: Vec::new(),
             synchronous: false,
             name,
+            dlq_publisher: None,
         }
     }
 
@@ -76,6 +82,18 @@ impl ProjectorEventHandler {
     /// Set synchronous mode.
     pub fn with_synchronous(mut self, synchronous: bool) -> Self {
         self.synchronous = synchronous;
+        self
+    }
+
+    /// Set the DLQ publisher.
+    ///
+    /// When wired, permanent (4xx-class per `classify_for_dlq`) handler
+    /// failures publish a dead letter and ack the message; transient
+    /// (5xx-class) failures propagate as `Err` so the bus's own
+    /// retry/redelivery mechanism handles them. When `None`, all
+    /// failures propagate as today (R2-15 step 6).
+    pub fn with_dlq_publisher(mut self, publisher: Arc<dyn DeadLetterPublisher>) -> Self {
+        self.dlq_publisher = Some(publisher);
         self
     }
 }
@@ -109,48 +127,93 @@ impl EventHandler for ProjectorEventHandler {
 
         let handler = self.handler.clone();
         let publisher = self.publisher.clone();
+        let dlq_publisher = self.dlq_publisher.clone();
+        let component_name = self.name.clone();
 
         Box::pin(
             async move {
                 let book_owned = (*book).clone();
 
-                let result: Result<(), BusError> = async {
-                    let projection = handler
-                        .handle(&book_owned, ProjectionMode::Execute)
-                        .await
-                        .map_err(BusError::Grpc)?;
+                let projection_or_status =
+                    handler.handle(&book_owned, ProjectionMode::Execute).await;
 
-                    // If we have a publisher and the projection has content, publish it back
-                    if let Some(ref publisher) = publisher {
-                        if projection.projection.is_some() || !projection.projector.is_empty() {
-                            debug!(
-                                projector = %projection.projector,
-                                sequence = projection.sequence,
-                                "Publishing projection output"
-                            );
-
-                            let source_edition =
-                                book.cover.as_ref().and_then(|c| c.edition.clone());
-                            let projection_event_book = create_projection_event_book(
-                                projection,
-                                &correlation_id,
-                                source_edition,
-                            );
-
-                            info!(
-                                domain = %projection_event_book.domain(),
-                                "Publishing projection for streaming"
-                            );
-
-                            publisher.publish(Arc::new(projection_event_book)).await?;
+                let projection = match projection_or_status {
+                    Ok(projection) => projection,
+                    Err(status) => {
+                        // R2-15 step 6: classify the handler failure.
+                        // - Immediate (4xx-class): publish DLQ and ack the
+                        //   message — re-delivering would just re-trigger
+                        //   the same permanent failure.
+                        // - RetryThenDlq (5xx-class): propagate Err so the
+                        //   bus's own retry/redelivery mechanism handles
+                        //   it; eventually the bus' own DLX takes the
+                        //   message off-queue.
+                        // - Without a dlq_publisher: preserve pre-R2-15
+                        //   behavior (propagate Err on every failure).
+                        let code = status.code();
+                        let is_immediate =
+                            matches!(code.classify_for_dlq(), DlqTrigger::Immediate(_));
+                        if is_immediate {
+                            if let Some(dlq) = dlq_publisher.as_ref() {
+                                let dead_letter = AngzarrDeadLetter::from_event_processing_failure(
+                                    &book_owned,
+                                    status.message(),
+                                    0,     // immediate path: zero retries attempted
+                                    false, // permanent failure
+                                    Vec::new(),
+                                    &component_name,
+                                    "projector",
+                                );
+                                match dlq.publish(dead_letter).await {
+                                    Ok(()) => return Ok(()),
+                                    Err(e) => {
+                                        // D2: do NOT ack when the DLQ write
+                                        // itself failed — acking here loses
+                                        // the event AND its dead letter
+                                        // (double fault → total loss).
+                                        // Propagate Err so the bus redelivers
+                                        // and a later attempt can capture it.
+                                        error!(
+                                            projector = %component_name,
+                                            error = %e,
+                                            "Failed to publish projector DLQ entry; \
+                                             propagating Err so the bus redelivers"
+                                        );
+                                        return Err(BusError::Grpc(status));
+                                    }
+                                }
+                            }
                         }
+                        return Err(BusError::Grpc(status));
                     }
+                };
 
-                    Ok(())
+                // If we have a publisher and the projection has content, publish it back
+                if let Some(ref publisher) = publisher {
+                    if projection.projection.is_some() || !projection.projector.is_empty() {
+                        debug!(
+                            projector = %projection.projector,
+                            sequence = projection.sequence,
+                            "Publishing projection output"
+                        );
+
+                        let source_edition = book.cover.as_ref().and_then(|c| c.edition.clone());
+                        let projection_event_book = create_projection_event_book(
+                            projection,
+                            &correlation_id,
+                            source_edition,
+                        );
+
+                        info!(
+                            domain = %projection_event_book.domain(),
+                            "Publishing projection for streaming"
+                        );
+
+                        publisher.publish(Arc::new(projection_event_book)).await?;
+                    }
                 }
-                .await;
 
-                result
+                Ok(())
             }
             .instrument(span),
         )
@@ -192,6 +255,7 @@ fn create_projection_event_book(
             root: None,
             correlation_id: correlation_id.to_string(),
             edition: source_edition,
+            ext: None,
         }),
     };
 

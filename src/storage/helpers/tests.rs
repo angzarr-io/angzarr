@@ -4,7 +4,6 @@
 //! behavior for sequence handling, timestamp parsing, and EventBook assembly.
 //!
 //! Key behaviors verified:
-//! - Sequence validation (optimistic concurrency control)
 //! - Timestamp parsing (RFC3339 format for event ordering)
 //! - Sequence extraction from EventPage
 
@@ -20,67 +19,7 @@ fn make_event_with_sequence(seq: u32) -> EventPage {
         }),
         payload: None,
         created_at: None,
-        ..Default::default()
     }
-}
-
-// ============================================================================
-// Sequence Resolution Tests
-// ============================================================================
-
-/// Valid sequence >= base_sequence is accepted.
-///
-/// This is the happy path: client provides correct sequence matching
-/// their view of aggregate state.
-#[test]
-fn test_resolve_sequence_explicit_valid() {
-    let event = make_event_with_sequence(5);
-    let result = resolve_sequence(&event, 3).unwrap();
-    assert_eq!(result, 5);
-}
-
-/// Sequence < base_sequence triggers SequenceConflict error.
-///
-/// Optimistic concurrency: if event's sequence is below what we expect,
-/// another writer updated the aggregate. Client must refetch and retry.
-#[test]
-fn test_resolve_sequence_explicit_conflict() {
-    let event = make_event_with_sequence(2);
-    let result = resolve_sequence(&event, 5);
-    assert!(matches!(
-        result,
-        Err(StorageError::SequenceConflict {
-            expected: 5,
-            actual: 2
-        })
-    ));
-}
-
-/// Sequence 0 is valid for new aggregates.
-///
-/// First event always has sequence 0. Verifies zero doesn't trigger
-/// any off-by-one edge cases.
-#[test]
-fn test_resolve_sequence_zero() {
-    let event = make_event_with_sequence(0);
-    let result = resolve_sequence(&event, 0).unwrap();
-    assert_eq!(result, 0);
-}
-
-/// H-21 regression: the prior signature took a `&mut u32 auto_sequence`
-/// that the body never read or wrote — auto-assign was advertised but
-/// dead. The new 2-arg signature documents the actual contract (caller
-/// always provides explicit sequence). This test pins the contract by
-/// exercising the new signature; if anyone reintroduces a third
-/// parameter without documenting auto-assign semantics, the call site
-/// here will break and force the discussion.
-#[test]
-fn test_resolve_sequence_signature_is_two_arg() {
-    let event = make_event_with_sequence(7);
-    // Compile-time pinning: any signature change forces this test to
-    // be revisited.
-    let result = resolve_sequence(&event, 7);
-    assert_eq!(result.unwrap(), 7);
 }
 
 // ============================================================================
@@ -103,7 +42,6 @@ fn test_parse_timestamp_present() {
             seconds: 1704067200, // 2024-01-01 00:00:00 UTC
             nanos: 0,
         }),
-        ..Default::default()
     };
     let result = parse_timestamp(&event).unwrap();
     assert!(result.starts_with("2024-01-01"));
@@ -122,7 +60,6 @@ fn test_parse_timestamp_missing_uses_now() {
         }),
         payload: None,
         created_at: None,
-        ..Default::default()
     };
     let result = parse_timestamp(&event).unwrap();
     // Should be a valid RFC3339 timestamp
@@ -145,7 +82,6 @@ fn test_parse_timestamp_invalid() {
             seconds: i64::MAX,
             nanos: i32::MAX,
         }),
-        ..Default::default()
     };
     let result = parse_timestamp(&event);
     assert!(matches!(result, Err(StorageError::InvalidTimestamp { .. })));
@@ -196,24 +132,6 @@ fn test_is_main_timeline_named_edition() {
     assert!(!is_main_timeline("feature-branch"));
 }
 
-/// Fallback edition returns main timeline for named editions.
-///
-/// When a named edition has no events, queries fall back to the main timeline.
-#[test]
-fn test_fallback_edition_named() {
-    assert_eq!(fallback_edition("v2"), DEFAULT_EDITION);
-    assert_eq!(fallback_edition("draft"), DEFAULT_EDITION);
-}
-
-/// Fallback edition returns same edition for main timeline.
-///
-/// Main timeline has no fallback - it is the fallback target.
-#[test]
-fn test_fallback_edition_main_timeline() {
-    assert_eq!(fallback_edition(""), "");
-    assert_eq!(fallback_edition("angzarr"), "angzarr");
-}
-
 // ============================================================================
 // EventBook Assembly Tests
 // ============================================================================
@@ -237,7 +155,10 @@ fn test_assemble_event_books_single() {
     let mut map = HashMap::new();
     map.insert(
         ("orders".to_string(), "angzarr".to_string(), root),
-        vec![make_event_with_sequence(0), make_event_with_sequence(1)],
+        BookParts {
+            pages: vec![make_event_with_sequence(0), make_event_with_sequence(1)],
+            ext: None,
+        },
     );
 
     let result = assemble_event_books(map, "corr-123");
@@ -245,6 +166,31 @@ fn test_assemble_event_books_single() {
     assert_eq!(result[0].pages.len(), 2);
     assert_eq!(result[0].cover.as_ref().unwrap().correlation_id, "corr-123");
     assert_eq!(result[0].cover.as_ref().unwrap().domain, "orders");
+}
+
+/// A book's `ext` (parent-routing cover) reconstructs from [`BookParts::ext`].
+///
+/// Guards the systemic data-loss path: before this, `assemble_event_books`
+/// hardcoded `ext: None`, dropping the routing cover on every read.
+#[test]
+fn test_assemble_event_books_preserves_ext() {
+    let root = uuid::Uuid::new_v4();
+    let ext = prost_types::Any {
+        type_url: "type.example/ParentCover".to_string(),
+        value: vec![0xCA, 0xFE],
+    };
+    let mut map = HashMap::new();
+    map.insert(
+        ("orders".to_string(), "angzarr".to_string(), root),
+        BookParts {
+            pages: vec![make_event_with_sequence(0)],
+            ext: Some(ext.clone()),
+        },
+    );
+
+    let result = assemble_event_books(map, "corr-123");
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].cover.as_ref().unwrap().ext.as_ref(), Some(&ext));
 }
 
 /// Multiple aggregates produce multiple EventBooks.
@@ -257,11 +203,17 @@ fn test_assemble_event_books_multiple() {
     let mut map = HashMap::new();
     map.insert(
         ("orders".to_string(), "angzarr".to_string(), root1),
-        vec![make_event_with_sequence(0)],
+        BookParts {
+            pages: vec![make_event_with_sequence(0)],
+            ext: None,
+        },
     );
     map.insert(
         ("inventory".to_string(), "angzarr".to_string(), root2),
-        vec![make_event_with_sequence(0)],
+        BookParts {
+            pages: vec![make_event_with_sequence(0)],
+            ext: None,
+        },
     );
 
     let result = assemble_event_books(map, "corr-456");

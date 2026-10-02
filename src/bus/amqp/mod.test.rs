@@ -32,6 +32,7 @@ fn test_routing_key_generation() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ..Default::default()
         }),
         pages: vec![],
         snapshot: None,
@@ -52,14 +53,28 @@ fn test_publisher_config() {
     assert!(config.queue.is_none());
 }
 
-/// Subscriber config sets queue and routing key pattern.
+/// Subscriber config sets queue and one routing key pattern per domain.
 ///
 /// Pattern "{domain}.*" routes all events for that domain to this queue.
 #[test]
 fn test_subscriber_config() {
-    let config = AmqpConfig::subscriber("amqp://localhost:5672", "orders-projector", "orders");
-    assert_eq!(config.routing_key, Some("orders.*".to_string()));
+    let config = AmqpConfig::subscriber(
+        "amqp://localhost:5672",
+        "orders-projector",
+        &["orders".to_string(), "payments".to_string()],
+    );
+    assert_eq!(
+        config.routing_keys,
+        vec!["orders.*".to_string(), "payments.*".to_string()]
+    );
     assert_eq!(config.queue, Some("orders-projector".to_string()));
+}
+
+/// An all-domains subscriber binds the single `#` key.
+#[test]
+fn test_subscriber_all_config_binds_every_routing_key() {
+    let config = AmqpConfig::subscriber_all("amqp://localhost:5672", "audit");
+    assert_eq!(config.routing_keys, vec!["#".to_string()]);
 }
 
 // ----------------------------------------------------------------------------
@@ -113,7 +128,7 @@ fn test_build_queue_args_includes_dlx_when_provided() {
         .get(&dlx_key)
         .expect("x-dead-letter-exchange must be set on the queue args (H-06)");
     match dlx_value {
-        AMQPValue::LongString(s) => assert_eq!(s.as_str(), "orders.dlx"),
+        AMQPValue::LongString(s) => assert_eq!(s.as_bytes(), b"orders.dlx"),
         other => panic!(
             "x-dead-letter-exchange must be a LongString carrying the DLX \
              exchange name; got {:?} (H-06)",

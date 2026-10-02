@@ -1,8 +1,5 @@
 //! Retry utilities: backoff builders and retryable error classification.
 //!
-//! DOC: This file is referenced in docs/docs/operations/error-recovery.mdx
-//!      Update documentation when making changes to retry patterns.
-//!
 //! Uses `backon` for exponential backoff with jitter. Provides standard
 //! backoff configurations for saga/PM command retries and gRPC connection retries.
 
@@ -111,41 +108,75 @@ pub fn connection_backoff() -> ExponentialBuilder {
 
 /// Determines if a gRPC error is retryable.
 ///
+/// Aligned with R2-15 decision #2 so the same classifier governs retry
+/// behavior across aggregate, saga, PM, and projector handler paths.
+/// Stays consistent with `crate::dlq::trigger::CodeDlqExt::classify_for_dlq`:
+/// codes that classifier sends to `DlqTrigger::RetryThenDlq` are the
+/// retryable ones here, with the sequence-conflict exception below.
+///
 /// # Retryable Codes
 ///
-/// - **`FailedPrecondition`**: Sequence mismatch with STRICT or COMMUTATIVE merge
-///   strategy. The client's command had a stale sequence number. Fix: fetch fresh
-///   state, rebuild command with correct sequence, retry.
+/// - **`Unavailable`**, **`DeadlineExceeded`**, **`ResourceExhausted`**:
+///   Downstream temporarily overloaded or unreachable. A retry after
+///   backoff often succeeds.
+/// - **`Internal`**, **`Unknown`**, **`DataLoss`**: Server-side faults
+///   that may be transient (leader re-election, transient storage hiccup,
+///   process restart). Retry, then DLQ on exhaustion.
+/// - **`Cancelled`**: Upstream / shutdown cancellation that typically
+///   recovers on the next event-loop tick.
+/// - **Sequence-conflict `FailedPrecondition`**: messages starting
+///   `"Sequence mismatch:"` (from `single_sequence_check`) or
+///   `"Sequence conflict:"` (from `storage::error::SEQUENCE_CONFLICT`).
+///   Two writers raced; the loser refetches fresh state and retries.
+///   Event sourcing's per-sequence idempotency makes this safe.
 ///
 /// # Non-Retryable Codes
 ///
-/// - **`Aborted`**: Used for MERGE_MANUAL when sequence mismatch occurs. The
-///   framework routes these to DLQ for human review — automated retry won't help.
-/// - **Other codes**: Business rejections, validation errors, network errors, etc.
-///   These require human intervention or code fixes.
+/// All other 4xx-class codes (`InvalidArgument`, `NotFound`, `Aborted`,
+/// `Unimplemented`, `PermissionDenied`, `Unauthenticated`, `OutOfRange`,
+/// `AlreadyExists`) plus non-sequence-conflict `FailedPrecondition`
+/// (business guards like "Hand already dealt", "Player does not exist" —
+/// refreshing state just re-hits the guard). `Aborted` specifically
+/// covers MERGE_MANUAL routing, where the aggregate owner asked for
+/// human review rather than automated retry. These all map to
+/// `DlqTrigger::Immediate` at the DLQ layer.
 ///
-/// # Why This Distinction?
+/// # Why This Set?
 ///
-/// Sequence conflicts are often transient — two concurrent writers raced, one won.
-/// The loser should fetch fresh state and retry with the updated sequence. This is
-/// safe because event sourcing guarantees idempotency via sequence numbers.
+/// Before R2-15, only sequence-conflict `FailedPrecondition` was
+/// retryable — the narrow definition made sense for the aggregate
+/// pipeline (sequence races are the dominant transient case there) but
+/// silently dropped legitimate transient errors (broker briefly down,
+/// downstream rebalancing) into the no-retry / DLQ-immediate bucket on
+/// the saga/PM/projector paths. R2-15 broadens the helper to the gRPC
+/// canonical transient set so all four handler types share one
+/// operator contract: 4xx → DLQ now, 5xx → retry then DLQ.
 ///
-/// MERGE_MANUAL conflicts are different: the aggregate owner explicitly chose to
-/// require human review rather than auto-retry. Respecting that decision means
-/// routing to DLQ, not retrying.
+/// # Consequence on Aggregate Retry Behavior
+///
+/// The aggregate command pipeline (`orchestration/aggregate/pipeline.rs`)
+/// will now retry on the full 5xx-class set, not just sequence
+/// conflicts. Aggregates will hold commands longer in the face of
+/// downstream blips rather than rejecting fast; operators who relied
+/// on fast-reject behavior for non-sequence transient codes will see
+/// delayed rejections. Accepted per R2-15.
 pub fn is_retryable_status(status: &Status) -> bool {
-    if !matches!(status.code(), Code::FailedPrecondition) {
-        return false;
+    use Code::*;
+    match status.code() {
+        Unavailable | DeadlineExceeded | ResourceExhausted | Internal | Unknown | DataLoss
+        | Cancelled => true,
+        FailedPrecondition => {
+            // FailedPrecondition is overloaded: business guards (e.g.
+            // "Hand already dealt") also surface as FailedPrecondition.
+            // Only sequence-conflict messages are retryable — refetching
+            // state and retrying a guard rejection just re-hits the
+            // guard. Match the message prefixes the framework emits.
+            let msg = status.message();
+            msg.starts_with("Sequence mismatch:") || msg.starts_with("Sequence conflict:")
+        }
+        Ok | InvalidArgument | NotFound | Aborted | Unimplemented | PermissionDenied
+        | Unauthenticated | OutOfRange | AlreadyExists => false,
     }
-    // FailedPrecondition is overloaded: aggregate guards (e.g.
-    // "Hand already dealt", "Player does not exist") also surface as
-    // FailedPrecondition. Only sequence-related rejections are actually
-    // retryable — refetching state and retrying a guard rejection just
-    // hits the same guard. Match the message prefix the framework emits
-    // (`Sequence mismatch:` from single_sequence_check,
-    // `Sequence conflict:` from storage::error::SEQUENCE_CONFLICT).
-    let msg = status.message();
-    msg.starts_with("Sequence mismatch:") || msg.starts_with("Sequence conflict:")
 }
 
 /// The outcome of a single attempt of a retryable operation.

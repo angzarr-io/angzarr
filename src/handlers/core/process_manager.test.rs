@@ -64,7 +64,7 @@ struct MockDestinationFetcher;
 
 #[async_trait]
 impl DestinationFetcher for MockDestinationFetcher {
-    async fn fetch(&self, _cover: &Cover) -> Option<EventBook> {
+    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
         unimplemented!("Not needed for constructor tests")
     }
 
@@ -72,7 +72,7 @@ impl DestinationFetcher for MockDestinationFetcher {
         &self,
         _domain: &str,
         _correlation_id: &str,
-    ) -> Option<EventBook> {
+    ) -> Result<Option<EventBook>, tonic::Status> {
         unimplemented!("Not needed for constructor tests")
     }
 }
@@ -84,6 +84,7 @@ impl FactExecutor for MockFactExecutor {
     async fn inject(
         &self,
         _fact: EventBook,
+        _delivery: crate::orchestration::FactDelivery,
     ) -> Result<(), crate::orchestration::FactInjectionError> {
         unimplemented!("Not needed for constructor tests")
     }

@@ -10,9 +10,8 @@ use crate::proto::{
     temporal_query::PointInTime, AggregateRoot, EventBook, Query, Uuid as ProtoUuid,
 };
 use crate::proto_ext::CoverExt;
-use crate::repository::EventBookRepository;
-use crate::storage::EventStore;
-use crate::storage::SnapshotStore;
+use crate::repository::{EventBookRepository, SnapshotRepository};
+use crate::storage::{EventStore, SnapshotStore};
 use crate::validation;
 
 /// Event query service.
@@ -43,22 +42,47 @@ impl EventQueryService {
         snapshot_store: Arc<dyn SnapshotStore>,
         enable_snapshots: bool,
     ) -> Self {
+        // write_enabled=false because EventQueryService never persists
+        // snapshots — it's a read-only surface. read_enabled mirrors the
+        // caller's preference.
+        let snapshot_repo = Arc::new(SnapshotRepository::with_flags(
+            snapshot_store,
+            enable_snapshots,
+            false,
+        ));
         Self {
-            event_book_repo: Arc::new(EventBookRepository::with_config(
-                event_store.clone(),
-                snapshot_store,
-                enable_snapshots,
-            )),
+            event_book_repo: Arc::new(EventBookRepository::new(event_store.clone(), snapshot_repo)),
             event_store,
         }
     }
 }
 
+/// Resolve and validate the `(domain, edition, root)` a root-addressed query
+/// targets — the same checks for every query RPC.
+fn query_target(
+    cover: Option<&crate::proto::Cover>,
+) -> Result<(String, String, uuid::Uuid), Status> {
+    let cover = cover.ok_or_else(|| {
+        Status::invalid_argument(crate::services::errmsg::QUERY_MISSING_COVER_OR_CORRELATION)
+    })?;
+    validation::validate_domain(&cover.domain)?;
+    let root = cover.root.as_ref().ok_or_else(|| {
+        Status::invalid_argument(crate::services::errmsg::QUERY_MISSING_ROOT_OR_CORRELATION)
+    })?;
+    let root = uuid::Uuid::from_slice(&root.value).map_err(|e| {
+        Status::invalid_argument(format!("{}{}", crate::services::errmsg::INVALID_UUID, e))
+    })?;
+    let edition = cover.edition().unwrap_or_default();
+    validation::validate_edition(edition)?;
+    Ok((cover.domain.clone(), edition.to_string(), root))
+}
+
 /// Resolve a `Query::selection` against the repository.
 ///
-/// Both `get_event_book` (unary) and `synchronize` (bidi-stream) MUST produce
-/// the same event set for the same `(domain, edition, root, selection)`. This
-/// helper centralises the dispatch so the two call sites cannot drift.
+/// `get_event_book` (unary), `get_events` (server-stream) and `synchronize`
+/// (bidi-stream) MUST produce the same event set for the same
+/// `(domain, edition, root, selection)`. This helper centralises the dispatch
+/// so the call sites cannot drift.
 ///
 /// Range upper bound: the proto `SequenceRange.upper` is inclusive (see the
 /// `test_get_event_book_with_range` doc-comment in mod.test.rs); storage
@@ -70,12 +94,6 @@ impl EventQueryService {
 /// - `InvalidArgument` if a temporal query is missing its `point_in_time`.
 /// - `InvalidArgument` if an `as_of_time` timestamp is malformed.
 /// - `Internal` for any storage / repository error.
-///
-/// Currently exercised only by the H-35/H-36 regression tests; production
-/// `get_event_book` / `synchronize` still inline the same branch logic with
-/// matching semantics. A future refactor will collapse both methods onto
-/// this helper.
-#[allow(dead_code)]
 pub(crate) async fn dispatch_selection(
     repo: &EventBookRepository,
     domain: &str,
@@ -100,10 +118,9 @@ pub(crate) async fn dispatch_selection(
         }
         Some(Selection::Temporal(tq)) => match tq.point_in_time {
             Some(PointInTime::AsOfTime(ref ts)) => {
-                let rfc3339 = crate::storage::helpers::timestamp_to_rfc3339(ts)
-                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                repo.get_temporal_by_time(domain, edition, root, &rfc3339)
-                    .await
+                // C10: forward the typed timestamp; normalization happens
+                // once at the repository/storage boundary, not here.
+                repo.get_temporal_by_time(domain, edition, root, ts).await
             }
             Some(PointInTime::AsOfSequence(seq)) => {
                 repo.get_temporal_by_sequence(domain, edition, root, seq)
@@ -155,22 +172,8 @@ impl EventQueryTrait for EventQueryService {
             return Ok(Response::new(book));
         }
 
-        // Standard query by domain + root
-        let cover = cover.ok_or_else(|| {
-            Status::invalid_argument(crate::services::errmsg::QUERY_MISSING_COVER_OR_CORRELATION)
-        })?;
-        let domain = cover.domain.clone();
-        validation::validate_domain(&domain)?;
-        let root = cover.root.as_ref().ok_or_else(|| {
-            Status::invalid_argument(crate::services::errmsg::QUERY_MISSING_ROOT_OR_CORRELATION)
-        })?;
-
-        let root_uuid = uuid::Uuid::from_slice(&root.value).map_err(|e| {
-            Status::invalid_argument(format!("{}{}", crate::services::errmsg::INVALID_UUID, e))
-        })?;
-
-        let edition = cover.edition().unwrap_or_default();
-        validation::validate_edition(edition)?;
+        let (domain, edition, root_uuid) = query_target(cover)?;
+        let edition = edition.as_str();
 
         info!(
             domain = %domain,
@@ -180,58 +183,20 @@ impl EventQueryTrait for EventQueryService {
             "GetEventBook starting query"
         );
 
-        // Handle selection: range, specific sequences, temporal, or full query
-        let book = match query.selection {
-            Some(Selection::Range(ref range)) => {
-                let lower = range.lower;
-                // Proto uses inclusive upper bound, storage uses exclusive.
-                // Convert: inclusive N → exclusive N+1 (saturating to avoid overflow)
-                let upper = range
-                    .upper
-                    .map(|u| u.saturating_add(1))
-                    .unwrap_or(u32::MAX);
-                info!(domain = %domain, root = %root_uuid, lower = lower, upper = upper, "GetEventBook range query");
-                self.event_book_repo
-                    .get_from_to(&domain, edition, root_uuid, lower, upper)
-                    .await
-            }
-            Some(Selection::Sequences(ref seq_set)) => {
-                info!(domain = %domain, root = %root_uuid, sequences = ?seq_set.values, "GetEventBook sequences query");
-                self.event_book_repo
-                    .get_sequences(&domain, edition, root_uuid, &seq_set.values)
-                    .await
-            }
-            Some(Selection::Temporal(ref tq)) => {
-                match tq.point_in_time {
-                    Some(PointInTime::AsOfTime(ref ts)) => {
-                        let rfc3339 = crate::storage::helpers::timestamp_to_rfc3339(ts)
-                            .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                        info!(domain = %domain, root = %root_uuid, as_of = %rfc3339, "GetEventBook temporal time query");
-                        self.event_book_repo
-                            .get_temporal_by_time(&domain, edition, root_uuid, &rfc3339)
-                            .await
-                    }
-                    Some(PointInTime::AsOfSequence(seq)) => {
-                        info!(domain = %domain, root = %root_uuid, as_of_sequence = seq, "GetEventBook temporal sequence query");
-                        self.event_book_repo
-                            .get_temporal_by_sequence(&domain, edition, root_uuid, seq)
-                            .await
-                    }
-                    None => {
-                        return Err(Status::invalid_argument(
-                            crate::services::errmsg::TEMPORAL_QUERY_MISSING_POINT,
-                        ));
-                    }
-                }
-            }
-            None => {
-                info!(domain = %domain, root = %root_uuid, "GetEventBook full query");
-                self.event_book_repo.get(&domain, edition, root_uuid).await
-            }
-        }
-        .map_err(|e| {
-            error!(domain = %domain, root = %root_uuid, error = %e, "GetEventBook query failed");
-            Status::internal(e.to_string())
+        // Selection dispatch goes through the shared `dispatch_selection`
+        // helper so the unary RPC and the `synchronize` bidi-stream
+        // produce the same event set for the same Query (H-35 / H-36).
+        let book = dispatch_selection(
+            &self.event_book_repo,
+            &domain,
+            edition,
+            root_uuid,
+            query.selection,
+        )
+        .await
+        .map_err(|status| {
+            error!(domain = %domain, root = %root_uuid, status = %status, "GetEventBook query failed");
+            status
         })?;
 
         info!(domain = %domain, root = %root_uuid, pages = book.pages.len(), "GetEventBook completed");
@@ -274,35 +239,15 @@ impl EventQueryTrait for EventQueryService {
             return Ok(Response::new(ReceiverStream::new(rx)));
         }
 
-        // Standard query by domain + root
-        let cover = cover.ok_or_else(|| {
-            Status::invalid_argument(crate::services::errmsg::QUERY_MISSING_COVER_OR_CORRELATION)
-        })?;
-        let domain = cover.domain.clone();
-        validation::validate_domain(&domain)?;
-        let root = cover.root.as_ref().ok_or_else(|| {
-            Status::invalid_argument(crate::services::errmsg::QUERY_MISSING_ROOT_OR_CORRELATION)
-        })?;
-
-        let root_uuid = uuid::Uuid::from_slice(&root.value).map_err(|e| {
-            Status::invalid_argument(format!("{}{}", crate::services::errmsg::INVALID_UUID, e))
-        })?;
-
-        let edition = cover.edition().unwrap_or_default().to_string();
+        let (domain, edition, root_uuid) = query_target(cover)?;
+        let selection = query.selection;
         let event_book_repo = self.event_book_repo.clone();
 
         tokio::spawn(async move {
-            match event_book_repo.get(&domain, &edition, root_uuid).await {
-                Ok(book) => {
-                    if tx.send(Ok(book)).await.is_err() {
-                        debug!(domain = %domain, root = %root_uuid, "Client disconnected before response");
-                    }
-                }
-                Err(e) => {
-                    if tx.send(Err(Status::internal(e.to_string()))).await.is_err() {
-                        debug!(domain = %domain, root = %root_uuid, "Client disconnected before error could be sent");
-                    }
-                }
+            let result =
+                dispatch_selection(&event_book_repo, &domain, &edition, root_uuid, selection).await;
+            if tx.send(result).await.is_err() {
+                debug!(domain = %domain, root = %root_uuid, "Client disconnected before response");
             }
         });
 
@@ -323,121 +268,36 @@ impl EventQueryTrait for EventQueryService {
             while let Some(query_result) = stream.next().await {
                 match query_result {
                     Ok(query) => {
-                        let cover = match query.cover.as_ref() {
-                            Some(c) => c,
-                            None => {
-                                if tx
-                                    .send(Err(Status::invalid_argument(
-                                        crate::services::errmsg::QUERY_MISSING_COVER,
-                                    )))
-                                    .await
-                                    .is_err()
-                                {
+                        let (domain, edition, root) = match query_target(query.cover.as_ref()) {
+                            Ok(target) => target,
+                            Err(status) => {
+                                if tx.send(Err(status)).await.is_err() {
                                     debug!("Client disconnected during synchronize");
                                     break;
                                 }
                                 continue;
                             }
                         };
-                        let domain = cover.domain.clone();
-                        let edition = cover.edition().unwrap_or_default();
-                        let root = match cover.root.as_ref() {
-                            Some(r) => match uuid::Uuid::from_slice(&r.value) {
-                                Ok(uuid) => uuid,
-                                Err(e) => {
-                                    error!(error = %e, "Invalid UUID in synchronize query");
-                                    if tx
-                                        .send(Err(Status::invalid_argument(format!(
-                                            "{}{e}",
-                                            crate::services::errmsg::INVALID_UUID
-                                        ))))
-                                        .await
-                                        .is_err()
-                                    {
-                                        debug!("Client disconnected during synchronize");
-                                        break;
-                                    }
-                                    continue;
-                                }
-                            },
-                            None => {
-                                if tx
-                                    .send(Err(Status::invalid_argument(
-                                        crate::services::errmsg::QUERY_MISSING_ROOT,
-                                    )))
-                                    .await
-                                    .is_err()
-                                {
-                                    debug!("Client disconnected during synchronize");
-                                    break;
-                                }
-                                continue;
-                            }
-                        };
+                        let edition = edition.as_str();
 
-                        // Handle selection: range, specific sequences, temporal, or full query
-                        // H-36: match get_event_book's inclusive→exclusive
-                        // conversion so the same Query produces the same
-                        // event set whether the caller goes through the
-                        // unary or the bidi-stream RPC.
-                        let result = match query.selection {
-                            Some(Selection::Range(ref range)) => {
-                                let lower = range.lower;
-                                let upper =
-                                    range.upper.map(|u| u.saturating_add(1)).unwrap_or(u32::MAX);
-                                event_book_repo
-                                    .get_from_to(&domain, edition, root, lower, upper)
-                                    .await
-                            }
-                            Some(Selection::Sequences(ref seq_set)) => {
-                                event_book_repo
-                                    .get_sequences(&domain, edition, root, &seq_set.values)
-                                    .await
-                            }
-                            Some(Selection::Temporal(ref tq)) => match tq.point_in_time {
-                                Some(PointInTime::AsOfTime(ref ts)) => {
-                                    match crate::storage::helpers::timestamp_to_rfc3339(ts) {
-                                        Ok(rfc3339) => {
-                                            event_book_repo
-                                                .get_temporal_by_time(
-                                                    &domain, edition, root, &rfc3339,
-                                                )
-                                                .await
-                                        }
-                                        Err(e) => {
-                                            if tx
-                                                .send(Err(Status::invalid_argument(e.to_string())))
-                                                .await
-                                                .is_err()
-                                            {
-                                                debug!("Client disconnected during synchronize");
-                                                break;
-                                            }
-                                            continue;
-                                        }
-                                    }
-                                }
-                                Some(PointInTime::AsOfSequence(seq)) => {
-                                    event_book_repo
-                                        .get_temporal_by_sequence(&domain, edition, root, seq)
-                                        .await
-                                }
-                                None => {
-                                    if tx
-                                        .send(Err(Status::invalid_argument(
-                                            crate::services::errmsg::TEMPORAL_QUERY_MISSING_POINT,
-                                        )))
-                                        .await
-                                        .is_err()
-                                    {
-                                        debug!("Client disconnected during synchronize");
-                                        break;
-                                    }
-                                    continue;
-                                }
-                            },
-                            None => event_book_repo.get(&domain, edition, root).await,
-                        };
+                        // Selection dispatch goes through the shared
+                        // `dispatch_selection` helper so this bidi-stream
+                        // path and the unary `get_event_book` produce the
+                        // same event set for the same Query
+                        // (H-35 / H-36). `dispatch_selection` returns a
+                        // pre-wrapped `Status` covering both the
+                        // invalid_argument cases (missing temporal point,
+                        // unparseable timestamp) and the internal-storage
+                        // case, so the send path collapses to a single
+                        // Ok/Err match.
+                        let result = dispatch_selection(
+                            &event_book_repo,
+                            &domain,
+                            edition,
+                            root,
+                            query.selection,
+                        )
+                        .await;
 
                         match result {
                             Ok(book) => {
@@ -446,9 +306,9 @@ impl EventQueryTrait for EventQueryService {
                                     break; // Client disconnected
                                 }
                             }
-                            Err(e) => {
-                                error!(domain = %domain, root = %root, error = %e, "Synchronize: failed to get events");
-                                if tx.send(Err(Status::internal(e.to_string()))).await.is_err() {
+                            Err(status) => {
+                                error!(domain = %domain, root = %root, status = %status, "Synchronize: failed to get events");
+                                if tx.send(Err(status)).await.is_err() {
                                     break;
                                 }
                             }
@@ -488,6 +348,7 @@ impl EventQueryTrait for EventQueryService {
                 }
             };
 
+            // Roots of the main timeline (AggregateRoot carries no edition).
             for domain in domains {
                 match event_store.list_roots(&domain, "").await {
                     Ok(roots) => {
@@ -505,6 +366,8 @@ impl EventQueryTrait for EventQueryService {
                     }
                     Err(e) => {
                         error!(domain = %domain, error = %e, "Failed to list roots");
+                        let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                        return;
                     }
                 }
             }

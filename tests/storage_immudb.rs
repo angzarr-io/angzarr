@@ -10,7 +10,7 @@ mod storage;
 
 use std::time::Duration;
 
-use angzarr::storage::ImmudbEventStore;
+use angzarr::storage::{AddMeta, ImmudbEventStore};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
@@ -45,10 +45,16 @@ async fn start_immudb() -> (testcontainers::ContainerAsync<GenericImage>, String
         .await
         .expect("Failed to get mapped port");
 
-    let host = container
-        .get_host()
-        .await
-        .expect("Failed to get container host");
+    // See storage_postgres.rs: dind wrapper sets TESTCONTAINERS_HOST because
+    // the bridge-gateway fallback is unreachable under rootless docker.
+    let host = match std::env::var("TESTCONTAINERS_HOST") {
+        Ok(h) => h,
+        Err(_) => container
+            .get_host()
+            .await
+            .expect("Failed to get container host")
+            .to_string(),
+    };
 
     // immudb default credentials: immudb:immudb, database: defaultdb
     let connection_string = format!(
@@ -60,6 +66,9 @@ async fn start_immudb() -> (testcontainers::ContainerAsync<GenericImage>, String
 
     (container, connection_string)
 }
+
+/// Serializes schema DDL across the concurrently running tests.
+static SCHEMA_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Connect to immudb and initialize schema.
 ///
@@ -82,44 +91,31 @@ async fn connect_and_init(connection_string: &str) -> (sqlx::PgPool, ImmudbEvent
         .await
         .expect("Failed to connect to immudb");
 
-    // Initialize schema using raw_sql (simple query mode for immudb compatibility)
-    // immudb doesn't support extended query protocol (prepared statements)
-    // Note: Using VARCHAR for root instead of BLOB[16] because the implementation
-    // stores UUIDs as strings (root.to_string())
-    // immudb has a 256 byte limit for indexed columns
-    // Keep VARCHAR sizes conservative to stay within limits
-    let create_table = r#"
-        CREATE TABLE IF NOT EXISTS events (
-            domain         VARCHAR(64) NOT NULL,
-            edition        VARCHAR(32) NOT NULL,
-            root           VARCHAR(36) NOT NULL,
-            sequence       INTEGER NOT NULL,
-            created_at     TIMESTAMP NOT NULL,
-            event_data     BLOB NOT NULL,
-            correlation_id VARCHAR(128),
-            external_id    VARCHAR(128),
-            source_edition VARCHAR(32),
-            source_domain  VARCHAR(64),
-            source_root    VARCHAR(36),
-            source_seq     INTEGER,
-            PRIMARY KEY (domain, edition, root, sequence)
-        )
-    "#;
-
-    pool.execute(sqlx::raw_sql(create_table))
-        .await
-        .expect("Failed to create events table");
+    // Initialize schema using raw_sql (simple query mode for immudb
+    // compatibility — immudb doesn't support the extended query protocol).
+    // The DDL is the production constant, NOT a local copy: a duplicated
+    // literal here silently drifted when the events table gained the
+    // source_component/source_command_index columns (O1) and every add()
+    // failed with "column does not exist".
+    // Concurrent tests share one database; serialize the DDL (immudb
+    // rejects concurrent CREATE TABLE with "tx read conflict").
+    let _ddl = SCHEMA_LOCK.lock().await;
+    pool.execute(sqlx::raw_sql(
+        angzarr::storage::immudb::schema::CREATE_EVENTS_TABLE,
+    ))
+    .await
+    .expect("Failed to create events table");
 
     // Create indexes (may fail if table already has data - immudb limitation)
     let _ = pool
         .execute(sqlx::raw_sql(
-            "CREATE INDEX IF NOT EXISTS ON events(correlation_id)",
+            angzarr::storage::immudb::schema::CREATE_CORRELATION_INDEX,
         ))
         .await;
 
     let _ = pool
         .execute(sqlx::raw_sql(
-            "CREATE INDEX IF NOT EXISTS ON events(domain, root, sequence)",
+            angzarr::storage::immudb::schema::CREATE_DOMAIN_ROOT_INDEX,
         ))
         .await;
 
@@ -128,19 +124,41 @@ async fn connect_and_init(connection_string: &str) -> (sqlx::PgPool, ImmudbEvent
     (pool, store)
 }
 
-#[tokio::test]
-async fn test_immudb_event_store() {
-    println!("=== ImmuDB EventStore Tests ===");
-    println!("Starting immudb container...");
+/// Shared container for the per-contract-fn tests (T11). The static holds
+/// the container handle (alive until process exit; ryuk reaps it) plus the
+/// connection string; each generated test opens its own connection since a
+/// pool created inside one `#[tokio::test]` runtime dies with that runtime.
+static IMMUDB: tokio::sync::OnceCell<(testcontainers::ContainerAsync<GenericImage>, String)> =
+    tokio::sync::OnceCell::const_new();
 
-    let (_container, connection_string) = start_immudb().await;
-    let (_pool, store) = connect_and_init(&connection_string).await;
+async fn shared_immudb_url() -> String {
+    let (_container, url) = IMMUDB
+        .get_or_init(|| async {
+            let (container, url) = start_immudb().await;
+            (container, url)
+        })
+        .await;
+    url.clone()
+}
 
-    println!("Running EventStore tests...");
-    run_event_store_tests!(&store);
+/// T4: core suite only. ImmuDB is append-only (delete_edition_events →
+/// NotImplemented, asserted by test_immudb_delete_not_supported below).
+/// Running the full suite was self-contradictory:
+/// it asserted both that delete succeeds AND that delete is unsupported.
+///
+/// T11: one generated `#[tokio::test]` per core contract fn. The known
+/// S2 sentinel failures now surface as individual red tests rather than
+/// one opaque mega-test failure.
+mod event_store_contract {
+    use angzarr::storage::ImmudbEventStore;
 
-    println!("=== All ImmuDB EventStore tests PASSED ===");
-    // Container is dropped here, stopping immudb
+    async fn fixture() -> ImmudbEventStore {
+        let url = super::shared_immudb_url().await;
+        let (_pool, store) = super::connect_and_init(&url).await;
+        store
+    }
+
+    crate::generate_event_store_core_tests!(fixture);
 }
 
 // =============================================================================
@@ -162,18 +180,16 @@ async fn test_immudb_correlation_queries() {
     let root2 = Uuid::new_v4();
 
     // Add events with same correlation ID across different aggregates.
-    // C-18 fix: trait `add()` now takes 7 args (added `external_id`,
-    // `source_info` for idempotency claims). Pass None for both — these
-    // tests don't exercise the claim paths.
     store
         .add(
             "domain_a",
             "angzarr",
             root1,
             vec![storage::event_store_tests::make_event(0, "EventA")],
-            &correlation_id,
-            None,
-            None,
+            &AddMeta {
+                correlation_id: &correlation_id,
+                ..Default::default()
+            },
         )
         .await
         .expect("add to domain_a failed");
@@ -184,9 +200,10 @@ async fn test_immudb_correlation_queries() {
             "angzarr",
             root2,
             vec![storage::event_store_tests::make_event(0, "EventB")],
-            &correlation_id,
-            None,
-            None,
+            &AddMeta {
+                correlation_id: &correlation_id,
+                ..Default::default()
+            },
         )
         .await
         .expect("add to domain_b failed");
@@ -228,16 +245,13 @@ async fn test_immudb_edition_composite_read() {
     let domain = "test_edition";
 
     // Add events to main timeline (angzarr edition).
-    // C-18 fix: trait `add()` now takes 7 args.
     store
         .add(
             domain,
             "angzarr",
             root,
             storage::event_store_tests::make_events(0, 5),
-            "",
-            None,
-            None,
+            &AddMeta::default(),
         )
         .await
         .expect("add to main timeline failed");
@@ -249,9 +263,7 @@ async fn test_immudb_edition_composite_read() {
             "feature-x",
             root,
             storage::event_store_tests::make_events(3, 3), // sequences 3, 4, 5
-            "",
-            None,
-            None,
+            &AddMeta::default(),
         )
         .await
         .expect("add to feature edition failed");
@@ -313,16 +325,13 @@ async fn test_immudb_delete_not_supported() {
     assert_eq!(next, 0, "new aggregate should have next_sequence 0");
 
     // Add some events.
-    // C-18 fix: trait `add()` now takes 7 args.
     store
         .add(
             domain,
             "test-edition",
             root,
             storage::event_store_tests::make_events(0, 3),
-            "",
-            None,
-            None,
+            &AddMeta::default(),
         )
         .await
         .expect("add should succeed");

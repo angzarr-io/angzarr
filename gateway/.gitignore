@@ -1,5 +1,5 @@
 # Generated protobuf code
 gen/
 
-# Generated OpenAPI spec (kept in docs/static/ instead)
+# Generated OpenAPI spec (gateway-gen writes api/angzarr.swagger.json)
 api/

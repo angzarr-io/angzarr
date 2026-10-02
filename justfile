@@ -39,7 +39,7 @@ CONTAINER_RUN := CONTAINER_CMD + " run --rm " + CONTAINER_USER_ARG
 
 # NOTE: Client libraries and examples have been extracted to separate repos:
 #   - angzarr-client-{lang}: Client libraries (pip install angzarr-client, etc.)
-#   - angzarr-examples-{lang}: Example implementations (poker domain)
+#   - angzarr-examples-{lang}: Example implementations (blackjack domain)
 # See: https://github.com/angzarr-io/
 
 mod images "build/images/justfile"
@@ -84,10 +84,13 @@ _build-images:
         # Fall back to the most-recently-created commit-tagged image of
         # each kind. If both exist we still skip skaffold; otherwise we
         # take the slow path below.
+        # `|| true`: grep exits 1 when no commit-tagged image exists yet
+        # (fresh machine); under set -euo pipefail that would kill the
+        # recipe silently before the slow path below can bootstrap.
         BASE_TAG=$(docker images --format "{{ "{{.Repository}}:{{.Tag}}" }} {{ "{{.CreatedAt}}" }}" ghcr.io/angzarr-io/angzarr-base 2>/dev/null \
-            | grep -E ":v[0-9]" | sort -k2 -r | head -1 | awk '{print $1}')
+            | grep -E ":v[0-9]" | sort -k2 -r | head -1 | awk '{print $1}' || true)
         RUST_TAG=$(docker images --format "{{ "{{.Repository}}:{{.Tag}}" }} {{ "{{.CreatedAt}}" }}" ghcr.io/angzarr-io/angzarr-rust 2>/dev/null \
-            | grep -E ":v[0-9]" | sort -k2 -r | head -1 | awk '{print $1}')
+            | grep -E ":v[0-9]" | sort -k2 -r | head -1 | awk '{print $1}' || true)
     fi
     if [ -n "$BASE_TAG" ] && [ -n "$RUST_TAG" ]; then
         printf '{"builds":[{"imageName":"ghcr.io/angzarr-io/angzarr-base","tag":"%s"},{"imageName":"ghcr.io/angzarr-io/angzarr-rust","tag":"%s"}]}\n' \
@@ -169,6 +172,7 @@ _container-dind +ARGS: _build-images
             -e CARGO_HOME=/workspace/.cargo-container \
             -e DOCKER_HOST=unix:///var/run/docker.sock \
             -e TESTCONTAINERS_RYUK_DISABLED=true \
+            -e TESTCONTAINERS_HOST=127.0.0.1 \
             "$IMAGE" just {{ARGS}}
     fi
 
@@ -241,13 +245,20 @@ _container-ephemeral +ARGS: _build-images
             # it (the original /src is read-only, but /work is writable).
             cp /etc/angzarr-justfile /work/justfile
             cd /work
-            just {{ARGS}}
+            # cargo mutants exits non-zero when mutants survive — that is a
+            # RESULT, not a tooling failure. Capture the exit code so the
+            # outcomes copy below still runs; `just mutants-summary` /
+            # `mutants-survivors` read the copied outcomes.json and were
+            # blind to every run that actually had survivors before this.
+            rc=0
+            just {{ARGS}} || rc=$?
             # Persist ONLY outcomes.json back to host. Mutated source trees
             # and intermediate working dirs die with the container.
             if [ -f /work/mutants.out/outcomes.json ]; then
                 cp /work/mutants.out/outcomes.json /out/outcomes.json
                 echo "[ephemeral] outcomes.json copied to host mutants.out/"
             fi
+            exit $rc
         '
 
 default:
@@ -315,55 +326,49 @@ buf-lint:
 buf-push:
     just _buf push
 
-# Generate proto documentation (outputs to docs/docs/api/proto/)
-buf-docs:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mkdir -p "{{TOP}}/docs/docs/api/proto"
-    # List proto files (exclude health which is internal). Sererr's
-    # proto root is also mounted because types.proto imports
-    # `sererr/sererr.proto` from the `sererr/` submodule.
-    PROTOS=$(find "{{TOP}}/angzarr-project/proto" -name '*.proto' ! -path '*/health/*' -printf '%P\n' | sort)
-    SERERR_PROTO_DIR="{{TOP}}/sererr/proto"
-    {{CONTAINER_RUN}} \
-        -v "{{TOP}}/angzarr-project/proto:/protos:Z" \
-        -v "${SERERR_PROTO_DIR}:/sererr-protos:Z" \
-        -v "{{TOP}}/docs/docs/api/proto:/out:Z" \
-        docker.io/pseudomuto/protoc-gen-doc \
-        --proto_path=/protos \
-        --proto_path=/sererr-protos \
-        --doc_opt=markdown,index.md \
-        $PROTOS
-    # Escape curly braces for MDX compatibility (handles google.api.http examples)
-    python3 "{{TOP}}/build/proto/escape_mdx.py" "{{TOP}}/docs/docs/api/proto/index.md"
-    # Fix anchors for Docusaurus compatibility (convert <a name=""> to heading IDs)
-    python3 "{{TOP}}/build/proto/fix_anchors.py" "{{TOP}}/docs/docs/api/proto/index.md"
-    # Add frontmatter for Docusaurus
-    sed -i '1i ---\ntitle: Protocol Buffer API\ndescription: Auto-generated documentation for Angzarr protobuf definitions\n---\n' "{{TOP}}/docs/docs/api/proto/index.md"
-
 # === gRPC Gateway ===
 
 # Run command in Go container (has Go, buf, protoc plugins)
 [private]
 _go +ARGS:
     #!/usr/bin/env bash
-    if [ "${DEVCONTAINER:-}" = "true" ] || (command -v go &>/dev/null && command -v buf &>/dev/null); then
-        eval {{ARGS}}
+    if [ "${DEVCONTAINER:-}" = "true" ] || command -v go &>/dev/null; then
+        eval {{quote(ARGS)}}
     else
         {{CONTAINER_RUN}} --network=host \
             -v "{{TOP}}:/workspace:Z" \
             -w /workspace \
             {{REGISTRY}}/angzarr-go:latest \
-            sh -c {{ARGS}}
+            sh -c {{quote(ARGS)}}
+    fi
+
+# Run a shell command in the angzarr-base image (it ships buf), so buf
+# generation never needs a host buf.
+[private]
+_buf-sh +ARGS:
+    #!/usr/bin/env bash
+    if [ "${DEVCONTAINER:-}" = "true" ]; then
+        eval {{quote(ARGS)}}
+    else
+        {{CONTAINER_RUN}} --network=host \
+            -v "{{TOP}}:/workspace:Z" \
+            -w /workspace \
+            -e BUF_CACHE_DIR=/tmp/buf-cache \
+            {{REGISTRY}}/angzarr-base:latest \
+            sh -c {{quote(ARGS)}}
     fi
 
 # Generate gRPC-Gateway and OpenAPI code from protos
 gateway-gen:
-    just _go "cd gateway && buf generate"
+    just _buf-sh "cd gateway && buf generate"
 
 # Build gRPC-Gateway binary (for local testing)
 gateway-build: gateway-gen
     just _go "cd gateway && go build -o /tmp/angzarr-grpc-gateway ."
+
+# Generate, vet and test the gRPC-Gateway (routing, discovery, REST wiring)
+gateway-test: gateway-gen
+    just _go "cd gateway && go vet ./... && go test ./... && bash test_dlq_admin_generated.sh"
 
 # Run gRPC-Gateway locally (connects to local coordinator)
 gateway-dev: gateway-gen
@@ -383,12 +388,6 @@ gateway-image-push TAG="latest": gateway-gen
     {{CONTAINER_CMD}} push "$IMAGE:{{TAG}}"
     {{CONTAINER_CMD}} push "$IMAGE:latest"
 
-# Generate OpenAPI spec and copy to docs
-openapi: gateway-gen
-    mkdir -p "{{TOP}}/docs/static"
-    cp "{{TOP}}/gateway/api/angzarr.swagger.json" "{{TOP}}/docs/static/openapi.json"
-    @echo "OpenAPI spec generated at docs/static/openapi.json"
-
 # === Build ===
 
 # Build the project (debug)
@@ -403,6 +402,15 @@ build-release:
 check:
     just _container check
 
+# Check code compiles with all feature-gated backends enabled.
+check-full:
+    just _container check-full
+
+# Compile-check every test target (incl. feature-gated contract suites).
+# Catches test-binary rot that `just test` never compiles.
+check-tests:
+    just _container check-tests
+
 # Format code
 fmt:
     just _container fmt
@@ -411,9 +419,39 @@ fmt:
 lint:
     just _container lint
 
+# === Code complexity (lizard, in container) ===
+# lizard is a multi-language per-function complexity analyzer baked into the
+# angzarr-rust image. These targets delegate into it (implementations live in
+# justfile.container), so no host install is needed.
+
+# Per-function cyclomatic complexity as a human-readable table + warnings.
+# Defaults to the Rust framework (src, crates) + Go gateway; pass paths/flags to
+# scope, e.g.
+#   just complexity src/bus
+#   just complexity -C 15 src         (warn on functions over CCN 15)
+complexity *ARGS:
+    just _container complexity {{ARGS}}
+
+# Same per-function analysis as CSV (header prepended) for LLM/tooling ingest.
+# Columns: nloc,ccn,tokens,params,length,location,file,function,long_name,start,end
+complexity-csv *ARGS:
+    just _container complexity-csv {{ARGS}}
+
+# Per-function COGNITIVE complexity (clippy) — the authoritative Rust gate.
+# Unlike `complexity` (lizard cyclomatic, which counts every `?`), this tracks
+# reader burden. Threshold in clippy.toml. Reports only; never fails the build.
+cognitive:
+    just _container cognitive
+
 # Run unit tests
 test:
     just _container test
+
+# Run unit tests with extra backend features compiled in, so feature-gated
+# bus/storage unit tests run too. FEATURES is comma-separated, e.g.
+#   just test-features amqp,kafka,pubsub,sns-sqs
+test-features FEATURES:
+    just _container test-features {{FEATURES}}
 
 # Pre-commit gate: fmt + lint + test in a SINGLE container invocation.
 # Avoids the inter-container `.cargo-lock` race that bites when lefthook
@@ -437,9 +475,11 @@ gen-mutants-exclude:
 # and so are routed through the regular `_container` (no source mutation).
 # =============================================================================
 
-# Run mutation tests on a specific file (ephemeral; no source touches host)
-mutants FILE:
-    just _container-ephemeral mutants {{FILE}}
+# Run mutation tests on a specific file (ephemeral; no source touches host).
+# EXTRA forwards additional cargo-mutants flags, e.g. a function filter:
+#   just mutants src/orchestration/saga/mod.rs --re orchestrate_saga
+mutants FILE *EXTRA:
+    just _container-ephemeral mutants {{FILE}} {{EXTRA}}
 
 # Run mutation tests on handlers/core (aggregate, projector, saga, PM)
 mutants-core:
@@ -453,9 +493,15 @@ mutants-bus:
 mutants-orchestration:
     just _container-ephemeral mutants-orchestration
 
-# Run mutation tests on changed code (CI uses git.diff file)
-mutants-ci:
-    just _container-ephemeral mutants-ci
+# Mutation-test the changes since BASE, one shard (k/N) of the mutant set,
+# as the CI mutation matrix does; then gate with `just mutants-ci-gate`.
+mutants-ci SHARD="0/1" BASE="origin/main":
+    git -C "{{TOP}}" diff "{{BASE}}"...HEAD > "{{TOP}}/git.diff"
+    just _container-ephemeral mutants-ci {{SHARD}} git.diff
+
+# Kill-rate gate (default 90%) over the last mutants-ci outcomes.
+mutants-ci-gate THRESHOLD="90":
+    just _container mutants-ci-gate {{THRESHOLD}} mutants.out/outcomes.json
 
 # Show mutation testing summary from last run's outcomes.json
 mutants-summary:
@@ -482,10 +528,12 @@ mutants-purge-cache:
 # Usage:
 #   just storage test              # All backends
 #   just storage sqlite test       # SQLite only (no containers)
+#   just storage mock test         # Mock only (no containers)
 #   just storage postgres test     # PostgreSQL only (testcontainers)
 #   just storage redis test        # Redis only (testcontainers)
 #   just storage immudb test       # ImmuDB only (testcontainers)
-#   just storage nats test         # NATS JetStream only (testcontainers)
+#   just storage dynamo test       # DynamoDB only (testcontainers, DynamoDB Local)
+#   just storage bigtable test     # Bigtable only (testcontainers, Bigtable emulator)
 # =============================================================================
 
 # Storage contract tests - run all backends or a specific one
@@ -496,9 +544,9 @@ storage *ARGS:
     if [[ "$args" == "test" ]] || [[ -z "$args" ]]; then
         # All backends - needs dind for testcontainers
         just _container-dind storage test
-    elif [[ "$args" == "sqlite test" ]]; then
-        # SQLite doesn't need containers
-        just _container storage sqlite test
+    elif [[ "$args" == "sqlite test" ]] || [[ "$args" == "mock test" ]]; then
+        # SQLite and Mock don't need containers
+        just _container storage $args
     else
         # Other backends need testcontainers
         just _container-dind storage $args
@@ -515,12 +563,12 @@ storage *ARGS:
 #
 # Usage:
 #   just bus test                  # All backends
-#   just bus channel test          # Channel only (no containers)
 #   just bus amqp test             # RabbitMQ only (testcontainers)
 #   just bus kafka test            # Kafka only (testcontainers)
 #   just bus pubsub test           # GCP Pub/Sub only (testcontainers)
 #   just bus sns-sqs test          # AWS SNS/SQS only (testcontainers)
-#   just bus nats test             # NATS JetStream only (testcontainers)
+# NOTE: the in-memory channel backend was removed (b1eb2416); every
+# remaining bus backend needs testcontainers.
 # =============================================================================
 
 # Bus contract tests - run all backends or a specific one
@@ -531,11 +579,8 @@ bus *ARGS:
     if [[ "$args" == "test" ]] || [[ -z "$args" ]]; then
         # All backends - needs dind for testcontainers
         just _container-dind bus test
-    elif [[ "$args" == "channel test" ]]; then
-        # Channel doesn't need containers
-        just _container bus channel test
     else
-        # Other backends need testcontainers
+        # All bus backends need testcontainers
         just _container-dind bus $args
     fi
 
@@ -546,10 +591,38 @@ bus *ARGS:
 test-contract:
     just _container-dind test-contract
 
+# Integration test binaries (SQLite, in-process gRPC, DLQ features,
+# aggregate/PM pipelines, snapshots, acceptance harness) — the CI
+# "Integration Tests" job.
+test-integration:
+    just _container-dind test-integration
+
+# Check that every recipe the GitHub workflows invoke exists.
+check-ci-recipes:
+    python3 "{{TOP}}/scripts/check_ci_recipes.py"
+
+# Every CI job, run locally the way CI runs it (mutation testing excepted:
+# `just mutants-ci` on a git.diff).
+ci-local: check-ci-recipes
+    just check-submodules-clean
+    just _container fmt
+    just _container lint
+    just _container test
+    just _container check-tests
+    just _container-dind storage postgres test
+    just _container-dind bus amqp test
+    just _container-dind test-dlq-postgres
+    just test-integration
+    just _container-dind cov-ci
+    just gateway-test
+    just helm-test
+
 # Run all local tests (no running K8s cluster required)
 # =============================================================================
 # Fast validation suite using in-memory backends (no containers needed).
-# Includes: unit tests, storage (SQLite), bus (channel).
+# Includes: test-target compile gate, unit tests, storage (SQLite).
+# (The in-memory channel bus was removed; all bus backends now need
+# testcontainers — run `just bus test` / `just test-contract` for those.)
 #
 # NOTE: Client and example tests are now in their respective repos:
 #   - angzarr-client-{lang}: just test
@@ -558,6 +631,11 @@ test-contract:
 # WHY: Quick feedback loop during development. Run this before committing.
 # =============================================================================
 test-local:
+    @echo "═══════════════════════════════════════════════════════════════════"
+    @echo "=== Test-Target Compile Gate ==="
+    @echo "═══════════════════════════════════════════════════════════════════"
+    just check-tests
+    @echo ""
     @echo "═══════════════════════════════════════════════════════════════════"
     @echo "=== Core Unit Tests ==="
     @echo "═══════════════════════════════════════════════════════════════════"
@@ -569,9 +647,9 @@ test-local:
     just storage sqlite test
     @echo ""
     @echo "═══════════════════════════════════════════════════════════════════"
-    @echo "=== Bus Contract Tests (Channel) ==="
+    @echo "=== Integration Tests ==="
     @echo "═══════════════════════════════════════════════════════════════════"
-    just bus channel test
+    just test-integration
     @echo ""
     @echo "═══════════════════════════════════════════════════════════════════"
     @echo "=== All Local Tests Complete ==="
@@ -869,6 +947,11 @@ secrets-init:
 # One-time setup: configure Skaffold for local registry
 skaffold-init:
     @uv run "{{TOP}}/scripts/configure_skaffold.py"
+
+# Render-test the angzarr Helm chart (helm template + assertions)
+helm-test:
+    bash "{{TOP}}/deploy/k8s/helm/angzarr/tests/test_status_envoy_security.sh"
+    bash "{{TOP}}/deploy/k8s/helm/angzarr/tests/test_sidecar_wiring.sh"
 
 # Build framework images (angzarr sidecars)
 framework-build: _skaffold-ready

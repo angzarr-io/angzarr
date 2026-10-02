@@ -108,7 +108,6 @@ fn test_dlq_target_config_default() {
     assert!(target.dlq_type.is_empty());
     assert!(target.amqp.is_none());
     assert!(target.kafka.is_none());
-    assert!(target.nats.is_none());
     assert!(target.pubsub.is_none());
     assert!(target.sns_sqs.is_none());
     assert!(target.database.is_none());
@@ -125,22 +124,17 @@ fn test_amqp_dlq_config_default() {
     assert_eq!(config.url, "amqp://localhost:5672");
 }
 
-/// Kafka config defaults to localhost with standard prefix.
+/// Kafka config defaults to localhost with the prefix every DLQ backend
+/// shares (`angzarr-dlq-{domain}` topics), matching the publisher's own
+/// default.
 #[test]
 fn test_kafka_dlq_config_default() {
     let config = KafkaDlqConfig::default();
     assert_eq!(config.bootstrap_servers, "localhost:9092");
-    assert_eq!(config.topic_prefix, "angzarr.dlq");
+    assert_eq!(config.topic_prefix, "angzarr-dlq");
+    assert_eq!(config.topic_prefix, PubSubDlqConfig::default().topic_prefix);
     assert!(config.sasl_username.is_none());
     assert!(config.sasl_password.is_none());
-}
-
-/// NATS config defaults to localhost.
-#[test]
-fn test_nats_dlq_config_default() {
-    let config = NatsDlqConfig::default();
-    assert_eq!(config.url, "nats://localhost:4222");
-    assert_eq!(config.stream_prefix, "angzarr-dlq");
 }
 
 /// Pub/Sub config requires project_id (empty by default).

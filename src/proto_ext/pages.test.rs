@@ -2,52 +2,40 @@
 //!
 //! Background (H-41): prost's `Name::type_url()` default implementation
 //! returns `"/{full_name}"` — proto3's "leading slash, no domain" canonical
-//! form. The pre-fix `decode_typed` accepted ONLY `type.googleapis.com/...`
-//! (per `TYPE_URL_PREFIX`), so an Any constructed by calling
+//! form. The pre-fix `decode_typed` accepted ONLY `type.googleapis.com/...`,
+//! so an Any constructed by calling
 //! `M::type_url()` on the same Rust message type would silently decode to
 //! `None`.
 //!
 //! Behavior we pin:
 //! - `type.googleapis.com/{full_name}` decodes (existing happy path).
-//! - `/{full_name}` decodes (prost `Name::type_url()` default — the bug).
-//! - `type.angzarr.io/{full_name}` decodes (angzarr canonical prefix; not
-//!   the original H-41 ask but stripping "everything up to the last /" gives
-//!   it for free and matches the H-40 cross-prefix tolerance).
+//! - `/{full_name}` decodes (prost `Name::type_url()` default — also
+//!   angzarr's bare canonical form; the original H-41 bug).
+//! - an arbitrary resolver host (`type.angzarr.io/{full_name}`) decodes —
+//!   stripping "everything up to the last /" gives it for free and matches
+//!   the H-40 cross-prefix tolerance.
 //! - Wrong message type still returns None.
 //! - Empty payload returns None.
 //!
-//! Test message: `Confirmation` — it has a `prost::Name` impl in the
-//! generated proto and is used elsewhere in the codebase. Any concrete proto
-//! type with `Name` works; Confirmation lets us reuse the existing test
-//! fixtures from `two_phase.test.rs`.
+//! Test message: `Compensate` — it has a `prost::Name` impl in the generated
+//! proto. Any concrete proto type with `Name` works.
 
 use prost::{Message, Name};
 
 use super::*;
 use crate::proto::page_header::SequenceType;
 use crate::proto::{
-    command_page, event_page, CommandPage, Confirmation, Cover, EventPage, NoOp, PageHeader,
-    Uuid as ProtoUuid,
+    command_page, event_page, CommandPage, Compensate, EventPage, MergeStrategy, PageHeader,
+    RejectionNotification,
 };
 
 // ----- Helpers --------------------------------------------------------------
 
-fn sample_cover() -> Cover {
-    Cover {
-        domain: "test".to_string(),
-        root: Some(ProtoUuid {
-            value: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-        }),
-        correlation_id: "corr-123".to_string(),
-        edition: None,
-    }
-}
-
-fn sample_confirmation() -> Confirmation {
-    Confirmation {
-        target: Some(sample_cover()),
+fn sample_compensate() -> Compensate {
+    Compensate {
         sequences: vec![7, 8, 9],
-        cascade_id: "cascade-42".to_string(),
+        reason: "card declined".to_string(),
+        command_type: "inventory.ReserveStock".to_string(),
     }
 }
 
@@ -62,7 +50,6 @@ fn make_event_page(type_url: &str, value: Vec<u8>) -> EventPage {
             type_url: type_url.to_string(),
             value,
         })),
-        ..Default::default()
     }
 }
 
@@ -72,7 +59,7 @@ fn make_command_page(type_url: &str, value: Vec<u8>) -> CommandPage {
             sync_mode: None,
             sequence_type: Some(SequenceType::Sequence(1)),
         }),
-        merge_strategy: 0,
+        merge_strategy: MergeStrategy::MergeCommutative as i32,
         payload: Some(command_page::Payload::Command(prost_types::Any {
             type_url: type_url.to_string(),
             value,
@@ -86,13 +73,13 @@ fn make_command_page(type_url: &str, value: Vec<u8>) -> CommandPage {
 /// happy path; the H-41 broadening must not break it).
 #[test]
 fn event_decode_typed_accepts_googleapis_prefix() {
-    let conf = sample_confirmation();
+    let conf = sample_compensate();
     let page = make_event_page(
-        &format!("type.googleapis.com/{}", Confirmation::full_name()),
+        &format!("type.googleapis.com/{}", Compensate::full_name()),
         conf.encode_to_vec(),
     );
 
-    let decoded: Option<Confirmation> = page.decode_typed();
+    let decoded: Option<Compensate> = page.decode_typed();
     assert_eq!(decoded.as_ref(), Some(&conf));
 }
 
@@ -102,9 +89,9 @@ fn event_decode_typed_accepts_googleapis_prefix() {
 /// MUST be decodable by `decode_typed::<M>()`.
 #[test]
 fn event_decode_typed_accepts_prost_name_type_url_shape() {
-    let conf = sample_confirmation();
+    let conf = sample_compensate();
     // prost's `Name::type_url()` default — leading slash, no domain.
-    let type_url = Confirmation::type_url();
+    let type_url = Compensate::type_url();
     assert!(
         type_url.starts_with('/'),
         "test premise: prost's Name::type_url() returns leading-slash form; \
@@ -113,7 +100,7 @@ fn event_decode_typed_accepts_prost_name_type_url_shape() {
     );
     let page = make_event_page(&type_url, conf.encode_to_vec());
 
-    let decoded: Option<Confirmation> = page.decode_typed();
+    let decoded: Option<Compensate> = page.decode_typed();
     assert_eq!(
         decoded.as_ref(),
         Some(&conf),
@@ -122,37 +109,37 @@ fn event_decode_typed_accepts_prost_name_type_url_shape() {
     );
 }
 
-/// `type.angzarr.io/...` is the angzarr canonical prefix (used by
-/// reaper-stamped Revocations, NoOp markers, framework Notifications).
-/// The "strip everything up to and including the last `/`" rule covers it
-/// for free; we pin it explicitly so a regression doesn't silently break
-/// cross-pipe decode by Confirmation/Revocation receivers.
+/// An arbitrary resolver host (here `type.angzarr.io/...`) still decodes:
+/// the "strip everything up to and including the last `/`" rule is
+/// prefix-agnostic. We pin it explicitly so a regression doesn't silently
+/// break cross-pipe decode of notification receivers that see
+/// an unexpected resolver prefix.
 #[test]
 fn event_decode_typed_accepts_angzarr_io_prefix() {
-    let conf = sample_confirmation();
+    let conf = sample_compensate();
     let page = make_event_page(
-        &format!("type.angzarr.io/{}", Confirmation::full_name()),
+        &format!("type.angzarr.io/{}", Compensate::full_name()),
         conf.encode_to_vec(),
     );
 
-    let decoded: Option<Confirmation> = page.decode_typed();
+    let decoded: Option<Compensate> = page.decode_typed();
     assert_eq!(decoded.as_ref(), Some(&conf));
 }
 
 /// Wrong message type (suffix mismatch) MUST return None regardless of
 /// prefix shape. This is the only thing standing between `decode_typed`
-/// and a silent panic if a caller asks for `Confirmation` and the page
-/// actually holds, say, a NoOp.
+/// and a silent panic if a caller asks for `Compensate` and the page
+/// actually holds, say, a RejectionNotification.
 #[test]
 fn event_decode_typed_rejects_mismatched_suffix() {
-    let conf = sample_confirmation();
-    // Pack a Confirmation but advertise it as a NoOp.
+    let conf = sample_compensate();
+    // Pack a Compensate but advertise it as a RejectionNotification.
     let page = make_event_page(
-        &format!("type.googleapis.com/{}", NoOp::full_name()),
+        &format!("type.googleapis.com/{}", RejectionNotification::full_name()),
         conf.encode_to_vec(),
     );
 
-    let decoded: Option<Confirmation> = page.decode_typed();
+    let decoded: Option<Compensate> = page.decode_typed();
     assert!(
         decoded.is_none(),
         "decode_typed must reject pages whose type_url suffix doesn't match \
@@ -170,10 +157,9 @@ fn event_decode_typed_returns_none_for_missing_payload() {
         }),
         created_at: None,
         payload: None,
-        ..Default::default()
     };
 
-    let decoded: Option<Confirmation> = page.decode_typed();
+    let decoded: Option<Compensate> = page.decode_typed();
     assert!(decoded.is_none());
 }
 
@@ -186,45 +172,58 @@ fn event_decode_typed_returns_none_for_missing_payload() {
 
 #[test]
 fn command_decode_typed_accepts_googleapis_prefix() {
-    let conf = sample_confirmation();
+    let conf = sample_compensate();
     let page = make_command_page(
-        &format!("type.googleapis.com/{}", Confirmation::full_name()),
+        &format!("type.googleapis.com/{}", Compensate::full_name()),
         conf.encode_to_vec(),
     );
 
-    let decoded: Option<Confirmation> = page.decode_typed();
+    let decoded: Option<Compensate> = page.decode_typed();
     assert_eq!(decoded.as_ref(), Some(&conf));
 }
 
 #[test]
 fn command_decode_typed_accepts_prost_name_type_url_shape() {
-    let conf = sample_confirmation();
-    let page = make_command_page(&Confirmation::type_url(), conf.encode_to_vec());
+    let conf = sample_compensate();
+    let page = make_command_page(&Compensate::type_url(), conf.encode_to_vec());
 
-    let decoded: Option<Confirmation> = page.decode_typed();
+    let decoded: Option<Compensate> = page.decode_typed();
     assert_eq!(decoded.as_ref(), Some(&conf));
 }
 
 #[test]
 fn command_decode_typed_accepts_angzarr_io_prefix() {
-    let conf = sample_confirmation();
+    let conf = sample_compensate();
     let page = make_command_page(
-        &format!("type.angzarr.io/{}", Confirmation::full_name()),
+        &format!("type.angzarr.io/{}", Compensate::full_name()),
         conf.encode_to_vec(),
     );
 
-    let decoded: Option<Confirmation> = page.decode_typed();
+    let decoded: Option<Compensate> = page.decode_typed();
     assert_eq!(decoded.as_ref(), Some(&conf));
 }
 
 #[test]
 fn command_decode_typed_rejects_mismatched_suffix() {
-    let conf = sample_confirmation();
+    let conf = sample_compensate();
     let page = make_command_page(
-        &format!("type.googleapis.com/{}", NoOp::full_name()),
+        &format!("type.googleapis.com/{}", RejectionNotification::full_name()),
         conf.encode_to_vec(),
     );
 
-    let decoded: Option<Confirmation> = page.decode_typed();
+    let decoded: Option<Compensate> = page.decode_typed();
     assert!(decoded.is_none());
+}
+
+/// Provenance arrives off the wire: a header without a source still yields
+/// a key (empty source fields) instead of panicking.
+#[test]
+fn idempotency_key_tolerates_a_missing_source() {
+    use crate::proto::AngzarrDeferredSequence;
+    let deferred = AngzarrDeferredSequence {
+        source: None,
+        source_seq: 3,
+        ..Default::default()
+    };
+    assert_eq!(deferred.idempotency_key(), ":::3");
 }

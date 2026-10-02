@@ -124,3 +124,58 @@ fn test_correlated_request_graceful_without_otel_runtime() {
     // Request should be created without panic
     assert_eq!(*request.get_ref(), "payload");
 }
+
+// ----- StatusExt::error_info_reason ------------------------------------------
+
+/// A status whose details are a google.rpc.Status carrying an ErrorInfo.
+fn status_with_error_info(reason: &str, type_url: &str) -> tonic::Status {
+    use prost::Message;
+    let info = ErrorInfo {
+        reason: reason.to_string(),
+        domain: "inventory".to_string(),
+        metadata: Default::default(),
+    };
+    let details = RpcStatus {
+        code: tonic::Code::FailedPrecondition as i32,
+        message: "out of stock".to_string(),
+        details: vec![
+            prost_types::Any {
+                type_url: "type.googleapis.com/google.rpc.DebugInfo".to_string(),
+                value: vec![],
+            },
+            prost_types::Any {
+                type_url: type_url.to_string(),
+                value: info.encode_to_vec(),
+            },
+        ],
+    };
+    tonic::Status::with_details(
+        tonic::Code::FailedPrecondition,
+        "out of stock",
+        details.encode_to_vec().into(),
+    )
+}
+
+/// The machine code is ErrorInfo.reason from the status details, whatever
+/// the type URL prefix (C-0505).
+#[test]
+fn error_info_reason_is_read_from_status_details() {
+    let status = status_with_error_info("OUT_OF_STOCK", "type.googleapis.com/google.rpc.ErrorInfo");
+    assert_eq!(status.error_info_reason(), "OUT_OF_STOCK");
+    let bare = status_with_error_info("CARD_DECLINED", "/google.rpc.ErrorInfo");
+    assert_eq!(bare.error_info_reason(), "CARD_DECLINED");
+}
+
+/// No ErrorInfo — no details, undecodable details, or details of another
+/// type — yields an empty code (C-0506).
+#[test]
+fn error_info_reason_is_empty_without_error_info() {
+    assert_eq!(
+        tonic::Status::failed_precondition("x").error_info_reason(),
+        ""
+    );
+    let garbage = tonic::Status::with_details(tonic::Code::Aborted, "x", vec![0xff, 0x01].into());
+    assert_eq!(garbage.error_info_reason(), "");
+    let other = status_with_error_info("NOPE", "type.googleapis.com/google.rpc.ErrorInfoX");
+    assert_eq!(other.error_info_reason(), "");
+}

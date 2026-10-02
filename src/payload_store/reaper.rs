@@ -14,13 +14,13 @@ use super::PayloadStore;
 /// Background task for cleaning up expired payloads.
 ///
 /// Runs periodically and deletes payloads older than the configured retention.
-pub struct TtlReaper<S: PayloadStore> {
+pub struct TtlReaper<S: PayloadStore + ?Sized> {
     store: Arc<S>,
     retention: Duration,
     interval: Duration,
 }
 
-impl<S: PayloadStore + 'static> TtlReaper<S> {
+impl<S: PayloadStore + ?Sized + 'static> TtlReaper<S> {
     /// Create a new TTL reaper.
     ///
     /// # Arguments

@@ -117,7 +117,7 @@ data:
                           # Health, ServerReflection, and any internal
                           # gRPC are intentionally absent.
                           services:
-                            - angzarr_client.proto.angzarr.status.DlqAdminService
+                            - io.angzarr.status.v1.DlqAdminService
                           print_options:
                             add_whitespace: false
                             always_print_primitive_fields: false

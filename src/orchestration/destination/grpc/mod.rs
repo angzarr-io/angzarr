@@ -7,7 +7,6 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use tokio::sync::Mutex;
-use tracing::warn;
 
 use crate::proto::event_query_service_client::EventQueryServiceClient;
 use crate::proto::{Cover, EventBook, Query};
@@ -40,19 +39,39 @@ impl GrpcDestinationFetcher {
         }
     }
 
+    /// Look up the EventQuery client for a domain.
+    ///
+    /// A missing client is a configuration error (`Err(NotFound)`), NOT
+    /// "no state" (O9): we could not query the source of truth at all, so
+    /// returning `Ok(None)` here would restart workflows / stamp sequence 0
+    /// against destinations that were merely never wired up.
+    fn client_for(
+        &self,
+        domain: &str,
+    ) -> Result<&Arc<Mutex<EventQueryServiceClient<tonic::transport::Channel>>>, tonic::Status>
+    {
+        self.clients.get(domain).ok_or_else(|| {
+            tonic::Status::not_found(format!("{}: {}", errmsg::NO_EVENT_QUERY_FOR_DOMAIN, domain))
+        })
+    }
+}
+
+#[async_trait]
+impl DestinationFetcher for GrpcDestinationFetcher {
     /// Fetch an EventBook by cover (domain + root).
     ///
-    /// Exposed as a direct method for callers that need `Result` rather than `Option`.
-    pub async fn fetch_result(&self, cover: &Cover) -> Result<EventBook, tonic::Status> {
+    /// `Err` = the fetch failed (bad cover, missing client, RPC error) and
+    /// must be propagated by the caller; the remote EventQuery service
+    /// reports "no events yet" as an empty book, not an error, so RPC
+    /// success is always `Ok(Some(book))`.
+    async fn fetch(&self, cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
         let domain = &cover.domain;
         let correlation_id = &cover.correlation_id;
         let root = cover.root.as_ref().ok_or_else(|| {
             tonic::Status::invalid_argument(crate::orchestration::errmsg::COVER_MISSING_ROOT)
         })?;
 
-        let client = self.clients.get(domain).ok_or_else(|| {
-            tonic::Status::not_found(format!("{}: {}", errmsg::NO_EVENT_QUERY_FOR_DOMAIN, domain))
-        })?;
+        let client = self.client_for(domain)?;
 
         let query = Query {
             cover: Some(Cover {
@@ -60,38 +79,26 @@ impl GrpcDestinationFetcher {
                 root: Some(root.clone()),
                 correlation_id: correlation_id.clone(),
                 edition: cover.edition.clone(),
+                ext: None,
             }),
             selection: None,
         };
 
-        let mut client = client.lock().await;
+        let mut client = client.lock().await.clone();
         let event_book = client
             .get_event_book(correlated_request(query, correlation_id))
             .await?
             .into_inner();
 
-        Ok(event_book)
-    }
-}
-
-#[async_trait]
-impl DestinationFetcher for GrpcDestinationFetcher {
-    async fn fetch(&self, cover: &Cover) -> Option<EventBook> {
-        match self.fetch_result(cover).await {
-            Ok(book) => Some(book),
-            Err(e) => {
-                warn!(
-                    domain = %cover.domain,
-                    error = %e,
-                    "Failed to fetch destination EventBook"
-                );
-                None
-            }
-        }
+        Ok(Some(event_book))
     }
 
-    async fn fetch_by_correlation(&self, domain: &str, correlation_id: &str) -> Option<EventBook> {
-        let client = self.clients.get(domain)?;
+    async fn fetch_by_correlation(
+        &self,
+        domain: &str,
+        correlation_id: &str,
+    ) -> Result<Option<EventBook>, tonic::Status> {
+        let client = self.client_for(domain)?;
 
         let query = Query {
             cover: Some(Cover {
@@ -99,26 +106,21 @@ impl DestinationFetcher for GrpcDestinationFetcher {
                 root: None,
                 correlation_id: correlation_id.to_string(),
                 edition: None, // correlation lookups don't have edition context
+                ext: None,
             }),
             selection: None,
         };
 
-        let mut client = client.lock().await;
-        match client
+        let mut client = client.lock().await.clone();
+        // O9: an RPC error propagates via `?` — it must never collapse to
+        // "no state". The EventQuery service reports an unknown correlation
+        // as an empty book on a successful RPC, so success is Ok(Some(..)).
+        let event_book = client
             .get_event_book(correlated_request(query, correlation_id))
-            .await
-        {
-            Ok(resp) => Some(resp.into_inner()),
-            Err(e) => {
-                warn!(
-                    domain = %domain,
-                    correlation_id = %correlation_id,
-                    error = %e,
-                    "Failed to fetch destination by correlation via gRPC"
-                );
-                None
-            }
-        }
+            .await?
+            .into_inner();
+
+        Ok(Some(event_book))
     }
 }
 

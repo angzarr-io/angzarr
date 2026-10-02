@@ -30,6 +30,10 @@ Scan the current project and discover matching ctxloom content from configured r
 4. **Install selected items** using:
    - `pull_remote` to fetch bundles/profiles from remotes
    - `sync_dependencies` to ensure all dependencies are fetched
+   - The first profile you install is auto-promoted into
+     `defaults.profiles` in `config.yaml`. If the user wants a *different*
+     profile to be default later, call `update_profile` with `default: true`
+     (this writes to `defaults.profiles` — there is no per-profile flag).
 
 ## Example workflow
 
