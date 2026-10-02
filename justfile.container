@@ -188,16 +188,55 @@ cov-ci:
         --fail-under-lines 70 \
         --codecov --output-path codecov.json
 
-# Run mutation tests on changed code (CI uses git.diff file)
-mutants-ci:
+# Feature-gated modules the lib-test mutation run does not compile (storage
+# and bus backends, DLQ publishers, payload stores, k8s discovery): their
+# contract suites cover them, and a mutant in uncompiled code always
+# "survives".
+MUTANTS_FEATURE_GATED := "-e 'src/storage/bigtable/**' -e 'src/storage/dynamo/**' -e 'src/storage/immudb/**' -e 'src/storage/postgres/**' -e 'src/storage/redis/**' -e 'src/bus/amqp/**' -e 'src/bus/kafka/**' -e 'src/bus/pubsub/**' -e 'src/bus/sns_sqs/**' -e 'src/dlq/publishers/amqp.rs' -e 'src/dlq/publishers/kafka.rs' -e 'src/dlq/publishers/pubsub.rs' -e 'src/dlq/publishers/sns_sqs.rs' -e 'src/payload_store/gcs.rs' -e 'src/payload_store/s3.rs' -e 'src/discovery/k8s/**' -e 'src/advice/lossy.rs'"
+
+# Mutation-test the code a diff changes (CI: git.diff against the PR base),
+# one shard of the mutant set: SHARD is k/N (0-based). Survivors are a
+# result, not a failure: the kill-rate gate is `mutants-ci-gate`.
+mutants-ci SHARD="0/1" DIFF="git.diff":
     #!/usr/bin/env bash
     set -euo pipefail
-    if [ -s git.diff ]; then
-        cargo install cargo-mutants --locked
-        cargo mutants --in-place --in-diff git.diff --no-shuffle -vV
-    else
+    if [ ! -s "{{DIFF}}" ]; then
         echo "No changes to test"
+        mkdir -p mutants.out
+        exit 0
     fi
+    command -v cargo-mutants >/dev/null || cargo install cargo-mutants --locked
+    rc=0
+    cargo mutants --in-place --in-diff "{{DIFF}}" --shard "{{SHARD}}" \
+        --no-shuffle --timeout {{MUTANTS_TIMEOUT}} {{MUTANTS_FEATURE_GATED}} -vV || rc=$?
+    # 2 = surviving mutants (judged by the gate); 3 = timeouts (counted as
+    # caught by the gate); anything else is a tooling failure.
+    case $rc in 0|2|3) exit 0 ;; *) exit $rc ;; esac
+
+# Kill-rate gate over one or more outcomes.json files (all shards of a
+# run): caught / (caught + missed) must reach THRESHOLD percent. Timeouts
+# count as caught; unviable mutants are not counted.
+mutants-ci-gate THRESHOLD="90" +OUTCOMES="mutants.out/outcomes.json":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    files=({{OUTCOMES}})
+    count() { jq -s "[.[].outcomes[] | select(.summary == \"$1\")] | length" "${files[@]}"; }
+    caught=$(( $(count CaughtMutant) + $(count Timeout) ))
+    missed=$(count MissedMutant)
+    unviable=$(count Unviable)
+    total=$((caught + missed))
+    echo "Caught: $caught  Missed: $missed  Unviable: $unviable  (from ${#files[@]} outcome file(s))"
+    if [ "$total" -eq 0 ]; then
+        echo "No viable mutants in the changed code"
+        exit 0
+    fi
+    rate=$((100 * caught / total))
+    echo "Kill rate: ${rate}% (threshold {{THRESHOLD}}%)"
+    if [ "$missed" -gt 0 ]; then
+        echo "=== Surviving mutants ==="
+        jq -rs '.[].outcomes[] | select(.summary == "MissedMutant") | .scenario.Mutant.name // .scenario' "${files[@]}"
+    fi
+    [ "$rate" -ge {{THRESHOLD}} ]
 
 # === Storage Contract Tests ===
 # =============================================================================

@@ -493,9 +493,15 @@ mutants-bus:
 mutants-orchestration:
     just _container-ephemeral mutants-orchestration
 
-# Run mutation tests on changed code (CI uses git.diff file)
-mutants-ci:
-    just _container-ephemeral mutants-ci
+# Mutation-test the changes since BASE, one shard (k/N) of the mutant set,
+# as the CI mutation matrix does; then gate with `just mutants-ci-gate`.
+mutants-ci SHARD="0/1" BASE="origin/main":
+    git -C "{{TOP}}" diff "{{BASE}}"...HEAD > "{{TOP}}/git.diff"
+    just _container-ephemeral mutants-ci {{SHARD}} git.diff
+
+# Kill-rate gate (default 90%) over the last mutants-ci outcomes.
+mutants-ci-gate THRESHOLD="90":
+    just _container mutants-ci-gate {{THRESHOLD}} mutants.out/outcomes.json
 
 # Show mutation testing summary from last run's outcomes.json
 mutants-summary:

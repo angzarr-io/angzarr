@@ -105,6 +105,7 @@ build/images/build.json
 # Mutation testing output
 mutants.out/
 mutants.out.*
+git.diff
 **/mutants/
 .mutants-cache/
 
