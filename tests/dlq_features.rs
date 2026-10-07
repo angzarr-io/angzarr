@@ -789,9 +789,26 @@ struct DlqAwarePmContext {
 impl ProcessManagerContext for DlqAwarePmContext {
     async fn handle(
         &self,
-        _trigger: &EventBook,
+        trigger: &EventBook,
         _pm_state: Option<&EventBook>,
     ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        // A rejection of a command this PM issued is handed back to it as a
+        // Notification trigger: that is the PM's compensation handler.
+        let handed_back = trigger.pages.last().is_some_and(|page| {
+            matches!(
+                &page.payload,
+                Some(angzarr::proto::event_page::Payload::Event(any))
+                    if any.type_url == "/io.angzarr.v1.Notification"
+            )
+        });
+        if handed_back {
+            self.compensation_calls.fetch_add(1, Ordering::SeqCst);
+            return Ok(PmHandleResponse {
+                commands: vec![],
+                process_events: vec![],
+                facts: vec![],
+            });
+        }
         let commands = match self.emit_command_with_sync_mode {
             None => vec![],
             Some(mode) => {
@@ -845,16 +862,6 @@ impl ProcessManagerContext for DlqAwarePmContext {
         _correlation_id: &str,
     ) -> CommandOutcome {
         (self.persist_outcome)()
-    }
-
-    async fn on_command_rejected(
-        &self,
-        _command: &CommandBook,
-        _reason: &str,
-        _code: &str,
-    ) -> Result<(), angzarr::orchestration::outbox::OutboxError> {
-        self.compensation_calls.fetch_add(1, Ordering::SeqCst);
-        Ok(())
     }
 
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {

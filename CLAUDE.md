@@ -192,6 +192,10 @@ Multi-domain event correlation via correlation ID. Own aggregate (correlation ID
 
 **Deferred commands:** Same as sagas: PM commands are deferred, and a PM command that fails
 transiently after the PM's events are persisted is redelivered from the coordinator outbox.
+A rejected PM command is handed back to the PM itself (C-0434): the coordinator triggers the PM
+with a Notification carrying the RejectionNotification before it returns and executes the PM's
+answer; a compensation command the PM issues while handling a rejection is dead-lettered if it is
+refused, never handed back again.
 
 ### Compensation
 Compensation signals are Notifications (RejectionNotification or Compensate) delivered to the

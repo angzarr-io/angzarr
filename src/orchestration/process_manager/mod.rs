@@ -250,19 +250,6 @@ pub trait ProcessManagerContext: Send + Sync {
         Ok(false)
     }
 
-    /// Raise the rejection of a command this PM emitted: record its
-    /// RejectionNotification in the outbox, addressed to the command's
-    /// `angzarr_deferred.source`. An error means the obligation was not
-    /// recorded and the trigger must not be acknowledged.
-    async fn on_command_rejected(
-        &self,
-        command: &CommandBook,
-        reason: &str,
-        code: &str,
-    ) -> Result<(), super::outbox::OutboxError> {
-        super::shared::record_rejection(self.outbox(), command, reason, code).await
-    }
-
     /// Publisher for routing failed PM commands and persistence attempts
     /// to the DLQ.
     ///
@@ -434,7 +421,10 @@ async fn publish_pm_command_dlq(
 /// command and returns the failures as reaction errors, DEAD_LETTER
 /// dead-letters failures and returns `Ok`. Without a caller, a rejection is
 /// dead-lettered and a transient failure goes to the outbox. In every mode a
-/// rejected command's RejectionNotification is recorded for its source.
+/// rejected command is handed back to the PM as a Notification trigger
+/// carrying its RejectionNotification, and the PM's answer runs before this
+/// returns; a command the PM issues while handling a rejection is
+/// dead-lettered when refused, never handed back again.
 #[allow(clippy::too_many_arguments)]
 #[tracing::instrument(name = "pm.orchestrate", skip_all, fields(%pm_name, %pm_domain, %correlation_id))]
 pub async fn orchestrate_pm(
@@ -641,7 +631,8 @@ pub async fn orchestrate_pm(
         // 2. The PM's job is to observe outcomes and react, not guarantee delivery
         // 3. Compensation is the PM's mechanism for handling failures
         //
-        let reaction_report = execute_pm_commands(
+        let mut rejected: Vec<RejectedPmCommand> = Vec::new();
+        let delivered = execute_pm_commands(
             ctx,
             executor,
             response.commands,
@@ -652,8 +643,47 @@ pub async fn orchestrate_pm(
             },
             sync_mode,
             policy,
+            &mut rejected,
         )
-        .await?;
+        .await;
+
+        // The PM issued the rejected commands, so their rejections are the
+        // PM's to handle: each is handed back to the PM as a Notification
+        // trigger before this orchestration returns, whatever the policy,
+        // and the PM's answer is persisted and executed like any reaction.
+        let mut handed_back = ReactionReport::default();
+        for rejection in &rejected {
+            let notification = rejection_trigger(trigger, pm_domain, correlation_id, rejection);
+            let report = match Box::pin(orchestrate_pm(
+                ctx,
+                fetcher,
+                executor,
+                fact_executor,
+                &notification,
+                pm_name,
+                pm_domain,
+                correlation_id,
+                sync_mode,
+                backoff,
+                error_mode,
+            ))
+            .await
+            {
+                Ok(report) => report,
+                Err(e) => {
+                    let message = format!("rejection not handled by the PM: {e}");
+                    publish_pm_command_dlq(ctx, &rejection.command, None, &message, false).await;
+                    return Err(e);
+                }
+            };
+            handed_back.reaction_errors.extend(report.reaction_errors);
+            handed_back.executed.extend(report.executed);
+        }
+        let mut reaction_report = delivered?;
+        reaction_report
+            .reaction_errors
+            .extend(handed_back.reaction_errors);
+        reaction_report.executed.extend(handed_back.executed);
 
         // Inject facts into target aggregates.
         //
@@ -711,11 +741,118 @@ pub async fn orchestrate_pm(
     }
 }
 
+/// A PM command its destination refused, to be handed back to the PM.
+struct RejectedPmCommand {
+    command: CommandBook,
+    reason: String,
+    code: String,
+}
+
+/// The trigger that hands a rejected command back to the PM that issued it:
+/// addressed to the PM's own aggregate (its domain, the correlation-derived
+/// root, the trigger's edition), with one page whose event is the
+/// Notification carrying the RejectionNotification, under the rejected
+/// command's provenance header.
+fn rejection_trigger(
+    trigger: &EventBook,
+    pm_domain: &str,
+    correlation_id: &str,
+    rejection: &RejectedPmCommand,
+) -> EventBook {
+    use super::shared::CorrelationRootExt;
+    use crate::proto_ext::type_url;
+    use prost::Message;
+    let cover = crate::proto::Cover {
+        domain: pm_domain.to_string(),
+        root: Some(crate::proto::Uuid {
+            value: correlation_id.correlation_root().as_bytes().to_vec(),
+        }),
+        correlation_id: correlation_id.to_string(),
+        edition: trigger.cover.as_ref().and_then(|c| c.edition.clone()),
+        ext: None,
+    };
+    let payload = crate::proto::RejectionNotification {
+        rejected_command: Some(rejection.command.clone()),
+        rejection_reason: rejection.reason.clone(),
+        code: rejection.code.clone(),
+    };
+    let notification = Notification {
+        cover: Some(cover.clone()),
+        payload: Some(prost_types::Any {
+            type_url: type_url::REJECTION_NOTIFICATION.to_string(),
+            value: payload.encode_to_vec(),
+        }),
+        sent_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
+    };
+    let header = rejection
+        .command
+        .pages
+        .first()
+        .and_then(|page| page.header.as_ref())
+        .filter(|h| matches!(h.sequence_type, Some(SequenceType::AngzarrDeferred(_))))
+        .map(|h| PageHeader {
+            sync_mode: None,
+            sequence_type: h.sequence_type.clone(),
+        });
+    EventBook {
+        cover: Some(cover),
+        pages: vec![crate::proto::EventPage {
+            header,
+            payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
+                type_url: type_url::NOTIFICATION.to_string(),
+                value: notification.encode_to_vec(),
+            })),
+            created_at: None,
+        }],
+        ..Default::default()
+    }
+}
+
+/// Whether the trigger's newest page is a Notification (a rejection handed
+/// back to the PM) rather than a business event.
+fn is_notification_trigger(trigger: &EventBook) -> bool {
+    use prost::Name;
+    matches!(
+        trigger.pages.last().and_then(|p| p.payload.as_ref()),
+        Some(crate::proto::event_page::Payload::Event(any))
+            if crate::proto_ext::type_url::fqn(&any.type_url) == Notification::full_name()
+    )
+}
+
+/// The provenance of a handed-back rejection: the rejected command's own
+/// provenance tuple, as a rejection notification. `None` when the rejected
+/// command carried no provenance.
+fn rejection_source_info(trigger: &EventBook) -> Option<crate::storage::SourceInfo> {
+    let page = trigger.pages.last()?;
+    let SequenceType::AngzarrDeferred(deferred) = page.header.as_ref()?.sequence_type.as_ref()?
+    else {
+        return None;
+    };
+    let source = deferred.source.as_ref()?;
+    let root = uuid::Uuid::from_slice(&source.root.as_ref()?.value).ok()?;
+    Some(
+        crate::storage::SourceInfo::new(
+            super::aggregate::edition_key(source.edition().unwrap_or_default()),
+            source.domain.as_str(),
+            root,
+            deferred.source_seq,
+            deferred.source_component.as_str(),
+            deferred.command_index,
+        )
+        .with_kind(crate::storage::ProvenanceKind::RejectionNotification),
+    )
+}
+
 /// The provenance recorded on a PM's events for the trigger that produced
-/// them: the triggering aggregate and its last sequence, under the PM's name.
-/// `None` when the trigger names no aggregate root.
+/// them: the triggering aggregate and its last sequence, under the PM's name;
+/// for a handed-back rejection, the rejected command's provenance. `None`
+/// when the trigger names no aggregate root, or is a rejection of a command
+/// that carried no provenance.
 fn trigger_source_info(trigger: &EventBook, pm_name: &str) -> Option<crate::storage::SourceInfo> {
     use crate::proto_ext::EventPageExt;
+    if is_notification_trigger(trigger) {
+        return rejection_source_info(trigger);
+    }
     let cover = trigger.cover.as_ref()?;
     let root = uuid::Uuid::from_slice(&cover.root.as_ref()?.value).ok()?;
     let seq = trigger.pages.iter().map(|p| p.sequence_num()).max()?;
@@ -756,6 +893,7 @@ async fn execute_pm_commands(
     source: PmCommandSource<'_>,
     sync_mode: SyncMode,
     policy: DeliveryPolicy,
+    rejected: &mut Vec<RejectedPmCommand>,
 ) -> Result<ReactionReport, BusError> {
     use super::shared::fill_correlation_id;
     use crate::proto_ext::EventPageExt;
@@ -859,9 +997,11 @@ async fn execute_pm_commands(
                     error = %message,
                     "PM command rejected"
                 );
-                // A rejection reaches its source whatever the policy.
-                raise_rejection(ctx, &command_book, &message, &error_code).await?;
-                if policy.dead_letters() {
+                // A rejection reaches the PM that issued the command
+                // whatever the policy.
+                let refused_compensation =
+                    hand_back(trigger, &command_book, &message, &error_code, rejected);
+                if refused_compensation || policy.dead_letters() {
                     publish_pm_command_dlq(ctx, &command_book, Some(code), &message, false).await;
                 }
                 Some((code, message))
@@ -877,7 +1017,7 @@ async fn execute_pm_commands(
                      retry later (underlying: {reason})"
                 );
                 error!(domain = %cmd_domain, error = %degraded, "PM Decision-mode command Retryable");
-                raise_rejection(ctx, &command_book, &degraded, "").await?;
+                hand_back(trigger, &command_book, &degraded, "", rejected);
                 publish_pm_command_dlq(ctx, &command_book, None, &degraded, false).await;
                 reported_failures.push(format!("{cmd_domain}: {degraded}"));
                 None
@@ -926,22 +1066,31 @@ async fn execute_pm_commands(
     })
 }
 
-/// Record a rejected PM command's RejectionNotification; failing to record
-/// it fails the orchestration so the trigger is redelivered.
-async fn raise_rejection(
-    ctx: &dyn ProcessManagerContext,
+/// Queue a refused PM command for hand-back to the PM. A command the PM
+/// issued while handling a rejection is not handed back (a refused
+/// compensation must not loop); returns `true` for such a command, which
+/// the caller dead-letters instead.
+fn hand_back(
+    trigger: &EventBook,
     command: &CommandBook,
     reason: &str,
     code: &str,
-) -> Result<(), BusError> {
-    ctx.on_command_rejected(command, reason, code)
-        .await
-        .map_err(|e| {
-            BusError::Publish(format!(
-                "{}: rejection notification not recorded: {e}",
-                command.domain()
-            ))
-        })
+    rejected: &mut Vec<RejectedPmCommand>,
+) -> bool {
+    if is_notification_trigger(trigger) {
+        warn!(
+            domain = %command.domain(),
+            error = %reason,
+            "PM compensation command refused; dead-lettering instead of handing back"
+        );
+        return true;
+    }
+    rejected.push(RejectedPmCommand {
+        command: command.clone(),
+        reason: reason.to_string(),
+        code: code.to_string(),
+    });
+    false
 }
 
 /// Hand a transiently-failed PM command to the outbox for redelivery, or

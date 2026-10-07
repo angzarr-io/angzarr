@@ -128,6 +128,22 @@ fn fast_backoff() -> ExponentialBuilder {
         .with_max_times(5)
 }
 
+/// The RejectionNotification a handed-back rejection trigger carries, or
+/// `None` for a business-event trigger.
+fn handed_back_rejection(trigger: &EventBook) -> Option<crate::proto::RejectionNotification> {
+    use prost::Message;
+    let any = match trigger.pages.last()?.payload.as_ref()? {
+        crate::proto::event_page::Payload::Event(any)
+            if any.type_url == crate::proto_ext::type_url::NOTIFICATION =>
+        {
+            any
+        }
+        _ => return None,
+    };
+    let notification = Notification::decode(any.value.as_slice()).ok()?;
+    crate::proto::RejectionNotification::decode(notification.payload?.value.as_slice()).ok()
+}
+
 /// Creates a trigger event with correlation ID for PM testing.
 ///
 /// PMs require correlation_id to identify the workflow instance.
@@ -609,11 +625,11 @@ async fn test_orchestrate_pm_does_not_re_emit_earlier_books_after_retry() {
 // If the executor returns `CommandOutcome::Retryable`, today the coordinator
 // only emits `warn!` and silently drops the command. The caller's await
 // resolves with a successful orchestrate_pm return but the Decision answer
-// never arrives. The fix: surface this as a degraded outcome — invoke
-// `on_command_rejected` (so the PM handler can compensate) AND fail the
+// never arrives. The fix: surface this as a degraded outcome — hand
+// the rejection back to the PM (so its handler can compensate) AND fail the
 // orchestrate_pm boundary with an error so the caller sees the failure.
 
-/// Records invocations of `on_command_rejected` so the test can assert that
+/// Records the rejections handed back to the PM so the test can assert that
 /// the Decision-mode Retryable degraded path runs the rejection callback.
 struct RejectionRecordingPm {
     rejected: tokio::sync::Mutex<Vec<String>>,
@@ -631,9 +647,17 @@ impl RejectionRecordingPm {
 impl ProcessManagerContext for RejectionRecordingPm {
     async fn handle(
         &self,
-        _trigger: &EventBook,
+        trigger: &EventBook,
         _pm_state: Option<&EventBook>,
     ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        if let Some(rejection) = handed_back_rejection(trigger) {
+            self.rejected.lock().await.push(rejection.rejection_reason);
+            return Ok(PmHandleResponse {
+                commands: vec![],
+                process_events: vec![],
+                facts: vec![],
+            });
+        }
         use crate::proto::{
             command_page::Payload as CmdPayload, page_header::SequenceType, CommandPage,
             MergeStrategy, PageHeader,
@@ -673,15 +697,6 @@ impl ProcessManagerContext for RejectionRecordingPm {
     ) -> CommandOutcome {
         CommandOutcome::Success(CommandResponse::default())
     }
-    async fn on_command_rejected(
-        &self,
-        _command: &CommandBook,
-        reason: &str,
-        _code: &str,
-    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
-        self.rejected.lock().await.push(reason.to_string());
-        Ok(())
-    }
 }
 
 /// Executor that always returns Retryable — simulates persistent transport-
@@ -700,7 +715,7 @@ impl CommandExecutor for AlwaysRetryableExecutor {
 
 /// H-14: a Decision-mode command whose executor returns Retryable must:
 ///   1. Not silently log-and-continue.
-///   2. Invoke `on_command_rejected` with a degraded reason so the PM can
+///   2. Hand a degraded-reason rejection back to the PM so the PM can
 ///      compensate.
 ///   3. Surface up through `orchestrate_pm` as an Err so the synchronous
 ///      caller's await resolves with a failure (degraded ProblemDetails).
@@ -734,7 +749,7 @@ async fn test_orchestrate_pm_decision_retryable_does_not_hang_caller() {
     assert_eq!(
         rejected.len(),
         1,
-        "Decision-mode Retryable must invoke on_command_rejected so the PM \
+        "Decision-mode Retryable must hand the rejection back so the PM \
          can compensate. Got {} rejections.",
         rejected.len()
     );
@@ -810,7 +825,7 @@ impl ProcessManagerContext for PmWithFact {
 //    `is_transient=false`.
 // 3. PM command Rejected (the dispatch loop sees a permanent rejection
 //    from the destination aggregate or transport) -> DLQ with the
-//    failed `CommandBook` + compensation via `on_command_rejected`.
+//    failed `CommandBook` + compensation via the hand-back to the PM.
 // 4. PM H-14 Decision-mode degraded (executor returned Retryable but
 //    contract requires synchronous accept/reject) -> DLQ
 //    unconditionally with the degraded reason.
@@ -906,9 +921,17 @@ impl DlqCommandPm {
 impl ProcessManagerContext for DlqCommandPm {
     async fn handle(
         &self,
-        _trigger: &EventBook,
+        trigger: &EventBook,
         _pm_state: Option<&EventBook>,
     ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        if handed_back_rejection(trigger).is_some() {
+            self.rejection_count.fetch_add(1, Ordering::SeqCst);
+            return Ok(PmHandleResponse {
+                commands: vec![],
+                process_events: vec![],
+                facts: vec![],
+            });
+        }
         use crate::proto::{
             command_page::Payload as CmdPayload, page_header::SequenceType, CommandPage,
             MergeStrategy, PageHeader,
@@ -952,15 +975,6 @@ impl ProcessManagerContext for DlqCommandPm {
         _correlation_id: &str,
     ) -> CommandOutcome {
         CommandOutcome::Success(CommandResponse::default())
-    }
-    async fn on_command_rejected(
-        &self,
-        _command: &CommandBook,
-        _reason: &str,
-        _code: &str,
-    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
-        self.rejection_count.fetch_add(1, Ordering::SeqCst);
-        Ok(())
     }
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
         Some(&self.dlq_publisher)
@@ -1155,8 +1169,8 @@ async fn pm_persist_immediate_rejection_publishes_dead_letter() {
     }
 }
 
-/// 4xx PM command rejection publishes a dead letter immediately alongside
-/// `on_command_rejected` for compensation.
+/// 4xx PM command rejection publishes a dead letter immediately and hands
+/// the rejection back to the PM for compensation.
 #[tokio::test]
 async fn pm_4xx_command_rejection_publishes_dead_letter_immediately() {
     let publisher = Arc::new(CapturingDlqPublisher::new());
@@ -2221,6 +2235,9 @@ impl ProcessManagerContext for TwoCommandPm {
         pm_state: Option<&EventBook>,
     ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
         let mut response = self.inner.handle(trigger, pm_state).await?;
+        if response.commands.is_empty() {
+            return Ok(response);
+        }
         let mut second = response.commands[0].clone();
         response.commands[0].cover.as_mut().unwrap().root =
             Some(crate::proto::Uuid { value: vec![1; 16] });
@@ -2230,14 +2247,6 @@ impl ProcessManagerContext for TwoCommandPm {
     }
     async fn persist_pm_events(&self, events: &EventBook, correlation_id: &str) -> CommandOutcome {
         self.inner.persist_pm_events(events, correlation_id).await
-    }
-    async fn on_command_rejected(
-        &self,
-        command: &CommandBook,
-        reason: &str,
-        code: &str,
-    ) -> Result<(), crate::orchestration::outbox::OutboxError> {
-        self.inner.on_command_rejected(command, reason, code).await
     }
     fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
         self.inner.dlq_publisher()
@@ -2569,38 +2578,89 @@ async fn test_pm_next_trigger_is_not_deduplicated() {
 }
 
 // ============================================================================
-// Rejections reach their source through the outbox
+// A rejected PM command is handed back to the PM (C-0434)
 // ============================================================================
+//
+// The PM issued the command, so its rejection is the PM's to handle: the
+// coordinator triggers the PM with the RejectionNotification before it
+// returns, whatever the caller's mode, and executes the PM's answer.
+// Recording it for the triggering aggregate instead left the PM's rejection
+// handler unreachable.
 
-/// PM emitting one deferred command (no header: the coordinator stamps the
-/// trigger as its source), with an outbox.
+/// A PM that asks `fulfillment` to ship on a business trigger (no header: the
+/// coordinator stamps the trigger as its source) and, handed back a
+/// rejection, records it and asks `order` to cancel (unless `answer` is
+/// false, or fails when `fail_on_rejection`).
 struct DeferredCommandPm {
     outbox: Arc<crate::orchestration::outbox::Outbox>,
+    dlq_publisher: Arc<CapturingDlqPublisher>,
+    dlq: Arc<dyn DeadLetterPublisher>,
+    answer: bool,
+    fail_on_rejection: bool,
+    handed_back: std::sync::Mutex<Vec<(EventBook, crate::proto::RejectionNotification)>>,
+}
+
+impl DeferredCommandPm {
+    fn new(answer: bool) -> Self {
+        let dlq_publisher = Arc::new(CapturingDlqPublisher::new());
+        Self {
+            outbox: crate::orchestration::outbox::testing::recording_outbox("pm-flow").0,
+            dlq: dlq_publisher.clone(),
+            dlq_publisher,
+            answer,
+            fail_on_rejection: false,
+            handed_back: Default::default(),
+        }
+    }
+}
+
+fn deferred_command_to(domain: &str, type_url: &str) -> CommandBook {
+    use crate::proto::{command_page::Payload as CmdPayload, CommandPage};
+    CommandBook {
+        cover: Some(Cover {
+            domain: domain.to_string(),
+            correlation_id: "corr-1".to_string(),
+            ..Default::default()
+        }),
+        pages: vec![CommandPage {
+            payload: Some(CmdPayload::Command(prost_types::Any {
+                type_url: type_url.to_string(),
+                value: vec![],
+            })),
+            ..Default::default()
+        }],
+    }
 }
 
 #[async_trait]
 impl ProcessManagerContext for DeferredCommandPm {
     async fn handle(
         &self,
-        _trigger: &EventBook,
+        trigger: &EventBook,
         _pm_state: Option<&EventBook>,
     ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
-        use crate::proto::{command_page::Payload as CmdPayload, CommandPage};
+        let command = match handed_back_rejection(trigger) {
+            Some(rejection) => {
+                if self.fail_on_rejection {
+                    return Err("rejection handler failed".into());
+                }
+                self.handed_back
+                    .lock()
+                    .unwrap()
+                    .push((trigger.clone(), rejection));
+                if !self.answer {
+                    return Ok(PmHandleResponse {
+                        commands: vec![],
+                        process_events: vec![],
+                        facts: vec![],
+                    });
+                }
+                deferred_command_to("order", "/test.CancelOrder")
+            }
+            None => deferred_command_to("fulfillment", "/fulfillment.Ship"),
+        };
         Ok(PmHandleResponse {
-            commands: vec![CommandBook {
-                cover: Some(Cover {
-                    domain: "fulfillment".to_string(),
-                    correlation_id: "corr-1".to_string(),
-                    ..Default::default()
-                }),
-                pages: vec![CommandPage {
-                    payload: Some(CmdPayload::Command(prost_types::Any {
-                        type_url: "/fulfillment.Ship".to_string(),
-                        value: vec![],
-                    })),
-                    ..Default::default()
-                }],
-            }],
+            commands: vec![command],
             process_events: vec![],
             facts: vec![],
         })
@@ -2615,13 +2675,74 @@ impl ProcessManagerContext for DeferredCommandPm {
     fn outbox(&self) -> Option<&Arc<crate::orchestration::outbox::Outbox>> {
         Some(&self.outbox)
     }
+    fn dlq_publisher(&self) -> Option<&Arc<dyn DeadLetterPublisher>> {
+        Some(&self.dlq)
+    }
 }
 
-/// C-0472 (PM side): a rejected PM command's RejectionNotification is
-/// recorded in the outbox and delivered to the command's source — the
-/// trigger aggregate — whatever the caller's mode.
+/// Rejects every command to `refuse`; records the domains of the rest.
+struct DomainRejectingExecutor {
+    refuse: Vec<&'static str>,
+    executed: std::sync::Mutex<Vec<String>>,
+}
+
+impl DomainRejectingExecutor {
+    fn refusing(refuse: &[&'static str]) -> Self {
+        Self {
+            refuse: refuse.to_vec(),
+            executed: Default::default(),
+        }
+    }
+}
+
+#[async_trait]
+impl CommandExecutor for DomainRejectingExecutor {
+    async fn execute(&self, command: CommandBook, _sync_mode: SyncMode) -> CommandOutcome {
+        let domain = command.domain().to_string();
+        if self.refuse.contains(&domain.as_str()) {
+            return CommandOutcome::Rejected {
+                code: tonic::Code::FailedPrecondition,
+                message: "no stock".to_string(),
+                error_code: "OUT_OF_STOCK".to_string(),
+            };
+        }
+        self.executed.lock().unwrap().push(domain);
+        CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+fn root_trigger() -> EventBook {
+    let mut trigger = trigger_at("order", 3, 4, "");
+    trigger.cover.as_mut().unwrap().correlation_id = "corr-1".to_string();
+    trigger
+}
+
+async fn run_deferred(
+    ctx: &DeferredCommandPm,
+    executor: &DomainRejectingExecutor,
+    mode: Option<CascadeErrorMode>,
+) -> Result<ReactionReport, BusError> {
+    orchestrate_pm(
+        ctx,
+        &NoOpFetcher,
+        executor,
+        None,
+        &root_trigger(),
+        "pm-flow",
+        "pm-flow-domain",
+        "corr-1",
+        SyncMode::Cascade,
+        fast_backoff(),
+        mode,
+    )
+    .await
+}
+
+/// C-0434: in every caller mode the rejection reaches the PM that issued the
+/// command — code and message apart (C-0505), the rejected command with its
+/// provenance — and nothing is recorded for the triggering aggregate.
 #[tokio::test]
-async fn pm_rejection_is_delivered_to_its_source() {
+async fn pm_rejection_is_handed_back_to_the_pm() {
     use crate::storage::ProvenanceKind;
     for mode in [
         None,
@@ -2630,40 +2751,182 @@ async fn pm_rejection_is_delivered_to_its_source() {
     ] {
         let (outbox, deliverer) =
             crate::orchestration::outbox::testing::recording_outbox("pm-flow");
-        let ctx = DeferredCommandPm { outbox };
-        let executor = CodeRejectingExecutor {
-            code: tonic::Code::FailedPrecondition,
-            message: "no stock".to_string(),
-            error_code: "OUT_OF_STOCK".to_string(),
+        let ctx = DeferredCommandPm {
+            outbox,
+            ..DeferredCommandPm::new(false)
         };
-        let _ = orchestrate_pm(
+        let _ = run_deferred(
             &ctx,
-            &NoOpFetcher,
-            &executor,
-            None,
-            &trigger_event(),
-            "pm-flow",
-            "pm-flow",
-            "corr-1",
-            SyncMode::Cascade,
-            fast_backoff(),
+            &DomainRejectingExecutor::refusing(&["fulfillment"]),
             mode,
         )
         .await;
 
-        let rejections = deliverer.attempted_of(ProvenanceKind::RejectionNotification);
-        assert_eq!(rejections.len(), 1, "mode {mode:?}");
+        let handed_back = ctx.handed_back.lock().unwrap();
+        assert_eq!(handed_back.len(), 1, "mode {mode:?}");
+        let (trigger, rejection) = &handed_back[0];
+        assert_eq!(rejection.code, "OUT_OF_STOCK");
+        assert_eq!(rejection.rejection_reason, "no stock");
+        let rejected = rejection.rejected_command.as_ref().unwrap();
+        assert_eq!(rejected.domain(), "fulfillment");
+        let deferred = captured_deferred(rejected);
+        assert_eq!(deferred.source.as_ref().unwrap().domain, "order");
+        assert_eq!(deferred.source_component, "pm-flow");
+
+        // Addressed to the PM's own aggregate, under the rejected command's
+        // provenance.
+        let cover = trigger.cover.as_ref().unwrap();
+        assert_eq!(cover.domain, "pm-flow-domain");
+        assert_eq!(cover.correlation_id, "corr-1");
+        assert_eq!(cover.root.as_ref().unwrap().value, {
+            use crate::orchestration::shared::CorrelationRootExt;
+            "corr-1".correlation_root().as_bytes().to_vec()
+        });
         assert_eq!(
-            rejections[0].book.domain(),
-            "order",
-            "routed to the trigger"
+            trigger.pages[0].header.as_ref().unwrap().sequence_type,
+            Some(SequenceType::AngzarrDeferred(deferred.clone()))
         );
-        assert_eq!(
-            crate::orchestration::outbox::testing::rejection_code_and_reason(&rejections[0].book),
-            ("OUT_OF_STOCK".to_string(), "no stock".to_string()),
-            "code and message travel separately (C-0505)"
+
+        assert!(
+            deliverer
+                .attempted_of(ProvenanceKind::RejectionNotification)
+                .is_empty(),
+            "mode {mode:?}: nothing is routed to the triggering aggregate"
         );
     }
+}
+
+/// The command the PM answers a rejection with is executed before the
+/// orchestration returns.
+#[tokio::test]
+async fn pm_answer_to_a_rejection_is_executed() {
+    let ctx = DeferredCommandPm::new(true);
+    let executor = DomainRejectingExecutor::refusing(&["fulfillment"]);
+    let report = run_deferred(
+        &ctx,
+        &executor,
+        Some(CascadeErrorMode::CascadeErrorContinue),
+    )
+    .await
+    .expect("CONTINUE reports the rejection without failing");
+    assert_eq!(
+        *executor.executed.lock().unwrap(),
+        vec!["order".to_string()]
+    );
+    assert_eq!(report.executed.len(), 1);
+    assert_eq!(report.executed[0].command.domain(), "order");
+    assert_eq!(
+        report.reaction_errors.len(),
+        1,
+        "the rejection is still reported"
+    );
+}
+
+/// A compensation that is itself refused is dead-lettered, not handed back:
+/// a refused compensation cannot loop.
+#[tokio::test]
+async fn pm_refused_compensation_is_dead_lettered_not_handed_back() {
+    let ctx = DeferredCommandPm::new(true);
+    let executor = DomainRejectingExecutor::refusing(&["fulfillment", "order"]);
+    let _ = run_deferred(&ctx, &executor, None).await;
+    assert_eq!(ctx.handed_back.lock().unwrap().len(), 1);
+    let dead_letters = ctx.dlq_publisher.captured.lock().await;
+    let domains: Vec<String> = dead_letters
+        .iter()
+        .filter_map(|d| d.cover.as_ref().map(|c| c.domain.clone()))
+        .collect();
+    assert!(
+        domains.contains(&"order".to_string()),
+        "the refused compensation is dead-lettered: {domains:?}"
+    );
+}
+
+/// A refused compensation is dead-lettered whatever the caller's policy.
+#[tokio::test]
+async fn pm_refused_compensation_is_dead_lettered_under_fail_fast() {
+    let ctx = DeferredCommandPm::new(true);
+    let executor = DomainRejectingExecutor::refusing(&["fulfillment", "order"]);
+    let _ = run_deferred(
+        &ctx,
+        &executor,
+        Some(CascadeErrorMode::CascadeErrorFailFast),
+    )
+    .await;
+    let dead_letters = ctx.dlq_publisher.captured.lock().await;
+    assert!(dead_letters
+        .iter()
+        .any(|d| d.cover.as_ref().is_some_and(|c| c.domain == "order")));
+}
+
+/// When the PM fails to handle a handed-back rejection, the orchestration
+/// fails (the trigger is redelivered) and the rejected command is
+/// dead-lettered so the rejection is never silently lost.
+#[tokio::test]
+async fn pm_failing_to_handle_a_rejection_fails_and_dead_letters_it() {
+    let ctx = DeferredCommandPm {
+        fail_on_rejection: true,
+        ..DeferredCommandPm::new(true)
+    };
+    let executor = DomainRejectingExecutor::refusing(&["fulfillment"]);
+    let result = run_deferred(
+        &ctx,
+        &executor,
+        Some(CascadeErrorMode::CascadeErrorContinue),
+    )
+    .await;
+    assert!(result.is_err());
+    let dead_letters = ctx.dlq_publisher.captured.lock().await;
+    assert_eq!(dead_letters.len(), 1);
+    assert_eq!(
+        dead_letters[0].cover.as_ref().map(|c| c.domain.as_str()),
+        Some("fulfillment")
+    );
+}
+
+/// A handed-back rejection is deduplicated by the rejected command's
+/// provenance under the rejection kind; one without provenance is not
+/// deduplicated (nothing to key it on).
+#[test]
+fn rejection_trigger_provenance() {
+    use crate::storage::ProvenanceKind;
+    let mut command = deferred_command_to("fulfillment", "/fulfillment.Ship");
+    command.pages[0].header = Some(PageHeader {
+        sync_mode: Some(SyncMode::Decision as i32),
+        sequence_type: Some(SequenceType::AngzarrDeferred(AngzarrDeferredSequence {
+            source: root_trigger().cover,
+            source_seq: 4,
+            source_component: "pm-flow".to_string(),
+            command_index: 2,
+        })),
+    });
+    let rejection = RejectedPmCommand {
+        command,
+        reason: "no stock".to_string(),
+        code: String::new(),
+    };
+    let trigger = rejection_trigger(&root_trigger(), "pm-flow-domain", "corr-1", &rejection);
+    assert!(is_notification_trigger(&trigger));
+    assert!(!is_notification_trigger(&root_trigger()));
+    let info = trigger_source_info(&trigger, "pm-flow").expect("keyed by provenance");
+    assert_eq!(info.domain, "order");
+    assert_eq!(info.seq, 4);
+    assert_eq!(info.component, "pm-flow");
+    assert_eq!(info.command_index, 2);
+    assert_eq!(info.kind, ProvenanceKind::RejectionNotification);
+    assert_eq!(
+        trigger.pages[0].header.as_ref().unwrap().sync_mode,
+        None,
+        "the hand-back carries the provenance, not the command's sync mode"
+    );
+
+    let unattributed = RejectedPmCommand {
+        command: deferred_command_to("fulfillment", "/fulfillment.Ship"),
+        reason: String::new(),
+        code: String::new(),
+    };
+    let trigger = rejection_trigger(&root_trigger(), "pm-flow-domain", "corr-1", &unattributed);
+    assert!(trigger.pages[0].header.is_none());
+    assert!(trigger_source_info(&trigger, "pm-flow").is_none());
 }
 
 /// A PM context that does not name itself is identified as
