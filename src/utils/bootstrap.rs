@@ -36,7 +36,12 @@ static METER_PROVIDER: std::sync::OnceLock<opentelemetry_sdk::metrics::SdkMeterP
 /// - W3C TraceContext propagator for distributed tracing
 ///
 /// Configuration via environment variables:
-/// - `OTEL_EXPORTER_OTLP_ENDPOINT` — Collector endpoint (default: `http://localhost:4317`)
+/// - `OTEL_EXPORTER_OTLP_ENDPOINT` (or a per-signal
+///   `OTEL_EXPORTER_OTLP_{TRACES,LOGS,METRICS}_ENDPOINT`) — Collector
+///   endpoint. Telemetry is exported only when one is set (see
+///   [`otlp_export_enabled`]); otherwise only the log output is configured,
+///   so a deployment without a collector does not retry exports forever.
+/// - `OTEL_SDK_DISABLED=true` — never export.
 /// - `OTEL_SERVICE_NAME` — Service name for resource attribution
 /// - `OTEL_RESOURCE_ATTRIBUTES` — Additional resource key=value pairs
 pub fn init_tracing() {
@@ -46,7 +51,7 @@ pub fn init_tracing() {
     let fmt_layer = tracing_subscriber::fmt::layer();
 
     #[cfg(feature = "otel")]
-    {
+    if otlp_export_enabled(|name| std::env::var(name).ok()) {
         use opentelemetry::trace::TracerProvider;
 
         // W3C TraceContext propagator for distributed trace context
@@ -136,15 +141,32 @@ pub fn init_tracing() {
             .init();
 
         tracing::info!("OpenTelemetry tracing initialized");
+        return;
     }
 
-    #[cfg(not(feature = "otel"))]
-    {
-        tracing_subscriber::registry()
-            .with(env_filter)
-            .with(fmt_layer)
-            .init();
-    }
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(fmt_layer)
+        .init();
+}
+
+/// Environment variables naming an OTLP collector endpoint.
+const OTLP_ENDPOINT_VARS: [&str; 4] = [
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+];
+
+/// Whether telemetry is exported: an OTLP endpoint is configured (non-empty)
+/// and the SDK is not disabled (`OTEL_SDK_DISABLED=true`). `env` reads an
+/// environment variable.
+pub fn otlp_export_enabled(env: impl Fn(&str) -> Option<String>) -> bool {
+    let disabled = env("OTEL_SDK_DISABLED").is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
+    !disabled
+        && OTLP_ENDPOINT_VARS
+            .iter()
+            .any(|name| env(name).is_some_and(|v| !v.trim().is_empty()))
 }
 
 /// Build the OpenTelemetry resource from environment variables.
