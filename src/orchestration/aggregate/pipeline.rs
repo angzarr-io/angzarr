@@ -902,6 +902,59 @@ pub async fn execute_fact_pipeline(
     business: Option<&dyn ClientLogic>,
     fact_events: EventBook,
 ) -> Result<FactResponse, Status> {
+    // A fact is appended at the aggregate's head and cannot be refused, so a
+    // concurrent writer that took the head first only means trying again:
+    // the next attempt appends after it, or finds this external_id already
+    // answered by a concurrent injection of the same fact.
+    let mut attempt = 1;
+    loop {
+        match execute_fact_attempt(ctx, business, fact_events.clone()).await {
+            Err(status) if attempt < FACT_APPEND_ATTEMPTS && is_head_conflict(&status) => {
+                attempt += 1;
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+/// Attempts a fact injection makes against a moving aggregate head.
+const FACT_APPEND_ATTEMPTS: u32 = 5;
+
+/// A storage append that lost the aggregate's head to a concurrent writer.
+fn is_head_conflict(status: &Status) -> bool {
+    status.code() == tonic::Code::FailedPrecondition
+        && status
+            .message()
+            .starts_with(crate::storage::errmsg::SEQUENCE_CONFLICT)
+}
+
+/// Answer a fact whose external_id was already persisted with the events it
+/// produced then, republished and fanned out as a redelivery is.
+async fn answer_cached_fact(
+    ctx: &dyn AggregateContext,
+    mut cached: EventBook,
+    correlation_id: &str,
+) -> Result<FactResponse, Status> {
+    // The rebuilt cover carries no correlation_id; PMs filter on it.
+    if let Some(ref mut cover) = cached.cover {
+        if cover.correlation_id.is_empty() {
+            cover.correlation_id = correlation_id.to_string();
+        }
+    }
+    publish_unless_noop(ctx, &cached, cached.pages.is_empty()).await;
+    let fanout = ctx.sync_fanout(&cached).await?;
+    Ok(FactResponse {
+        events: cached,
+        projections: fanout.projections,
+        already_processed: true,
+    })
+}
+
+async fn execute_fact_attempt(
+    ctx: &dyn AggregateContext,
+    business: Option<&dyn ClientLogic>,
+    fact_events: EventBook,
+) -> Result<FactResponse, Status> {
     let (domain, root_uuid) = parse_event_cover(&fact_events)?;
     let edition = extract_event_edition(&fact_events)?;
     let correlation_id = crate::orchestration::correlation::extract_correlation_id(&fact_events)?;
@@ -927,7 +980,7 @@ pub async fn execute_fact_pipeline(
     // time, republished, without invoking the handler again. Storage-level
     // dedup at persist remains the safety net.
     if !external_id.is_empty() {
-        if let Some(mut cached) = ctx
+        if let Some(cached) = ctx
             .check_external_idempotency(&domain, &edition, root_uuid, &external_id)
             .await?
         {
@@ -935,19 +988,7 @@ pub async fn execute_fact_pipeline(
                 external_id = external_id.as_str(),
                 "Fact already processed (external_id pre-handler hit), returning cached result"
             );
-            // The rebuilt cover carries no correlation_id; PMs filter on it.
-            if let Some(ref mut cover) = cached.cover {
-                if cover.correlation_id.is_empty() {
-                    cover.correlation_id = correlation_id.clone();
-                }
-            }
-            publish_unless_noop(ctx, &cached, cached.pages.is_empty()).await;
-            let fanout = ctx.sync_fanout(&cached).await?;
-            return Ok(FactResponse {
-                events: cached,
-                projections: fanout.projections,
-                already_processed: true,
-            });
+            return answer_cached_fact(ctx, cached, &correlation_id).await;
         }
     }
 
@@ -1044,11 +1085,18 @@ pub async fn execute_fact_pipeline(
         PersistOutcome::Duplicate { .. } => {
             // The pre-handler idempotency check normally answers duplicates;
             // reaching storage-level dedup means two injections of the same
-            // external_id raced. The loser retries and reads the cached result.
+            // external_id raced. The loser answers with the winner's events,
+            // exactly as a redelivery does.
             tracing::warn!(
                 external_id = %external_id,
                 "Fact pipeline reached PersistOutcome::Duplicate — concurrent fact race detected"
             );
+            if let Some(cached) = ctx
+                .check_external_idempotency(&domain, &edition, root_uuid, &external_id)
+                .await?
+            {
+                return answer_cached_fact(ctx, cached, &correlation_id).await;
+            }
             return Err(Status::aborted(
                 "concurrent fact injection — retry to read the cached result",
             ));

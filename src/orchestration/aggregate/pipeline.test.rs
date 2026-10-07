@@ -1421,6 +1421,9 @@ fn fact_book(correlation_id: &str) -> EventBook {
 struct FactCtx {
     inner: TestCtx,
     persisted: std::sync::Mutex<Vec<EventBook>>,
+    /// `check_external_idempotency` answers None until the first persist,
+    /// then this book (what a concurrent winner stored).
+    stored_by_winner: Option<EventBook>,
 }
 
 #[async_trait]
@@ -1474,6 +1477,19 @@ impl AggregateContext for FactCtx {
 
     async fn dead_letter_unpublished(&self, events: &EventBook, reason: &str) {
         self.inner.dead_letter_unpublished(events, reason).await
+    }
+
+    async fn check_external_idempotency(
+        &self,
+        _domain: &str,
+        _edition: &str,
+        _root: Uuid,
+        _external_id: &str,
+    ) -> Result<Option<EventBook>, Status> {
+        if self.persisted.lock().unwrap().is_empty() {
+            return Ok(None);
+        }
+        Ok(self.stored_by_winner.clone())
     }
 }
 
@@ -1915,4 +1931,194 @@ async fn test_events_of_a_main_timeline_command_do_not_claim_an_edition() {
     .expect("the main-timeline command runs");
     let received = ctx.persisted.lock().unwrap();
     assert_eq!(received[0].cover.as_ref().unwrap().edition, None);
+}
+
+// ============================================================================
+// Concurrent injections of one fact
+// ============================================================================
+
+/// Two injections of one external_id race past the pre-handler check; the
+/// loser's persist is a storage-level Duplicate. It answers with the winner's
+/// events (as a redelivery would), so a waiting caller sees success.
+#[tokio::test]
+async fn test_fact_race_loser_answers_with_the_winners_events() {
+    let mut winner = book_with_domain("dest", "");
+    winner.pages = vec![make_event_page(0)];
+    let ctx = FactCtx {
+        inner: TestCtx {
+            persist_outcome: Some(PersistOutcome::Duplicate {
+                first_sequence: 0,
+                last_sequence: 0,
+            }),
+            ..Default::default()
+        },
+        stored_by_winner: Some(winner),
+        ..Default::default()
+    };
+    let response = execute_fact_pipeline(&ctx, None, fact_book("conv-1"))
+        .await
+        .expect("the race loser answers with the cached result");
+    assert!(response.already_processed);
+    assert_eq!(response.events.pages.len(), 1);
+    assert_eq!(
+        response.events.cover.as_ref().unwrap().correlation_id,
+        "conv-1"
+    );
+    assert_eq!(ctx.inner.publish_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(ctx.inner.fanout_calls.load(Ordering::SeqCst), 1);
+}
+
+/// A Duplicate with nothing readable back is still reported as the race.
+#[tokio::test]
+async fn test_fact_race_with_no_cached_result_is_aborted() {
+    let ctx = FactCtx {
+        inner: TestCtx {
+            persist_outcome: Some(PersistOutcome::Duplicate {
+                first_sequence: 0,
+                last_sequence: 0,
+            }),
+            ..Default::default()
+        },
+        ..Default::default()
+    };
+    let err = execute_fact_pipeline(&ctx, None, fact_book(""))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::Aborted);
+}
+
+// ============================================================================
+// A fact that loses the aggregate head to a concurrent writer retries
+// ============================================================================
+
+/// Fails the first `conflicts` persists with a storage head conflict (or
+/// `failure`, when set), then persists.
+struct HeadRaceCtx {
+    inner: FactCtx,
+    conflicts: usize,
+    failure: Option<Status>,
+}
+
+#[async_trait]
+impl AggregateContext for HeadRaceCtx {
+    async fn load_prior_events_with_divergence(
+        &self,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        temporal: &TemporalQuery,
+        divergence: Option<u32>,
+    ) -> Result<EventBook, Status> {
+        self.inner
+            .load_prior_events_with_divergence(domain, edition, root, temporal, divergence)
+            .await
+    }
+
+    async fn persist_events(
+        &self,
+        prior: &EventBook,
+        received: &EventBook,
+        domain: &str,
+        edition: &str,
+        root: Uuid,
+        correlation_id: &str,
+        external_id: Option<&str>,
+        source_info: Option<&SourceInfo>,
+    ) -> Result<PersistOutcome, Status> {
+        let attempt = self.inner.persisted.lock().unwrap().len();
+        let outcome = self
+            .inner
+            .persist_events(
+                prior,
+                received,
+                domain,
+                edition,
+                root,
+                correlation_id,
+                external_id,
+                source_info,
+            )
+            .await;
+        if attempt < self.conflicts {
+            return Err(self.failure.clone().unwrap_or_else(|| {
+                Status::failed_precondition(format!(
+                    "{}expected 4, got 5",
+                    crate::storage::errmsg::SEQUENCE_CONFLICT
+                ))
+            }));
+        }
+        outcome
+    }
+
+    async fn publish(&self, events: &EventBook) -> Result<(), Status> {
+        self.inner.publish(events).await
+    }
+
+    async fn sync_fanout(&self, events: &EventBook) -> Result<super::super::SyncFanout, Status> {
+        self.inner.sync_fanout(events).await
+    }
+
+    async fn dead_letter_unpublished(&self, events: &EventBook, reason: &str) {
+        self.inner.dead_letter_unpublished(events, reason).await
+    }
+}
+
+fn head_race(conflicts: usize, failure: Option<Status>) -> HeadRaceCtx {
+    let mut persisted = book_with_domain("dest", "");
+    persisted.pages = vec![make_event_page(4)];
+    HeadRaceCtx {
+        inner: FactCtx {
+            inner: TestCtx {
+                persist_outcome: Some(PersistOutcome::Persisted(persisted)),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+        conflicts,
+        failure,
+    }
+}
+
+#[tokio::test]
+async fn test_fact_that_loses_the_head_is_appended_on_retry() {
+    let ctx = head_race(2, None);
+    let response = execute_fact_pipeline(&ctx, None, fact_book(""))
+        .await
+        .expect("the fact lands after the concurrent writer");
+    assert_eq!(response.events.pages.len(), 1);
+    assert_eq!(ctx.inner.persisted.lock().unwrap().len(), 3);
+    assert_eq!(
+        ctx.inner.inner.load_calls.load(Ordering::SeqCst),
+        3,
+        "every attempt reloads the head"
+    );
+}
+
+#[tokio::test]
+async fn test_fact_head_conflicts_are_retried_a_bounded_number_of_times() {
+    let ctx = head_race(usize::MAX, None);
+    let err = execute_fact_pipeline(&ctx, None, fact_book(""))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert_eq!(
+        ctx.inner.persisted.lock().unwrap().len(),
+        FACT_APPEND_ATTEMPTS as usize
+    );
+}
+
+/// Only a lost head is retried: another refusal of the append fails at once.
+#[tokio::test]
+async fn test_fact_other_persist_failures_are_not_retried() {
+    for failure in [
+        Status::failed_precondition("Business response targets elsewhere"),
+        Status::internal("Sequence conflict: but not a precondition"),
+    ] {
+        let ctx = head_race(usize::MAX, Some(failure.clone()));
+        let err = execute_fact_pipeline(&ctx, None, fact_book(""))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), failure.code());
+        assert_eq!(ctx.inner.persisted.lock().unwrap().len(), 1);
+    }
 }

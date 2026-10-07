@@ -669,8 +669,8 @@ impl AggregateContext for GrpcAggregateContext {
                 .map_err(|e| match e {
                     StorageError::SequenceConflict { expected, actual } => {
                         Status::failed_precondition(format!(
-                            "Sequence conflict: expected {}, got {}",
-                            expected, actual
+                            "{}expected {expected}, got {actual}",
+                            crate::storage::errmsg::SEQUENCE_CONFLICT
                         ))
                     }
                     _ => Status::internal(format!("Failed to persist events: {e}")),
