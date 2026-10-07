@@ -442,10 +442,10 @@ async fn test_inherited_sync_mode_used_when_no_override() {
 // outer-loop iterations and skips re-persistence of any already-persisted
 // book on the re-run.
 //
-// Each EventBook is identified by a stable fingerprint: (root_id_hex, first
-// page sequence, last page sequence, page count). The persister is observed
-// here via call counts per book, so any double-persist of book-1 surfaces as
-// a duplicate `persist` invocation on the dedup test.
+// Each EventBook is identified by its position in the handler's response and
+// its content as emitted. The persister is observed here via call counts per
+// book, so any double-persist of book-1 surfaces as a duplicate `persist`
+// invocation on the dedup test.
 
 /// PM context that emits TWO distinct PM event books per handle() call.
 ///
@@ -2671,4 +2671,323 @@ async fn pm_rejection_is_delivered_to_its_source() {
 #[test]
 fn test_default_component_name_is_process_manager() {
     assert_eq!(EmptyPm.component_name(), "process_manager");
+}
+
+// ============================================================================
+// The coordinator numbers the PM's own-stream events
+// ============================================================================
+//
+// The PM handler sees no sequences but its own state's and emits its events
+// unnumbered; the event store appends only at the stream head. Unnumbered
+// pages would all be stored at sequence 0, so every PM event after the first
+// in a workflow would conflict forever.
+
+/// An in-memory PM stream that, like the event store, accepts a book only
+/// when its pages continue the head contiguously.
+#[derive(Default)]
+struct PmStream {
+    pages: std::sync::Mutex<Vec<crate::proto::EventPage>>,
+    /// Pages a concurrent writer appends just before the next persist of a
+    /// book whose first page is labelled `interleave_before`.
+    interleave_before: std::sync::Mutex<Option<(String, usize)>>,
+    persist_calls: std::sync::Mutex<Vec<String>>,
+}
+
+fn labelled_page(label: &str) -> crate::proto::EventPage {
+    crate::proto::EventPage {
+        payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
+            type_url: label.to_string(),
+            value: vec![],
+        })),
+        ..Default::default()
+    }
+}
+
+fn page_label(page: &crate::proto::EventPage) -> String {
+    match &page.payload {
+        Some(crate::proto::event_page::Payload::Event(any)) => any.type_url.clone(),
+        _ => String::new(),
+    }
+}
+
+impl PmStream {
+    fn with_pages(labels: &[&str]) -> Self {
+        let stream = Self::default();
+        for label in labels {
+            let seq = stream.pages.lock().unwrap().len() as u32;
+            let mut page = labelled_page(label);
+            page.header = Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(SequenceType::Sequence(seq)),
+            });
+            stream.pages.lock().unwrap().push(page);
+        }
+        stream
+    }
+
+    /// (sequence, label) of every stored page.
+    fn stored(&self) -> Vec<(u32, String)> {
+        use crate::proto_ext::EventPageExt;
+        self.pages
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|p| (p.sequence_num(), page_label(p)))
+            .collect()
+    }
+
+    fn append(&self, book: &EventBook) -> CommandOutcome {
+        use crate::proto_ext::EventPageExt;
+        let first = book.pages.first().map(page_label).unwrap_or_default();
+        self.persist_calls.lock().unwrap().push(first.clone());
+        let interleave = {
+            let mut pending = self.interleave_before.lock().unwrap();
+            match pending.as_ref() {
+                Some((label, _)) if *label == first => pending.take(),
+                _ => None,
+            }
+        };
+        let mut pages = self.pages.lock().unwrap();
+        if let Some((_, count)) = interleave {
+            for _ in 0..count {
+                let seq = pages.len() as u32;
+                let mut page = labelled_page("concurrent");
+                page.header = Some(PageHeader {
+                    sync_mode: None,
+                    sequence_type: Some(SequenceType::Sequence(seq)),
+                });
+                pages.push(page);
+            }
+        }
+        for (offset, page) in book.pages.iter().enumerate() {
+            let explicit = matches!(
+                page.header.as_ref().and_then(|h| h.sequence_type.as_ref()),
+                Some(SequenceType::Sequence(_))
+            );
+            if !explicit || page.sequence_num() as usize != pages.len() + offset {
+                return CommandOutcome::Retryable {
+                    reason: "Sequence conflict".to_string(),
+                    current_state: None,
+                };
+            }
+        }
+        pages.extend(book.pages.iter().cloned());
+        CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+/// Fetches the PM's state from a [`PmStream`].
+struct PmStreamFetcher(Arc<PmStream>);
+
+#[async_trait]
+impl DestinationFetcher for PmStreamFetcher {
+    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, tonic::Status> {
+        Ok(None)
+    }
+    async fn fetch_by_correlation(
+        &self,
+        _domain: &str,
+        _correlation_id: &str,
+    ) -> Result<Option<EventBook>, tonic::Status> {
+        let pages = self.0.pages.lock().unwrap().clone();
+        if pages.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(EventBook {
+            next_sequence: pages.len() as u32,
+            pages,
+            ..Default::default()
+        }))
+    }
+}
+
+/// A PM that emits the same unnumbered books, labelled page by page, on
+/// every trigger, persisting them to a [`PmStream`].
+struct UnnumberedBooksPm {
+    stream: Arc<PmStream>,
+    books: Vec<Vec<&'static str>>,
+}
+
+#[async_trait]
+impl ProcessManagerContext for UnnumberedBooksPm {
+    async fn handle(
+        &self,
+        _trigger: &EventBook,
+        _pm_state: Option<&EventBook>,
+    ) -> Result<PmHandleResponse, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(PmHandleResponse {
+            commands: vec![],
+            process_events: self
+                .books
+                .iter()
+                .map(|labels| EventBook {
+                    pages: labels.iter().map(|l| labelled_page(l)).collect(),
+                    ..Default::default()
+                })
+                .collect(),
+            facts: vec![],
+        })
+    }
+    async fn persist_pm_events(
+        &self,
+        process_events: &EventBook,
+        _correlation_id: &str,
+    ) -> CommandOutcome {
+        self.stream.append(process_events)
+    }
+}
+
+async fn run_unnumbered(pm: &UnnumberedBooksPm) -> Result<ReactionReport, BusError> {
+    orchestrate_pm(
+        pm,
+        &PmStreamFetcher(pm.stream.clone()),
+        &NoOpExecutor,
+        None,
+        &trigger_event(),
+        "pmg-fulfillment",
+        "fulfillment-pm",
+        "corr-1",
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await
+}
+
+fn stored(pairs: &[(u32, &str)]) -> Vec<(u32, String)> {
+    pairs.iter().map(|(s, l)| (*s, l.to_string())).collect()
+}
+
+/// A new workflow's events start at 0 and continue book after book.
+#[tokio::test]
+async fn test_pm_events_of_a_new_workflow_are_numbered_from_zero() {
+    let pm = UnnumberedBooksPm {
+        stream: Arc::new(PmStream::default()),
+        books: vec![vec!["a", "b"], vec!["c"]],
+    };
+    run_unnumbered(&pm).await.expect("PM events persist");
+    assert_eq!(pm.stream.stored(), stored(&[(0, "a"), (1, "b"), (2, "c")]));
+}
+
+/// A running workflow's events continue from its stream head.
+#[tokio::test]
+async fn test_pm_events_continue_from_the_stream_head() {
+    let pm = UnnumberedBooksPm {
+        stream: Arc::new(PmStream::with_pages(&["x", "y", "z"])),
+        books: vec![vec!["a"], vec!["b"]],
+    };
+    run_unnumbered(&pm).await.expect("PM events persist");
+    assert_eq!(
+        pm.stream.stored(),
+        stored(&[(0, "x"), (1, "y"), (2, "z"), (3, "a"), (4, "b")])
+    );
+}
+
+/// The same events emitted for a second trigger land after the first's:
+/// numbering follows the stream, not the handler's output.
+#[tokio::test]
+async fn test_pm_events_of_successive_triggers_do_not_conflict() {
+    let pm = UnnumberedBooksPm {
+        stream: Arc::new(PmStream::default()),
+        books: vec![vec!["a"]],
+    };
+    run_unnumbered(&pm).await.expect("first trigger");
+    run_unnumbered(&pm).await.expect("second trigger");
+    assert_eq!(pm.stream.stored(), stored(&[(0, "a"), (1, "a")]));
+}
+
+/// A book that loses the head to a concurrent writer is renumbered after it
+/// on the retry, and the books already persisted are not persisted again.
+#[tokio::test]
+async fn test_pm_retry_renumbers_after_a_concurrent_writer_without_repersisting() {
+    let stream = Arc::new(PmStream::default());
+    *stream.interleave_before.lock().unwrap() = Some(("c".to_string(), 1));
+    let pm = UnnumberedBooksPm {
+        stream: stream.clone(),
+        books: vec![vec!["a", "b"], vec!["c"]],
+    };
+    run_unnumbered(&pm)
+        .await
+        .expect("PM events persist after retry");
+    assert_eq!(
+        stream.stored(),
+        stored(&[(0, "a"), (1, "b"), (2, "concurrent"), (3, "c")])
+    );
+    assert_eq!(
+        *stream.persist_calls.lock().unwrap(),
+        vec!["a".to_string(), "c".to_string(), "c".to_string()],
+        "book 1 persisted once; book 2 retried after the conflict"
+    );
+}
+
+/// The stream head is one past the state's last event, whether the state
+/// reports it in next_sequence or only through its pages or snapshot.
+#[test]
+fn test_process_stream_head() {
+    assert_eq!(process_stream_head(None), 0);
+    let reported = EventBook {
+        next_sequence: 3,
+        ..Default::default()
+    };
+    assert_eq!(process_stream_head(Some(&reported)), 3);
+    let from_pages = PmStream::with_pages(&["x", "y"]);
+    let book = EventBook {
+        pages: from_pages.pages.lock().unwrap().clone(),
+        ..Default::default()
+    };
+    assert_eq!(process_stream_head(Some(&book)), 2);
+    let from_snapshot = EventBook {
+        snapshot: Some(crate::proto::Snapshot {
+            sequence: 6,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(process_stream_head(Some(&from_snapshot)), 7);
+}
+
+/// An explicit sequence on a process event is kept and numbering continues
+/// after it; deferred headers are replaced by the stream sequence while the
+/// header's sync_mode survives.
+#[test]
+fn test_sequence_process_events_is_fill_only() {
+    let mut book = EventBook {
+        pages: vec![
+            labelled_page("a"),
+            crate::proto::EventPage {
+                header: Some(PageHeader {
+                    sync_mode: None,
+                    sequence_type: Some(SequenceType::Sequence(7)),
+                }),
+                ..Default::default()
+            },
+            crate::proto::EventPage {
+                header: Some(PageHeader {
+                    sync_mode: Some(SyncMode::Cascade as i32),
+                    sequence_type: Some(SequenceType::AngzarrDeferred(Default::default())),
+                }),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    let next = sequence_process_events(&mut book, 2);
+    let numbered: Vec<Option<SequenceType>> = book
+        .pages
+        .iter()
+        .map(|p| p.header.as_ref().and_then(|h| h.sequence_type.clone()))
+        .collect();
+    assert_eq!(
+        numbered,
+        vec![
+            Some(SequenceType::Sequence(2)),
+            Some(SequenceType::Sequence(7)),
+            Some(SequenceType::Sequence(8)),
+        ]
+    );
+    assert_eq!(next, 9);
+    assert_eq!(
+        book.pages[2].header.as_ref().unwrap().sync_mode,
+        Some(SyncMode::Cascade as i32)
+    );
 }

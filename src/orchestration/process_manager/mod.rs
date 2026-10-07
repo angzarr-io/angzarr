@@ -62,45 +62,66 @@ use super::shared::UndeliveredCommand;
 use super::shared::{ExecutedCommand, ReactionReport};
 use super::FactExecutor;
 
-/// Stable fingerprint for a PM event book, used to deduplicate persistence
-/// across outer-loop iterations.
+/// Identity of one PM event book the handler emitted, used to deduplicate
+/// persistence across outer-loop iterations.
 ///
 /// When `persist_pm_events` returns `Retryable` on book N (with books
 /// 1..N-1 already persisted successfully), the whole outer loop restarts:
-/// the PM handler re-runs and an idempotent handler will re-emit the same
+/// the PM handler re-runs and an idempotent handler re-emits the same
 /// earlier books. Without dedup the coordinator would persist them twice.
 ///
-/// The fingerprint captures (PM root, first/last persisted sequence, page
-/// count) — sufficient to distinguish books emitted within one workflow.
-/// The PM root is the PM's own aggregate root (correlation_id-derived);
-/// page sequences are guaranteed monotone within a book by the framework's
-/// sequence-stamping contract, so first/last + count is collision-free for
-/// any pair of books a single workflow could emit.
+/// The identity is the book's position in the handler's response and its
+/// content as the handler emitted it, before the coordinator numbers its
+/// pages: a re-emitted book matches although the stream head it would be
+/// numbered from has moved past it.
 #[derive(Clone, Eq, Hash, PartialEq, Debug)]
 struct BookFingerprint {
-    root_hex: String,
-    first_seq: u32,
-    last_seq: u32,
-    page_count: usize,
+    index: usize,
+    content: Vec<u8>,
 }
 
 impl BookFingerprint {
-    fn of(book: &EventBook) -> Self {
-        use crate::proto_ext::{CoverExt, EventPageExt};
-        let root_hex = book
-            .cover
-            .as_ref()
-            .and_then(|c| c.root_id_hex())
-            .unwrap_or_default();
-        let first_seq = book.pages.first().map(|p| p.sequence_num()).unwrap_or(0);
-        let last_seq = book.pages.last().map(|p| p.sequence_num()).unwrap_or(0);
+    fn of(index: usize, book: &EventBook) -> Self {
+        use prost::Message;
         Self {
-            root_hex,
-            first_seq,
-            last_seq,
-            page_count: book.pages.len(),
+            index,
+            content: book.encode_to_vec(),
         }
     }
+}
+
+/// The sequence the PM's next event takes: one past the head of its stream
+/// (0 for a new workflow).
+fn process_stream_head(pm_state: Option<&EventBook>) -> u32 {
+    use crate::proto_ext::calculate_next_sequence;
+    pm_state.map_or(0, |state| {
+        state.next_sequence.max(calculate_next_sequence(
+            &state.pages,
+            state.snapshot.as_ref(),
+        ))
+    })
+}
+
+/// Number the pages of a PM event book from `next`, FILL-ONLY: a page that
+/// carries an explicit sequence keeps it and the numbering continues after
+/// it; every other page takes the next sequence. Returns the sequence after
+/// the book's last page.
+///
+/// The PM handler sees no sequences but its own state's, and the event
+/// store appends only at the stream head, so the coordinator numbers the
+/// PM's own-stream events.
+fn sequence_process_events(book: &mut EventBook, mut next: u32) -> u32 {
+    for page in &mut book.pages {
+        let header = page.header.get_or_insert_with(PageHeader::default);
+        match header.sequence_type {
+            Some(SequenceType::Sequence(explicit)) => next = explicit + 1,
+            _ => {
+                header.sequence_type = Some(SequenceType::Sequence(next));
+                next += 1;
+            }
+        }
+    }
+    next
 }
 
 /// Result of process manager handle phase.
@@ -528,19 +549,20 @@ pub async fn orchestrate_pm(
         // Each emitted book is persisted separately; empty books are skipped.
         let mut should_continue_outer = false;
         let mut should_return_err: Option<BusError> = None;
-        for process_events in &response.process_events {
-            if process_events.pages.is_empty() {
+        let mut next_sequence = process_stream_head(pm_state.as_ref());
+        for (index, emitted) in response.process_events.iter().enumerate() {
+            if emitted.pages.is_empty() {
                 continue;
             }
             // Skip books already persisted on a prior outer-loop iteration.
-            let fp = BookFingerprint::of(process_events);
+            let fp = BookFingerprint::of(index, emitted);
             if persisted.contains(&fp) {
-                debug!(
-                    fingerprint = ?fp,
-                    "Skipping already-persisted PM book on retry"
-                );
+                debug!(index, "Skipping already-persisted PM book on retry");
                 continue;
             }
+            let mut process_events = emitted.clone();
+            next_sequence = sequence_process_events(&mut process_events, next_sequence);
+            let process_events = &process_events;
             let outcome = match &trigger_source {
                 Some(source) => {
                     ctx.persist_pm_events_for_trigger(process_events, correlation_id, source)
