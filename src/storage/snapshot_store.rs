@@ -12,7 +12,8 @@ use crate::proto::{Snapshot, SnapshotRetention};
 /// Only strictly older snapshots are pruned, so the newest snapshot is
 /// never deleted:
 /// - `RETENTION_DEFAULT` and `RETENTION_TRANSIENT`: pruned by any newer
-///   snapshot of the same aggregate.
+///   snapshot of the same aggregate, whatever the newer one's retention, so
+///   a PERSIST snapshot supersedes older routine ones (C-0452, C-0511).
 /// - `RETENTION_PERSIST` and unknown values: never pruned.
 pub fn is_superseded(old_sequence: u32, old_retention: i32, new_sequence: u32) -> bool {
     old_sequence < new_sequence

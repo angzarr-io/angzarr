@@ -472,6 +472,38 @@ pub async fn test_retention_transient_pruned_by_newer<S: SnapshotStore>(store: &
     );
 }
 
+/// C-0452 / C-0511: a newer snapshot of ANY retention supersedes older
+/// routine snapshots; a PERSIST snapshot is itself kept, and routine
+/// snapshots written after it follow the usual rule.
+pub async fn test_retention_persist_supersedes_older_routine<S: SnapshotStore>(store: &S) {
+    let domain = "test_snap_persist_supersedes";
+    let root = Uuid::new_v4();
+    for (seq, retention) in [
+        (20, SnapshotRetention::RetentionTransient),
+        (30, SnapshotRetention::RetentionDefault),
+        (40, SnapshotRetention::RetentionPersist),
+        (60, SnapshotRetention::RetentionTransient),
+    ] {
+        store
+            .put(
+                domain,
+                "test",
+                root,
+                make_snapshot_with_retention(seq, retention),
+            )
+            .await
+            .expect("put should succeed");
+    }
+    for (seq, kept) in [(20, false), (30, false), (40, true), (60, true)] {
+        let found = store
+            .get_at_seq(domain, "test", root, seq)
+            .await
+            .unwrap()
+            .filter(|s| s.sequence == seq);
+        assert_eq!(found.is_some(), kept, "snapshot at {seq}");
+    }
+}
+
 pub async fn test_retention_default<S: SnapshotStore>(store: &S) {
     let domain = "test_snap_default";
     let root = Uuid::new_v4();
@@ -711,6 +743,9 @@ macro_rules! run_snapshot_store_tests {
 
         test_retention_transient_pruned_by_newer($store).await;
         println!("  test_retention_transient_pruned_by_newer: PASSED");
+
+        test_retention_persist_supersedes_older_routine($store).await;
+        println!("  test_retention_persist_supersedes_older_routine: PASSED");
 
         test_retention_default($store).await;
         println!("  test_retention_default: PASSED");
