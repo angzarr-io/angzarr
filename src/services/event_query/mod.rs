@@ -18,40 +18,43 @@ use crate::validation;
 ///
 /// Provides query access to the event store.
 pub struct EventQueryService {
+    /// Event reads; never substitutes a snapshot for the events it summarizes.
     event_book_repo: Arc<EventBookRepository>,
+    /// The latest snapshot a whole-history query carries alongside.
+    snapshot_repo: Arc<SnapshotRepository>,
     event_store: Arc<dyn EventStore>,
 }
 
 impl EventQueryService {
-    /// Create a new event query service with snapshot optimization disabled.
-    ///
-    /// Snapshots are disabled because the EventQuery service returns event
-    /// history — callers expect all events in `pages`, not a snapshot plus
-    /// subsequent events. Snapshot optimization is for aggregate state
-    /// reconstruction (AggregateCoordinator), not event queries.
+    /// Create a new event query service. A whole-history query returns every
+    /// event with the aggregate's latest snapshot alongside (C-0243).
     pub fn new(event_store: Arc<dyn EventStore>, snapshot_store: Arc<dyn SnapshotStore>) -> Self {
-        Self::with_options(event_store, snapshot_store, false)
+        Self::with_options(event_store, snapshot_store, true)
     }
 
-    /// Create a new event query service with configurable snapshot reading.
-    ///
-    /// Use `enable_snapshots = true` (default) for saga workloads where snapshots
-    /// improve efficiency. Use `false` for raw event queries (debugging, replay).
+    /// Create a new event query service with configurable snapshot reading:
+    /// `enable_snapshots = false` answers whole-history queries without the
+    /// snapshot.
     pub fn with_options(
         event_store: Arc<dyn EventStore>,
         snapshot_store: Arc<dyn SnapshotStore>,
         enable_snapshots: bool,
     ) -> Self {
-        // write_enabled=false because EventQueryService never persists
-        // snapshots — it's a read-only surface. read_enabled mirrors the
-        // caller's preference.
-        let snapshot_repo = Arc::new(SnapshotRepository::with_flags(
-            snapshot_store,
-            enable_snapshots,
+        // write_enabled=false: EventQueryService is a read-only surface.
+        // Event reads never consult snapshots; the history query attaches
+        // the latest one separately.
+        let no_snapshots = Arc::new(SnapshotRepository::with_flags(
+            snapshot_store.clone(),
+            false,
             false,
         ));
         Self {
-            event_book_repo: Arc::new(EventBookRepository::new(event_store.clone(), snapshot_repo)),
+            event_book_repo: Arc::new(EventBookRepository::new(event_store.clone(), no_snapshots)),
+            snapshot_repo: Arc::new(SnapshotRepository::with_flags(
+                snapshot_store,
+                enable_snapshots,
+                false,
+            )),
             event_store,
         }
     }
@@ -96,6 +99,7 @@ fn query_target(
 /// - `Internal` for any storage / repository error.
 pub(crate) async fn dispatch_selection(
     repo: &EventBookRepository,
+    snapshots: &SnapshotRepository,
     domain: &str,
     edition: &str,
     root: uuid::Uuid,
@@ -133,7 +137,14 @@ pub(crate) async fn dispatch_selection(
                 ));
             }
         },
-        None => repo.get(domain, edition, root).await,
+        // The whole history, with the latest snapshot alongside (C-0243).
+        None => match repo.get(domain, edition, root).await {
+            Ok(mut book) => snapshots.get(domain, edition, root).await.map(|snapshot| {
+                book.snapshot = snapshot;
+                book
+            }),
+            Err(e) => Err(e),
+        },
     };
     result.map_err(|e| Status::internal(e.to_string()))
 }
@@ -188,6 +199,7 @@ impl EventQueryTrait for EventQueryService {
         // produce the same event set for the same Query (H-35 / H-36).
         let book = dispatch_selection(
             &self.event_book_repo,
+            &self.snapshot_repo,
             &domain,
             edition,
             root_uuid,
@@ -242,10 +254,18 @@ impl EventQueryTrait for EventQueryService {
         let (domain, edition, root_uuid) = query_target(cover)?;
         let selection = query.selection;
         let event_book_repo = self.event_book_repo.clone();
+        let snapshot_repo = self.snapshot_repo.clone();
 
         tokio::spawn(async move {
-            let result =
-                dispatch_selection(&event_book_repo, &domain, &edition, root_uuid, selection).await;
+            let result = dispatch_selection(
+                &event_book_repo,
+                &snapshot_repo,
+                &domain,
+                &edition,
+                root_uuid,
+                selection,
+            )
+            .await;
             if tx.send(result).await.is_err() {
                 debug!(domain = %domain, root = %root_uuid, "Client disconnected before response");
             }
@@ -260,6 +280,7 @@ impl EventQueryTrait for EventQueryService {
     ) -> Result<Response<Self::SynchronizeStream>, Status> {
         let mut stream = request.into_inner();
         let event_book_repo = self.event_book_repo.clone();
+        let snapshot_repo = self.snapshot_repo.clone();
         let (tx, rx) = tokio::sync::mpsc::channel(32);
 
         tokio::spawn(async move {
@@ -292,6 +313,7 @@ impl EventQueryTrait for EventQueryService {
                         // Ok/Err match.
                         let result = dispatch_selection(
                             &event_book_repo,
+                            &snapshot_repo,
                             &domain,
                             edition,
                             root,

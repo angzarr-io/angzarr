@@ -13,8 +13,9 @@
 //! - Temporal queries support point-in-time views
 //! - Missing/invalid parameters return InvalidArgument gRPC status
 //!
-//! Note: EventQuery deliberately ignores snapshots — it's for event inspection,
-//! not aggregate state reconstruction. Use AggregateService for state.
+//! A whole-history query returns every event with the aggregate's latest
+//! snapshot alongside (C-0243); the snapshot never replaces the events it
+//! summarizes.
 
 use super::*;
 use crate::proto::{event_page, page_header, EventPage, PageHeader, SequenceRange, TemporalQuery};
@@ -27,6 +28,15 @@ use tokio_stream::StreamExt;
 // ============================================================================
 // Test Setup
 // ============================================================================
+
+/// A snapshot repository that reads nothing.
+fn no_snapshots() -> crate::repository::SnapshotRepository {
+    crate::repository::SnapshotRepository::with_flags(
+        Arc::new(MockSnapshotStore::new()),
+        false,
+        false,
+    )
+}
 
 fn create_test_service_with_mocks(
     event_store: Arc<MockEventStore>,
@@ -859,11 +869,9 @@ async fn test_get_event_book_temporal_empty_point_in_time() {
 // Snapshot Handling Tests
 // ============================================================================
 
-/// EventQuery ignores snapshots — returns full event history.
-///
-/// Unlike AggregateService (which uses snapshots for efficiency), EventQuery
-/// is for inspection. Users querying events want to see the actual events,
-/// not a compacted state representation.
+/// A whole-history query returns every event, with the aggregate's latest
+/// snapshot alongside (C-0243): the snapshot never replaces the events it
+/// summarizes.
 #[tokio::test]
 async fn test_get_event_book_returns_all_events_despite_snapshot() {
     let (service, event_store, snapshot_store) = create_default_test_service();
@@ -935,9 +943,10 @@ async fn test_get_event_book_returns_all_events_despite_snapshot() {
         1,
         "EventQuery must return all events regardless of snapshots"
     );
-    assert!(
-        book.snapshot.is_none(),
-        "EventQuery should not include snapshots"
+    assert_eq!(
+        book.snapshot.as_ref().map(|s| s.sequence),
+        Some(0),
+        "the latest snapshot is surfaced alongside the history"
     );
 }
 
@@ -1094,6 +1103,7 @@ async fn test_dispatch_selection_temporal_missing_point_returns_descriptive_mess
 
     let result = super::dispatch_selection(
         &repo,
+        &no_snapshots(),
         "orders",
         "",
         uuid::Uuid::new_v4(),
@@ -1168,6 +1178,7 @@ async fn test_dispatch_selection_range_upper_is_inclusive() {
 
     let book = super::dispatch_selection(
         &repo,
+        &no_snapshots(),
         "orders",
         "",
         root,
@@ -1262,10 +1273,16 @@ async fn test_dispatch_selection_matches_get_event_book_on_same_range() {
         .into_inner();
 
     // dispatch_selection path (used by synchronize)
-    let stream_book =
-        super::dispatch_selection(&repo, "orders", "", root, Some(Selection::Range(range)))
-            .await
-            .expect("dispatch_selection must succeed");
+    let stream_book = super::dispatch_selection(
+        &repo,
+        &no_snapshots(),
+        "orders",
+        "",
+        root,
+        Some(Selection::Range(range)),
+    )
+    .await
+    .expect("dispatch_selection must succeed");
 
     assert_eq!(
         unary_book.pages.len(),
@@ -1326,6 +1343,7 @@ async fn test_dispatch_selection_range_upper_none_returns_to_latest() {
 
     let book = super::dispatch_selection(
         &repo,
+        &no_snapshots(),
         "orders",
         "",
         root,
@@ -1472,4 +1490,142 @@ async fn test_synchronize_validates_domain_and_edition() {
             Some(pages) => assert_eq!(out.message().await.unwrap().unwrap().pages.len(), pages),
         }
     }
+}
+
+// ============================================================================
+// Snapshots alongside the history (C-0243)
+// ============================================================================
+
+async fn ten_events_with_snapshot_at_five(
+    event_store: &MockEventStore,
+    snapshot_store: &MockSnapshotStore,
+    root: uuid::Uuid,
+) {
+    let events = (0..10)
+        .map(|seq| EventPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::Sequence(seq)),
+            }),
+            payload: Some(event_page::Payload::Event(Any {
+                type_url: "test.OrderEvent".to_string(),
+                value: vec![],
+            })),
+            created_at: None,
+        })
+        .collect();
+    event_store
+        .add(
+            "orders",
+            "",
+            root,
+            events,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
+        .await
+        .unwrap();
+    for sequence in [2, 5] {
+        snapshot_store
+            .put(
+                "orders",
+                "",
+                root,
+                crate::proto::Snapshot {
+                    sequence,
+                    state: Some(Any {
+                        type_url: "test.OrderState".to_string(),
+                        value: vec![sequence as u8],
+                    }),
+                    retention: crate::proto::SnapshotRetention::RetentionDefault as i32,
+                    created_at: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+}
+
+fn whole_history_query(root: uuid::Uuid) -> Query {
+    Query {
+        cover: Some(crate::proto::Cover {
+            domain: "orders".to_string(),
+            root: Some(ProtoUuid {
+                value: root.as_bytes().to_vec(),
+            }),
+            correlation_id: String::new(),
+            edition: None,
+            ext: None,
+        }),
+        selection: None,
+    }
+}
+
+/// C-0243: the unary and streamed history queries carry the latest
+/// snapshot (sequence 5) and still every event.
+#[tokio::test]
+async fn test_history_query_carries_the_latest_snapshot_and_every_event() {
+    let (service, event_store, snapshot_store) = create_default_test_service();
+    let root = uuid::Uuid::new_v4();
+    ten_events_with_snapshot_at_five(&event_store, &snapshot_store, root).await;
+
+    let unary = service
+        .get_event_book(Request::new(whole_history_query(root)))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut stream = service
+        .get_events(Request::new(whole_history_query(root)))
+        .await
+        .unwrap()
+        .into_inner();
+    let streamed = stream.next().await.unwrap().unwrap();
+
+    for book in [unary, streamed] {
+        assert_eq!(book.snapshot.as_ref().map(|s| s.sequence), Some(5));
+        assert_eq!(book.pages.len(), 10);
+        assert_eq!(book.next_sequence, 10);
+    }
+}
+
+/// A selection (range, sequences, point in time) answers events only; the
+/// snapshot belongs to the whole-history read.
+#[tokio::test]
+async fn test_range_query_does_not_substitute_a_snapshot() {
+    let (service, event_store, snapshot_store) = create_default_test_service();
+    let root = uuid::Uuid::new_v4();
+    ten_events_with_snapshot_at_five(&event_store, &snapshot_store, root).await;
+    let mut query = whole_history_query(root);
+    query.selection = Some(Selection::Range(SequenceRange {
+        lower: 0,
+        upper: None,
+    }));
+    let book = service
+        .get_event_book(Request::new(query))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(book.pages.len(), 10);
+    assert!(book.snapshot.is_none());
+}
+
+/// With snapshot reads disabled the history query carries no snapshot.
+#[tokio::test]
+async fn test_history_query_without_snapshot_reads_carries_none() {
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let root = uuid::Uuid::new_v4();
+    ten_events_with_snapshot_at_five(&event_store, &snapshot_store, root).await;
+    let service = EventQueryService::with_options(event_store, snapshot_store, false);
+    let book = service
+        .get_event_book(Request::new(whole_history_query(root)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(book.pages.len(), 10);
+    assert!(book.snapshot.is_none());
 }
