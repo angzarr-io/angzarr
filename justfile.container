@@ -52,8 +52,8 @@ lint:
     cargo clippy --all-targets --features "test-utils" -- -D warnings
 
 # Run unit tests
-test:
-    cargo test --lib --features "test-utils"
+test *ARGS:
+    cargo test --lib --features "test-utils" {{ARGS}}
 
 # Run unit tests with extra (comma-separated) backend features.
 test-features FEATURES:

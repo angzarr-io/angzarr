@@ -415,6 +415,10 @@ check-tests:
 fmt:
     just _container fmt
 
+# Apply formatting in place
+fmt-fix:
+    just _container fmt-fix
+
 # Lint code
 lint:
     just _container lint
@@ -443,9 +447,10 @@ complexity-csv *ARGS:
 cognitive:
     just _container cognitive
 
-# Run unit tests
-test:
-    just _container test
+# Run unit tests. ARGS are passed to `cargo test`, e.g. a test-name filter:
+#   just test process_manager::tests
+test *ARGS:
+    just _container test {{ARGS}}
 
 # Run unit tests with extra backend features compiled in, so feature-gated
 # bus/storage unit tests run too. FEATURES is comma-separated, e.g.
