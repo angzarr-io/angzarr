@@ -920,7 +920,8 @@ async fn run_pm(
         "pm-feature",
         "pm-feature",
         "corr-pm",
-        SyncMode::Simple,
+        // A bus-delivered trigger: a command's own DECISION mode raises it.
+        SyncMode::Async,
         fast_backoff(),
         None,
     )
