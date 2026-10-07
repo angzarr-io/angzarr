@@ -841,14 +841,16 @@ pub async fn execute_compensation_pipeline(
     )
     .await?;
 
-    let response = business
+    let mut response = business
         .invoke(ContextualCommand {
             events: Some(prior_events.clone()),
             command: Some(command_book),
         })
         .await?;
 
-    if let Some(business_response::Result::Events(events)) = &response.result {
+    // The events are answered as persisted (sequenced and timestamped as
+    // stored), as a redelivery answers them from the store.
+    if let Some(business_response::Result::Events(events)) = &mut response.result {
         if !events.pages.is_empty() {
             let outcome = ctx
                 .persist_events(
@@ -867,6 +869,7 @@ pub async fn execute_compensation_pipeline(
             if !is_noop {
                 ctx.sync_fanout(&persisted).await?;
             }
+            *events = persisted;
         }
     }
 

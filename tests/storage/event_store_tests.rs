@@ -2445,6 +2445,52 @@ pub async fn test_get_until_timestamp_nanosecond_boundary_precision<S: EventStor
     assert_eq!(filtered[0].sequence_num(), 0);
 }
 
+/// A page added without `created_at` reads back with the time it was
+/// stored: readers (and temporal cuts) see when every event happened.
+pub async fn test_add_stamps_created_at_on_unstamped_pages<S: EventStore>(store: &S) {
+    let domain = "test_created_at_stamp";
+    let root = Uuid::new_v4();
+    let before = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+
+    store
+        .add(
+            domain,
+            "test",
+            root,
+            vec![make_event(0, "Created")],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
+        .await
+        .expect("add should succeed");
+
+    let after = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let events = store
+        .get(domain, "test", root)
+        .await
+        .expect("get should succeed");
+    assert_eq!(events.len(), 1);
+    let stamped = events[0]
+        .created_at
+        .as_ref()
+        .expect("the stored page carries its persist time");
+    assert!(
+        stamped.seconds >= before && stamped.seconds <= after,
+        "created_at {} not within [{before}, {after}]",
+        stamped.seconds
+    );
+}
+
 pub async fn test_timestamp_preservation<S: EventStore>(store: &S) {
     use prost_types::Timestamp;
 
@@ -3747,6 +3793,7 @@ macro_rules! generate_event_store_core_tests {
             test_get_until_timestamp_returns_all_when_recent,
             test_get_until_timestamp_nanosecond_boundary_precision,
             test_timestamp_preservation,
+            test_add_stamps_created_at_on_unstamped_pages,
             // large scale tests
             test_large_aggregate_10k,
             test_history_larger_than_one_result_page,

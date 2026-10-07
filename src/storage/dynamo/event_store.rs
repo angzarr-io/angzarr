@@ -465,6 +465,8 @@ impl EventStore for DynamoEventStore {
         events: Vec<EventPage>,
         meta: &AddMeta<'_>,
     ) -> Result<AddOutcome> {
+        let mut events = events;
+        crate::storage::helpers::stamp_created_at(&mut events);
         if events.is_empty() {
             return Ok(AddOutcome::Added {
                 first_sequence: 0,

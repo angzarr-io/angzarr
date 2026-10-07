@@ -497,3 +497,29 @@ async fn persist_publish_retry_waits_before_second_attempt() {
     assert_eq!(bus.inner.take_published().await.len(), 1);
     assert!(dlq.0.lock().await.is_empty());
 }
+
+/// The published PM book carries the persist time the store recorded on
+/// each page, so a consumer of the bus copy and a reader of the store see
+/// the same `created_at`.
+#[tokio::test]
+async fn persist_publishes_the_stored_created_at() {
+    let store = Arc::new(MockEventStore::new());
+    let store_dyn: Arc<dyn EventStore> = store.clone();
+    let bus = Arc::new(MockEventBus::new());
+    let bus_dyn: Arc<dyn EventBus> = bus.clone();
+    use crate::orchestration::shared::CorrelationRootExt;
+    let book = pm_book("pm", Uuid::new_v4(), "corr", &[0, 1]);
+    let outcome =
+        persist_pm_event_book(&store_dyn, &bus_dyn, "pm", &book, "corr", None, None).await;
+    assert!(matches!(outcome, CommandOutcome::Success(_)));
+
+    let stored = store
+        .get("pm", "", "corr".correlation_root())
+        .await
+        .unwrap();
+    let published = bus.take_published().await;
+    let published_times: Vec<_> = published[0].pages.iter().map(|p| p.created_at).collect();
+    let stored_times: Vec<_> = stored.iter().map(|p| p.created_at).collect();
+    assert!(published_times.iter().all(Option::is_some));
+    assert_eq!(published_times, stored_times);
+}

@@ -312,3 +312,42 @@ fn pct_encode_preserves_uuid_hyphens() {
     assert_eq!(pct_encode_component(uuid_str), uuid_str);
     assert_eq!(pct_decode_component(uuid_str).unwrap(), uuid_str);
 }
+
+/// A page stored without `created_at` carries the persist time in the page
+/// itself: reads that decode the stored page must see when it was stored,
+/// and temporal cuts compare it. One write shares one instant.
+#[test]
+fn test_stamp_created_at_writes_the_persist_time_into_unstamped_pages() {
+    let given = Timestamp {
+        seconds: 1704067200,
+        nanos: 5,
+    };
+    let mut events = vec![
+        EventPage {
+            header: None,
+            payload: None,
+            created_at: None,
+        },
+        EventPage {
+            header: None,
+            payload: None,
+            created_at: Some(given),
+        },
+        EventPage {
+            header: None,
+            payload: None,
+            created_at: None,
+        },
+    ];
+    let before = chrono::Utc::now();
+    stamp_created_at(&mut events);
+    let after = chrono::Utc::now();
+    let stamped = events[0].created_at.expect("stamped into the page");
+    let at = chrono::DateTime::from_timestamp(stamped.seconds, stamped.nanos as u32).unwrap();
+    assert!(
+        at >= before && at <= after,
+        "{at} not within [{before}, {after}]"
+    );
+    assert_eq!(events[1].created_at, Some(given), "a given time is kept");
+    assert_eq!(events[2].created_at, Some(stamped), "one instant per write");
+}

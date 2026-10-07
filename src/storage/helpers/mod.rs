@@ -85,6 +85,20 @@ pub fn parse_timestamp(event: &EventPage) -> Result<String> {
     }
 }
 
+/// Give every page that carries no `created_at` the persist time, one
+/// instant for the whole write.
+///
+/// The time is written INTO the page, so the stored page and any
+/// `created_at` column carry the same instant: reads return it, and
+/// temporal cuts compare it. A page that carries its own `created_at`
+/// keeps it.
+pub fn stamp_created_at(events: &mut [EventPage]) {
+    let now = prost_types::Timestamp::from(std::time::SystemTime::now());
+    for event in events.iter_mut().filter(|e| e.created_at.is_none()) {
+        event.created_at = Some(now);
+    }
+}
+
 /// Extract the sequence number from an EventPage.
 pub fn event_sequence(event: &EventPage) -> u32 {
     event.sequence_num()

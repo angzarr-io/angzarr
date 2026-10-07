@@ -140,6 +140,8 @@ impl EventStore for MockEventStore {
         events: Vec<EventPage>,
         meta: &AddMeta<'_>,
     ) -> Result<AddOutcome> {
+        let mut events = events;
+        crate::storage::helpers::stamp_created_at(&mut events);
         if *self.fail_on_add.read().await {
             return Err(StorageError::NotFound {
                 domain: domain.to_string(),

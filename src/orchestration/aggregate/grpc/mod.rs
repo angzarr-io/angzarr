@@ -623,7 +623,7 @@ impl AggregateContext for GrpcAggregateContext {
     ) -> Result<PersistOutcome, Status> {
         // Compute new pages: those in received but not in prior
         let prior_max_seq = prior.pages.iter().map(|p| p.sequence_num()).max();
-        let new_pages: Vec<_> = received
+        let mut new_pages: Vec<_> = received
             .pages
             .iter()
             .filter(|p| {
@@ -632,6 +632,9 @@ impl AggregateContext for GrpcAggregateContext {
             })
             .cloned()
             .collect();
+        // Stamped here, not only by the store, so the book that is
+        // published and returned carries the instant that is stored.
+        crate::storage::helpers::stamp_created_at(&mut new_pages);
 
         // Check if snapshot changed (compare state bytes)
         let snapshot_changed = match (&prior.snapshot, &received.snapshot) {

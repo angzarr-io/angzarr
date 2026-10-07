@@ -393,6 +393,8 @@ impl EventStore for SqliteEventStore {
         events: Vec<EventPage>,
         meta: &AddMeta<'_>,
     ) -> Result<AddOutcome> {
+        let mut events = events;
+        crate::storage::helpers::stamp_created_at(&mut events);
         let correlation_id = meta.correlation_id;
         let external_id = meta.external_id;
         let source_info = meta.source_info;

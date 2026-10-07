@@ -70,6 +70,10 @@ pub async fn persist_pm_event_book(
     let pm_root = correlation_id.correlation_root();
     let edition =
         crate::orchestration::aggregate::edition_key(process_events.edition().unwrap_or_default());
+    // Stamped here, not only by the store, so the book that is published
+    // carries the instant that is stored.
+    let mut pages = process_events.pages.clone();
+    crate::storage::helpers::stamp_created_at(&mut pages);
 
     // Persist directly to event store (bypasses command pipeline)
     if let Err(e) = event_store
@@ -77,7 +81,7 @@ pub async fn persist_pm_event_book(
             pm_domain,
             edition,
             pm_root,
-            process_events.pages.clone(),
+            pages.clone(),
             &crate::storage::AddMeta {
                 correlation_id,
                 // The trigger these events answer, for trigger deduplication.
@@ -126,7 +130,7 @@ pub async fn persist_pm_event_book(
     // ever distinguish from `Default::default()`.
     let publish_book = EventBook {
         cover,
-        pages: process_events.pages.clone(),
+        pages,
         ..Default::default()
     };
     let publish_book = Arc::new(publish_book);
