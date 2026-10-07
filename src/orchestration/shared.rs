@@ -118,6 +118,24 @@ pub fn read_reaction_errors(
         .unwrap_or_default()
 }
 
+/// The mode a saga/PM reaction command runs with: the stronger of the
+/// caller's mode and the command's own (`PageHeader.sync_mode` on its first
+/// page; UNSPECIFIED and unknown ints are no own mode). See
+/// [`crate::proto_ext::SyncModeExt::floor_for`].
+pub(crate) fn reaction_sync_mode(
+    caller: crate::proto::SyncMode,
+    command: &CommandBook,
+) -> crate::proto::SyncMode {
+    use crate::proto_ext::SyncModeExt;
+    let own = command
+        .pages
+        .first()
+        .and_then(|page| page.header.as_ref())
+        .and_then(|header| header.sync_mode)
+        .and_then(crate::proto::SyncMode::explicit);
+    caller.floor_for(own)
+}
+
 /// A saga/PM command that could not be delivered.
 #[derive(Debug, Clone)]
 pub(crate) struct UndeliveredCommand {

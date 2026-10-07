@@ -53,7 +53,7 @@ use crate::proto::{
     page_header::SequenceType, AngzarrDeferredSequence, CascadeErrorMode, CommandBook, EventBook,
     Notification, PageHeader, RevocationResponse, SyncMode,
 };
-use crate::proto_ext::{CoverExt, SyncModeExt};
+use crate::proto_ext::CoverExt;
 
 use super::command::{CommandExecutor, CommandOutcome, DeliveryPolicy};
 use super::destination::DestinationFetcher;
@@ -951,18 +951,11 @@ async fn execute_pm_commands(
             .map(|c| c.domain.clone())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // A sync_mode on the command's first page header overrides the flow's
-        // mode for that command (e.g. DECISION when the PM needs the
-        // accept/reject answer synchronously). An explicit ASYNC overrides
-        // too; UNSPECIFIED and unknown ints inherit, so a garbled header can
-        // never demote a Cascade or Decision flow to fire-and-forget.
-        let effective_sync_mode = command_book
-            .pages
-            .first()
-            .and_then(|page| page.header.as_ref())
-            .and_then(|header| header.sync_mode)
-            .and_then(SyncMode::explicit)
-            .unwrap_or(sync_mode);
+        // The caller's mode is a floor: the command runs with the stronger
+        // of it and the command's own mode (e.g. DECISION when the PM needs
+        // the accept/reject answer synchronously), so a CASCADE caller
+        // observes the whole chain.
+        let effective_sync_mode = super::shared::reaction_sync_mode(sync_mode, &command_book);
 
         debug!(
             domain = %cmd_domain,

@@ -2199,3 +2199,86 @@ async fn test_rejection_notification_carries_code_and_message() {
 fn test_default_component_name_is_saga() {
     assert_eq!(AlwaysSucceeds.component_name(), "saga");
 }
+
+// ============================================================================
+// The caller's sync mode is a floor (C-0507, C-0508)
+// ============================================================================
+
+/// Records the sync mode each command was executed with.
+struct ModeRecordingExecutor {
+    seen: AsyncMutex<Vec<SyncMode>>,
+}
+
+#[async_trait]
+impl CommandExecutor for ModeRecordingExecutor {
+    async fn execute(&self, _command: CommandBook, sync_mode: SyncMode) -> CommandOutcome {
+        self.seen.lock().await.push(sync_mode);
+        CommandOutcome::Success(CommandResponse::default())
+    }
+}
+
+/// C-0507/C-0508: a saga's reaction command runs with the stronger of the
+/// caller's mode and its own, so a CASCADE caller observes the whole chain
+/// even when the command is tagged ASYNC.
+#[tokio::test]
+async fn saga_command_runs_with_the_stronger_of_callers_and_own_mode() {
+    for (caller, own, effective) in [
+        (SyncMode::Cascade, SyncMode::Async, SyncMode::Cascade),
+        (SyncMode::Simple, SyncMode::Decision, SyncMode::Simple),
+        (SyncMode::Decision, SyncMode::Simple, SyncMode::Simple),
+        (SyncMode::Simple, SyncMode::Cascade, SyncMode::Cascade),
+    ] {
+        let ctx = SagaWithNoDeferredAndSyncMode { override_mode: own };
+        let executor = ModeRecordingExecutor {
+            seen: AsyncMutex::new(Vec::new()),
+        };
+        orchestrate_saga(
+            &ctx,
+            &executor,
+            None,
+            None,
+            "saga-floor",
+            "corr-1",
+            None,
+            caller,
+            fast_backoff(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            executor.seen.lock().await.as_slice(),
+            &[effective],
+            "caller {caller:?}, own {own:?}"
+        );
+    }
+}
+
+/// An ASYNC caller's command raised to SIMPLE by its own mode is executed
+/// synchronously, not published to the command bus.
+#[tokio::test]
+async fn saga_command_raised_above_async_is_not_published() {
+    let ctx = SagaWithNoDeferredAndSyncMode {
+        override_mode: SyncMode::Simple,
+    };
+    let executor = ModeRecordingExecutor {
+        seen: AsyncMutex::new(Vec::new()),
+    };
+    // A publish would fail the saga: the command must be executed instead.
+    let bus = FailingCommandBus;
+    orchestrate_saga(
+        &ctx,
+        &executor,
+        Some(&bus),
+        None,
+        "saga-floor",
+        "corr-1",
+        None,
+        SyncMode::Async,
+        fast_backoff(),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(executor.seen.lock().await.as_slice(), &[SyncMode::Simple]);
+}

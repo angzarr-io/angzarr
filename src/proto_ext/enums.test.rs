@@ -134,3 +134,63 @@ fn test_cascade_error_mode_resolution() {
         assert_eq!(CascadeErrorMode::or_default_fail_fast(mode as i32), mode);
     }
 }
+
+/// C-0508: a reaction command runs with the stronger of the caller's mode
+/// and its own; C-0507: a CASCADE caller observes the whole chain.
+#[test]
+fn sync_mode_floor_takes_the_stronger_mode() {
+    use SyncMode::*;
+    let cases = [
+        (Async, Decision, Decision),
+        (Decision, Async, Decision),
+        (Decision, Simple, Simple),
+        (Simple, Decision, Simple),
+        (Simple, Cascade, Cascade),
+        (Cascade, Async, Cascade),
+        (Cascade, Decision, Cascade),
+        (Cascade, Simple, Cascade),
+        (Async, Async, Async),
+        (Simple, Simple, Simple),
+    ];
+    for (caller, own, effective) in cases {
+        assert_eq!(
+            caller.floor_for(Some(own)),
+            effective,
+            "caller {caller:?}, own {own:?}"
+        );
+    }
+}
+
+/// Without an own mode the caller's mode applies (C-0435).
+#[test]
+fn sync_mode_floor_without_own_mode_is_the_callers() {
+    for caller in [
+        SyncMode::Async,
+        SyncMode::Decision,
+        SyncMode::Simple,
+        SyncMode::Cascade,
+    ] {
+        assert_eq!(caller.floor_for(None), caller);
+    }
+}
+
+/// ISOLATED sits outside the ordering: an ISOLATED command stays ISOLATED
+/// (pending the decision on C-0508's CASCADE/ISOLATED row), and under an
+/// unordered caller mode the command's own mode applies.
+#[test]
+fn sync_mode_floor_leaves_isolated_outside_the_ordering() {
+    for caller in [SyncMode::Async, SyncMode::Cascade] {
+        assert_eq!(
+            caller.floor_for(Some(SyncMode::Isolated)),
+            SyncMode::Isolated
+        );
+    }
+    assert_eq!(
+        SyncMode::Isolated.floor_for(Some(SyncMode::Async)),
+        SyncMode::Async
+    );
+    assert_eq!(
+        SyncMode::Unspecified.floor_for(Some(SyncMode::Simple)),
+        SyncMode::Simple
+    );
+}

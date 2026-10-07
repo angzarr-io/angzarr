@@ -384,10 +384,9 @@ impl ProcessManagerContext for PmWithSyncOverride {
     }
 }
 
-/// Per-command override on PageHeader.sync_mode wins over the inherited
-/// flow sync_mode. Lets a PM tag a single emitted command (e.g.
-/// SYNC_MODE_DECISION when its accept/reject must surface synchronously)
-/// while the surrounding flow stays whatever the original caller asked.
+/// C-0434: a per-command PageHeader.sync_mode stronger than the caller's
+/// applies to that command. Lets a PM tag a single emitted command (e.g.
+/// SYNC_MODE_DECISION when its accept/reject must surface synchronously).
 #[tokio::test]
 async fn test_per_command_sync_mode_override_is_honored() {
     let ctx = PmWithSyncOverride {
@@ -1243,7 +1242,7 @@ async fn pm_h14_decision_degraded_publishes_dead_letter() {
         "pm-test",
         "pm-test",
         "corr-1",
-        SyncMode::Simple,
+        SyncMode::Async,
         fast_backoff(),
         None,
     )
@@ -3285,4 +3284,51 @@ fn test_sequence_process_events_is_fill_only() {
         book.pages[2].header.as_ref().unwrap().sync_mode,
         Some(SyncMode::Cascade as i32)
     );
+}
+
+// ============================================================================
+// The caller's sync mode is a floor (C-0507, C-0508)
+// ============================================================================
+
+/// C-0508: a PM's reaction command runs with the stronger of the caller's
+/// mode and its own. (ISOLATED commands stay ISOLATED pending the decision
+/// on the CASCADE/ISOLATED row.)
+#[tokio::test]
+async fn pm_command_runs_with_the_stronger_of_callers_and_own_mode() {
+    use SyncMode::*;
+    for (caller, own, effective) in [
+        (Async, Decision, Decision),
+        (Decision, Async, Decision),
+        (Decision, Simple, Simple),
+        (Simple, Decision, Simple),
+        (Simple, Cascade, Cascade),
+        (Cascade, Async, Cascade),
+        (Cascade, Decision, Cascade),
+        (Cascade, Simple, Cascade),
+    ] {
+        let ctx = PmWithSyncOverride {
+            override_mode: Some(own),
+        };
+        let executor = RecordingExecutor::new();
+        orchestrate_pm(
+            &ctx,
+            &NoOpFetcher,
+            &executor,
+            None,
+            &trigger_event(),
+            "pmg-fulfillment",
+            "fulfillment-pm",
+            "corr-1",
+            caller,
+            fast_backoff(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            executor.seen.lock().await.as_slice(),
+            &[effective],
+            "caller {caller:?}, own {own:?}"
+        );
+    }
 }

@@ -256,12 +256,14 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
             }
 
             let domain = command.domain().to_string();
+            // The caller's mode is a floor; the command's own mode may raise it.
+            let sync_mode = super::shared::reaction_sync_mode(self.sync_mode, &command);
 
             // ASYNC mode: publish to command bus (fire-and-forget).
             // Results come back via RejectionNotification through the event bus.
             // No retry loop needed — the command handler will handle sequence
             // conflicts and rejection routing.
-            if self.sync_mode == SyncMode::Async {
+            if sync_mode == SyncMode::Async {
                 if let Some(bus) = self.command_bus {
                     match bus.publish(Arc::new(command)).await {
                         Ok(()) => {
@@ -290,7 +292,7 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
             }
 
             // SIMPLE/CASCADE mode: execute synchronously
-            match self.executor.execute(command.clone(), self.sync_mode).await {
+            match self.executor.execute(command.clone(), sync_mode).await {
                 CommandOutcome::Success(response) => {
                     debug!(%domain, "Saga command executed successfully");
                     self.tracker.lock().await.executed.push(ExecutedCommand {

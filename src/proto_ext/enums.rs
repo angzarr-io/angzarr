@@ -20,6 +20,27 @@ pub trait SyncModeExt {
     /// unknown ints. Used for per-command overrides, where "unset" means
     /// "inherit".
     fn explicit(raw: i32) -> Option<SyncMode>;
+
+    /// The mode a reaction command runs with when `self` is the caller's
+    /// mode and `own` the command's own `PageHeader.sync_mode`: the caller's
+    /// mode is a floor, so the stronger of the two in the ordering
+    /// ASYNC < DECISION < SIMPLE < CASCADE applies, and a CASCADE caller
+    /// observes the whole chain. Without an own mode the caller's applies.
+    /// ISOLATED is outside the ordering: an ISOLATED command stays ISOLATED,
+    /// and under an unordered caller mode the command's own mode applies.
+    fn floor_for(self, own: Option<SyncMode>) -> SyncMode;
+}
+
+/// Position of an ordered mode in ASYNC < DECISION < SIMPLE < CASCADE;
+/// `None` for the modes outside the ordering.
+fn sync_mode_rank(mode: SyncMode) -> Option<u8> {
+    match mode {
+        SyncMode::Async => Some(0),
+        SyncMode::Decision => Some(1),
+        SyncMode::Simple => Some(2),
+        SyncMode::Cascade => Some(3),
+        SyncMode::Isolated | SyncMode::Unspecified => None,
+    }
 }
 
 impl SyncModeExt for SyncMode {
@@ -31,6 +52,17 @@ impl SyncModeExt for SyncMode {
         match SyncMode::try_from(raw) {
             Ok(SyncMode::Unspecified) | Err(_) => None,
             Ok(mode) => Some(mode),
+        }
+    }
+
+    fn floor_for(self, own: Option<SyncMode>) -> SyncMode {
+        let Some(own) = own else {
+            return self;
+        };
+        match (sync_mode_rank(self), sync_mode_rank(own)) {
+            (Some(caller), Some(command)) if command > caller => own,
+            (Some(_), Some(_)) => self,
+            _ => own,
         }
     }
 }
