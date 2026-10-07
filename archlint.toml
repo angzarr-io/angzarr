@@ -1,0 +1,249 @@
+# Architecture rules for angzarr core, checked by `just archlint`
+# (tools/archlint; pattern syntax and rule semantics in
+# tools/archlint/src/rules.rs). `just archlint-edges` prints the module graph
+# these rules are checked against.
+#
+# Layers of the `angzarr` crate, bottom to top:
+#   proto                    generated types
+#   proto_ext, descriptor    extension traits and descriptors over them
+#   storage, bus, dlq        persistence and transport: traits plus concrete
+#                            backends, chosen only by their factories
+#   repository               event books and snapshots over the storage traits
+#   orchestration            aggregate/saga/PM/projector pipelines over the
+#                            traits, never a concrete backend
+#   services, handlers       gRPC services and bus handlers over orchestration
+#   bin/*                    the sidecar binaries: wire everything together
+# archlint and xtask are tooling; no product code depends on them.
+#
+# `allow` lists the ONLY workspace targets a module may reference (external
+# crates are constrained by `deny` alone); `self::**` is the module's own
+# subtree. Rules apply to library code (`scope = "lib"`) where tests
+# legitimately reach mocks and concrete backends.
+
+# ---- the bottom -------------------------------------------------------------
+
+[[rule]]
+name = "proto-is-a-leaf"
+why = "generated proto types reference nothing else in core"
+from = ["angzarr::proto::**"]
+allow = ["angzarr::proto::**"]
+
+[[rule]]
+name = "proto-ext-sits-on-proto"
+why = "extension traits on generated types depend on those types only"
+from = ["angzarr::proto_ext::**"]
+scope = "lib"
+allow = ["angzarr::proto_ext::**", "angzarr::proto::**"]
+
+[[rule]]
+name = "descriptor-sits-on-proto-ext"
+why = "component descriptors are built from proto types and their extensions only"
+from = ["angzarr::descriptor::**"]
+scope = "lib"
+allow = ["angzarr::descriptor::**", "angzarr::proto::**", "angzarr::proto_ext::**"]
+
+[[rule]]
+name = "validation-sits-on-limits"
+why = "request validation reads configured limits and proto types, nothing above them"
+from = ["angzarr::validation::**"]
+scope = "lib"
+allow = ["angzarr::validation::**", "angzarr::config::limits::**", "angzarr::proto::**"]
+
+# ---- backends behind their traits ---------------------------------------------
+
+[[rule]]
+name = "storage-backends-behind-the-trait"
+why = "only the storage module (its factory) names a concrete storage backend; everything else uses the EventStore/SnapshotStore/PositionStore traits"
+from = [
+    "angzarr",
+    "angzarr::advice::**",
+    "angzarr::bus::**",
+    "angzarr::config::**",
+    "angzarr::descriptor::**",
+    "angzarr::discovery::**",
+    "angzarr::dlq::**",
+    "angzarr::grpc::**",
+    "angzarr::handlers::**",
+    "angzarr::orchestration::**",
+    "angzarr::payload_store::**",
+    "angzarr::process::**",
+    "angzarr::proto_ext::**",
+    "angzarr::proto_reflect::**",
+    "angzarr::repository::**",
+    "angzarr::services::**",
+    "angzarr::status::**",
+    "angzarr::transport::**",
+    "angzarr::utils::**",
+    "angzarr::validation::**",
+    "angzarr::bin#*::**",
+]
+scope = "lib"
+deny = [
+    "angzarr::storage::bigtable::**",
+    "angzarr::storage::dynamo::**",
+    "angzarr::storage::immudb::**",
+    "angzarr::storage::mock::**",
+    "angzarr::storage::postgres::**",
+    "angzarr::storage::redis::**",
+    "angzarr::storage::sql::**",
+    "angzarr::storage::sqlite::**",
+]
+
+[[rule]]
+name = "bus-backends-behind-the-factory"
+why = "only the bus module (its factory) names a concrete message bus; everything else uses the EventBus/CommandBus traits"
+from = [
+    "angzarr",
+    "angzarr::advice::**",
+    "angzarr::config::**",
+    "angzarr::descriptor::**",
+    "angzarr::discovery::**",
+    "angzarr::dlq::**",
+    "angzarr::grpc::**",
+    "angzarr::handlers::**",
+    "angzarr::orchestration::**",
+    "angzarr::payload_store::**",
+    "angzarr::process::**",
+    "angzarr::proto_ext::**",
+    "angzarr::proto_reflect::**",
+    "angzarr::repository::**",
+    "angzarr::services::**",
+    "angzarr::status::**",
+    "angzarr::storage::**",
+    "angzarr::transport::**",
+    "angzarr::utils::**",
+    "angzarr::validation::**",
+    "angzarr::bin#*::**",
+]
+scope = "lib"
+deny = [
+    "angzarr::bus::amqp::**",
+    "angzarr::bus::kafka::**",
+    "angzarr::bus::sns_sqs::**",
+]
+
+[[rule]]
+name = "bus-pubsub-backend-behind-the-factory"
+why = "only the bus module, and the DLQ's own Pub/Sub publisher (which shares its topic helper), name the Pub/Sub bus backend"
+from = [
+    "angzarr",
+    "angzarr::advice::**",
+    "angzarr::config::**",
+    "angzarr::descriptor::**",
+    "angzarr::discovery::**",
+    "angzarr::grpc::**",
+    "angzarr::handlers::**",
+    "angzarr::orchestration::**",
+    "angzarr::payload_store::**",
+    "angzarr::process::**",
+    "angzarr::proto_ext::**",
+    "angzarr::proto_reflect::**",
+    "angzarr::repository::**",
+    "angzarr::services::**",
+    "angzarr::status::**",
+    "angzarr::storage::**",
+    "angzarr::transport::**",
+    "angzarr::utils::**",
+    "angzarr::validation::**",
+    "angzarr::bin#*::**",
+]
+scope = "lib"
+deny = ["angzarr::bus::pubsub::**"]
+
+# ---- repository and orchestration ---------------------------------------------
+
+[[rule]]
+name = "repository-over-storage-traits"
+why = "event-book and snapshot repositories are built on the storage traits and nothing above them"
+from = ["angzarr::repository::**"]
+scope = "lib"
+allow = [
+    "angzarr::repository::**",
+    "angzarr::proto::**",
+    "angzarr::proto_ext::**",
+    "angzarr::storage::config::**",
+    "angzarr::storage::error::**",
+    "angzarr::storage::event_store::**",
+    "angzarr::storage::snapshot_store::**",
+]
+
+[[rule]]
+name = "orchestration-over-abstractions"
+why = "the pipelines depend on traits, repositories and shared utilities; never on a concrete DLQ publisher, the gRPC services or handlers above them, or a binary"
+from = ["angzarr::orchestration::**"]
+scope = "lib"
+allow = [
+    "angzarr::orchestration::**",
+    "angzarr::proto::**",
+    "angzarr::proto_ext::**",
+    "angzarr::proto_reflect::**",
+    "angzarr::advice::**",
+    "angzarr::bus::error::**",
+    "angzarr::bus::traits::**",
+    "angzarr::config::**",
+    "angzarr::discovery::**",
+    "angzarr::dlq",
+    "angzarr::dlq::trigger::**",
+    "angzarr::dlq::publishers::noop::**",
+    "angzarr::repository::**",
+    "angzarr::storage::error::**",
+    "angzarr::storage::event_store::**",
+    "angzarr::storage::helpers::**",
+    "angzarr::transport::**",
+    "angzarr::utils::**",
+    "angzarr::validation::**",
+    "trivial_delegation::**",
+    # Known inversion: the aggregate's gRPC context persists snapshots and
+    # upcasts through these two service-layer helpers.
+    "angzarr::services::snapshot_handler::**",
+    "angzarr::services::upcaster::**",
+]
+
+# ---- services and handlers --------------------------------------------------------
+
+[[rule]]
+name = "services-below-handlers-and-status"
+why = "gRPC services sit over orchestration; they never reach the bus handlers or the DLQ admin surface"
+from = ["angzarr::services::**"]
+scope = "lib"
+deny = ["angzarr::handlers::**", "angzarr::status::**"]
+
+[[rule]]
+name = "handlers-over-orchestration"
+why = "bus handlers drive orchestration over the traits; they never reach the gRPC services or a concrete backend"
+from = ["angzarr::handlers::**"]
+scope = "lib"
+allow = [
+    "angzarr::handlers::**",
+    "angzarr::proto::**",
+    "angzarr::proto_ext::**",
+    "angzarr::descriptor::**",
+    "angzarr::bus::error::**",
+    "angzarr::bus::traits::**",
+    "angzarr::dlq",
+    "angzarr::dlq::trigger::**",
+    "angzarr::orchestration::**",
+    "angzarr::storage::event_store::**",
+    "angzarr::utils::retry::**",
+]
+
+[[rule]]
+name = "status-over-dlq"
+why = "the DLQ admin surface reads dead letters and proto metadata only"
+from = ["angzarr::status::**"]
+scope = "lib"
+allow = [
+    "angzarr::status::**",
+    "angzarr::dlq::**",
+    "angzarr::proto::**",
+    "angzarr::proto_ext::**",
+    "angzarr::proto_reflect::**",
+]
+
+# ---- tooling -------------------------------------------------------------------
+
+[[rule]]
+name = "product-code-never-depends-on-tooling"
+why = "archlint and xtask are build tooling; the angzarr crate and its binaries never reference them"
+from = ["angzarr::**"]
+deny = ["archlint::**", "xtask::**"]

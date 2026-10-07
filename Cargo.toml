@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/trivial-delegation",
+    "tools/archlint",
     "xtask",
 ]
 # sererr is a submodule with its own cargo workspace. Cargo's auto-discovery

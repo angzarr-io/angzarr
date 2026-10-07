@@ -51,6 +51,20 @@ fmt-fix:
 lint:
     cargo clippy --all-targets --features "test-utils" -- -D warnings
 
+# Architecture lint: the module-level layer rules in archlint.toml
+# (tools/archlint) over the workspace.
+archlint:
+    cargo run --quiet -p archlint -- --rules archlint.toml --manifest-path Cargo.toml
+
+# Unit tests of the archlint tool itself
+test-archlint:
+    cargo test --quiet -p archlint
+
+# Print the module dependency graph archlint checks (one
+# `scope from -> to` line per edge): the starting point for rules.
+archlint-edges:
+    cargo run --quiet -p archlint -- --manifest-path Cargo.toml --edges
+
 # Run unit tests
 test *ARGS:
     cargo test --lib --features "test-utils" {{ARGS}}

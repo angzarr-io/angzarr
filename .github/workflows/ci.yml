@@ -89,6 +89,15 @@ jobs:
             ghcr.io/angzarr-io/angzarr-rust:latest \
             just -f justfile.container lint
 
+      - name: Architecture lint
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace \
+            ghcr.io/angzarr-io/angzarr-rust:latest \
+            just -f justfile.container test-archlint archlint
+
       - name: Buf lint
         run: |
           docker run --rm \

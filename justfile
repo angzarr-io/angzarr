@@ -447,6 +447,14 @@ complexity-csv *ARGS:
 cognitive:
     just _container cognitive
 
+# Architecture lint: module-level layer rules (archlint.toml)
+archlint:
+    just _container archlint
+
+# The module dependency graph archlint checks
+archlint-edges:
+    just _container archlint-edges
+
 # Run unit tests. ARGS are passed to `cargo test`, e.g. a test-name filter:
 #   just test process_manager::tests
 test *ARGS:
@@ -612,6 +620,7 @@ ci-local: check-ci-recipes
     just check-submodules-clean
     just _container fmt
     just _container lint
+    just _container test-archlint archlint
     just _container test
     just _container check-tests
     just _container-dind storage postgres test

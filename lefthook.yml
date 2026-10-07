@@ -38,6 +38,11 @@ pre-commit:
     scan-secrets:
       run: just scan-secrets
 
+    # Module-level layer rules (archlint.toml) over the Rust workspace.
+    archlint:
+      glob: "*.{rs,toml}"
+      run: just archlint
+
     # Rust - fmt + clippy + test in a SINGLE container invocation.
     # Running them as three separate `just _container ...` calls under
     # rootless docker triggers a `.cargo-lock` permission race because

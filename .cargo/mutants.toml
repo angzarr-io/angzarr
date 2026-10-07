@@ -102,6 +102,9 @@ exclude_globs = [
   # keeps mutants from being generated for the `fn main()` wrappers
   # in the first place.
   "src/bin/**",
+  # Build tooling copied from angzarr-router (tools/archlint), where it is
+  # mutation-tested; a bin-only crate the `--lib` passes here cannot build.
+  "tools/**",
   "examples/rust/*/agg/src/main.rs",
   "examples/rust/*/saga-*/src/main.rs",
   "examples/rust/*/pmg-*/src/main.rs",
