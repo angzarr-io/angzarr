@@ -183,6 +183,21 @@ for d in docs:
                 or k in ("ANGZARR__STORAGE__TYPE", "ANGZARR__STORAGE__POSTGRES__URI")]
         check(not dead, f"{name} sets no env for nonexistent config keys {dead}")
 
+# --- business-logic readiness --------------------------------------------
+app_deploys = [
+    d for d in docs
+    if d["kind"] == "Deployment"
+    and any(c["name"] == "angzarr" for c in d["spec"]["template"]["spec"]["containers"])
+]
+check(len(app_deploys) >= 4, f"one Deployment per application ({len(app_deploys)})")
+for d in app_deploys:
+    for c in d["spec"]["template"]["spec"]["containers"]:
+        if c["name"] == "angzarr":
+            continue
+        probe = (c.get("readinessProbe") or {}).get("tcpSocket", {})
+        check(probe.get("port") == "grpc",
+              f"{d['metadata']['name']}/{c['name']} is Ready only when its gRPC port accepts")
+
 # --- gateway --------------------------------------------------------------
 gw = env(container(find("Deployment", "angzarr-grpc-gateway"), "gateway"))
 check(gw.get("AGGREGATE_TARGET_TEMPLATE") == "{domain}-aggregate.default.svc.cluster.local:1310",

@@ -123,6 +123,10 @@ spec:
             {{- if .env }}
             {{- toYaml .env | nindent 12 }}
             {{- end }}
+          # The pod is Ready only when the business logic accepts
+          # connections too, not just the sidecar.
+          readinessProbe:
+            {{- toYaml (.readinessProbe | default $.Values.applicationReadinessProbe) | nindent 12 }}
           resources:
             {{- if .resources }}
             {{- toYaml .resources | nindent 12 }}
@@ -354,6 +358,10 @@ spec:
               {{- else }}
               value: {{ $.Values.storage.postgres.uri | quote }}
               {{- end }}
+          # The pod is Ready only when the business logic accepts
+          # connections too, not just the sidecar.
+          readinessProbe:
+            {{- toYaml (.readinessProbe | default $.Values.applicationReadinessProbe) | nindent 12 }}
           resources:
             {{- if .resources }}
             {{- toYaml .resources | nindent 12 }}
@@ -572,6 +580,10 @@ spec:
               value: {{ .topics | join "," | quote }}
             - name: ANGZARR_LOG
               value: {{ $.Values.logging.level }}
+          # The pod is Ready only when the business logic accepts
+          # connections too, not just the sidecar.
+          readinessProbe:
+            {{- toYaml (.readinessProbe | default $.Values.applicationReadinessProbe) | nindent 12 }}
           resources:
             {{- if .resources }}
             {{- toYaml .resources | nindent 12 }}
@@ -767,6 +779,10 @@ spec:
               value: "{{ $.Values.service.aggregatePort }}"
             - name: ANGZARR_LOG
               value: {{ $.Values.logging.level }}
+          # The pod is Ready only when the business logic accepts
+          # connections too, not just the sidecar.
+          readinessProbe:
+            {{- toYaml (.readinessProbe | default $.Values.applicationReadinessProbe) | nindent 12 }}
           resources:
             {{- if .resources }}
             {{- toYaml .resources | nindent 12 }}

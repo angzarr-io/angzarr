@@ -474,6 +474,15 @@ applications:
   #     - "order.*"
   #     - "payment.PaymentSettled"
 
+# Readiness of the business-logic container in every application pod (an
+# application entry's `readinessProbe` overrides it): the pod takes traffic
+# only once the business logic accepts connections on its gRPC port.
+applicationReadinessProbe:
+  tcpSocket:
+    port: grpc
+  initialDelaySeconds: 2
+  periodSeconds: 5
+
 # Default resources for application containers
 applicationResources:
   limits:
