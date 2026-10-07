@@ -311,16 +311,21 @@ impl GrpcAggregateContext {
         events: &EventBook,
     ) -> Result<Reported, Status> {
         let channel = self.channels.channel(&endpoint.grpc_url())?;
-        let mut client = SagaCoordinatorServiceClient::new(channel).with_message_limits();
-        let request = self.downstream_request(
-            SagaHandleRequest {
-                source: Some(events.clone()),
-                sync_mode: crate::proto::SyncMode::Cascade.into(),
-                cascade_error_mode: self.cascade_error_mode.into(),
-            },
-            events.correlation_id(),
-        );
-        let response = client.execute(request).await?;
+        let client = SagaCoordinatorServiceClient::new(channel).with_message_limits();
+        // A request that never reached the coordinator is sent again.
+        let response = crate::transport::retry_unconnected(|| {
+            let mut client = client.clone();
+            let request = self.downstream_request(
+                SagaHandleRequest {
+                    source: Some(events.clone()),
+                    sync_mode: crate::proto::SyncMode::Cascade.into(),
+                    cascade_error_mode: self.cascade_error_mode.into(),
+                },
+                events.correlation_id(),
+            );
+            async move { client.execute(request).await }
+        })
+        .await?;
         Ok(Reported::from_metadata(response.metadata()))
     }
 
@@ -333,16 +338,21 @@ impl GrpcAggregateContext {
         events: &EventBook,
     ) -> Result<Reported, Status> {
         let channel = self.channels.channel(&endpoint.grpc_url())?;
-        let mut client = ProcessManagerCoordinatorServiceClient::new(channel).with_message_limits();
-        let request = self.downstream_request(
-            ProcessManagerCoordinatorRequest {
-                trigger: Some(events.clone()),
-                sync_mode: crate::proto::SyncMode::Cascade.into(),
-                cascade_error_mode: self.cascade_error_mode.into(),
-            },
-            events.correlation_id(),
-        );
-        let response = client.handle(request).await?;
+        let client = ProcessManagerCoordinatorServiceClient::new(channel).with_message_limits();
+        // A request that never reached the coordinator is sent again.
+        let response = crate::transport::retry_unconnected(|| {
+            let mut client = client.clone();
+            let request = self.downstream_request(
+                ProcessManagerCoordinatorRequest {
+                    trigger: Some(events.clone()),
+                    sync_mode: crate::proto::SyncMode::Cascade.into(),
+                    cascade_error_mode: self.cascade_error_mode.into(),
+                },
+                events.correlation_id(),
+            );
+            async move { client.handle(request).await }
+        })
+        .await?;
         Ok(Reported::from_metadata(response.metadata()))
     }
 

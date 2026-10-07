@@ -35,7 +35,7 @@ impl ChannelCache {
         if let Some(channel) = channels.get(url) {
             return Ok(channel.clone());
         }
-        let channel = Channel::from_shared(url.to_string())
+        let channel = crate::transport::tcp_endpoint(url)
             .map_err(|e| Status::invalid_argument(format!("Invalid endpoint {url}: {e}")))?
             .connect_lazy();
         channels.insert(url.to_string(), channel.clone());

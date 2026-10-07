@@ -59,8 +59,8 @@ pub use server::{serve_with_transport, serve_with_transport_and_shutdown};
 
 // Re-exports: client
 pub use client::{
-    connect_to_address, connect_with_transport, is_uds_address, GrpcMessageLimits,
-    ServiceEndpointConfig,
+    connect_to_address, connect_with_transport, is_uds_address, is_unconnected, retry_unconnected,
+    tcp_endpoint, GrpcMessageLimits, ServiceEndpointConfig, UNCONNECTED_ATTEMPTS,
 };
 
 // Re-exports: trace

@@ -297,7 +297,7 @@ impl RemoteEventSource {
     pub async fn connect(address: &str) -> std::result::Result<Self, GapFillError> {
         use crate::proto::event_query_service_client::EventQueryServiceClient;
 
-        let channel = tonic::transport::Channel::from_shared(format!("http://{}", address))
+        let channel = crate::transport::tcp_endpoint(format!("http://{}", address))
             .map_err(|e| GapFillError::Transport(e.to_string()))?
             .connect()
             .await
