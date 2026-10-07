@@ -214,7 +214,7 @@ fn test_correlation_root_distinct_friendly_ids_get_distinct_roots() {
 fn test_reaction_errors_round_trip_through_response_metadata() {
     let errors = vec![crate::proto::CascadeReactionError {
         component: "ChargeSaga".into(),
-        code: tonic::Code::FailedPrecondition as i32,
+        status_code: tonic::Code::FailedPrecondition as i32,
         message: "card declined".into(),
         ..Default::default()
     }];
@@ -248,13 +248,18 @@ fn test_undelivered_command_reaction_error_names_target_and_type() {
         command,
         code: tonic::Code::FailedPrecondition,
         reason: "card declined".into(),
+        error_code: "CARD_DECLINED".into(),
     }
     .reaction_error("ChargeSaga");
     assert_eq!(error.component, "ChargeSaga");
     assert_eq!(error.target.unwrap().domain, "payment");
     assert_eq!(error.command_type, "examples.CapturePayment");
-    assert_eq!(error.code, tonic::Code::FailedPrecondition as i32);
+    assert_eq!(error.status_code, tonic::Code::FailedPrecondition as i32);
     assert_eq!(error.message, "card declined");
+    assert_eq!(
+        error.code, "CARD_DECLINED",
+        "C-0509: code and message apart"
+    );
 }
 
 fn produced(domain: &str, sequences: &[u32]) -> EventBook {
@@ -486,6 +491,7 @@ fn undelivered_payment() -> UndeliveredCommand {
         command: deferred_to("payment", 2),
         code: tonic::Code::FailedPrecondition,
         reason: "card declined".into(),
+        error_code: String::new(),
     }
 }
 

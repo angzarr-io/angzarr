@@ -29,6 +29,7 @@ use crate::proto::{
 };
 use crate::proto_ext::{
     calculate_set_next_seq, correlated_request, CascadeErrorModeExt, CoverExt, EventPageExt,
+    StatusExt,
 };
 use crate::repository::EventBookRepository;
 use crate::repository::SnapshotRepository;
@@ -474,8 +475,9 @@ impl GrpcAggregateContext {
                     component: failure.target,
                     target: None,
                     command_type: String::new(),
-                    code: failure.status.code() as i32,
+                    status_code: failure.status.code() as i32,
                     message: failure.status.message().to_string(),
+                    code: failure.status.error_info_reason(),
                 });
                 Ok(())
             }

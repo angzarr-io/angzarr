@@ -915,6 +915,8 @@ fn consumer_book_of_empty_book_is_none() {
 #[derive(Clone, Default)]
 struct ScriptedSagaServer {
     fail: Option<tonic::Code>,
+    /// ErrorInfo.reason the failure carries in its status details.
+    fail_reason: Option<String>,
     /// Reaction errors reported in the success response's metadata.
     report: Vec<CascadeReactionError>,
     /// Executed reaction commands reported in the success response's
@@ -935,7 +937,30 @@ impl SagaCoordServiceTrait for ScriptedSagaServer {
             .await
             .push((request.into_inner(), metadata));
         match self.fail {
-            Some(code) => Err(Status::new(code, "saga delivery rejected")),
+            Some(code) => Err(match &self.fail_reason {
+                None => Status::new(code, "saga delivery rejected"),
+                Some(reason) => {
+                    use crate::proto_ext::grpc::{ErrorInfo, RpcStatus};
+                    use prost::Message;
+                    let details = RpcStatus {
+                        code: code as i32,
+                        message: "saga delivery rejected".into(),
+                        details: vec![prost_types::Any {
+                            type_url: "type.googleapis.com/google.rpc.ErrorInfo".into(),
+                            value: ErrorInfo {
+                                reason: reason.clone(),
+                                ..Default::default()
+                            }
+                            .encode_to_vec(),
+                        }],
+                    };
+                    Status::with_details(
+                        code,
+                        "saga delivery rejected",
+                        details.encode_to_vec().into(),
+                    )
+                }
+            }),
             None => {
                 let mut response = tonic::Response::new(SagaResponse::default());
                 crate::orchestration::shared::attach_reaction_errors(
@@ -1087,8 +1112,9 @@ async fn sync_fanout_continue_runs_all_and_succeeds() {
     components.sort();
     assert_eq!(components, vec!["saga-a", "saga-b"]);
     for error in &fanout.reaction_errors {
-        assert_eq!(error.code, tonic::Code::FailedPrecondition as i32);
+        assert_eq!(error.status_code, tonic::Code::FailedPrecondition as i32);
         assert_eq!(error.message, "saga delivery rejected");
+        assert_eq!(error.code, "", "C-0510: no ErrorInfo, empty code");
         assert!(
             error.target.is_none(),
             "a coordinator failure names no target"
@@ -1378,8 +1404,9 @@ async fn sync_fanout_continue_collects_reported_reaction_errors() {
             ..Default::default()
         }),
         command_type: "examples.CapturePayment".to_string(),
-        code: tonic::Code::FailedPrecondition as i32,
+        status_code: tonic::Code::FailedPrecondition as i32,
         message: "card declined".to_string(),
+        code: "CARD_DECLINED".to_string(),
     };
     spawn_saga(
         &discovery,
@@ -1770,4 +1797,32 @@ async fn dead_letter_unpublished_captures_transient_events_dead_letter() {
         }
         other => panic!("expected event-processing details, got {other:?}"),
     }
+}
+
+/// C-0509: a CONTINUE reaction error carries the failure's machine code
+/// (ErrorInfo.reason) apart from its message.
+#[tokio::test]
+async fn sync_fanout_continue_reaction_error_carries_the_machine_code() {
+    let discovery = Arc::new(StaticServiceDiscovery::new());
+    let failing = ScriptedSagaServer {
+        fail: Some(tonic::Code::FailedPrecondition),
+        fail_reason: Some("CARD_DECLINED".to_string()),
+        ..Default::default()
+    };
+    spawn_saga(&discovery, "saga-a", failing).await;
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    let ctx = GrpcAggregateContext::new(
+        Arc::new(MockEventStore::new()),
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        discovery,
+        Arc::new(MockEventBus::new()),
+    )
+    .with_sync_mode(crate::proto::SyncMode::Cascade)
+    .with_cascade_error_mode(CascadeErrorMode::CascadeErrorContinue);
+    let fanout = ctx.sync_fanout(&cascade_book()).await.unwrap();
+    assert_eq!(fanout.reaction_errors.len(), 1);
+    let error = &fanout.reaction_errors[0];
+    assert_eq!(error.code, "CARD_DECLINED");
+    assert_eq!(error.message, "saga delivery rejected");
+    assert_eq!(error.status_code, tonic::Code::FailedPrecondition as i32);
 }

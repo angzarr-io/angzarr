@@ -335,6 +335,7 @@ impl<'a> RetryableOperation for SagaOperation<'a> {
                         command: command.clone(),
                         code,
                         reason: message.clone(),
+                        error_code: error_code.clone(),
                     });
                     if self.policy.stops_on_failure() {
                         return RetryOutcome::Fatal(format!("{domain}: {message}"));
@@ -549,6 +550,7 @@ impl<'a> SagaRetryBuilder<'a> {
                     command: command.clone(),
                     code: tonic::Code::Unavailable,
                     reason: reason.clone(),
+                    error_code: String::new(),
                 })
                 .collect();
             drop(tracker);

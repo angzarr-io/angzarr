@@ -1740,7 +1740,7 @@ impl CommandExecutor for FirstFailsExecutor {
             (true, false) => CommandOutcome::Rejected {
                 code: tonic::Code::FailedPrecondition,
                 message: "insufficient funds".to_string(),
-                error_code: String::new(),
+                error_code: "INSUFFICIENT_FUNDS".to_string(),
             },
             (true, true) => CommandOutcome::Retryable {
                 reason: "Unavailable".to_string(),
@@ -2064,8 +2064,22 @@ async fn test_continue_returns_reaction_errors() {
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].component, "saga-policy");
     assert_eq!(errors[0].target.as_ref().unwrap().domain, "dest");
-    assert_eq!(errors[0].code, tonic::Code::FailedPrecondition as i32);
+    assert_eq!(
+        errors[0].status_code,
+        tonic::Code::FailedPrecondition as i32
+    );
     assert_eq!(errors[0].message, "insufficient funds");
+    assert_eq!(errors[0].code, "INSUFFICIENT_FUNDS", "C-0509");
+}
+
+/// C-0510: a transient failure carries no machine code.
+#[tokio::test]
+async fn test_continue_transient_reaction_error_has_no_machine_code() {
+    let run = run_policy(Some(CascadeErrorMode::CascadeErrorContinue), true).await;
+    let errors = run.result.unwrap().reaction_errors;
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, "");
+    assert_eq!(errors[0].status_code, tonic::Code::Unavailable as i32);
 }
 
 /// Bus-driven retry exhaustion is dead-lettered, not compensated, and the

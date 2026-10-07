@@ -1555,7 +1555,7 @@ async fn test_reaction_errors_reach_the_command_response() {
     received.pages = vec![make_event_page(0)];
     let error = crate::proto::CascadeReactionError {
         component: "ChargeSaga".to_string(),
-        code: tonic::Code::FailedPrecondition as i32,
+        status_code: tonic::Code::FailedPrecondition as i32,
         message: "card declined".to_string(),
         ..Default::default()
     };

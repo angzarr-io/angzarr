@@ -1004,7 +1004,7 @@ async fn execute_pm_commands(
                 if refused_compensation || policy.dead_letters() {
                     publish_pm_command_dlq(ctx, &command_book, Some(code), &message, false).await;
                 }
-                Some((code, message))
+                Some((code, message, error_code))
             }
             CommandOutcome::Retryable { reason, .. }
                 if effective_sync_mode == SyncMode::Decision =>
@@ -1038,15 +1038,16 @@ async fn execute_pm_commands(
                     | DeliveryPolicy::Compensate
                     | DeliveryPolicy::Continue => {}
                 }
-                Some((tonic::Code::Unavailable, reason))
+                Some((tonic::Code::Unavailable, reason, String::new()))
             }
         };
 
-        if let Some((code, reason)) = failure {
+        if let Some((code, reason, error_code)) = failure {
             undelivered.push(UndeliveredCommand {
                 command: command_book,
                 code,
                 reason,
+                error_code,
             });
             if policy.stops_on_failure() {
                 break;

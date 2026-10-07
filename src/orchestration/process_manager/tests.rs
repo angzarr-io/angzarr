@@ -2423,6 +2423,38 @@ async fn pm_continue_returns_reaction_errors() {
     assert_eq!(errors[0].target.as_ref().unwrap().domain, "fulfillment");
     assert_eq!(errors[0].command_type, "test.PmCommand");
     assert_eq!(errors[0].message, "out of stock");
+    assert_eq!(
+        errors[0].status_code,
+        tonic::Code::FailedPrecondition as i32
+    );
+    assert_eq!(errors[0].code, "", "C-0510: no ErrorInfo, empty code");
+}
+
+/// C-0509: a refused PM command's reaction error carries the refusal's
+/// machine code apart from its message.
+#[tokio::test]
+async fn pm_continue_reaction_error_carries_the_machine_code() {
+    let ctx = DeferredCommandPm::new(false);
+    let report = run_deferred(
+        &ctx,
+        &DomainRejectingExecutor::refusing(&["fulfillment"]),
+        Some(CascadeErrorMode::CascadeErrorContinue),
+    )
+    .await
+    .unwrap();
+    assert_eq!(report.reaction_errors.len(), 1);
+    assert_eq!(report.reaction_errors[0].code, "OUT_OF_STOCK");
+    assert_eq!(report.reaction_errors[0].message, "no stock");
+}
+
+/// A transiently failed PM command has no machine code.
+#[tokio::test]
+async fn pm_transient_reaction_error_has_no_machine_code() {
+    let run = run_pm_policy(Some(CascadeErrorMode::CascadeErrorContinue), true).await;
+    let errors = run.result.unwrap().reaction_errors;
+    assert_eq!(errors.len(), 1);
+    assert_eq!(errors[0].code, "");
+    assert_eq!(errors[0].status_code, tonic::Code::Unavailable as i32);
 }
 
 #[tokio::test]

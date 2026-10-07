@@ -124,6 +124,8 @@ pub(crate) struct UndeliveredCommand {
     pub command: CommandBook,
     pub code: tonic::Code,
     pub reason: String,
+    /// Machine failure code (ErrorInfo.reason); empty when none.
+    pub error_code: String,
 }
 
 impl UndeliveredCommand {
@@ -145,8 +147,9 @@ impl UndeliveredCommand {
             component: component.to_string(),
             target: self.command.cover.clone(),
             command_type,
-            code: self.code as i32,
+            status_code: self.code as i32,
             message: self.reason.clone(),
+            code: self.error_code.clone(),
         }
     }
 }
