@@ -1298,7 +1298,11 @@ mod mock_integration {
                 domain,
                 edition,
                 root,
-                vec![test_event(0, "Event0"), test_event(1, "Event1")],
+                vec![
+                    test_event(0, "Event0"),
+                    test_event(1, "Event1"),
+                    test_event(2, "Event2"),
+                ],
                 &AddMeta {
                     correlation_id: "",
                     external_id: None,
@@ -1309,9 +1313,10 @@ mod mock_integration {
             .await
             .unwrap();
 
+        // Each read below selects two of the three events.
         let until = prost_types::Timestamp {
-            seconds: 1704067200 + 10,
-            nanos: 0,
+            seconds: 1704067200 + 1,
+            nanos: 500_000_000,
         };
         let books = [
             repo.get_from_to(domain, edition, root, 0, 2).await.unwrap(),
@@ -1321,7 +1326,12 @@ mod mock_integration {
             repo.get_temporal_by_sequence(domain, edition, root, 1)
                 .await
                 .unwrap(),
+            // Contiguous sequences read as a range; sparse ones filter the
+            // full stream. Both shapes must name the aggregate.
             repo.get_sequences(domain, edition, root, &[0, 1])
+                .await
+                .unwrap(),
+            repo.get_sequences(domain, edition, root, &[0, 2])
                 .await
                 .unwrap(),
         ];

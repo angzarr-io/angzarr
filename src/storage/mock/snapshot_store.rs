@@ -43,16 +43,6 @@ impl MockSnapshotStore {
             .get(&aggregate_key(domain, edition, root))
             .and_then(|by_seq| by_seq.values().next_back().cloned())
     }
-
-    /// Number of aggregates with at least one stored snapshot.
-    pub async fn stored_count(&self) -> usize {
-        self.snapshots
-            .read()
-            .await
-            .values()
-            .filter(|by_seq| !by_seq.is_empty())
-            .count()
-    }
 }
 
 #[async_trait]
