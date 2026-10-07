@@ -247,3 +247,18 @@ fn compensation_request_wraps_the_envelope() {
     assert_eq!(request.get_ref().command, Some(envelope));
     assert_eq!(request.get_ref().sync_mode, SyncMode::Async as i32);
 }
+
+/// A target domain discovery cannot resolve is unavailable: the
+/// notification stays open for a later attempt rather than counting as
+/// delivered.
+#[tokio::test]
+async fn discovery_sender_reports_unresolvable_target_unavailable() {
+    let discovery = Arc::new(crate::discovery::StaticServiceDiscovery::new());
+    let sender = DiscoveryCompensationSender::new(discovery);
+    let status = sender
+        .handle_compensation(reserve_stock())
+        .await
+        .unwrap_err();
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+    assert!(status.message().contains("inventory"), "{status}");
+}

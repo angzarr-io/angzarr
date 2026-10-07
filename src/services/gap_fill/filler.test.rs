@@ -496,3 +496,24 @@ impl HandlerPositionStore for ArcPositionStore {
         self.0.put(root, sequence).await
     }
 }
+
+/// A remote EventQuery service that cannot be reached is a gap-fill
+/// error, never an empty book: an empty book would read as "no missing
+/// events" and the projector would silently skip the gap.
+#[tokio::test]
+async fn test_remote_event_source_unreachable_is_an_error() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let channel = tonic::transport::Channel::from_shared(format!("http://127.0.0.1:{port}"))
+        .unwrap()
+        .connect_lazy();
+    let source = RemoteEventSource::new(
+        crate::proto::event_query_service_client::EventQueryServiceClient::new(channel),
+    );
+    let err = source
+        .get_from_to("orders", "", Uuid::new_v4(), 0, 5)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GapFillError::Grpc(_)), "{err:?}");
+}

@@ -375,3 +375,21 @@ fn test_same_type_under_different_prefixes_is_not_a_type_change() {
     };
     assert_eq!(diff_state_fields(&before, &after), names(&["#1"]));
 }
+
+/// A length-delimited field over 127 bytes has a two-byte length prefix;
+/// its value spans prefix plus payload, and the fields after it still
+/// parse.
+#[test]
+fn test_wire_fields_long_length_delimited_value() {
+    let state = ClientState {
+        name: "n".repeat(200),
+        flags: 9,
+        ..Default::default()
+    };
+    let fields = wire_fields(&state.encode_to_vec()).expect("well-formed encoding");
+
+    let name = &fields[&2][0];
+    assert_eq!(name.len(), 2 + 200);
+    assert_eq!(&name[..2], &[0xc8, 0x01]);
+    assert_eq!(fields[&5], vec![9u32.to_le_bytes().to_vec()]);
+}

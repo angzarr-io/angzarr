@@ -289,7 +289,7 @@ impl EventBookRepository {
             .await?;
 
         let (snapshot_to_carry, events) = match snapshot {
-            Some(snap) if snap.sequence <= sequence => {
+            Some(snap) => {
                 let from = snap.sequence + 1;
                 // sequence is inclusive; get_from_to upper bound is exclusive.
                 let upper = sequence.saturating_add(1);
@@ -302,7 +302,7 @@ impl EventBookRepository {
                 };
                 (Some(snap), events)
             }
-            _ => {
+            None => {
                 let events = self
                     .event_store
                     .get_from_to(domain, edition, root, 0, sequence.saturating_add(1))

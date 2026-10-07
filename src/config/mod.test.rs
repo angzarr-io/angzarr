@@ -219,3 +219,22 @@ dlq:
         .expect("audit should round-trip when set in YAML");
     assert_eq!(audit.storage_type, "sqlite");
 }
+
+/// A file named by the `path` argument is loaded over the defaults.
+#[test]
+#[serial_test::serial(angzarr_config_env)]
+fn test_load_reads_the_named_file() {
+    let original = std::env::var(CONFIG_ENV_VAR).ok();
+    std::env::remove_var(CONFIG_ENV_VAR);
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("angzarr.yaml");
+    std::fs::write(&path, "transport:\n  tcp:\n    host: 10.1.2.3\n").unwrap();
+
+    let loaded = Config::load(Some(path.to_str().unwrap()));
+
+    if let Some(val) = original {
+        std::env::set_var(CONFIG_ENV_VAR, val);
+    }
+    let config = loaded.expect("config file must load");
+    assert_eq!(config.transport.tcp.host, "10.1.2.3");
+}

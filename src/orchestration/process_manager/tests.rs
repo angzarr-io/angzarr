@@ -2665,3 +2665,10 @@ async fn pm_rejection_is_delivered_to_its_source() {
         );
     }
 }
+
+/// A PM context that does not name itself is identified as
+/// `"process_manager"` in DLQ tooling.
+#[test]
+fn test_default_component_name_is_process_manager() {
+    assert_eq!(EmptyPm.component_name(), "process_manager");
+}

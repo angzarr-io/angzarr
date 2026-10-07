@@ -1642,3 +1642,132 @@ async fn sync_fanout_compensate_after_pm_failure_compensates_saga_reactions() {
     assert_eq!(compensate.sequences, vec![6]);
     assert_eq!(compensate.reason, "ChargePm: card declined");
 }
+
+// ============================================================================
+// Books the context builds name their aggregate
+// ============================================================================
+
+/// A book assembled straight from the event store (divergence and
+/// idempotency paths) carries the aggregate's cover and its next sequence.
+#[test]
+fn build_event_book_stamps_cover_and_next_sequence() {
+    let root = Uuid::new_v4();
+    let book = build_event_book(
+        "orders",
+        "branch-a",
+        root,
+        vec![make_event_page(0), make_event_page(1)],
+        None,
+    );
+    let cover = book.cover.expect("cover");
+    assert_eq!(cover.domain, "orders");
+    assert_eq!(cover.root.unwrap().value, root.as_bytes().to_vec());
+    assert_eq!(cover.edition.unwrap().name, "branch-a");
+    assert_eq!(book.next_sequence, 2);
+}
+
+/// The persisted book names the aggregate the events were written to.
+#[tokio::test]
+async fn persist_events_returns_book_with_target_cover() {
+    let ctx = build_ctx_with_stores(
+        Arc::new(MockEventStore::new()),
+        Arc::new(MockSnapshotStore::new()),
+    );
+    let root = Uuid::new_v4();
+    let received = EventBook {
+        pages: vec![make_event_page(0)],
+        ..Default::default()
+    };
+
+    let outcome = ctx
+        .persist_events(
+            &EventBook::default(),
+            &received,
+            "orders",
+            "",
+            root,
+            "corr-cover",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let PersistOutcome::Persisted(book) = outcome else {
+        panic!("expected Persisted");
+    };
+    let cover = book.cover.expect("persisted book must carry a cover");
+    assert_eq!(cover.domain, "orders");
+    assert_eq!(cover.root.unwrap().value, root.as_bytes().to_vec());
+    assert_eq!(book.pages.len(), 1);
+}
+
+/// DECISION answers accept/reject synchronously; projectors run from the
+/// bus, so the synchronous fan-out never calls them.
+#[tokio::test]
+async fn sync_fanout_decision_does_not_call_projectors() {
+    let projector = CapturingProjectorServer::default();
+    let captured = projector.requests.clone();
+    let (listener, port) = bind_ephemeral().await;
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(ProjectorCoordinatorServiceServer::new(projector))
+            .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+            .await
+            .unwrap();
+    });
+    let discovery = Arc::new(StaticServiceDiscovery::new());
+    discovery
+        .register_projector("prj-capture", "orders", "127.0.0.1", port)
+        .await;
+    let ctx = GrpcAggregateContext::new(
+        Arc::new(MockEventStore::new()),
+        Arc::new(SnapshotRepository::new(Arc::new(MockSnapshotStore::new()))),
+        discovery,
+        Arc::new(MockEventBus::new()),
+    )
+    .with_sync_mode(crate::proto::SyncMode::Decision);
+
+    let fanout = ctx
+        .sync_fanout(&book_with_cover(vec![make_event_page(0)]))
+        .await
+        .unwrap();
+    assert!(fanout.projections.is_empty());
+    assert!(
+        captured.lock().await.is_empty(),
+        "projector must not be called"
+    );
+}
+
+/// Persisted events the bus would not take are captured as a transient
+/// events dead letter attributed to this aggregate coordinator, so an
+/// operator can replay them once the bus recovers.
+#[tokio::test]
+async fn dead_letter_unpublished_captures_transient_events_dead_letter() {
+    let dlq = Arc::new(CapturingDlqPublisher::default());
+    let ctx = build_ctx_with_stores(
+        Arc::new(MockEventStore::new()),
+        Arc::new(MockSnapshotStore::new()),
+    )
+    .with_dlq_publisher(dlq.clone())
+    .with_component_name("agg-orders");
+
+    let book = book_with_cover(vec![make_event_page(0)]);
+    ctx.dead_letter_unpublished(&book, "bus unavailable").await;
+
+    let captured = dlq.captured.lock().await;
+    assert_eq!(captured.len(), 1);
+    let dead_letter = &captured[0];
+    assert_eq!(dead_letter.source_component, "agg-orders");
+    assert_eq!(dead_letter.source_component_type, "aggregate");
+    assert!(matches!(
+        &dead_letter.payload,
+        DeadLetterPayload::Events(events) if events.pages.len() == 1
+    ));
+    match &dead_letter.rejection_details {
+        Some(RejectionDetails::EventProcessingFailed(details)) => {
+            assert!(details.is_transient);
+            assert_eq!(details.error, "bus unavailable");
+        }
+        other => panic!("expected event-processing details, got {other:?}"),
+    }
+}

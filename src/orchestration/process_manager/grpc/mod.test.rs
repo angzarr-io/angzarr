@@ -433,3 +433,67 @@ async fn persisted_trigger_is_recognised_by_its_provenance() {
     assert!(ctx.trigger_handled(&trigger, "", "corr").await.unwrap());
     assert!(!ctx.trigger_handled(&other, "", "corr").await.unwrap());
 }
+
+/// Fails the first publish, then forwards to a MockEventBus.
+struct FailsOnce {
+    failed: std::sync::atomic::AtomicBool,
+    inner: MockEventBus,
+}
+
+#[async_trait::async_trait]
+impl EventBus for FailsOnce {
+    async fn publish(&self, book: Arc<EventBook>) -> crate::bus::Result<crate::bus::PublishResult> {
+        if !self.failed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            return Err(crate::bus::BusError::Connection(
+                "first publish fails".into(),
+            ));
+        }
+        self.inner.publish(book).await
+    }
+
+    async fn subscribe(
+        &self,
+        _handler: Box<dyn crate::bus::EventHandler>,
+    ) -> crate::bus::Result<()> {
+        Err(crate::bus::BusError::SubscribeNotSupported)
+    }
+
+    async fn create_subscriber(
+        &self,
+        _name: &str,
+        _domain_filter: Option<&str>,
+    ) -> crate::bus::Result<Arc<dyn EventBus>> {
+        Err(crate::bus::BusError::SubscribeNotSupported)
+    }
+}
+
+/// The backoff precedes the retry: a publish that recovers on the second
+/// attempt waited exactly the first backoff step, and nothing is
+/// dead-lettered.
+#[tokio::test(start_paused = true)]
+async fn persist_publish_retry_waits_before_second_attempt() {
+    let store: Arc<dyn EventStore> = Arc::new(MockEventStore::new());
+    let bus = Arc::new(FailsOnce {
+        failed: std::sync::atomic::AtomicBool::new(false),
+        inner: MockEventBus::new(),
+    });
+    let bus_dyn: Arc<dyn EventBus> = bus.clone();
+    let dlq = Arc::new(CapturingDlq::default());
+    let dlq_dyn: Arc<dyn crate::dlq::DeadLetterPublisher> = dlq.clone();
+
+    let start = tokio::time::Instant::now();
+    let outcome = persist_pm_event_book(
+        &store,
+        &bus_dyn,
+        "pm",
+        &pm_book("pm", Uuid::new_v4(), "corr", &[0]),
+        "corr",
+        Some((&dlq_dyn, "pm-flow")),
+        None,
+    )
+    .await;
+    assert!(matches!(outcome, CommandOutcome::Success(_)));
+    assert_eq!(start.elapsed(), std::time::Duration::from_millis(200));
+    assert_eq!(bus.inner.take_published().await.len(), 1);
+    assert!(dlq.0.lock().await.is_empty());
+}

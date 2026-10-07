@@ -2178,3 +2178,10 @@ async fn test_rejection_notification_carries_code_and_message() {
         );
     }
 }
+
+/// A saga context that does not name itself is identified as `"saga"` in
+/// DLQ tooling.
+#[test]
+fn test_default_component_name_is_saga() {
+    assert_eq!(AlwaysSucceeds.component_name(), "saga");
+}

@@ -338,6 +338,20 @@ fn test_prepare_uds_socket_removes_stale_socket() {
     std::os::unix::net::UnixListener::bind(&path).expect("rebind after cleanup");
 }
 
+/// A socket path that cannot be inspected (here: its parent is a regular
+/// file) is an error up front, not a guard over a path bind will reject.
+#[test]
+fn test_prepare_uds_socket_uninspectable_path_is_an_error() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let not_a_dir = temp.path().join("file");
+    std::fs::write(&not_a_dir, b"data").unwrap();
+
+    let result = prepare_uds_socket(&not_a_dir.join("svc.sock"));
+
+    assert!(result.is_err());
+    assert_ne!(result.err().unwrap().kind(), std::io::ErrorKind::NotFound);
+}
+
 /// A regular file at the socket path (misconfiguration) is an error and is
 /// never deleted.
 #[test]

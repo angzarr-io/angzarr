@@ -703,3 +703,41 @@ async fn test_wraps_trait_object_store() {
     let published = mock_bus.take_published().await;
     assert!(is_external(&published[0].pages[0]));
 }
+
+/// The threshold is inclusive: a book that lands exactly on the limit once
+/// its payloads are offloaded is published.
+#[tokio::test]
+async fn test_book_exactly_at_threshold_after_offload_is_published() {
+    let (store, _temp) = create_test_store().await;
+    let book = EventBook {
+        pages: vec![event_page(0, 3000)],
+        snapshot: Some(crate::proto::Snapshot {
+            state: Some(prost_types::Any {
+                type_url: "test.State".into(),
+                value: vec![2u8; 512],
+            }),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+
+    // Measure the offloaded size against a roomy threshold.
+    let probe_bus = Arc::new(MockEventBus::new());
+    let probe = OffloadingEventBus::wrap(
+        Arc::clone(&probe_bus) as Arc<dyn EventBus>,
+        OffloadingConfig::new(Arc::clone(&store)).with_threshold(2048),
+    );
+    probe.publish(Arc::new(book.clone())).await.unwrap();
+    let offloaded_len = probe_bus.take_published().await[0].encoded_len();
+    assert!(offloaded_len < book.encoded_len());
+
+    // The same book against a threshold of exactly that size.
+    let mock_bus = Arc::new(MockEventBus::new());
+    let bus = OffloadingEventBus::wrap(
+        Arc::clone(&mock_bus) as Arc<dyn EventBus>,
+        OffloadingConfig::new(store).with_threshold(offloaded_len),
+    );
+    bus.publish(Arc::new(book)).await.unwrap();
+    let published = mock_bus.take_published().await;
+    assert_eq!(published[0].encoded_len(), offloaded_len);
+}

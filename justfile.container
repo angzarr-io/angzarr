@@ -188,16 +188,18 @@ cov-ci:
         --fail-under-lines 70 \
         --codecov --output-path codecov.json
 
-# Feature-gated modules the lib-test mutation run does not compile (storage
+# Feature-gated code the lib-test mutation run does not compile (storage
 # and bus backends, DLQ publishers, payload stores, k8s discovery): their
 # contract suites cover them, and a mutant in uncompiled code always
-# "survives".
-MUTANTS_FEATURE_GATED := "-e 'src/storage/bigtable/**' -e 'src/storage/dynamo/**' -e 'src/storage/immudb/**' -e 'src/storage/postgres/**' -e 'src/storage/redis/**' -e 'src/bus/amqp/**' -e 'src/bus/kafka/**' -e 'src/bus/pubsub/**' -e 'src/bus/sns_sqs/**' -e 'src/dlq/publishers/amqp.rs' -e 'src/dlq/publishers/kafka.rs' -e 'src/dlq/publishers/pubsub.rs' -e 'src/dlq/publishers/sns_sqs.rs' -e 'src/payload_store/gcs.rs' -e 'src/payload_store/s3.rs' -e 'src/discovery/k8s/**' -e 'src/advice/lossy.rs'"
+# "survives". `-e` drops whole gated files; `-E` drops gated items inside
+# ungated files: backend match arms, Postgres-only helpers and impls, and
+# the SqlDatabase conflict-target defaults only the Postgres impl uses.
+MUTANTS_FEATURE_GATED := "-e 'src/storage/bigtable/**' -e 'src/storage/dynamo/**' -e 'src/storage/immudb/**' -e 'src/storage/postgres/**' -e 'src/storage/redis/**' -e 'src/bus/amqp/**' -e 'src/bus/kafka/**' -e 'src/bus/pubsub/**' -e 'src/bus/sns_sqs/**' -e 'src/dlq/publishers/amqp.rs' -e 'src/dlq/publishers/kafka.rs' -e 'src/dlq/publishers/pubsub.rs' -e 'src/dlq/publishers/sns_sqs.rs' -e 'src/payload_store/gcs.rs' -e 'src/payload_store/s3.rs' -e 'src/discovery/k8s/**' -e 'src/advice/lossy.rs' -E 'match arm BackendConfig::(Bigtable|Dynamo|Immudb)\\(' -E 'postgres_pool ->' -E 'ensure_postgres_dlq_schema ->' -E 'PostgresDlq(Reader|Publisher)' -E 'SqlDatabase::(positions|snapshots)_conflict_target ->'"
 
 # Mutation-test the code a diff changes (CI: git.diff against the PR base),
 # one shard of the mutant set: SHARD is k/N (0-based). Survivors are a
 # result, not a failure: the kill-rate gate is `mutants-ci-gate`.
-mutants-ci SHARD="0/1" DIFF="git.diff":
+mutants-ci SHARD="0/1" DIFF="git.diff": gen-mutants-exclude
     #!/usr/bin/env bash
     set -euo pipefail
     if [ ! -s "{{DIFF}}" ]; then
@@ -215,11 +217,17 @@ mutants-ci SHARD="0/1" DIFF="git.diff":
 
 # Kill-rate gate over one or more outcomes.json files (all shards of a
 # run): caught / (caught + missed) must reach THRESHOLD percent. Timeouts
-# count as caught; unviable mutants are not counted.
+# count as caught; unviable mutants are not counted. Shards with no mutants
+# upload no file, so paths that do not exist (an unmatched glob) are skipped.
 mutants-ci-gate THRESHOLD="90" +OUTCOMES="mutants.out/outcomes.json":
     #!/usr/bin/env bash
     set -euo pipefail
-    files=({{OUTCOMES}})
+    files=()
+    for f in {{OUTCOMES}}; do [ -f "$f" ] && files+=("$f"); done
+    if [ ${#files[@]} -eq 0 ]; then
+        echo "No mutants in the changed code"
+        exit 0
+    fi
     count() { jq -s "[.[].outcomes[] | select(.summary == \"$1\")] | length" "${files[@]}"; }
     caught=$(( $(count CaughtMutant) + $(count Timeout) ))
     missed=$(count MissedMutant)

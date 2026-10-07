@@ -43,6 +43,7 @@ impl OutboxLog for MemoryOutboxLog {
     async fn append_close(&self, _key: &str) -> Result<(), OutboxError> {
         Ok(())
     }
+    #[crate::trivial_delegation]
     async fn open_entries(&self) -> Result<Vec<OutboxEntry>, OutboxError> {
         Ok(Vec::new())
     }

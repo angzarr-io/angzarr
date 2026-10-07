@@ -232,6 +232,8 @@ struct TestCtx {
     load_calls: Arc<AtomicUsize>,
     /// `persist_events` call count.
     persist_calls: Arc<AtomicUsize>,
+    /// Fail the first N `persist_events` calls with Unavailable.
+    persist_fail_times: usize,
     /// Book returned for `TemporalQuery::AsOfSequence` loads, with the
     /// requested sequences recorded.
     historical_events: Option<EventBook>,
@@ -292,7 +294,10 @@ impl AggregateContext for TestCtx {
         _external_id: Option<&str>,
         source_info: Option<&SourceInfo>,
     ) -> Result<PersistOutcome, Status> {
-        self.persist_calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.persist_calls.fetch_add(1, Ordering::SeqCst);
+        if call < self.persist_fail_times {
+            return Err(Status::unavailable("store down (synthetic)"));
+        }
         self.persisted_claims
             .lock()
             .unwrap()
@@ -537,6 +542,22 @@ async fn test_publish_failure_retries_in_place_and_succeeds() {
     publish_unless_noop(&ctx, &book_with_domain("orders", "c1"), false).await;
     assert_eq!(ctx.publish_calls.load(Ordering::SeqCst), 2);
     assert_eq!(ctx.unpublished_dlq_calls.load(Ordering::SeqCst), 0);
+}
+
+/// The backoff precedes the retry: a publish that recovers on the second
+/// attempt waited exactly the first backoff step. (Total exhaustion time
+/// alone cannot tell "sleep between attempts" from "sleep once at the end":
+/// 200ms + 400ms equals 3 x 200ms.)
+#[tokio::test(start_paused = true)]
+async fn test_publish_retry_waits_before_second_attempt() {
+    let ctx = TestCtx {
+        publish_fail_times: 1,
+        ..Default::default()
+    };
+    let start = tokio::time::Instant::now();
+    publish_unless_noop(&ctx, &book_with_domain("orders", "c1"), false).await;
+    assert_eq!(start.elapsed(), std::time::Duration::from_millis(200));
+    assert_eq!(ctx.publish_calls.load(Ordering::SeqCst), 2);
 }
 
 /// Exhaustion captures the persisted book to the DLQ for operator replay.
@@ -1672,4 +1693,72 @@ async fn test_compensation_rejects_a_plain_command() {
         .unwrap_err();
     assert_eq!(err.code(), tonic::Code::InvalidArgument);
     assert_eq!(logic.invocations.load(Ordering::SeqCst), 0);
+}
+
+// ============================================================================
+// Retry in place and speculative execution
+// ============================================================================
+
+/// A transient failure before anything was persisted re-runs the command in
+/// place against freshly loaded state.
+#[tokio::test]
+async fn test_transient_failure_before_persist_retries_in_place() {
+    let mut received = book_with_domain("dest", "");
+    received.pages = vec![make_event_page(0)];
+    let ctx = TestCtx {
+        prior_events: Some(book_with_domain("dest", "")),
+        persist_outcome: Some(PersistOutcome::Persisted(received.clone())),
+        persist_fail_times: 1,
+        ..Default::default()
+    };
+    let business = WiredLogic {
+        replay: StubReplay {
+            states_by_page_count: vec![],
+        },
+        respond_events: received,
+    };
+    let response = execute_command_with_retry(
+        &ctx,
+        &business,
+        explicit_command(MergeStrategy::MergeStrict, 0),
+        crate::utils::retry::saga_backoff()
+            .with_min_delay(std::time::Duration::from_millis(1))
+            .with_max_delay(std::time::Duration::from_millis(1)),
+    )
+    .await
+    .expect("the second attempt succeeds");
+    assert_eq!(response.events.unwrap().pages.len(), 1);
+    assert_eq!(ctx.persist_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(ctx.load_calls.load(Ordering::SeqCst), 2);
+}
+
+/// A speculative command runs the business logic against historical state
+/// and answers with the events it would produce, persisting nothing.
+#[tokio::test]
+async fn test_speculative_returns_would_be_events_without_persisting() {
+    let mut would_be = book_with_domain("dest", "");
+    would_be.pages = vec![make_event_page(3), make_event_page(4)];
+    let ctx = TestCtx::default();
+    let business = WiredLogic {
+        replay: StubReplay {
+            states_by_page_count: vec![],
+        },
+        respond_events: would_be,
+    };
+    let response = execute_command_pipeline(
+        &ctx,
+        &business,
+        plain_command(),
+        PipelineMode::Speculative {
+            as_of_sequence: Some(2),
+            as_of_timestamp: None,
+        },
+    )
+    .await
+    .unwrap();
+    let events = response.events.expect("speculative events");
+    assert_eq!(events.pages.len(), 2);
+    assert_eq!(*ctx.historical_requests.lock().unwrap(), vec![2]);
+    assert_eq!(ctx.persist_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(ctx.publish_calls.load(Ordering::SeqCst), 0);
 }

@@ -1281,4 +1281,56 @@ mod mock_integration {
         assert_eq!(book.pages[1].sequence_num(), 2);
         assert_eq!(book.pages[2].sequence_num(), 3);
     }
+
+    /// Every read names the aggregate it was read from: domain, root and
+    /// edition ride on the returned book's cover, so a consumer replaying
+    /// or forwarding the book never has to carry them separately.
+    #[tokio::test]
+    async fn test_reads_stamp_cover_with_domain_root_and_edition() {
+        let (repo, event_store, _) = setup_shared();
+        let domain = "test_domain";
+        let edition = "branch-a";
+        let root = Uuid::new_v4();
+
+        use crate::storage::EventStore;
+        event_store
+            .add(
+                domain,
+                edition,
+                root,
+                vec![test_event(0, "Event0"), test_event(1, "Event1")],
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let until = prost_types::Timestamp {
+            seconds: 1704067200 + 10,
+            nanos: 0,
+        };
+        let books = [
+            repo.get_from_to(domain, edition, root, 0, 2).await.unwrap(),
+            repo.get_temporal_by_time(domain, edition, root, &until)
+                .await
+                .unwrap(),
+            repo.get_temporal_by_sequence(domain, edition, root, 1)
+                .await
+                .unwrap(),
+            repo.get_sequences(domain, edition, root, &[0, 1])
+                .await
+                .unwrap(),
+        ];
+        for book in books {
+            let cover = book.cover.expect("read must stamp a cover");
+            assert_eq!(cover.domain, domain);
+            assert_eq!(cover.root.unwrap().value, root.as_bytes().to_vec());
+            assert_eq!(cover.edition.unwrap().name, edition);
+            assert_eq!(book.pages.len(), 2);
+        }
+    }
 }

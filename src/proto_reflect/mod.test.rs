@@ -269,6 +269,18 @@ fn decode_to_json_roundtrip_angzarr_dead_letter() {
     );
 }
 
+/// The pool is set once: initializing with extras after it is set (here,
+/// by `ensure_initialized`) reports `AlreadyInitialized` instead of
+/// silently ignoring the operator's extra descriptors.
+#[test]
+fn init_with_extras_after_initialization_is_already_initialized() {
+    ensure_initialized().unwrap();
+    assert!(matches!(
+        init_from_embedded_with_extras(&[]),
+        Err(ReflectError::AlreadyInitialized)
+    ));
+}
+
 /// `ensure_initialized` is idempotent — repeat calls succeed.
 #[test]
 fn ensure_initialized_is_idempotent() {

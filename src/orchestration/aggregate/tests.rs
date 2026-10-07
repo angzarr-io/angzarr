@@ -898,4 +898,9 @@ fn test_main_timeline_spellings_share_one_key() {
         extract_edition(&with_edition(Some("branch-a"))).unwrap(),
         "branch-a"
     );
+    let branch_events = EventBook {
+        cover: with_edition(Some("branch-a")).cover,
+        ..Default::default()
+    };
+    assert_eq!(extract_event_edition(&branch_events).unwrap(), "branch-a");
 }

@@ -443,14 +443,7 @@ jobs:
         uses: extractions/setup-just@v2
 
       - name: Kill-rate gate (90%)
-        run: |
-          shopt -s nullglob
-          files=(shards/*/outcomes.json)
-          if [ ${#files[@]} -eq 0 ]; then
-            echo "No mutants in the changed code"
-            exit 0
-          fi
-          just -f justfile.container mutants-ci-gate 90 "${files[@]}"
+        run: just -f justfile.container mutants-ci-gate 90 shards/*/outcomes.json
 
   # Gateway: regenerate from the protos, vet and test (routing, discovery).
   gateway:

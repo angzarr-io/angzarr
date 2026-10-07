@@ -218,6 +218,7 @@ pub trait ProcessManagerContext: Send + Sync {
     /// workflow's PM aggregate (`edition`, `correlation_id`): a redelivery,
     /// or the bus copy of a trigger a CASCADE already ran synchronously.
     /// Defaults to `false` (no trigger deduplication).
+    #[crate::trivial_delegation]
     async fn trigger_handled(
         &self,
         trigger: &crate::storage::SourceInfo,

@@ -367,17 +367,11 @@ impl Outbox {
     }
 
     /// Attempt every open entry whose backoff has elapsed at `now`.
+    /// [`Self::claim`] skips entries in flight or not yet due.
     pub async fn drain_due(&self, now: Instant) -> Result<DrainStats, OutboxError> {
-        let due: Vec<String> = {
-            let pending = self.pending.lock().await;
-            pending
-                .iter()
-                .filter(|(_, p)| !p.in_flight && p.next_due <= now)
-                .map(|(key, _)| key.clone())
-                .collect()
-        };
+        let keys: Vec<String> = self.pending.lock().await.keys().cloned().collect();
         let mut stats = DrainStats::default();
-        for key in due {
+        for key in keys {
             if let Some(entry) = self.claim(&key, Some(now)).await {
                 stats.add(self.attempt(entry, now).await?);
             }

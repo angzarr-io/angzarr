@@ -266,3 +266,60 @@ positions: { use: cache }
         assert!(err.contains("positions") && err.contains("redis"), "{err}");
     }
 }
+
+/// A composite backend is event-only: it cannot hold snapshots, so naming
+/// it as the snapshot store is rejected at load time rather than failing
+/// on the first snapshot write.
+#[test]
+fn test_registry_rejects_composite_as_snapshot_store() {
+    let yaml = "\
+backends:
+  ledger: { type: postgres, uri: postgres://ledger }
+  branches: { type: sqlite, path: /tmp/ed.db }
+  store: { type: composite, main: ledger, editions: branches }
+events: { use: store }
+snapshots: { use: store }
+positions: { use: ledger }
+";
+    let cfg: StorageRegistryConfig = serde_yaml::from_str(yaml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("snapshots") && err.contains("composite"),
+        "{err}"
+    );
+}
+
+/// Composites do not nest: a composite whose main is itself a composite is
+/// rejected even though a composite is event-capable.
+#[test]
+fn test_registry_rejects_nested_composite_main() {
+    let yaml = "\
+backends:
+  ledger: { type: postgres, uri: postgres://ledger }
+  branches: { type: sqlite, path: /tmp/ed.db }
+  inner: { type: composite, main: ledger, editions: branches }
+  outer: { type: composite, main: inner, editions: branches }
+events: { use: outer }
+snapshots: { use: ledger }
+positions: { use: ledger }
+";
+    let cfg: StorageRegistryConfig = serde_yaml::from_str(yaml).unwrap();
+    let err = cfg.validate().unwrap_err();
+    assert!(
+        err.contains("'outer'") && err.contains("not an event-capable"),
+        "{err}"
+    );
+}
+
+/// The ImmuDB URI carries credentials, so its Debug form names the type
+/// but never prints the URI.
+#[test]
+fn test_immudb_config_debug_redacts_uri() {
+    let cfg = ImmudbConfig {
+        uri: "postgres://immudb:s3cret@ledger:5432/defaultdb".to_string(),
+    };
+    let rendered = format!("{cfg:?}");
+    assert!(rendered.contains("ImmudbConfig"), "{rendered}");
+    assert!(rendered.contains("<redacted>"), "{rendered}");
+    assert!(!rendered.contains("s3cret"), "{rendered}");
+}

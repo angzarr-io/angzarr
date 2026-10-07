@@ -117,6 +117,7 @@ pub trait AggregateContext: Send + Sync {
     ///
     /// Runs once, after publish. Its errors reach the caller (subject to the
     /// request's `CascadeErrorMode`); the events stay persisted and published.
+    #[crate::trivial_delegation]
     async fn sync_fanout(&self, _events: &EventBook) -> Result<SyncFanout, Status> {
         Ok(SyncFanout::default())
     }
@@ -165,6 +166,7 @@ pub trait AggregateContext: Send + Sync {
     /// persisted-but-unpublished class). Production contexts override this to
     /// publish an events dead letter so operators can replay; the default
     /// only logs, loudly.
+    #[crate::trivial_delegation]
     async fn dead_letter_unpublished(&self, _events: &EventBook, reason: &str) {
         tracing::error!(
             reason = %reason,

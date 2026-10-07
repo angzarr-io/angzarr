@@ -87,7 +87,9 @@ fn is_socket(meta: &std::fs::Metadata) -> bool {
     meta.file_type().is_socket()
 }
 
+// Compiled only off unix; mutation testing runs on unix.
 #[cfg(not(unix))]
+#[mutants::skip]
 fn is_socket(_meta: &std::fs::Metadata) -> bool {
     false
 }

@@ -599,3 +599,54 @@ fn test_from_compensation_delivery_failure() {
     }
     assert_eq!(proto.cover, envelope.cover);
 }
+
+/// Saga/PM rejection dead letters distinguish an immediate business
+/// rejection (`retry_count == 0`) from a retry budget that ran out, so an
+/// operator reading the DLQ knows whether replaying can help.
+#[test]
+fn test_rejection_reason_distinguishes_immediate_from_exhausted_retries() {
+    let command = make_test_command("inventory", Uuid::new_v4());
+    let events = EventBook {
+        cover: command.cover.clone(),
+        ..Default::default()
+    };
+
+    let saga_immediate =
+        AngzarrDeadLetter::from_saga_command_rejection(&command, "denied", 0, false, "saga-x");
+    let saga_retried =
+        AngzarrDeadLetter::from_saga_command_rejection(&command, "denied", 4, true, "saga-x");
+    assert_eq!(
+        saga_immediate.rejection_reason,
+        "Saga command rejected (immediate): denied"
+    );
+    assert_eq!(
+        saga_retried.rejection_reason,
+        "Saga command rejected after 4 attempts: denied"
+    );
+
+    let pm_immediate =
+        AngzarrDeadLetter::from_pm_command_rejection(&command, "denied", 0, false, "pm-x");
+    let pm_retried =
+        AngzarrDeadLetter::from_pm_command_rejection(&command, "denied", 4, true, "pm-x");
+    assert_eq!(
+        pm_immediate.rejection_reason,
+        "PM command rejected (immediate): denied"
+    );
+    assert_eq!(
+        pm_retried.rejection_reason,
+        "PM command rejected after 4 attempts: denied"
+    );
+
+    let persist_immediate =
+        AngzarrDeadLetter::from_pm_persist_failure(&events, "conflict", 0, false, "pm-x");
+    let persist_retried =
+        AngzarrDeadLetter::from_pm_persist_failure(&events, "conflict", 4, true, "pm-x");
+    assert_eq!(
+        persist_immediate.rejection_reason,
+        "PM persistence rejected (immediate): conflict"
+    );
+    assert_eq!(
+        persist_retried.rejection_reason,
+        "PM persistence retries exhausted after 4 attempts: conflict"
+    );
+}

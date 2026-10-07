@@ -151,3 +151,12 @@ fn trait_default_source_id_is_unknown() {
     let r = DefaultsReader;
     assert_eq!(r.source_id(), "unknown");
 }
+
+#[tokio::test]
+async fn trait_default_delete_older_than_removes_nothing() {
+    // A reader without durable storage has nothing for DLQ retention to
+    // reclaim; reporting a non-zero count would make the retention sweep
+    // claim deletions that never happened.
+    let r = DefaultsReader;
+    assert_eq!(r.delete_older_than(Utc::now()).await.unwrap(), 0);
+}
