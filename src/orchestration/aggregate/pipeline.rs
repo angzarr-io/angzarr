@@ -44,14 +44,11 @@ pub async fn execute_command_pipeline(
             as_of_sequence,
             as_of_timestamp,
         } => {
+            // No point in time: the what-if runs against the current state.
             let temporal = match (as_of_sequence, as_of_timestamp) {
                 (Some(seq), _) => TemporalQuery::AsOfSequence(seq),
                 (_, Some(ts)) => TemporalQuery::AsOfTimestamp(ts),
-                (None, None) => {
-                    return Err(Status::invalid_argument(
-                        crate::orchestration::errmsg::SPECULATIVE_REQUIRES_TEMPORAL,
-                    ));
-                }
+                (None, None) => TemporalQuery::Current,
             };
             speculative_mode(ctx, business, command_book, temporal).await
         }

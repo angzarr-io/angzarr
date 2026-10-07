@@ -41,8 +41,6 @@ pub mod errmsg {
 
     // Aggregate command pipeline errors
     pub const INVALID_UUID: &str = "Invalid UUID: ";
-    pub const SPECULATIVE_REQUIRES_TEMPORAL: &str =
-        "Speculative requires either as_of_sequence or as_of_timestamp";
     /// Prefix shared by every merge-gate sequence-mismatch message. Callers
     /// treat it as "refresh state and resubmit" (see `utils::retry`).
     pub const SEQUENCE_MISMATCH_CLASS: &str = "Sequence mismatch:";

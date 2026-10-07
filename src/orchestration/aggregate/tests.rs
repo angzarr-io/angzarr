@@ -743,7 +743,6 @@ fn test_errmsg_constants_non_empty() {
     assert!(!errmsg::SEQUENCE_MISMATCH.is_empty());
     assert!(!errmsg::SEQUENCE_MISMATCH_OVERLAP.is_empty());
     assert!(!errmsg::SEQUENCE_MISMATCH_DLQ_SUFFIX.is_empty());
-    assert!(!errmsg::SPECULATIVE_REQUIRES_TEMPORAL.is_empty());
     assert!(!errmsg::FACT_EVENTS_MISSING_MARKER.is_empty());
 }
 

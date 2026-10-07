@@ -238,6 +238,8 @@ struct TestCtx {
     /// requested sequences recorded.
     historical_events: Option<EventBook>,
     historical_requests: Arc<std::sync::Mutex<Vec<u32>>>,
+    /// Every temporal query a load was asked for, in order.
+    loaded_temporals: Arc<std::sync::Mutex<Vec<TemporalQuery>>>,
     /// Claims `check_deferred_idempotency` was asked about.
     claims_looked_up: Arc<std::sync::Mutex<Vec<SourceInfo>>>,
     /// The provenance claim each `persist_events` call carried.
@@ -254,6 +256,10 @@ impl AggregateContext for TestCtx {
         _temporal: &TemporalQuery,
         _explicit_divergence: Option<u32>,
     ) -> Result<EventBook, Status> {
+        self.loaded_temporals
+            .lock()
+            .unwrap()
+            .push(_temporal.clone());
         if let TemporalQuery::AsOfSequence(seq) = _temporal {
             self.historical_requests.lock().unwrap().push(*seq);
             return Ok(self.historical_events.clone().unwrap_or_default());
@@ -1761,4 +1767,79 @@ async fn test_speculative_returns_would_be_events_without_persisting() {
     assert_eq!(*ctx.historical_requests.lock().unwrap(), vec![2]);
     assert_eq!(ctx.persist_calls.load(Ordering::SeqCst), 0);
     assert_eq!(ctx.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+// ============================================================================
+// Speculative execution without a point in time (C-0266)
+// ============================================================================
+
+/// A what-if with no point in time runs against the current state: the
+/// current history is loaded, the handler's events come back, nothing is
+/// persisted or published.
+#[tokio::test]
+async fn test_speculative_without_point_in_time_runs_against_current_state() {
+    let mut prior = book_with_domain("dest", "");
+    prior.pages = vec![make_event_page(0)];
+    prior.next_sequence = 1;
+    let ctx = TestCtx {
+        prior_events: Some(prior),
+        ..Default::default()
+    };
+    let mut respond_events = book_with_domain("dest", "");
+    respond_events.pages = vec![make_event_page(1)];
+    let logic = WiredLogic {
+        replay: StubReplay {
+            states_by_page_count: vec![],
+        },
+        respond_events,
+    };
+    let response = execute_command_pipeline(
+        &ctx,
+        &logic,
+        plain_command(),
+        PipelineMode::Speculative {
+            as_of_sequence: None,
+            as_of_timestamp: None,
+        },
+    )
+    .await
+    .expect("a what-if without a point in time runs");
+    assert_eq!(response.events.expect("projected events").pages.len(), 1);
+    let temporals = ctx.loaded_temporals.lock().unwrap();
+    assert_eq!(temporals.len(), 1);
+    assert!(matches!(temporals[0], TemporalQuery::Current));
+    assert_eq!(ctx.persist_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(ctx.publish_calls.load(Ordering::SeqCst), 0);
+}
+
+/// A what-if as of a timestamp loads the state at that time.
+#[tokio::test]
+async fn test_speculative_as_of_timestamp_loads_state_at_that_time() {
+    let ctx = TestCtx::default();
+    let logic = WiredLogic {
+        replay: StubReplay {
+            states_by_page_count: vec![],
+        },
+        respond_events: book_with_domain("dest", ""),
+    };
+    let at = prost_types::Timestamp {
+        seconds: 1_704_067_200,
+        nanos: 0,
+    };
+    execute_command_pipeline(
+        &ctx,
+        &logic,
+        plain_command(),
+        PipelineMode::Speculative {
+            as_of_sequence: None,
+            as_of_timestamp: Some(at),
+        },
+    )
+    .await
+    .expect("a what-if as of a time runs");
+    let temporals = ctx.loaded_temporals.lock().unwrap();
+    assert!(matches!(
+        temporals.as_slice(),
+        [TemporalQuery::AsOfTimestamp(ts)] if ts.seconds == 1_704_067_200
+    ));
 }
