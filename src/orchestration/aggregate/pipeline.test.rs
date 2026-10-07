@@ -1843,3 +1843,76 @@ async fn test_speculative_as_of_timestamp_loads_state_at_that_time() {
         [TemporalQuery::AsOfTimestamp(ts)] if ts.seconds == 1_704_067_200
     ));
 }
+
+// ============================================================================
+// Events persisted in an edition carry it on their book
+// ============================================================================
+
+fn edition_run_ctx() -> FactCtx {
+    let mut persisted = book_with_domain("dest", "");
+    persisted.pages = vec![make_event_page(0)];
+    FactCtx {
+        inner: TestCtx {
+            prior_events: Some(book_with_domain("dest", "")),
+            persist_outcome: Some(PersistOutcome::Persisted(persisted)),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+fn logic_responding_with(cover_edition: Option<crate::proto::Edition>) -> WiredLogic {
+    let mut respond_events = book_with_domain("dest", "");
+    respond_events.cover.as_mut().unwrap().edition = cover_edition;
+    respond_events.pages = vec![make_event_page(0)];
+    WiredLogic {
+        replay: StubReplay {
+            states_by_page_count: vec![],
+        },
+        respond_events,
+    }
+}
+
+fn what_if_edition() -> crate::proto::Edition {
+    crate::proto::Edition {
+        name: "what-if-1".to_string(),
+        divergences: vec![crate::proto::DomainDivergence {
+            domain: "dest".to_string(),
+            sequence: 0,
+        }],
+    }
+}
+
+/// A command in a named edition persists its events there; the book handed
+/// to persistence (and so published) names that edition, divergences
+/// included, so consumers can tell a what-if from the main timeline.
+#[tokio::test]
+async fn test_events_of_an_edition_command_carry_the_edition() {
+    let ctx = edition_run_ctx();
+    let mut command = plain_command();
+    command.cover.as_mut().unwrap().edition = Some(what_if_edition());
+    execute_mode(&ctx, &logic_responding_with(None), command)
+        .await
+        .expect("the edition command runs");
+    let received = ctx.persisted.lock().unwrap();
+    assert_eq!(
+        received[0].cover.as_ref().unwrap().edition,
+        Some(what_if_edition())
+    );
+}
+
+/// The book names the edition the command ran in, not whatever the
+/// business response claimed.
+#[tokio::test]
+async fn test_events_of_a_main_timeline_command_do_not_claim_an_edition() {
+    let ctx = edition_run_ctx();
+    execute_mode(
+        &ctx,
+        &logic_responding_with(Some(what_if_edition())),
+        plain_command(),
+    )
+    .await
+    .expect("the main-timeline command runs");
+    let received = ctx.persisted.lock().unwrap();
+    assert_eq!(received[0].cover.as_ref().unwrap().edition, None);
+}

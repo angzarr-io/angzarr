@@ -675,6 +675,10 @@ async fn execute_attempt(
     // `command_book` moves into the handler call.
     let manual_command = needs_manual_check.then(|| command_book.clone());
 
+    // The events land in the command's edition; their book names it for
+    // every reader of the persisted book (bus consumers, the response).
+    let command_edition = command_book.cover.as_ref().and_then(|c| c.edition.clone());
+
     // Invoke client logic
     let contextual_command = ContextualCommand {
         events: Some(prior_events.clone()),
@@ -685,7 +689,11 @@ async fn execute_attempt(
         tracing::error!(error = %e, "client logic invocation failed");
         e
     })?;
-    let received_events = extract_events_from_response(response, &correlation_id)?;
+    let mut received_events = extract_events_from_response(response, &correlation_id)?;
+    received_events
+        .cover
+        .get_or_insert_with(Default::default)
+        .edition = command_edition;
 
     // Post-execution gates observe the fields the command actually touched by
     // replaying prior + received. They never modify `received_events`.
