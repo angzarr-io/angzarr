@@ -790,6 +790,50 @@ async fn persist_events_event_store_failure_still_propagates() {
     );
 }
 
+/// A write that lost the aggregate's head to a concurrent writer is a
+/// FailedPrecondition sequence conflict (storage::errmsg::SEQUENCE_CONFLICT),
+/// the class retried in place, not an internal error.
+#[tokio::test]
+async fn persist_events_head_conflict_is_a_sequence_conflict() {
+    let event_store = Arc::new(MockEventStore::new());
+    let root = Uuid::new_v4();
+    event_store
+        .add(
+            "orders",
+            "",
+            root,
+            vec![make_event_page(0)],
+            &AddMeta::default(),
+        )
+        .await
+        .unwrap();
+    let ctx = build_ctx_with_stores(event_store, Arc::new(MockSnapshotStore::new()));
+    let received = EventBook {
+        pages: vec![make_event_page(0)],
+        ..Default::default()
+    };
+    let err = ctx
+        .persist_events(
+            &EventBook::default(),
+            &received,
+            "orders",
+            "",
+            root,
+            "corr-conflict",
+            None,
+            None,
+        )
+        .await
+        .expect_err("the head moved");
+    assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    assert!(
+        err.message()
+            .starts_with(crate::storage::errmsg::SEQUENCE_CONFLICT),
+        "{}",
+        err.message()
+    );
+}
+
 /// `send_to_dlq` on the full `GrpcAggregateContext` delegates to the
 /// free fn. Same shape as the test above, but routed through the
 /// context method to pin the wrapper.

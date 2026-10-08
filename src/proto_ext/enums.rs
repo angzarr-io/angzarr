@@ -62,8 +62,7 @@ impl SyncModeExt for SyncMode {
             return self;
         };
         match (sync_mode_rank(self), sync_mode_rank(own)) {
-            (Some(caller), Some(command)) if command > caller => own,
-            (Some(_), Some(_)) => self,
+            (Some(_), Some(_)) => std::cmp::max_by_key(self, own, |mode| sync_mode_rank(*mode)),
             _ => own,
         }
     }
