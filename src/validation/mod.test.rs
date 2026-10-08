@@ -301,6 +301,7 @@ mod resource_limits_validation {
                 root: None,
                 correlation_id: String::new(),
                 edition: None,
+                ext: None,
             }),
             pages,
         }

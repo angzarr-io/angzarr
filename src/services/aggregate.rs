@@ -8,22 +8,23 @@ use tonic::{Request, Response, Status};
 use crate::bus::EventBus;
 use crate::config::ResourceLimits;
 use crate::discovery::ServiceDiscovery;
+use crate::dlq::{DeadLetterPublisher, NoopDeadLetterPublisher};
 use crate::orchestration::aggregate::grpc::GrpcAggregateContext;
 use crate::orchestration::aggregate::{
-    execute_command_pipeline, execute_command_with_retry, execute_fact_pipeline,
-    parse_command_cover, AggregateContext, ClientLogic, GrpcBusinessLogic, PipelineMode,
-    TemporalQuery,
+    execute_command_pipeline, execute_command_with_retry, execute_compensation_pipeline,
+    execute_fact_pipeline, ClientLogic, GrpcBusinessLogic, PipelineMode,
 };
+use crate::orchestration::channels::ChannelCache;
 use crate::proto::{
-    business_response,
     command_handler_coordinator_service_server::CommandHandlerCoordinatorService,
-    command_handler_service_client::CommandHandlerServiceClient, BusinessResponse, CommandRequest,
-    CommandResponse, ContextualCommand, EventRequest, FactInjectionResponse,
+    command_handler_service_client::CommandHandlerServiceClient, BusinessResponse,
+    CascadeErrorMode, CommandRequest, CommandResponse, EventRequest, FactInjectionResponse,
     SpeculateCommandHandlerRequest,
 };
-use crate::proto_ext::CoverExt;
+use crate::proto_ext::{CascadeErrorModeExt, CoverExt, SyncModeExt};
+use crate::repository::SnapshotRepository;
 use crate::services::upcaster::Upcaster;
-use crate::storage::{EventStore, SnapshotStore};
+use crate::storage::EventStore;
 use crate::utils::retry::saga_backoff;
 use crate::validation::validate_command_book;
 
@@ -35,64 +36,85 @@ use crate::validation::validate_command_book;
 /// Uses the shared aggregate pipeline for both async and sync operations.
 pub struct AggregateService {
     event_store: Arc<dyn EventStore>,
-    snapshot_store: Arc<dyn SnapshotStore>,
+    snapshot_repo: Arc<SnapshotRepository>,
     business: Arc<dyn ClientLogic>,
     event_bus: Arc<dyn EventBus>,
-    /// When false, snapshots are not written even if client logic returns snapshot_state.
-    snapshot_write_enabled: bool,
-    /// When false, snapshots are not read (for testing/debugging).
-    snapshot_read_enabled: bool,
     /// Service discovery for projectors (sync operations).
     discovery: Arc<dyn ServiceDiscovery>,
     /// Upcaster for event version transformation.
     upcaster: Option<Arc<Upcaster>>,
     /// Resource limits for validation.
     limits: ResourceLimits,
+    /// DLQ publisher threaded down to every constructed
+    /// [`GrpcAggregateContext`]. Defaults to a noop so callers that don't
+    /// care about DLQ (in-process tests, embedded mode without operator
+    /// config) stay zero-touch. The bin overrides it at startup via
+    /// `with_dlq_publisher(init_dlq_publisher(&config.dlq).await?)`
+    /// (R2-15). Hard-fail boot on init error happens at the call site,
+    /// not here.
+    dlq_publisher: Arc<dyn DeadLetterPublisher>,
+    /// The domain this coordinator owns. When set, commands and facts for any
+    /// other domain are refused instead of being written into this store.
+    domain: Option<String>,
+    /// Channels to saga/PM coordinators for CASCADE fan-out, shared by every
+    /// command this service handles.
+    channels: Arc<ChannelCache>,
+    /// Compensation outbox for CASCADE_ERROR_COMPENSATE requests.
+    outbox: Option<Arc<crate::orchestration::outbox::Outbox>>,
 }
 
 impl AggregateService {
-    /// Create a new aggregate service with snapshots enabled.
+    /// Create a new aggregate service.
+    ///
+    /// Snapshot policy (read_enabled / write_enabled) lives on the
+    /// passed-in `SnapshotRepository`. Callers building one with
+    /// defaults: `Arc::new(SnapshotRepository::new(store))`. Callers
+    /// wanting explicit flags:
+    /// `Arc::new(SnapshotRepository::with_flags(store, read, write))`.
     pub fn new(
         event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
+        snapshot_repo: Arc<SnapshotRepository>,
         business_client: CommandHandlerServiceClient<Channel>,
         event_bus: Arc<dyn EventBus>,
         discovery: Arc<dyn ServiceDiscovery>,
     ) -> Self {
         Self {
             event_store,
-            snapshot_store,
+            snapshot_repo,
             business: Arc::new(GrpcBusinessLogic::new(business_client)),
             event_bus,
-            snapshot_write_enabled: true,
-            snapshot_read_enabled: true,
             discovery,
             upcaster: None,
             limits: ResourceLimits::default(),
+            dlq_publisher: Arc::new(NoopDeadLetterPublisher),
+            domain: None,
+            channels: Arc::new(ChannelCache::new()),
+            outbox: None,
         }
     }
 
-    /// Create a new aggregate service with configurable snapshot behavior.
-    pub fn with_config(
-        event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
-        business_client: CommandHandlerServiceClient<Channel>,
-        event_bus: Arc<dyn EventBus>,
-        discovery: Arc<dyn ServiceDiscovery>,
-        snapshot_read_enabled: bool,
-        snapshot_write_enabled: bool,
-    ) -> Self {
-        Self {
-            event_store,
-            snapshot_store,
-            business: Arc::new(GrpcBusinessLogic::new(business_client)),
-            event_bus,
-            snapshot_write_enabled,
-            snapshot_read_enabled,
-            discovery,
-            upcaster: None,
-            limits: ResourceLimits::default(),
+    /// Restrict this coordinator to one aggregate domain.
+    pub fn with_domain(mut self, domain: impl Into<String>) -> Self {
+        self.domain = Some(domain.into());
+        self
+    }
+
+    /// Refuse a book addressed to a domain this coordinator does not own.
+    fn check_domain(&self, book_domain: &str) -> Result<(), Status> {
+        match &self.domain {
+            Some(own) if own != book_domain => Err(Status::invalid_argument(format!(
+                "{}{book_domain} (this coordinator serves {own})",
+                super::errmsg::DOMAIN_MISMATCH
+            ))),
+            _ => Ok(()),
         }
+    }
+
+    /// Record CASCADE_ERROR_COMPENSATE Compensate notifications in `outbox`
+    /// (drained by the binary).
+    pub fn with_outbox(mut self, outbox: Arc<crate::orchestration::outbox::Outbox>) -> Self {
+        self.outbox = Some(outbox);
+        self
     }
 
     /// Set the upcaster for event version transformation.
@@ -107,84 +129,77 @@ impl AggregateService {
         self
     }
 
+    /// Set the DLQ publisher (R2-15). The bin calls this at startup with
+    /// the result of `init_dlq_publisher(&config.dlq).await?` so dead
+    /// letters from `MergeManual` sequence mismatches reach the
+    /// operator-configured backend instead of the default noop.
+    pub fn with_dlq_publisher(mut self, publisher: Arc<dyn DeadLetterPublisher>) -> Self {
+        self.dlq_publisher = publisher;
+        self
+    }
+
     /// Create a new aggregate service with injected business logic.
     ///
-    /// This constructor accepts `Arc<dyn ClientLogic>` directly instead of a gRPC client,
-    /// enabling unit testing with mock implementations.
+    /// Test-only constructor: accepts `Arc<dyn ClientLogic>` directly
+    /// instead of a gRPC client.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_business_logic(
         event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
+        snapshot_repo: Arc<SnapshotRepository>,
         business: Arc<dyn ClientLogic>,
         event_bus: Arc<dyn EventBus>,
         discovery: Arc<dyn ServiceDiscovery>,
     ) -> Self {
         Self {
             event_store,
-            snapshot_store,
+            snapshot_repo,
             business,
             event_bus,
-            snapshot_write_enabled: true,
-            snapshot_read_enabled: true,
             discovery,
             upcaster: None,
             limits: ResourceLimits::default(),
-        }
-    }
-
-    /// Create with injected business logic and configurable snapshot behavior.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn with_business_logic_and_config(
-        event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
-        business: Arc<dyn ClientLogic>,
-        event_bus: Arc<dyn EventBus>,
-        discovery: Arc<dyn ServiceDiscovery>,
-        snapshot_read_enabled: bool,
-        snapshot_write_enabled: bool,
-    ) -> Self {
-        Self {
-            event_store,
-            snapshot_store,
-            business,
-            event_bus,
-            snapshot_write_enabled,
-            snapshot_read_enabled,
-            discovery,
-            upcaster: None,
-            limits: ResourceLimits::default(),
+            dlq_publisher: Arc::new(NoopDeadLetterPublisher),
+            domain: None,
+            channels: Arc::new(ChannelCache::new()),
+            outbox: None,
         }
     }
 
     /// Create an async context (no sync projector calls).
     fn create_async_context(&self) -> GrpcAggregateContext {
-        let mut ctx = GrpcAggregateContext::with_config(
+        let mut ctx = GrpcAggregateContext::new(
             self.event_store.clone(),
-            self.snapshot_store.clone(),
+            self.snapshot_repo.clone(),
             self.discovery.clone(),
             self.event_bus.clone(),
-            self.snapshot_read_enabled,
-            self.snapshot_write_enabled,
-        );
+        )
+        .with_dlq_publisher(self.dlq_publisher.clone())
+        .with_channel_cache(self.channels.clone());
         if let Some(ref upcaster) = self.upcaster {
             ctx = ctx.with_upcaster(upcaster.clone());
+        }
+        if let Some(ref outbox) = self.outbox {
+            ctx = ctx.with_outbox(outbox.clone());
         }
         ctx
     }
 
     /// Create a sync context (calls sync projectors).
     fn create_sync_context(&self, sync_mode: crate::proto::SyncMode) -> GrpcAggregateContext {
-        let mut ctx = GrpcAggregateContext::with_config(
+        let mut ctx = GrpcAggregateContext::new(
             self.event_store.clone(),
-            self.snapshot_store.clone(),
+            self.snapshot_repo.clone(),
             self.discovery.clone(),
             self.event_bus.clone(),
-            self.snapshot_read_enabled,
-            self.snapshot_write_enabled,
         )
-        .with_sync_mode(sync_mode);
+        .with_sync_mode(sync_mode)
+        .with_dlq_publisher(self.dlq_publisher.clone())
+        .with_channel_cache(self.channels.clone());
         if let Some(ref upcaster) = self.upcaster {
             ctx = ctx.with_upcaster(upcaster.clone());
+        }
+        if let Some(ref outbox) = self.outbox {
+            ctx = ctx.with_outbox(outbox.clone());
         }
         ctx
     }
@@ -194,9 +209,9 @@ impl AggregateService {
     /// Parses the proto sync mode and creates async context for Async mode,
     /// sync context otherwise. This consolidates the repeated pattern of
     /// extracting sync mode and conditionally creating the right context type.
+    /// Unknown ints resolve to Async — see [`crate::proto_ext::SyncModeExt`].
     fn create_context_for_sync_mode(&self, sync_mode_int: i32) -> GrpcAggregateContext {
-        let sync_mode = crate::proto::SyncMode::try_from(sync_mode_int)
-            .unwrap_or(crate::proto::SyncMode::Async);
+        let sync_mode = crate::proto::SyncMode::or_default_async(sync_mode_int);
         if sync_mode == crate::proto::SyncMode::Async {
             self.create_async_context()
         } else {
@@ -218,13 +233,14 @@ impl CommandHandlerCoordinatorService for AggregateService {
             Status::invalid_argument(super::errmsg::COMMAND_REQUEST_MISSING_COMMAND)
         })?;
 
-        // Validate command book before processing
         validate_command_book(&command_book, &self.limits)?;
+        self.check_domain(command_book.domain())?;
 
-        let mut ctx = self.create_context_for_sync_mode(sync_request.sync_mode);
-        if let Some(ref cascade_id) = sync_request.cascade_id {
-            ctx = ctx.with_cascade_id(cascade_id);
-        }
+        let ctx = self
+            .create_context_for_sync_mode(sync_request.sync_mode)
+            .with_cascade_error_mode(CascadeErrorMode::or_default_fail_fast(
+                sync_request.cascade_error_mode,
+            ));
 
         let result =
             execute_command_with_retry(&ctx, &*self.business, command_book, saga_backoff()).await;
@@ -243,18 +259,15 @@ impl CommandHandlerCoordinatorService for AggregateService {
             Status::invalid_argument(super::errmsg::SPECULATE_AGG_MISSING_COMMAND)
         })?;
 
-        // Validate command book before processing
         validate_command_book(&command_book, &self.limits)?;
+        self.check_domain(command_book.domain())?;
 
         let (as_of_sequence, as_of_timestamp) = match speculate_req.point_in_time {
             Some(temporal) => match temporal.point_in_time {
                 Some(crate::proto::temporal_query::PointInTime::AsOfSequence(seq)) => {
                     (Some(seq), None)
                 }
-                Some(crate::proto::temporal_query::PointInTime::AsOfTime(ts)) => {
-                    let ts_str = format!("{}.{}", ts.seconds, ts.nanos);
-                    (None, Some(ts_str))
-                }
+                Some(crate::proto::temporal_query::PointInTime::AsOfTime(ts)) => (None, Some(ts)),
                 None => (None, None),
             },
             None => (None, None),
@@ -276,11 +289,14 @@ impl CommandHandlerCoordinatorService for AggregateService {
         Ok(Response::new(response))
     }
 
-    /// Handle compensation flow - returns BusinessResponse for saga compensation handling.
+    /// Handle a compensation delivery: a Notification envelope (RejectionNotification
+    /// or Compensate) from a coordinator's outbox.
     ///
-    /// Unlike normal HandleCommand, this returns the raw BusinessResponse so the caller
-    /// can inspect revocation flags and decide how to handle (quarantine, notify, etc.).
-    /// If business logic returns events, they are persisted before returning.
+    /// Returns the raw BusinessResponse so the delivering coordinator can act on a
+    /// revocation response. Events the handler returns are persisted under the
+    /// envelope's provenance claim; a redelivered envelope returns the first
+    /// delivery's events without invoking the handler again. An UNIMPLEMENTED answer
+    /// from the handler (no handler for the notification) passes through unchanged.
     #[tracing::instrument(name = "aggregate.handle_compensation", skip_all)]
     async fn handle_compensation(
         &self,
@@ -290,49 +306,11 @@ impl CommandHandlerCoordinatorService for AggregateService {
         let command_book = sync_request.command.ok_or_else(|| {
             Status::invalid_argument(super::errmsg::COMMAND_REQUEST_MISSING_COMMAND)
         })?;
-        let (domain, root_uuid) = parse_command_cover(&command_book)?;
-        let edition = command_book.edition().unwrap_or_default().to_string();
-        let correlation_id =
-            crate::orchestration::correlation::extract_correlation_id(&command_book)?;
+        validate_command_book(&command_book, &self.limits)?;
+        self.check_domain(command_book.domain())?;
 
         let ctx = self.create_context_for_sync_mode(sync_request.sync_mode);
-
-        // Load prior events
-        let prior_events = ctx
-            .load_prior_events(&domain, &edition, root_uuid, &TemporalQuery::Current)
-            .await?;
-
-        // Transform events (upcasting)
-        let prior_events = ctx.transform_events(&domain, prior_events).await?;
-
-        // Invoke business logic
-        let contextual_command = ContextualCommand {
-            events: Some(prior_events.clone()),
-            command: Some(command_book),
-        };
-
-        let response = self.business.invoke(contextual_command).await?;
-
-        // If business returned events, persist them
-        if let Some(business_response::Result::Events(ref events)) = response.result {
-            if !events.pages.is_empty() {
-                ctx.persist_events(
-                    &prior_events,
-                    events,
-                    &domain,
-                    &edition,
-                    root_uuid,
-                    &correlation_id,
-                    None,
-                    None, // speculative path doesn't carry source provenance
-                )
-                .await?;
-
-                // Post-persist: publish to bus
-                ctx.post_persist(events).await?;
-            }
-        }
-
+        let response = execute_compensation_pipeline(&ctx, &*self.business, command_book).await?;
         Ok(Response::new(response))
     }
 
@@ -341,10 +319,14 @@ impl CommandHandlerCoordinatorService for AggregateService {
     /// Facts are events that already happened externally and cannot be rejected by business logic.
     /// They are persisted unconditionally with coordinator-assigned sequence numbers.
     ///
-    /// `route_to_handler`: When true (default), invokes the aggregate's handle_fact method
-    /// for validation/error checking before persistence. The aggregate cannot reject facts,
-    /// but can validate data integrity and log warnings. When false, facts are persisted
-    /// directly without aggregate involvement.
+    /// `skip_handler`: When false/unset (the proto3 zero value — the safe default),
+    /// the fact is routed through the aggregate's handle_fact method for
+    /// validation/error checking before persistence. The aggregate cannot reject
+    /// facts, but can validate data integrity and log warnings. When true, facts
+    /// are persisted directly without aggregate involvement (projector-originated
+    /// writes). This replaces the removed routing bool (EventRequest field 3,
+    /// now reserved — see types.proto), whose proto3 zero value silently
+    /// bypassed the handler when the field was omitted.
     ///
     /// Idempotent: subsequent requests with same external_id return original events.
     #[tracing::instrument(name = "aggregate.handle_event", skip_all)]
@@ -356,14 +338,18 @@ impl CommandHandlerCoordinatorService for AggregateService {
         let fact_events = sync_event_book
             .events
             .ok_or_else(|| Status::invalid_argument(super::errmsg::EVENT_REQUEST_MISSING_EVENTS))?;
+        self.check_domain(fact_events.domain())?;
 
         let ctx = self.create_context_for_sync_mode(sync_event_book.sync_mode);
 
-        // Use aggregate handler if route_to_handler is true (default behavior)
-        let business: Option<&dyn ClientLogic> = if sync_event_book.route_to_handler {
-            Some(&*self.business)
-        } else {
+        // Route through the aggregate's handle_fact unless the caller opted
+        // out. skip_handler's proto3 zero value (false/unset) means "route" —
+        // the safe default: omission can no longer bypass fact validation the
+        // way the removed routing bool's zero value used to.
+        let business: Option<&dyn ClientLogic> = if sync_event_book.skip_handler {
             None
+        } else {
+            Some(&*self.business)
         };
 
         let fact_response = execute_fact_pipeline(&ctx, business, fact_events).await?;

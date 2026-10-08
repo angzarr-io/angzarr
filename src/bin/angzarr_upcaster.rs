@@ -27,7 +27,6 @@ use tracing::{debug, info};
 
 use angzarr::proto::upcaster_service_server::{UpcasterService, UpcasterServiceServer};
 use angzarr::proto::{UpcastRequest, UpcastResponse};
-use angzarr::proto_reflect;
 use angzarr::transport::{grpc_trace_layer, serve_with_transport};
 use angzarr::utils::bootstrap::startup;
 
@@ -71,7 +70,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = Server::builder()
         .layer(grpc_trace_layer())
         .add_service(health_service)
-        .add_service(proto_reflect::reflection_service())
+        // Framework-internal binary: no gRPC reflection. See H-33.
         .add_service(UpcasterServiceServer::new(upcaster_service));
 
     serve_with_transport(router, &config.transport, "upcaster", None).await?;

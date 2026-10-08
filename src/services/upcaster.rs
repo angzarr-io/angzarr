@@ -30,6 +30,7 @@ use crate::proto::{upcaster_service_client::UpcasterServiceClient, EventPage, Up
 use crate::proto_ext::correlated_request;
 #[cfg(test)]
 use crate::proto_ext::EventPageExt;
+use crate::transport::GrpcMessageLimits;
 
 // ============================================================================
 // Configuration
@@ -93,7 +94,7 @@ impl Upcaster {
     ///
     /// Uses the same channel as client logic (both services on same server).
     pub fn from_channel(channel: Channel) -> Self {
-        let client = UpcasterServiceClient::new(channel);
+        let client = UpcasterServiceClient::new(channel).with_message_limits();
         info!("Upcaster client created (shared channel with client logic)");
         Self {
             client: Some(Arc::new(Mutex::new(client))),
@@ -107,7 +108,7 @@ impl Upcaster {
         use crate::transport::connect_to_address;
 
         let channel = connect_to_address(address).await?;
-        let client = UpcasterServiceClient::new(channel);
+        let client = UpcasterServiceClient::new(channel).with_message_limits();
         info!(address = %address, "Upcaster client connected (separate address)");
 
         Ok(Self {
@@ -145,6 +146,7 @@ impl Upcaster {
 
         debug!(domain = %domain, event_count = events.len(), "Upcasting events");
 
+        let identities: Vec<PageIdentity> = events.iter().map(PageIdentity::of).collect();
         let request = correlated_request(
             UpcastRequest {
                 domain: domain.to_string(),
@@ -153,10 +155,37 @@ impl Upcaster {
             "", // No correlation context for upcasting
         );
 
-        let mut client = client.lock().await;
-        let response = client.upcast(request).await?;
+        let mut client = client.lock().await.clone();
+        let upcast = client.upcast(request).await?.into_inner().events;
 
-        Ok(response.into_inner().events)
+        let returned: Vec<PageIdentity> = upcast.iter().map(PageIdentity::of).collect();
+        if returned != identities {
+            return Err(Status::internal(format!(
+                "Upcaster for {domain} changed the event stream: sent {} page(s) {:?}, \
+                 got {} page(s) {:?}; it may rewrite payloads only",
+                identities.len(),
+                identities,
+                returned.len(),
+                returned
+            )));
+        }
+        Ok(upcast)
+    }
+}
+
+/// What an upcaster must hand back unchanged for each page: its sequence.
+/// Only the payload may be rewritten.
+#[derive(Debug, PartialEq, Eq)]
+struct PageIdentity {
+    sequence: u32,
+}
+
+impl PageIdentity {
+    fn of(page: &EventPage) -> Self {
+        use crate::proto_ext::EventPageExt;
+        Self {
+            sequence: page.sequence_num(),
+        }
     }
 }
 

@@ -1,8 +1,9 @@
 //! angzarr-projector: Projector sidecar
 //!
 //! Kubernetes sidecar for projector services. Subscribes to events from the
-//! message bus (AMQP, Kafka, or IPC) and forwards them to the projector for
-//! read model updates.
+//! message bus (AMQP, Kafka, Pub/Sub or SNS/SQS) and forwards them to the
+//! projector for read model updates. Serves gRPC health on the configured
+//! transport (`ANGZARR__TRANSPORT__*`).
 //!
 //! ## Architecture
 //! ```text
@@ -22,11 +23,11 @@
 //! ## Configuration
 //! - TARGET_ADDRESS: Projector gRPC address (e.g., "localhost:50051")
 //! - TARGET_COMMAND: Optional command to spawn projector (embedded mode)
-//! - ANGZARR_SUBSCRIPTIONS: Event subscriptions (format: "domain:Type1,Type2;domain2")
-//! - MESSAGING_TYPE: amqp, kafka, or ipc
+//! - ANGZARR_SUBSCRIPTIONS: Event subscriptions (format: "domain:Type1,Type2;domain2");
+//!   the bus subscription is scoped to these domains, empty = every domain
+//! - ANGZARR__MESSAGING__TYPE: amqp, kafka, pubsub or sns-sqs
 //! - STREAM_OUTPUT: Set to "true" to publish projector output (default: false)
 
-use std::path::Path;
 use std::time::Duration;
 
 use backon::Retryable;
@@ -35,12 +36,19 @@ use tracing::{error, info, warn};
 use angzarr::bus::{init_event_bus, EventBusMode};
 use angzarr::config::{Config, STREAM_OUTPUT_ENV_VAR, TARGET_COMMAND_JSON_ENV_VAR};
 use angzarr::descriptor::parse_subscriptions;
+use angzarr::dlq::init_dlq_publisher;
 use angzarr::handlers::core::projector::ProjectorEventHandler;
+use angzarr::payload_store::{init_payload_offload, with_offload};
 use angzarr::process::{wait_for_ready, ManagedProcess, ProcessEnv};
 use angzarr::proto::projector_service_client::ProjectorServiceClient;
-use angzarr::transport::connect_to_address;
+use angzarr::transport::{
+    connect_to_address, grpc_trace_layer, serve_with_transport, GrpcMessageLimits,
+};
 use angzarr::utils::bootstrap::init_tracing;
 use angzarr::utils::retry::connection_backoff;
+use angzarr::utils::sidecar::start_subscriber;
+use tonic::transport::Server;
+use tonic_health::server::health_reporter;
 
 /// Environment variable for subscription configuration.
 const SUBSCRIPTIONS_ENV_VAR: &str = "ANGZARR_SUBSCRIPTIONS";
@@ -59,6 +67,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })?;
 
     info!("Starting angzarr-projector sidecar");
+
+    // R2-15 hard-fail boot: if the operator configured DLQ but the chosen
+    // backend cannot be reached, fail loudly here rather than silently
+    // dropping permanent projector failures for the lifetime of the
+    // process. Runs before heavier init (process spawn, downstream gRPC,
+    // bus subscriber) so the failure path is as cheap as possible.
+    let dlq_publisher = init_dlq_publisher(&config.dlq).await.map_err(|e| {
+        error!("DLQ publisher init failed (boot abort): {}", e);
+        e
+    })?;
+    if config.dlq.targets.is_empty() {
+        warn!(
+            "dlq.targets is empty; dead letters will be discarded by the \
+             default noop publisher. Set dlq.targets in config.yaml to \
+             route projector permanent-failure dead letters to a backend."
+        );
+    } else {
+        info!(
+            target_count = config.dlq.targets.len(),
+            "DLQ publisher initialized"
+        );
+    }
 
     let target = config
         .target
@@ -89,10 +119,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Spawn projector process if command is configured (embedded mode)
     let _managed_process = if !command.is_empty() {
-        // Extract service_name and domain from target address for socket naming
-        // e.g., "/tmp/angzarr/projector-logging-customer.sock" -> service_name="projector-logging", domain="customer"
-        let (service_name, domain) = extract_socket_names(&address);
-        let env = ProcessEnv::from_transport(&config.transport, &service_name, Some(&domain));
+        let env = ProcessEnv::from_transport(&config.transport, "projector", Some(projector_name));
         let process =
             ManagedProcess::spawn(&command, target.working_dir.as_deref(), &env, None).await?;
 
@@ -135,7 +162,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     .await?;
 
     // Create client for the Projector service (Handle RPC)
-    let projector_client = ProjectorServiceClient::new(channel);
+    let projector_client = ProjectorServiceClient::new(channel).with_message_limits();
 
     // Get subscriptions from environment or config
     let subscriptions = if let Ok(subs_str) = std::env::var(SUBSCRIPTIONS_ENV_VAR) {
@@ -150,75 +177,51 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     info!(name = %projector_name, inputs = subscriptions.len(), "Configured projector subscriptions");
 
+    let offload = init_payload_offload(&config.payload_offload).await?;
+
     // Create publisher if streaming is enabled
     let publisher = if stream_output {
         info!("Streaming output enabled - projector results will be published");
-        Some(
-            init_event_bus(messaging, EventBusMode::Publisher)
-                .await
-                .map_err(|e| -> Box<dyn std::error::Error> { e })?,
-        )
+        let bus = init_event_bus(messaging, EventBusMode::Publisher)
+            .await
+            .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+        Some(with_offload(bus, offload.as_ref()))
     } else {
         info!("Streaming output disabled - projector results will not be published");
         None
     };
 
-    // Create subscriber
-    let queue_name = format!("projector-{}", projector_name);
-    let subscriber_mode = EventBusMode::SubscriberAll { queue: queue_name };
-    let subscriber = init_event_bus(messaging, subscriber_mode)
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
-
     // Create handler with or without streaming capability
-    let mut handler = ProjectorEventHandler::new(projector_client, projector_name.to_string());
+    let mut handler = ProjectorEventHandler::new(projector_client, projector_name.to_string())
+        .with_dlq_publisher(dlq_publisher.clone());
     if let Some(pub_bus) = publisher {
         handler = handler.with_publisher(pub_bus);
     }
-    let handler = handler;
 
-    subscriber
-        .subscribe(Box::new(handler))
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let _subscriber = start_subscriber(
+        messaging,
+        format!("projector-{}", projector_name),
+        subscriptions,
+        Box::new(handler),
+        dlq_publisher,
+        offload.as_ref(),
+        projector_name,
+        "projector",
+    )
+    .await?;
 
-    // Start consuming (no-op for AMQP/Kafka, spawns reader for IPC)
-    subscriber
-        .start_consuming()
-        .await
-        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    // Health endpoint for kubelet probes; serves until SIGTERM/SIGINT, then
+    // drains and flushes telemetry.
+    let (health_reporter, health_service) = health_reporter();
+    health_reporter
+        .set_service_status("", tonic_health::ServingStatus::Serving)
+        .await;
+    let router = Server::builder()
+        .layer(grpc_trace_layer())
+        .add_service(health_service);
 
-    info!("Projector sidecar running, press Ctrl+C to exit");
-
-    tokio::signal::ctrl_c().await?;
+    info!("Projector sidecar running");
+    serve_with_transport(router, &config.transport, "projector", Some(projector_name)).await?;
 
     Ok(())
-}
-
-/// Extract service_name and domain from a UDS socket path.
-///
-/// For path like "/tmp/angzarr/projector-logging-customer.sock":
-/// - Returns ("projector-logging", "customer")
-///
-/// For path like "/tmp/angzarr/projector-customer.sock":
-/// - Returns ("projector", "customer")
-fn extract_socket_names(address: &str) -> (String, String) {
-    // Get the filename without extension
-    let path = Path::new(address);
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("projector-unknown");
-
-    // Split on last hyphen to separate domain
-    // "projector-logging-customer" -> ("projector-logging", "customer")
-    // "projector-customer" -> ("projector", "customer")
-    if let Some(last_hyphen) = stem.rfind('-') {
-        let service_name = &stem[..last_hyphen];
-        let domain = &stem[last_hyphen + 1..];
-        (service_name.to_string(), domain.to_string())
-    } else {
-        // Fallback if no hyphen found
-        ("projector".to_string(), stem.to_string())
-    }
 }

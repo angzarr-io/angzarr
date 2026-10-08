@@ -148,21 +148,22 @@ fn make_test_saga_service(name: &str, source_domain: Option<&str>, port: i32) ->
     }
 }
 
-/// Helper to make a PM Service with the subscriptions label populated.
+/// Helper to make a PM Service with the subscriptions annotation populated.
 fn make_test_pm_service(name: &str, subscriptions: Option<&str>, port: i32) -> Service {
     let mut labels = BTreeMap::new();
     labels.insert(
         COMPONENT_LABEL.to_string(),
         COMPONENT_PROCESS_MANAGER.to_string(),
     );
-    if let Some(s) = subscriptions {
-        labels.insert(SUBSCRIPTIONS_LABEL.to_string(), s.to_string());
-    }
+    labels.insert(PM_DOMAIN_LABEL.to_string(), "checkout".to_string());
+    let annotations = subscriptions
+        .map(|s| BTreeMap::from([(SUBSCRIPTIONS_ANNOTATION.to_string(), s.to_string())]));
     Service {
         metadata: ObjectMeta {
             name: Some(name.to_string()),
             namespace: Some("test-ns".to_string()),
             labels: Some(labels),
+            annotations,
             ..Default::default()
         },
         spec: Some(ServiceSpec {
@@ -237,7 +238,7 @@ fn test_extract_pm_subscriptions_trims_whitespace() {
     );
 }
 
-/// A PM with no subscriptions label is unroutable for the same reason
+/// A PM with no subscriptions annotation is unroutable for the same reason
 /// as an unlabeled saga — skip it.
 #[test]
 fn test_extract_pm_missing_subscriptions_skipped() {
@@ -245,7 +246,7 @@ fn test_extract_pm_missing_subscriptions_skipped() {
     assert!(K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").is_none());
 }
 
-/// An empty subscriptions label (e.g. `""` or just commas) shouldn't
+/// An empty subscriptions annotation (e.g. `""` or just commas) shouldn't
 /// register a no-op PM — that's also unroutable.
 #[test]
 fn test_extract_pm_empty_subscriptions_skipped() {
@@ -370,15 +371,16 @@ fn test_pm_watcher_path_uses_configured_namespace_not_metadata() {
         COMPONENT_LABEL.to_string(),
         COMPONENT_PROCESS_MANAGER.to_string(),
     );
-    labels.insert(
-        SUBSCRIPTIONS_LABEL.to_string(),
-        "order,inventory".to_string(),
-    );
+    labels.insert(PM_DOMAIN_LABEL.to_string(), "fulfillment".to_string());
     let svc = Service {
         metadata: ObjectMeta {
             name: Some("pmg-fulfillment".to_string()),
             namespace: Some("prod-services".to_string()),
             labels: Some(labels),
+            annotations: Some(BTreeMap::from([(
+                SUBSCRIPTIONS_ANNOTATION.to_string(),
+                "order,inventory".to_string(),
+            )])),
             ..Default::default()
         },
         spec: Some(ServiceSpec {
@@ -571,4 +573,189 @@ fn test_next_reconnect_delay_first_call_with_observed_returns_min_delay() {
 
     let delay = next_reconnect_delay(true, &mut iter, &builder);
     assert_eq!(delay, Duration::from_millis(100));
+}
+
+// ============================================================================
+// apply_watch_event: deletes and relists evict
+// ============================================================================
+
+fn extract_any(svc: &Service) -> Option<(String, DiscoveredService)> {
+    K8sServiceDiscovery::extract_service_with_namespace(svc, "test-ns").map(|d| (d.name.clone(), d))
+}
+
+/// Saga extraction requires the source-domain label; used to model a
+/// Service that stops qualifying.
+fn extract_saga(svc: &Service) -> Option<(String, SagaService)> {
+    K8sServiceDiscovery::extract_saga_with_namespace(svc, "test-ns")
+        .map(|s| (s.service.name.clone(), s))
+}
+
+async fn names<T>(cache: &RwLock<HashMap<String, T>>) -> Vec<String> {
+    let mut v: Vec<String> = cache.read().await.keys().cloned().collect();
+    v.sort();
+    v
+}
+
+/// A Delete event evicts the Service so it is no longer routed to.
+#[tokio::test]
+async fn test_watch_delete_evicts_service() {
+    let cache = RwLock::new(HashMap::new());
+    let relist = Mutex::new(None);
+    let svc = make_test_service(
+        "orders-projector",
+        COMPONENT_PROJECTOR,
+        Some("orders"),
+        1310,
+    );
+
+    apply_watch_event(
+        "projector",
+        &cache,
+        &relist,
+        Event::Apply(svc.clone()),
+        extract_any,
+    )
+    .await;
+    assert_eq!(names(&cache).await, vec!["orders-projector"]);
+
+    apply_watch_event(
+        "projector",
+        &cache,
+        &relist,
+        Event::Delete(svc),
+        extract_any,
+    )
+    .await;
+    assert!(names(&cache).await.is_empty());
+}
+
+/// A relist after a disconnected watch replaces the cache: a Service
+/// deleted while disconnected (absent from the relist) is evicted, and
+/// the cache keeps serving the old entries until the relist completes.
+#[tokio::test]
+async fn test_watch_relist_replaces_cache_on_init_done() {
+    let cache = RwLock::new(HashMap::new());
+    let relist = Mutex::new(None);
+    let kept = make_test_service("a-projector", COMPONENT_PROJECTOR, Some("a"), 1310);
+    let gone = make_test_service("b-projector", COMPONENT_PROJECTOR, Some("b"), 1310);
+    for svc in [kept.clone(), gone] {
+        apply_watch_event("projector", &cache, &relist, Event::Apply(svc), extract_any).await;
+    }
+
+    apply_watch_event("projector", &cache, &relist, Event::Init, extract_any).await;
+    apply_watch_event(
+        "projector",
+        &cache,
+        &relist,
+        Event::InitApply(kept),
+        extract_any,
+    )
+    .await;
+    assert_eq!(
+        names(&cache).await,
+        vec!["a-projector", "b-projector"],
+        "cache unchanged until the relist completes"
+    );
+
+    apply_watch_event("projector", &cache, &relist, Event::InitDone, extract_any).await;
+    assert_eq!(names(&cache).await, vec!["a-projector"]);
+}
+
+/// A Delete that arrives during a relist is not resurrected by InitDone.
+#[tokio::test]
+async fn test_watch_delete_during_relist_is_not_resurrected() {
+    let cache = RwLock::new(HashMap::new());
+    let relist = Mutex::new(None);
+    let svc = make_test_service("a-projector", COMPONENT_PROJECTOR, Some("a"), 1310);
+
+    apply_watch_event("projector", &cache, &relist, Event::Init, extract_any).await;
+    apply_watch_event(
+        "projector",
+        &cache,
+        &relist,
+        Event::InitApply(svc.clone()),
+        extract_any,
+    )
+    .await;
+    apply_watch_event(
+        "projector",
+        &cache,
+        &relist,
+        Event::Delete(svc),
+        extract_any,
+    )
+    .await;
+    apply_watch_event("projector", &cache, &relist, Event::InitDone, extract_any).await;
+
+    assert!(names(&cache).await.is_empty());
+}
+
+/// An update that removes a required label (here the saga source-domain)
+/// drops the Service instead of leaving the stale entry routed.
+#[tokio::test]
+async fn test_watch_apply_of_unqualified_service_removes_it() {
+    let cache = RwLock::new(HashMap::new());
+    let relist = Mutex::new(None);
+
+    let labelled = make_test_saga_service("saga-x", Some("orders"), 1310);
+    apply_watch_event(
+        "saga",
+        &cache,
+        &relist,
+        Event::Apply(labelled),
+        extract_saga,
+    )
+    .await;
+    assert_eq!(names(&cache).await, vec!["saga-x"]);
+
+    let unlabelled = make_test_saga_service("saga-x", None, 1310);
+    apply_watch_event(
+        "saga",
+        &cache,
+        &relist,
+        Event::Apply(unlabelled),
+        extract_saga,
+    )
+    .await;
+    assert!(names(&cache).await.is_empty());
+}
+
+// ============================================================================
+// PM subscriptions annotation
+// ============================================================================
+
+/// The subscriptions are read from the annotation only; a label of the
+/// same name (which could not hold a comma list anyway) is not consulted.
+#[test]
+fn test_extract_pm_ignores_subscriptions_label() {
+    let mut svc = make_test_pm_service("pmg-checkout", None, 1310);
+    svc.metadata
+        .labels
+        .as_mut()
+        .unwrap()
+        .insert(SUBSCRIPTIONS_ANNOTATION.to_string(), "order".to_string());
+
+    assert!(K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").is_none());
+}
+
+/// The PM's domain (its own event stream) comes from the `angzarr.io/pm`
+/// label, independent of the Service name.
+#[test]
+fn test_extract_pm_domain_from_pm_label() {
+    let svc = make_test_pm_service("checkout-flow-pm", Some("order,payment"), 1310);
+    let pm = K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").expect("pm");
+    assert_eq!(pm.service.name, "checkout-flow-pm");
+    assert_eq!(pm.service.domain.as_deref(), Some("checkout"));
+}
+
+/// A PM Service without its domain label is not registered.
+#[test]
+fn test_extract_pm_missing_domain_label_skipped() {
+    let mut svc = make_test_pm_service("checkout-flow-pm", Some("order"), 1310);
+    svc.metadata
+        .labels
+        .as_mut()
+        .unwrap()
+        .remove(PM_DOMAIN_LABEL);
+    assert!(K8sServiceDiscovery::extract_pm_with_namespace(&svc, "test-ns").is_none());
 }

@@ -44,7 +44,7 @@ pub async fn connect_channel(address: &str) -> Result<Channel, String> {
             tokio::time::sleep(delay).await;
         }
 
-        match Channel::from_shared(format!("http://{}", address)) {
+        match crate::transport::tcp_endpoint(format!("http://{}", address)) {
             Ok(endpoint) => match endpoint.connect().await {
                 Ok(channel) => return Ok(channel),
                 Err(e) => {

@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "ctxloom": {
-      "command": "/home/babbitt/go/bin/ctxloom",
+      "command": "ctxloom",
       "args": [
         "mcp"
       ],
@@ -21,6 +21,13 @@
         "mcp"
       ],
       "cwd": "${CLAUDE_PROJECT_DIR}"
+    },
+    "sequential-thinking": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@anthropics/mcp-server-sequential-thinking"
+      ]
     }
   }
 }

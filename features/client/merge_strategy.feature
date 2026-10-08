@@ -1,6 +1,3 @@
-# DOC: This file is referenced in docs/docs/reference/patterns.mdx
-#      Update documentation when making changes to merge strategy patterns.
-
 Feature: Merge Strategy - Concurrency Control
   The MergeStrategy enum controls how the aggregate coordinator handles sequence
   conflicts when multiple commands target the same aggregate concurrently.
@@ -23,7 +20,7 @@ Feature: Merge Strategy - Concurrency Control
   - AGGREGATE_HANDLES enables CRDT-style operations: counters, sets, last-writer-wins.
     Same pattern applies to distributed counters, collaborative editing.
 
-  Why poker exercises merge strategy patterns well:
+  Why a player wallet exercises merge strategy patterns well:
   - STRICT for fund operations: ReserveFunds must see current balance to prevent
     over-reserving. Two players can't both reserve the same $500.
   - COMMUTATIVE for non-critical updates: AddBonusPoints can retry automatically

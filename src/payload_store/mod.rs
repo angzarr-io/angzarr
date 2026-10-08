@@ -1,8 +1,5 @@
 //! External payload storage for claim check pattern.
 //!
-//! DOC: This file is referenced in docs/docs/operations/payload-offloading.md
-//!      Update documentation when making changes to payload store patterns.
-//!
 //! When event/command payloads exceed message bus size limits, they are stored
 //! externally and replaced with a `PayloadReference` marker. This module provides
 //! the storage backends and related infrastructure.
@@ -50,6 +47,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+use crate::bus::EventBus;
 use crate::proto::{PayloadReference, PayloadStorageType};
 
 /// Error message constants for payload store operations.
@@ -126,6 +124,40 @@ pub fn hash_to_hex(hash: &[u8]) -> String {
     hex::encode(hash)
 }
 
+/// Object key for a payload in an object store: `[{prefix}/]{hh}/{hash}`,
+/// sharded by the first two hex chars of the content hash.
+pub fn payload_object_key(prefix: Option<&str>, hash: &[u8]) -> String {
+    let hex = hash_to_hex(hash);
+    let subdir = &hex[0..2];
+    match prefix {
+        Some(prefix) => format!("{}/{}/{}", prefix, subdir, hex),
+        None => format!("{}/{}", subdir, hex),
+    }
+}
+
+/// Whether `key` has the content-addressed layout every payload store
+/// writes: `[{prefix}/]{hh}/{hash}` where `hash` is 64 lowercase hex chars
+/// and `hh` its first two. Object-store reapers delete only such keys, so a
+/// bucket shared with other data never loses foreign objects.
+pub fn is_payload_object_key(key: &str, prefix: Option<&str>) -> bool {
+    let rest = match prefix {
+        Some(p) => match key.strip_prefix(p).and_then(|r| r.strip_prefix('/')) {
+            Some(r) => r,
+            None => return false,
+        },
+        None => key,
+    };
+    let Some((subdir, hash)) = rest.split_once('/') else {
+        return false;
+    };
+    hash.len() == 64
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && hash.starts_with(subdir)
+        && subdir.len() == 2
+}
+
 /// Parse hex string back to hash bytes.
 pub fn hex_to_hash(hex_str: &str) -> Result<Vec<u8>> {
     hex::decode(hex_str).map_err(|e| PayloadStoreError::InvalidUri(e.to_string()))
@@ -194,6 +226,52 @@ pub async fn init_payload_store(
             Ok(Some(Arc::new(store)))
         }
     }
+}
+
+/// Claim-check offload resolved at boot: the payload store plus the size
+/// above which event payloads are moved to it.
+#[derive(Clone)]
+pub struct PayloadOffload {
+    store: Arc<dyn PayloadStore>,
+    threshold: Option<usize>,
+}
+
+impl PayloadOffload {
+    /// Offload through `store`; `threshold` `None` uses each bus's limit.
+    pub fn new(store: Arc<dyn PayloadStore>, threshold: Option<usize>) -> Self {
+        Self { store, threshold }
+    }
+
+    /// Wrap `bus` so publishes offload oversized payloads and subscribers
+    /// resolve references back to full events.
+    pub fn wrap(&self, bus: Arc<dyn EventBus>) -> Arc<dyn EventBus> {
+        crate::bus::wrap_with_offloading(bus, Some(Arc::clone(&self.store)), self.threshold)
+    }
+}
+
+/// Wrap `bus` with `offload` when offloading is enabled.
+pub fn with_offload(bus: Arc<dyn EventBus>, offload: Option<&PayloadOffload>) -> Arc<dyn EventBus> {
+    match offload {
+        Some(o) => o.wrap(bus),
+        None => bus,
+    }
+}
+
+/// Initialize claim-check offload from `payload_offload` config.
+///
+/// Returns `None` when offloading is disabled. When enabled, builds the
+/// store and spawns its [`TtlReaper`] (retention `retention_hours`,
+/// interval `cleanup_interval_secs`).
+pub async fn init_payload_offload(
+    config: &PayloadOffloadConfig,
+) -> std::result::Result<Option<PayloadOffload>, Box<dyn std::error::Error>> {
+    let Some(store) = init_payload_store(config).await? else {
+        return Ok(None);
+    };
+    TtlReaper::new(Arc::clone(&store), config.retention())
+        .with_interval(config.cleanup_interval())
+        .spawn();
+    Ok(Some(PayloadOffload::new(store, config.threshold())))
 }
 
 #[cfg(test)]

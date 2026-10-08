@@ -118,34 +118,6 @@ mod row_key_tests {
         }
     }
 
-    /// H-26 companion: cascade-index row key shape must also round-trip
-    /// hash characters in any component.
-    #[test]
-    fn test_cascade_index_row_key_round_trip_with_hash_in_components() {
-        let root = Uuid::parse_str("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee").unwrap();
-
-        for (cascade_id, domain, edition) in [
-            ("cascade#alpha", "orders", "main"),
-            ("cascade", "orders#beta", "main"),
-            ("cascade", "orders", "v2#gamma"),
-            ("cas#cade", "or#ders", "v2#preview"),
-        ] {
-            let key =
-                BigtableEventStore::cascade_index_row_key(cascade_id, domain, edition, root, 7);
-            let parsed = BigtableEventStore::parse_cascade_index_key(&key).unwrap_or_else(|| {
-                panic!(
-                    "round-trip failed for cascade={:?} domain={:?} edition={:?}",
-                    cascade_id, domain, edition
-                )
-            });
-            assert_eq!(parsed.0, cascade_id);
-            assert_eq!(parsed.1, domain);
-            assert_eq!(parsed.2, edition);
-            assert_eq!(parsed.3, root);
-            assert_eq!(parsed.4, 7);
-        }
-    }
-
     #[test]
     fn test_snapshot_row_key_format() {
         let root = Uuid::parse_str("12345678-1234-1234-1234-123456789abc").unwrap();
@@ -193,8 +165,6 @@ mod sequence_tests {
             }),
             payload: None,
             created_at: None,
-            no_commit: false,
-            cascade_id: None,
         }
     }
 
@@ -279,8 +249,6 @@ mod mutation_tests {
                 seconds: 1705315800,
                 nanos: 0,
             }),
-            no_commit: false,
-            cascade_id: None,
         };
 
         let mutations = BigtableEventStore::build_event_mutations(&event, "corr-123");

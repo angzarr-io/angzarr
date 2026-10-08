@@ -4,7 +4,7 @@
 //! - `EventBus` trait: Event delivery to projectors/sagas
 //! - `EventHandler` trait: For processing events
 //! - Bus configuration types
-//! - Implementations: AMQP (RabbitMQ), Kafka, Channel, IPC, NATS, Pub/Sub, SNS/SQS
+//! - Implementations: AMQP (RabbitMQ), Kafka, Pub/Sub, SNS/SQS
 
 use std::sync::Arc;
 
@@ -14,6 +14,7 @@ use crate::proto::EventBook;
 
 // Core modules
 pub mod config;
+pub mod delivery;
 pub mod error;
 pub mod factory;
 pub mod traits;
@@ -22,27 +23,30 @@ pub mod traits;
 #[cfg(feature = "amqp")]
 pub mod amqp;
 pub mod dispatch;
-#[cfg(unix)]
-pub mod ipc;
 #[cfg(feature = "kafka")]
 pub mod kafka;
+// C02: MockEventBus is a test double only. It is never registered with the
+// self-registering `BusBackend` factory (see `factory.rs`), so gating it
+// behind `test`/`test-utils` also removes the only way production code
+// could reach for it directly (the two sidecar binaries used to
+// hand-import it as a silent fallback for unrecognized messaging types —
+// removed in this change; see `src/bin/angzarr_aggregate.rs` and
+// `src/bin/angzarr_process_manager.rs`).
+#[cfg(any(test, feature = "test-utils"))]
 pub mod mock;
-#[cfg(feature = "nats")]
-pub mod nats;
 pub mod offloading;
-// Outbox is always available (sqlite always compiled)
-pub mod outbox;
+pub mod ordering;
 #[cfg(feature = "pubsub")]
 pub mod pubsub;
 #[cfg(feature = "sns-sqs")]
 pub mod sns_sqs;
 
 // Re-export core types from submodules
-#[cfg(unix)]
-pub use config::IpcBusConfig;
 pub use config::{
-    AmqpBusConfig, EventBusMode, KafkaConfig, MessagingConfig, PubSubBusConfig, SnsSqsBusConfig,
+    AmqpBusConfig, DeliveryConfig, EventBusMode, KafkaConfig, MessagingConfig, PubSubBusConfig,
+    SnsSqsBusConfig,
 };
+pub use delivery::{DeadLetteringHandler, TargetFilterHandler};
 
 pub use error::{errmsg, BusError, Result};
 
@@ -56,15 +60,10 @@ pub use traits::{
 // Re-export implementation types
 #[cfg(feature = "amqp")]
 pub use amqp::{AmqpConfig, AmqpEventBus};
-#[cfg(unix)]
-pub use ipc::{
-    IpcBroker, IpcBrokerConfig, IpcConfig, IpcEventBus, SubscriberInfo, SUBSCRIBERS_ENV_VAR,
-};
 #[cfg(feature = "kafka")]
 pub use kafka::{KafkaEventBus, KafkaEventBusConfig};
+#[cfg(any(test, feature = "test-utils"))]
 pub use mock::MockEventBus;
-#[cfg(feature = "nats")]
-pub use nats::{NatsBusConfig, NatsEventBus};
 pub use offloading::{OffloadingConfig, OffloadingEventBus};
 #[cfg(feature = "pubsub")]
 pub use pubsub::{PubSubConfig, PubSubEventBus};
@@ -135,6 +134,21 @@ impl<T: EventBus> EventBus for Instrumented<T> {
     fn max_message_size(&self) -> Option<usize> {
         self.inner().max_message_size()
     }
+}
+
+/// Backoff between consumer reconnect / receive attempts: 100 ms doubling
+/// to 30 s, with jitter, never giving up. The iterator never runs dry, so
+/// callers never fall back to a fixed delay after a few failures.
+#[cfg_attr(
+    not(any(feature = "amqp", feature = "pubsub", feature = "sns-sqs")),
+    allow(dead_code)
+)]
+pub(crate) fn reconnect_backoff() -> backon::ExponentialBuilder {
+    backon::ExponentialBuilder::default()
+        .with_min_delay(std::time::Duration::from_millis(100))
+        .with_max_delay(std::time::Duration::from_secs(30))
+        .with_jitter()
+        .without_max_times()
 }
 
 #[cfg(test)]

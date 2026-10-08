@@ -90,7 +90,7 @@ macro_rules! impl_position_store {
                 root: &[u8],
                 sequence: u32,
             ) -> crate::storage::Result<()> {
-                use sea_query::{Alias, Expr, OnConflict, Query};
+                use sea_query::{Alias, Expr, Query};
 
                 use crate::storage::schema::Positions;
 
@@ -129,18 +129,20 @@ macro_rules! impl_position_store {
                         updated_at.into(),
                     ])
                     .on_conflict(
-                        OnConflict::columns([
-                            Positions::Handler,
-                            Positions::Edition,
-                            Positions::Domain,
-                            Positions::Root,
-                        ])
-                        .update_columns([Positions::Sequence, Positions::UpdatedAt])
-                        .action_and_where(
-                            Expr::col((Positions::Table, Positions::Sequence))
-                                .lt(Expr::col((Alias::new("excluded"), Positions::Sequence))),
-                        )
-                        .to_owned(),
+                        // S1: the conflict target is backend-specific.
+                        // Postgres targets the NULLS-NOT-DISTINCT PK columns;
+                        // SQLite targets the COALESCE(edition,'') unique
+                        // expression index (migration 0009) because its
+                        // NULL-distinct PK can never fire for main-timeline
+                        // rows — every put inserted a duplicate and the
+                        // checkpoint froze.
+                        <$db_type>::positions_conflict_target()
+                            .update_columns([Positions::Sequence, Positions::UpdatedAt])
+                            .action_and_where(
+                                Expr::col((Positions::Table, Positions::Sequence))
+                                    .lt(Expr::col((Alias::new("excluded"), Positions::Sequence))),
+                            )
+                            .to_owned(),
                     )
                     .to_owned();
 

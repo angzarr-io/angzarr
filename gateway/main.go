@@ -19,72 +19,92 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/angzarr-io/angzarr/gateway/discovery"
-	gw "github.com/angzarr-io/angzarr/gateway/gen/angzarr_client/proto/angzarr"
-	// H-42: angzarr-status DLQ admin protos live under core/main/proto and
-	// generate into gen/angzarr/status (their own go_package). The REST
-	// surface (`/api/dlq`, `/api/dlq/{id}`, etc.) is dead unless we
-	// register this handler.
-	status "github.com/angzarr-io/angzarr/gateway/gen/angzarr/status"
+	statusv1 "github.com/angzarr-io/angzarr/gateway/gen/io/angzarr/status/v1"
+	angzarrv1 "github.com/angzarr-io/angzarr/gateway/gen/io/angzarr/v1"
+	"github.com/angzarr-io/angzarr/gateway/routing"
 )
 
 //go:embed api/*
 var apiFS embed.FS
 
 var (
-	grpcTarget     = flag.String("grpc-target", "", "gRPC server endpoint (default: GRPC_TARGET env or localhost:1310)")
-	httpPort       = flag.Int("http-port", 8080, "HTTP server port")
-	descriptorFile = flag.String("descriptor-file", "", "Proto descriptor file for type discovery (default: DESCRIPTOR_PATH env)")
+	grpcTarget              = flag.String("grpc-target", "", "Single aggregate gRPC target for every domain (default: GRPC_TARGET env; localhost:1310 when no template is set)")
+	aggregateTargetTemplate = flag.String("aggregate-target-template", "", "Per-domain aggregate target, {domain} substituted, e.g. {domain}-aggregate:1310 (default: AGGREGATE_TARGET_TEMPLATE env)")
+	statusTarget            = flag.String("status-target", "", "angzarr-status gRPC target serving DlqAdminService (default: STATUS_TARGET env; unset = no /api/dlq routes)")
+	httpPort                = flag.Int("http-port", 8080, "HTTP server port")
+	descriptorFile          = flag.String("descriptor-file", "", "Proto descriptor file for type discovery (default: DESCRIPTOR_PATH env)")
 )
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func dial(target string) (*grpc.ClientConn, error) {
+	return grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+}
+
+// buildGatewayMux registers the REST surface: aggregate services
+// (CommandHandlerCoordinator, EventQuery) through the per-domain router,
+// and DlqAdminService on angzarr-status when a status connection is given.
+// Saga/PM/projector coordinators and EventStream are not exposed: they are
+// per-component internal services with no single backend.
+func buildGatewayMux(ctx context.Context, aggregates grpc.ClientConnInterface, status grpc.ClientConnInterface) (*runtime.ServeMux, error) {
+	gwMux := runtime.NewServeMux(runtime.WithMetadata(routing.DomainAnnotator))
+
+	if err := angzarrv1.RegisterCommandHandlerCoordinatorServiceHandlerClient(ctx, gwMux,
+		angzarrv1.NewCommandHandlerCoordinatorServiceClient(aggregates)); err != nil {
+		return nil, fmt.Errorf("register CommandHandlerCoordinatorService: %w", err)
+	}
+	if err := angzarrv1.RegisterEventQueryServiceHandlerClient(ctx, gwMux,
+		angzarrv1.NewEventQueryServiceClient(aggregates)); err != nil {
+		return nil, fmt.Errorf("register EventQueryService: %w", err)
+	}
+	if status != nil {
+		if err := statusv1.RegisterDlqAdminServiceHandlerClient(ctx, gwMux,
+			statusv1.NewDlqAdminServiceClient(status)); err != nil {
+			return nil, fmt.Errorf("register DlqAdminService: %w", err)
+		}
+	}
+	return gwMux, nil
+}
 
 func main() {
 	flag.Parse()
 
-	target := *grpcTarget
-	if target == "" {
-		target = os.Getenv("GRPC_TARGET")
-	}
-	if target == "" {
+	template := firstNonEmpty(*aggregateTargetTemplate, os.Getenv("AGGREGATE_TARGET_TEMPLATE"))
+	target := firstNonEmpty(*grpcTarget, os.Getenv("GRPC_TARGET"))
+	if template == "" && target == "" {
 		target = "localhost:1310"
 	}
+	statusAddr := firstNonEmpty(*statusTarget, os.Getenv("STATUS_TARGET"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Set up gRPC connection
-	conn, err := grpc.NewClient(target, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	aggregates, err := routing.NewRouter(template, target, dial)
 	if err != nil {
-		log.Fatalf("Failed to connect to gRPC server at %s: %v", target, err)
+		log.Fatalf("Invalid aggregate routing: %v", err)
 	}
-	defer conn.Close()
+	defer aggregates.Close()
 
-	// Create gRPC-Gateway mux
-	gwMux := runtime.NewServeMux()
+	var statusConn grpc.ClientConnInterface
+	if statusAddr != "" {
+		conn, err := dial(statusAddr)
+		if err != nil {
+			log.Fatalf("Failed to connect to angzarr-status at %s: %v", statusAddr, err)
+		}
+		defer conn.Close()
+		statusConn = conn
+	}
 
-	// Register all service handlers
-	if err := gw.RegisterCommandHandlerCoordinatorServiceHandler(ctx, gwMux, conn); err != nil {
-		log.Fatalf("Failed to register CommandHandlerCoordinatorService handler: %v", err)
-	}
-	if err := gw.RegisterEventQueryServiceHandler(ctx, gwMux, conn); err != nil {
-		log.Fatalf("Failed to register EventQueryService handler: %v", err)
-	}
-	if err := gw.RegisterEventStreamServiceHandler(ctx, gwMux, conn); err != nil {
-		log.Fatalf("Failed to register EventStreamService handler: %v", err)
-	}
-	if err := gw.RegisterSagaCoordinatorServiceHandler(ctx, gwMux, conn); err != nil {
-		log.Fatalf("Failed to register SagaCoordinatorService handler: %v", err)
-	}
-	if err := gw.RegisterProjectorCoordinatorServiceHandler(ctx, gwMux, conn); err != nil {
-		log.Fatalf("Failed to register ProjectorCoordinatorService handler: %v", err)
-	}
-	if err := gw.RegisterProcessManagerCoordinatorServiceHandler(ctx, gwMux, conn); err != nil {
-		log.Fatalf("Failed to register ProcessManagerCoordinatorService handler: %v", err)
-	}
-	// H-42: DLQ admin REST routes (GET /api/dlq, GET /api/dlq/{id},
-	// DELETE /api/dlq/{id}, POST /api/dlq/{id}/replay). Connected to the
-	// same gRPC backend; the angzarr-status pod serves DlqAdminService on
-	// that endpoint via the in-process command-handler binary.
-	if err := status.RegisterDlqAdminServiceHandler(ctx, gwMux, conn); err != nil {
-		log.Fatalf("Failed to register DlqAdminService handler: %v", err)
+	gwMux, err := buildGatewayMux(ctx, aggregates, statusConn)
+	if err != nil {
+		log.Fatalf("Failed to build gateway: %v", err)
 	}
 
 	// Load base OpenAPI spec
@@ -143,6 +163,10 @@ func main() {
 	server := &http.Server{
 		Addr:    addr,
 		Handler: mux,
+		// Bounded header read and idle time; no write timeout, which would
+		// cut off the event stream route.
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Graceful shutdown
@@ -161,7 +185,8 @@ func main() {
 		cancel()
 	}()
 
-	log.Printf("Starting gRPC-Gateway on %s, proxying to %s", addr, target)
+	log.Printf("Starting gRPC-Gateway on %s (aggregates: template=%q target=%q, status=%q)",
+		addr, template, target, statusAddr)
 	if err := server.ListenAndServe(); err != http.ErrServerClosed {
 		log.Fatalf("HTTP server error: %v", err)
 	}

@@ -13,18 +13,30 @@
 //! - Temporal queries support point-in-time views
 //! - Missing/invalid parameters return InvalidArgument gRPC status
 //!
-//! Note: EventQuery deliberately ignores snapshots — it's for event inspection,
-//! not aggregate state reconstruction. Use AggregateService for state.
+//! A whole-history query returns every event with the aggregate's latest
+//! snapshot alongside (C-0243); the snapshot never replaces the events it
+//! summarizes.
 
 use super::*;
 use crate::proto::{event_page, page_header, EventPage, PageHeader, SequenceRange, TemporalQuery};
+use crate::proto_ext::EventPageExt;
 use crate::storage::mock::{MockEventStore, MockSnapshotStore};
+use crate::storage::AddMeta;
 use prost_types::{Any, Timestamp};
 use tokio_stream::StreamExt;
 
 // ============================================================================
 // Test Setup
 // ============================================================================
+
+/// A snapshot repository that reads nothing.
+fn no_snapshots() -> crate::repository::SnapshotRepository {
+    crate::repository::SnapshotRepository::with_flags(
+        Arc::new(MockSnapshotStore::new()),
+        false,
+        false,
+    )
+}
 
 fn create_test_service_with_mocks(
     event_store: Arc<MockEventStore>,
@@ -67,6 +79,7 @@ async fn test_get_event_book_empty_aggregate() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -94,10 +107,20 @@ async fn test_get_event_book_with_data() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }];
     event_store
-        .add("orders", "", root, events, "", None, None)
+        .add(
+            "orders",
+            "",
+            root,
+            events,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .unwrap();
 
@@ -109,6 +132,7 @@ async fn test_get_event_book_with_data() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -135,6 +159,7 @@ async fn test_get_event_book_missing_root() {
             root: None,
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -159,6 +184,7 @@ async fn test_get_event_book_invalid_uuid() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -194,10 +220,20 @@ async fn test_get_event_book_with_range() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
-            .add("orders", "", root, events, "", None, None)
+            .add(
+                "orders",
+                "",
+                root,
+                events,
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
+            )
             .await
             .unwrap();
     }
@@ -211,6 +247,7 @@ async fn test_get_event_book_with_range() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: Some(Selection::Range(SequenceRange {
             lower: 2,
@@ -243,6 +280,7 @@ async fn test_get_events_empty_aggregate() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -274,10 +312,20 @@ async fn test_get_events_with_data() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }];
     event_store
-        .add("orders", "", root, events, "", None, None)
+        .add(
+            "orders",
+            "",
+            root,
+            events,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .unwrap();
 
@@ -289,6 +337,7 @@ async fn test_get_events_with_data() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -314,6 +363,7 @@ async fn test_get_events_missing_root() {
             root: None,
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -337,6 +387,7 @@ async fn test_get_events_invalid_uuid() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -383,14 +434,35 @@ async fn test_get_aggregate_roots_with_data() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
     event_store
-        .add("orders", "", root1, vec![event.clone()], "", None, None)
+        .add(
+            "orders",
+            "",
+            root1,
+            vec![event.clone()],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .unwrap();
     event_store
-        .add("orders", "", root2, vec![event], "", None, None)
+        .add(
+            "orders",
+            "",
+            root2,
+            vec![event],
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .unwrap();
 
@@ -418,7 +490,6 @@ async fn test_get_aggregate_roots_multiple_domains() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     };
     event_store
         .add(
@@ -426,9 +497,12 @@ async fn test_get_aggregate_roots_multiple_domains() {
             "",
             uuid::Uuid::new_v4(),
             vec![event.clone()],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .unwrap();
@@ -438,9 +512,12 @@ async fn test_get_aggregate_roots_multiple_domains() {
             "",
             uuid::Uuid::new_v4(),
             vec![event],
-            "",
-            None,
-            None,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
         )
         .await
         .unwrap();
@@ -478,10 +555,20 @@ async fn test_get_event_book_by_correlation_id() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }];
     event_store
-        .add("orders", "", root, events, correlation_id, None, None)
+        .add(
+            "orders",
+            "",
+            root,
+            events,
+            &AddMeta {
+                correlation_id,
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .unwrap();
 
@@ -492,6 +579,7 @@ async fn test_get_event_book_by_correlation_id() {
             root: None,
             correlation_id: correlation_id.to_string(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -514,6 +602,7 @@ async fn test_get_event_book_by_correlation_id_not_found() {
             root: None,
             correlation_id: "nonexistent".to_string(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -549,10 +638,20 @@ async fn test_get_events_by_correlation_id_multiple_aggregates() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
-            .add(domain, "", root, events, correlation_id, None, None)
+            .add(
+                domain,
+                "",
+                root,
+                events,
+                &AddMeta {
+                    correlation_id,
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
+            )
             .await
             .unwrap();
     }
@@ -564,6 +663,7 @@ async fn test_get_events_by_correlation_id_multiple_aggregates() {
             root: None,
             correlation_id: correlation_id.to_string(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -603,7 +703,6 @@ async fn test_get_event_book_temporal_by_time() {
                 seconds: 1704067200, // 2024-01-01T00:00:00Z
                 nanos: 0,
             }),
-            ..Default::default()
         },
         EventPage {
             header: Some(PageHeader {
@@ -618,7 +717,6 @@ async fn test_get_event_book_temporal_by_time() {
                 seconds: 1704153600, // 2024-01-02T00:00:00Z
                 nanos: 0,
             }),
-            ..Default::default()
         },
         EventPage {
             header: Some(PageHeader {
@@ -633,11 +731,21 @@ async fn test_get_event_book_temporal_by_time() {
                 seconds: 1704240000, // 2024-01-03T00:00:00Z
                 nanos: 0,
             }),
-            ..Default::default()
         },
     ];
     event_store
-        .add("orders", "", root, events, "", None, None)
+        .add(
+            "orders",
+            "",
+            root,
+            events,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .unwrap();
 
@@ -650,6 +758,7 @@ async fn test_get_event_book_temporal_by_time() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: Some(Selection::Temporal(TemporalQuery {
             point_in_time: Some(PointInTime::AsOfTime(Timestamp {
@@ -687,10 +796,20 @@ async fn test_get_event_book_temporal_by_sequence() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
-            .add("orders", "", root, events, "", None, None)
+            .add(
+                "orders",
+                "",
+                root,
+                events,
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
+            )
             .await
             .unwrap();
     }
@@ -704,6 +823,7 @@ async fn test_get_event_book_temporal_by_sequence() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: Some(Selection::Temporal(TemporalQuery {
             point_in_time: Some(PointInTime::AsOfSequence(2)),
@@ -732,6 +852,7 @@ async fn test_get_event_book_temporal_empty_point_in_time() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: Some(Selection::Temporal(TemporalQuery {
             point_in_time: None,
@@ -748,11 +869,9 @@ async fn test_get_event_book_temporal_empty_point_in_time() {
 // Snapshot Handling Tests
 // ============================================================================
 
-/// EventQuery ignores snapshots — returns full event history.
-///
-/// Unlike AggregateService (which uses snapshots for efficiency), EventQuery
-/// is for inspection. Users querying events want to see the actual events,
-/// not a compacted state representation.
+/// A whole-history query returns every event, with the aggregate's latest
+/// snapshot alongside (C-0243): the snapshot never replaces the events it
+/// summarizes.
 #[tokio::test]
 async fn test_get_event_book_returns_all_events_despite_snapshot() {
     let (service, event_store, snapshot_store) = create_default_test_service();
@@ -769,10 +888,20 @@ async fn test_get_event_book_returns_all_events_despite_snapshot() {
             value: vec![],
         })),
         created_at: None,
-        ..Default::default()
     }];
     event_store
-        .add("customer", "", root, events, "", None, None)
+        .add(
+            "customer",
+            "",
+            root,
+            events,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
         .await
         .unwrap();
 
@@ -784,6 +913,7 @@ async fn test_get_event_book_returns_all_events_despite_snapshot() {
             value: vec![1, 2, 3],
         }),
         retention: crate::proto::SnapshotRetention::RetentionDefault as i32,
+        created_at: None,
     };
     snapshot_store
         .put("customer", "", root, snapshot)
@@ -799,6 +929,7 @@ async fn test_get_event_book_returns_all_events_despite_snapshot() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: None,
     };
@@ -812,9 +943,10 @@ async fn test_get_event_book_returns_all_events_despite_snapshot() {
         1,
         "EventQuery must return all events regardless of snapshots"
     );
-    assert!(
-        book.snapshot.is_none(),
-        "EventQuery should not include snapshots"
+    assert_eq!(
+        book.snapshot.as_ref().map(|s| s.sequence),
+        Some(0),
+        "the latest snapshot is surfaced alongside the history"
     );
 }
 
@@ -843,10 +975,20 @@ async fn test_get_event_book_with_sequences() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
-            .add("orders", "", root, events, "", None, None)
+            .add(
+                "orders",
+                "",
+                root,
+                events,
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
+            )
             .await
             .unwrap();
     }
@@ -859,6 +1001,7 @@ async fn test_get_event_book_with_sequences() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: Some(Selection::Sequences(crate::proto::SequenceSet {
             values: vec![1, 3],
@@ -949,11 +1092,18 @@ async fn test_get_events_missing_cover() {
 async fn test_dispatch_selection_temporal_missing_point_returns_descriptive_message() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
-    let repo =
-        crate::repository::EventBookRepository::with_config(event_store, snapshot_store, false);
+    let repo = crate::repository::EventBookRepository::new(
+        event_store,
+        std::sync::Arc::new(crate::repository::SnapshotRepository::with_flags(
+            snapshot_store,
+            false,
+            false,
+        )),
+    );
 
     let result = super::dispatch_selection(
         &repo,
+        &no_snapshots(),
         "orders",
         "",
         uuid::Uuid::new_v4(),
@@ -999,19 +1149,36 @@ async fn test_dispatch_selection_range_upper_is_inclusive() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
-            .add("orders", "", root, events, "", None, None)
+            .add(
+                "orders",
+                "",
+                root,
+                events,
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
+            )
             .await
             .unwrap();
     }
 
-    let repo =
-        crate::repository::EventBookRepository::with_config(event_store, snapshot_store, false);
+    let repo = crate::repository::EventBookRepository::new(
+        event_store,
+        std::sync::Arc::new(crate::repository::SnapshotRepository::with_flags(
+            snapshot_store,
+            false,
+            false,
+        )),
+    );
 
     let book = super::dispatch_selection(
         &repo,
+        &no_snapshots(),
         "orders",
         "",
         root,
@@ -1053,17 +1220,33 @@ async fn test_dispatch_selection_matches_get_event_book_on_same_range() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
-            .add("orders", "", root, events, "", None, None)
+            .add(
+                "orders",
+                "",
+                root,
+                events,
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
+            )
             .await
             .unwrap();
     }
 
     let service = create_test_service_with_mocks(event_store.clone(), snapshot_store.clone());
-    let repo =
-        crate::repository::EventBookRepository::with_config(event_store, snapshot_store, false);
+    let repo = crate::repository::EventBookRepository::new(
+        event_store,
+        std::sync::Arc::new(crate::repository::SnapshotRepository::with_flags(
+            snapshot_store,
+            false,
+            false,
+        )),
+    );
 
     let range = SequenceRange {
         lower: 1,
@@ -1079,6 +1262,7 @@ async fn test_dispatch_selection_matches_get_event_book_on_same_range() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         selection: Some(Selection::Range(range)),
     };
@@ -1089,10 +1273,16 @@ async fn test_dispatch_selection_matches_get_event_book_on_same_range() {
         .into_inner();
 
     // dispatch_selection path (used by synchronize)
-    let stream_book =
-        super::dispatch_selection(&repo, "orders", "", root, Some(Selection::Range(range)))
-            .await
-            .expect("dispatch_selection must succeed");
+    let stream_book = super::dispatch_selection(
+        &repo,
+        &no_snapshots(),
+        "orders",
+        "",
+        root,
+        Some(Selection::Range(range)),
+    )
+    .await
+    .expect("dispatch_selection must succeed");
 
     assert_eq!(
         unary_book.pages.len(),
@@ -1124,19 +1314,36 @@ async fn test_dispatch_selection_range_upper_none_returns_to_latest() {
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }];
         event_store
-            .add("orders", "", root, events, "", None, None)
+            .add(
+                "orders",
+                "",
+                root,
+                events,
+                &AddMeta {
+                    correlation_id: "",
+                    external_id: None,
+                    source_info: None,
+                    ext: None,
+                },
+            )
             .await
             .unwrap();
     }
 
-    let repo =
-        crate::repository::EventBookRepository::with_config(event_store, snapshot_store, false);
+    let repo = crate::repository::EventBookRepository::new(
+        event_store,
+        std::sync::Arc::new(crate::repository::SnapshotRepository::with_flags(
+            snapshot_store,
+            false,
+            false,
+        )),
+    );
 
     let book = super::dispatch_selection(
         &repo,
+        &no_snapshots(),
         "orders",
         "",
         root,
@@ -1149,4 +1356,276 @@ async fn test_dispatch_selection_range_upper_none_returns_to_latest() {
     .expect("range query must succeed");
 
     assert_eq!(book.pages.len(), 4, "upper: None means 'to latest'");
+}
+
+// ============================================================================
+// Every query RPC honours the same selection and validation
+// ============================================================================
+
+async fn seed_three_events(event_store: &Arc<MockEventStore>, root: uuid::Uuid) {
+    let pages = (0..3)
+        .map(|seq| EventPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(seq)),
+            }),
+            payload: Some(event_page::Payload::Event(Any {
+                type_url: "test.Event".to_string(),
+                value: vec![],
+            })),
+            ..Default::default()
+        })
+        .collect();
+    event_store
+        .add("orders", "", root, pages, &AddMeta::default())
+        .await
+        .unwrap();
+}
+
+fn root_query(root: uuid::Uuid, edition: Option<&str>, selection: Option<Selection>) -> Query {
+    Query {
+        cover: Some(crate::proto::Cover {
+            domain: "orders".to_string(),
+            root: Some(ProtoUuid {
+                value: root.as_bytes().to_vec(),
+            }),
+            correlation_id: String::new(),
+            edition: edition.map(|name| crate::proto::Edition {
+                name: name.to_string(),
+                divergences: vec![],
+            }),
+            ext: None,
+        }),
+        selection,
+    }
+}
+
+/// GetEvents streams the selected range, exactly like GetEventBook — not the
+/// whole aggregate.
+#[tokio::test]
+async fn test_get_events_honours_range_selection() {
+    let (service, event_store, _) = create_default_test_service();
+    let root = uuid::Uuid::new_v4();
+    seed_three_events(&event_store, root).await;
+    let range = Some(Selection::Range(SequenceRange {
+        lower: 1,
+        upper: Some(1),
+    }));
+
+    let unary = service
+        .get_event_book(Request::new(root_query(root, None, range.clone())))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut stream = service
+        .get_events(Request::new(root_query(root, None, range)))
+        .await
+        .unwrap()
+        .into_inner();
+    let streamed = stream.next().await.unwrap().unwrap();
+    assert_eq!(streamed.pages.len(), 1);
+    assert_eq!(streamed.pages[0].sequence_num(), 1);
+    assert_eq!(streamed.pages, unary.pages);
+}
+
+/// GetEvents rejects an invalid edition name like GetEventBook does.
+#[tokio::test]
+async fn test_get_events_validates_edition() {
+    let (service, _, _) = create_default_test_service();
+    let bad = "x".repeat(1000);
+    let err = service
+        .get_events(Request::new(root_query(
+            uuid::Uuid::new_v4(),
+            Some(&bad),
+            None,
+        )))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), tonic::Code::InvalidArgument);
+}
+
+/// Synchronize applies the unary RPC's domain and edition validation to each
+/// query (an invalid one is answered with INVALID_ARGUMENT, not served).
+#[tokio::test]
+async fn test_synchronize_validates_domain_and_edition() {
+    let root = uuid::Uuid::new_v4();
+    let mut bad_domain = root_query(root, None, None);
+    bad_domain.cover.as_mut().unwrap().domain = "bad domain!".to_string();
+    let bad_edition = root_query(root, Some(&"x".repeat(1000)), None);
+
+    for (invalid, valid_answer) in [
+        (Some(bad_domain), None),
+        (Some(bad_edition), None),
+        (None, Some(3)),
+    ] {
+        let (service, event_store, _) = create_default_test_service();
+        seed_three_events(&event_store, root).await;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(
+                    crate::proto::event_query_service_server::EventQueryServiceServer::new(service),
+                )
+                .serve_with_incoming(tokio_stream::wrappers::TcpListenerStream::new(listener))
+                .await
+                .unwrap();
+        });
+        let mut client = crate::proto::event_query_service_client::EventQueryServiceClient::new(
+            tonic::transport::Channel::from_shared(format!("http://127.0.0.1:{port}"))
+                .unwrap()
+                .connect_lazy(),
+        );
+        let query = invalid.unwrap_or_else(|| root_query(root, None, None));
+        let mut out = client
+            .synchronize(tokio_stream::iter(vec![query]))
+            .await
+            .unwrap()
+            .into_inner();
+        match valid_answer {
+            None => assert_eq!(
+                out.message().await.unwrap_err().code(),
+                tonic::Code::InvalidArgument
+            ),
+            Some(pages) => assert_eq!(out.message().await.unwrap().unwrap().pages.len(), pages),
+        }
+    }
+}
+
+// ============================================================================
+// Snapshots alongside the history (C-0243)
+// ============================================================================
+
+async fn ten_events_with_snapshot_at_five(
+    event_store: &MockEventStore,
+    snapshot_store: &MockSnapshotStore,
+    root: uuid::Uuid,
+) {
+    let events = (0..10)
+        .map(|seq| EventPage {
+            header: Some(PageHeader {
+                sync_mode: None,
+                sequence_type: Some(page_header::SequenceType::Sequence(seq)),
+            }),
+            payload: Some(event_page::Payload::Event(Any {
+                type_url: "test.OrderEvent".to_string(),
+                value: vec![],
+            })),
+            created_at: None,
+        })
+        .collect();
+    event_store
+        .add(
+            "orders",
+            "",
+            root,
+            events,
+            &AddMeta {
+                correlation_id: "",
+                external_id: None,
+                source_info: None,
+                ext: None,
+            },
+        )
+        .await
+        .unwrap();
+    for sequence in [2, 5] {
+        snapshot_store
+            .put(
+                "orders",
+                "",
+                root,
+                crate::proto::Snapshot {
+                    sequence,
+                    state: Some(Any {
+                        type_url: "test.OrderState".to_string(),
+                        value: vec![sequence as u8],
+                    }),
+                    retention: crate::proto::SnapshotRetention::RetentionDefault as i32,
+                    created_at: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+}
+
+fn whole_history_query(root: uuid::Uuid) -> Query {
+    Query {
+        cover: Some(crate::proto::Cover {
+            domain: "orders".to_string(),
+            root: Some(ProtoUuid {
+                value: root.as_bytes().to_vec(),
+            }),
+            correlation_id: String::new(),
+            edition: None,
+            ext: None,
+        }),
+        selection: None,
+    }
+}
+
+/// C-0243: the unary and streamed history queries carry the latest
+/// snapshot (sequence 5) and still every event.
+#[tokio::test]
+async fn test_history_query_carries_the_latest_snapshot_and_every_event() {
+    let (service, event_store, snapshot_store) = create_default_test_service();
+    let root = uuid::Uuid::new_v4();
+    ten_events_with_snapshot_at_five(&event_store, &snapshot_store, root).await;
+
+    let unary = service
+        .get_event_book(Request::new(whole_history_query(root)))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut stream = service
+        .get_events(Request::new(whole_history_query(root)))
+        .await
+        .unwrap()
+        .into_inner();
+    let streamed = stream.next().await.unwrap().unwrap();
+
+    for book in [unary, streamed] {
+        assert_eq!(book.snapshot.as_ref().map(|s| s.sequence), Some(5));
+        assert_eq!(book.pages.len(), 10);
+        assert_eq!(book.next_sequence, 10);
+    }
+}
+
+/// A selection (range, sequences, point in time) answers events only; the
+/// snapshot belongs to the whole-history read.
+#[tokio::test]
+async fn test_range_query_does_not_substitute_a_snapshot() {
+    let (service, event_store, snapshot_store) = create_default_test_service();
+    let root = uuid::Uuid::new_v4();
+    ten_events_with_snapshot_at_five(&event_store, &snapshot_store, root).await;
+    let mut query = whole_history_query(root);
+    query.selection = Some(Selection::Range(SequenceRange {
+        lower: 0,
+        upper: None,
+    }));
+    let book = service
+        .get_event_book(Request::new(query))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(book.pages.len(), 10);
+    assert!(book.snapshot.is_none());
+}
+
+/// With snapshot reads disabled the history query carries no snapshot.
+#[tokio::test]
+async fn test_history_query_without_snapshot_reads_carries_none() {
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let root = uuid::Uuid::new_v4();
+    ten_events_with_snapshot_at_five(&event_store, &snapshot_store, root).await;
+    let service = EventQueryService::with_options(event_store, snapshot_store, false);
+    let book = service
+        .get_event_book(Request::new(whole_history_query(root)))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(book.pages.len(), 10);
+    assert!(book.snapshot.is_none());
 }

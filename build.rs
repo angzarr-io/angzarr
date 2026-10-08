@@ -5,33 +5,19 @@ use prost::Message;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Rerun if proto files or migration files change.
-    println!(
-        "cargo:rerun-if-changed=angzarr-project/proto/angzarr_client/proto/angzarr/v1/types.proto"
-    );
+    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/types.proto");
     println!("cargo:rerun-if-changed=migrations");
-    println!("cargo:rerun-if-changed=angzarr-project/proto/angzarr_client/proto/angzarr/v1/command_handler.proto");
-    println!(
-        "cargo:rerun-if-changed=angzarr-project/proto/angzarr_client/proto/angzarr/v1/projector.proto"
-    );
-    println!(
-        "cargo:rerun-if-changed=angzarr-project/proto/angzarr_client/proto/angzarr/v1/saga.proto"
-    );
-    println!("cargo:rerun-if-changed=angzarr-project/proto/angzarr_client/proto/angzarr/v1/process_manager.proto");
-    println!(
-        "cargo:rerun-if-changed=angzarr-project/proto/angzarr_client/proto/angzarr/v1/query.proto"
-    );
-    println!(
-        "cargo:rerun-if-changed=angzarr-project/proto/angzarr_client/proto/angzarr/v1/stream.proto"
-    );
-    println!(
-        "cargo:rerun-if-changed=angzarr-project/proto/angzarr_client/proto/angzarr/v1/upcaster.proto"
-    );
-    println!(
-        "cargo:rerun-if-changed=angzarr-project/proto/angzarr_client/proto/angzarr/v1/meta.proto"
-    );
-    println!("cargo:rerun-if-changed=angzarr-project/proto/angzarr_client/proto/angzarr/v1/cloudevents.proto");
+    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/command_handler.proto");
+    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/projector.proto");
+    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/saga.proto");
+    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/process_manager.proto");
+    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/query.proto");
+    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/stream.proto");
+    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/upcaster.proto");
+    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/meta.proto");
+    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/cloudevents.proto");
     println!("cargo:rerun-if-changed=proto/io/cloudevents/v1/cloudevents.proto");
-    println!("cargo:rerun-if-changed=proto/angzarr/status/dlq_admin.proto");
+    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/status/v1/dlq_admin.proto");
     // Sererr proto schema lives in the `sererr/` submodule; rerun if it
     // changes upstream.
     println!("cargo:rerun-if-changed=sererr/proto/sererr/v1/sererr.proto");
@@ -52,24 +38,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .type_attribute(
-            ".angzarr_client.proto.angzarr.v1.BusinessResponse.result",
+            ".io.angzarr.v1.BusinessResponse.result",
             "#[allow(clippy::large_enum_variant)]",
         )
         .compile_with_config(
             prost_config,
             &[
-                "angzarr-project/proto/angzarr_client/proto/angzarr/v1/types.proto",
-                "angzarr-project/proto/angzarr_client/proto/angzarr/v1/command_handler.proto",
-                "angzarr-project/proto/angzarr_client/proto/angzarr/v1/projector.proto",
-                "angzarr-project/proto/angzarr_client/proto/angzarr/v1/saga.proto",
-                "angzarr-project/proto/angzarr_client/proto/angzarr/v1/process_manager.proto",
-                "angzarr-project/proto/angzarr_client/proto/angzarr/v1/query.proto",
-                "angzarr-project/proto/angzarr_client/proto/angzarr/v1/stream.proto",
-                "angzarr-project/proto/angzarr_client/proto/angzarr/v1/upcaster.proto",
-                "angzarr-project/proto/angzarr_client/proto/angzarr/v1/meta.proto",
-                "angzarr-project/proto/angzarr_client/proto/angzarr/v1/cloudevents.proto",
+                "angzarr-project/proto/io/angzarr/v1/types.proto",
+                "angzarr-project/proto/io/angzarr/v1/command_handler.proto",
+                "angzarr-project/proto/io/angzarr/v1/projector.proto",
+                "angzarr-project/proto/io/angzarr/v1/saga.proto",
+                "angzarr-project/proto/io/angzarr/v1/process_manager.proto",
+                "angzarr-project/proto/io/angzarr/v1/query.proto",
+                "angzarr-project/proto/io/angzarr/v1/stream.proto",
+                "angzarr-project/proto/io/angzarr/v1/upcaster.proto",
+                "angzarr-project/proto/io/angzarr/v1/meta.proto",
+                "angzarr-project/proto/io/angzarr/v1/cloudevents.proto",
                 "proto/io/cloudevents/v1/cloudevents.proto",
-                "proto/angzarr/status/dlq_admin.proto",
+                "angzarr-project/proto/io/angzarr/status/v1/dlq_admin.proto",
             ],
             // Include paths: angzarr's own protos, our local protos,
             // AND sererr's proto root so types.proto can resolve
@@ -81,10 +67,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //
     // The full descriptor at `descriptor.bin` contains every framework
     // proto (command-handler, saga, PM, projector, query, stream,
-    // upcaster, types) and exposes internal messages (Confirmation,
-    // Revocation, NoOp, AngzarrDeferredSequence, ...) to anyone who
+    // upcaster, types) and exposes internal messages (Notification,
+    // Compensate, AngzarrDeferredSequence, ...) to anyone who
     // calls `grpcurl list`. For the reflection-exposed surface, we
-    // ship only `proto/angzarr/status/dlq_admin.proto` and its
+    // ship only `io/angzarr/status/v1/dlq_admin.proto` and its
     // transitive imports.
     //
     // The in-process pool keeps loading the full set via
@@ -94,7 +80,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     emit_public_descriptor_subset(
         &descriptor_path,
         &out_dir.join("descriptor_public.bin"),
-        &["angzarr/status/dlq_admin.proto"],
+        &["io/angzarr/status/v1/dlq_admin.proto"],
     )?;
 
     Ok(())

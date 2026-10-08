@@ -143,7 +143,6 @@ The `should_ack()` method returns `true` for `Success` and `DecodeError`—malfo
 
 | Transport | Durability | Latency | Use Case |
 |-----------|------------|---------|----------|
-| Channel | None | Microseconds | Single-process, testing. Events lost on crash. |
 | IPC | None | Sub-millisecond | Multi-process local dev. Named pipes, Unix only. |
 | AMQP (RabbitMQ) | Configurable | Milliseconds | Production default. Mature, widely deployed. |
 | Kafka | Strong | Milliseconds | High-throughput, log retention for replay. |
@@ -172,8 +171,6 @@ Kinesis is appropriate when you need:
 - Integration with AWS Lambda, Firehose, Analytics
 
 ### When to Use Each
-
-**Channel**: Unit tests, single-process embedded deployments. No external dependencies.
 
 **IPC**: Local-dev deployments with multiple processes (aggregate + projectors). Low latency, zero network overhead.
 
@@ -304,12 +301,9 @@ See the embedded contract above. Full specifications cover:
 ## Running Interface Tests
 
 ```bash
-# Test against channel (default, fast)
-cargo test --test interfaces
-
-# Test against specific transport
+# Test against a specific transport
 BUS_BACKEND=amqp cargo test --test interfaces
 BUS_BACKEND=kafka cargo test --test interfaces
 ```
 
-Tests verify every transport implements the same contract. If tests pass on channel, they must pass on AMQP, Kafka, etc.
+Tests verify every transport implements the same contract.

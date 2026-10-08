@@ -12,7 +12,8 @@ pub struct SnsSqsConfig {
     /// Subscription ID suffix (consumer group equivalent).
     pub subscription_id: Option<String>,
     /// Domains to subscribe to (for consumers).
-    /// Empty means all domains (subscribe-side filtering used).
+    /// Must be non-empty for consumers: each domain has its own topic, so
+    /// there is no all-domains subscription (`start_consuming` rejects it).
     pub domains: Vec<String>,
     /// Visibility timeout in seconds for SQS messages (default: 30).
     pub visibility_timeout_secs: i32,
@@ -51,17 +52,14 @@ impl SnsSqsConfig {
         }
     }
 
-    /// Create config for subscribing to all domains.
-    pub fn subscriber_all(subscription_id: impl Into<String>) -> Self {
+    /// Derive a subscriber config that shares this config's region,
+    /// endpoint, topic prefix and queue tuning, so a subscriber created
+    /// from a publisher reads the topics that publisher writes.
+    pub fn subscriber_config(&self, subscription_id: &str, domain: Option<&str>) -> Self {
         Self {
-            region: None,
-            endpoint_url: None,
-            topic_prefix: "angzarr".to_string(),
-            subscription_id: Some(subscription_id.into()),
-            domains: Vec::new(),
-            visibility_timeout_secs: 30,
-            max_messages: 10,
-            wait_time_secs: 20,
+            subscription_id: Some(subscription_id.to_string()),
+            domains: domain.map(|d| vec![d.to_string()]).unwrap_or_default(),
+            ..self.clone()
         }
     }
 

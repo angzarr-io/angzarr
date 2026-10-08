@@ -68,3 +68,39 @@ fn test_default_topic_prefix() {
     let default_prefix = "angzarr-dlq";
     assert_eq!(default_prefix, "angzarr-dlq");
 }
+
+// ============================================================================
+// Retention queue policy
+// ============================================================================
+
+use super::{retention_queue_policy, RETENTION_SECONDS};
+
+/// The retention queue grants SNS SendMessage, scoped to the DLQ topic —
+/// without it real AWS drops every delivery into the queue.
+#[test]
+fn test_retention_queue_policy_allows_only_the_dlq_topic() {
+    let policy: serde_json::Value = serde_json::from_str(&retention_queue_policy(
+        "arn:aws:sqs:us-east-1:123:angzarr-dlq-orders",
+        "arn:aws:sns:us-east-1:123:angzarr-dlq-orders",
+    ))
+    .unwrap();
+
+    let stmt = &policy["Statement"][0];
+    assert_eq!(stmt["Effect"], "Allow");
+    assert_eq!(stmt["Principal"]["Service"], "sns.amazonaws.com");
+    assert_eq!(stmt["Action"], "sqs:SendMessage");
+    assert_eq!(
+        stmt["Resource"],
+        "arn:aws:sqs:us-east-1:123:angzarr-dlq-orders"
+    );
+    assert_eq!(
+        stmt["Condition"]["ArnEquals"]["aws:SourceArn"],
+        "arn:aws:sns:us-east-1:123:angzarr-dlq-orders"
+    );
+}
+
+/// Dead letters are kept for the SQS maximum (14 days).
+#[test]
+fn test_retention_is_sqs_maximum() {
+    assert_eq!(RETENTION_SECONDS, 1_209_600);
+}

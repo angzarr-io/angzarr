@@ -1,0 +1,16 @@
+version: "1.0.0"
+description: "Angzarr core project-specific bundles not covered by the rust-developer/prototype profiles"
+tags:
+  - angzarr
+  - project
+
+bundles:
+  - personal/versionator
+  - personal/behavioral-interface-test
+
+  # CQRS-ES architecture + AI hallucination guardrails
+  - ctxloom-default/cqrs
+  - ctxloom-default/reduce-hallucinations
+
+  # Sequential-thinking MCP server
+  - ctxloom-default/sequential-thinking

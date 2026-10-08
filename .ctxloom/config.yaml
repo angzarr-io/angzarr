@@ -1,0 +1,20 @@
+# ctxloom Configuration
+# See https://github.com/ctxloom/ctxloom for documentation
+
+# Language model plugin configuration
+llm:
+  plugins:
+    claude-code: {}
+
+# Default settings
+defaults:
+  profiles:
+    - personal/rust-developer
+    - personal/prototype
+    - angzarr-core
+  llm_plugin: claude-code
+  use_distilled: true
+
+# MCP server configuration
+mcp:
+  auto_register_ctxloom: true

@@ -17,7 +17,8 @@ pub(super) struct KafkaExtractor<'a, H: rdkafka::message::Headers>(pub &'a H);
 impl<H: rdkafka::message::Headers> opentelemetry::propagation::Extractor for KafkaExtractor<'_, H> {
     fn get(&self, key: &str) -> Option<&str> {
         for i in 0..self.0.count() {
-            if let Some(header) = self.0.get_as::<[u8]>(i) {
+            // rdkafka 0.36: get_as returns Result<Header<_>, _>, not Option.
+            if let Ok(header) = self.0.get_as::<[u8]>(i) {
                 if header.key == key {
                     return header.value.and_then(|v| std::str::from_utf8(v).ok());
                 }
@@ -28,7 +29,7 @@ impl<H: rdkafka::message::Headers> opentelemetry::propagation::Extractor for Kaf
     fn keys(&self) -> Vec<&str> {
         let mut keys = Vec::new();
         for i in 0..self.0.count() {
-            if let Some(header) = self.0.get_as::<[u8]>(i) {
+            if let Ok(header) = self.0.get_as::<[u8]>(i) {
                 keys.push(header.key);
             }
         }
@@ -58,7 +59,6 @@ pub(super) fn kafka_extract_trace_context<M: rdkafka::message::Message>(
     message: &M,
     span: &tracing::Span,
 ) {
-    use rdkafka::message::Headers;
     if let Some(headers) = message.headers() {
         crate::utils::tracing::extract_trace_context(&KafkaExtractor(headers), span);
     }

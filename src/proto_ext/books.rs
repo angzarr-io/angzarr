@@ -73,8 +73,9 @@ pub trait CommandBookExt: CoverExt {
 
     /// Get the merge strategy from the first command page.
     ///
-    /// Returns the MergeStrategy enum value. Defaults to Commutative if no pages.
-    fn merge_strategy(&self) -> MergeStrategy;
+    /// Returns the MergeStrategy enum value. Defaults to Commutative if no
+    /// pages; UNSPECIFIED and unknown wire values resolve to Commutative.
+    fn effective_merge_strategy(&self) -> MergeStrategy;
 }
 
 impl CommandBookExt for CommandBook {
@@ -86,10 +87,10 @@ impl CommandBookExt for CommandBook {
         self.pages.first()
     }
 
-    fn merge_strategy(&self) -> MergeStrategy {
+    fn effective_merge_strategy(&self) -> MergeStrategy {
         self.pages
             .first()
-            .map(|p| p.merge_strategy())
+            .map(CommandPageExt::effective_merge_strategy)
             .unwrap_or(MergeStrategy::MergeCommutative)
     }
 }

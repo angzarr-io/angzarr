@@ -24,7 +24,13 @@ impl MockPositionStore {
     }
 
     /// Create a key from handler/domain/edition/root.
+    ///
+    /// C-15: the main-timeline sentinels (`""` and `"angzarr"`) address the
+    /// same checkpoint, mirroring the SQL backends that store both as NULL.
+    /// Without this, a projector that checkpoints under `""` would not resume
+    /// from a position written under `"angzarr"` (and vice versa).
     fn make_key(handler: &str, domain: &str, edition: &str, root: &[u8]) -> String {
+        let edition = crate::storage::timeline::storage_edition(edition);
         format!("{}:{}:{}:{}", handler, domain, edition, hex::encode(root))
     }
 }
@@ -57,7 +63,18 @@ impl PositionStore for MockPositionStore {
         sequence: u32,
     ) -> Result<()> {
         let key = Self::make_key(handler, domain, edition, root);
-        self.positions.write().unwrap().insert(key, sequence);
+        // C-17: positions are a monotonic checkpoint. A stale or replayed put
+        // with sequence <= the current one must no-op, not regress — otherwise
+        // a projector re-processes events on its next start. Mirrors the SQL
+        // UPSERT guard `WHERE positions.sequence < excluded.sequence` (equal
+        // also no-ops, idempotent re-checkpoint).
+        let mut positions = self.positions.write().unwrap();
+        match positions.get(&key) {
+            Some(&current) if current >= sequence => {}
+            _ => {
+                positions.insert(key, sequence);
+            }
+        }
         Ok(())
     }
 }

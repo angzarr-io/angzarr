@@ -1,0 +1,9 @@
+version: "1.0.0"
+description: "Prototyping profile for greenfield development - no backwards compatibility, reductive approach"
+tags:
+  - prototype
+  - greenfield
+  - rapid
+
+bundles:
+  - personal/prototyping

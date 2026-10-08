@@ -15,13 +15,10 @@
 
 use super::*;
 // Direct imports from merge module for test utilities
-use super::merge::{
-    build_combined_events, build_events_up_to_sequence, diff_state_fields,
-    partition_by_commit_status,
-};
+use super::merge::{build_combined_events, build_events_up_to_sequence, diff_state_fields};
 use crate::proto::{
-    command_page, event_page, page_header, CommandBook, CommandPage, Cover, EventBook,
-    MergeStrategy, PageHeader, Uuid as ProtoUuid,
+    command_page, event_page, page_header, AngzarrDeferredSequence, CommandBook, CommandPage,
+    Cover, EventBook, ExternalDeferredSequence, MergeStrategy, PageHeader, Uuid as ProtoUuid,
 };
 use crate::proto_ext::{calculate_set_next_seq, CommandBookExt, EventBookExt};
 use prost_types::Any;
@@ -49,6 +46,7 @@ fn make_command_book_with_strategy(
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
@@ -78,7 +76,6 @@ fn make_event_book(domain: &str, root: Uuid, last_sequence: Option<u32>) -> Even
                 value: vec![],
             })),
             created_at: None,
-            ..Default::default()
         }]
     } else {
         vec![]
@@ -92,6 +89,7 @@ fn make_event_book(domain: &str, root: Uuid, last_sequence: Option<u32>) -> Even
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages,
         snapshot: None,
@@ -151,6 +149,7 @@ fn test_parse_command_cover_missing_root() {
             root: None,
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
     };
@@ -191,6 +190,65 @@ fn test_extract_command_sequence_empty_pages() {
     assert_eq!(extract_command_sequence(&command), 0);
 }
 
+/// A command carrying the given `AngzarrDeferred` header on its first page.
+fn make_deferred_command(deferred: AngzarrDeferredSequence) -> CommandBook {
+    let root = Uuid::new_v4();
+    let mut command = make_command_book("orders", root, 0);
+    command.pages[0].header = Some(PageHeader {
+        sync_mode: None,
+        sequence_type: Some(page_header::SequenceType::AngzarrDeferred(deferred)),
+    });
+    command
+}
+
+/// A deferred (saga/PM) command claims no sequence: its expected sequence is
+/// 0 whatever provenance it carries.
+#[test]
+fn test_extract_command_sequence_deferred_is_zero() {
+    let command = make_deferred_command(AngzarrDeferredSequence {
+        source_seq: 7,
+        command_index: 3,
+        ..Default::default()
+    });
+
+    assert_eq!(extract_command_sequence(&command), 0);
+}
+
+/// External (webhook/integration) deferred sequences claim no sequence
+/// either (framework stamps on receipt).
+#[test]
+fn test_extract_command_sequence_external_deferred_is_zero() {
+    let root = Uuid::new_v4();
+    let mut command = make_command_book("orders", root, 0);
+    command.pages[0].header = Some(PageHeader {
+        sync_mode: None,
+        sequence_type: Some(page_header::SequenceType::ExternalDeferred(
+            ExternalDeferredSequence::default(),
+        )),
+    });
+
+    assert_eq!(extract_command_sequence(&command), 0);
+}
+
+/// `stamp_deferred_sequences` rewrites the deferred header into an explicit
+/// `Sequence(actual + idx)`.
+#[test]
+fn test_stamp_deferred_sequences_writes_head() {
+    let mut command = make_deferred_command(AngzarrDeferredSequence::default());
+
+    assert_eq!(
+        extract_command_sequence(&command),
+        0,
+        "deferred before stamp"
+    );
+    super::parsing::stamp_deferred_sequences(&mut command, 9);
+    assert_eq!(
+        extract_command_sequence(&command),
+        9,
+        "after stamping, the header is an explicit Sequence(actual)"
+    );
+}
+
 /// Next sequence is last event sequence + 1.
 #[test]
 fn test_next_sequence_from_events() {
@@ -224,6 +282,7 @@ fn test_next_sequence_from_snapshot() {
         sequence: 10,
         state: None,
         retention: SnapshotRetention::RetentionDefault as i32,
+        created_at: None,
     });
     calculate_set_next_seq(&mut events);
 
@@ -248,7 +307,10 @@ fn test_merge_strategy_default_is_commutative() {
     let root = Uuid::new_v4();
     let command = make_command_book("orders", root, 0);
 
-    assert_eq!(command.merge_strategy(), MergeStrategy::MergeCommutative);
+    assert_eq!(
+        command.effective_merge_strategy(),
+        MergeStrategy::MergeCommutative
+    );
 }
 
 /// Strict strategy requires exact sequence match.
@@ -260,7 +322,10 @@ fn test_merge_strategy_strict() {
     let root = Uuid::new_v4();
     let command = make_command_book_with_strategy("orders", root, 0, MergeStrategy::MergeStrict);
 
-    assert_eq!(command.merge_strategy(), MergeStrategy::MergeStrict);
+    assert_eq!(
+        command.effective_merge_strategy(),
+        MergeStrategy::MergeStrict
+    );
 }
 
 /// Aggregate-handles strategy delegates conflict resolution.
@@ -275,8 +340,28 @@ fn test_merge_strategy_aggregate_handles() {
         make_command_book_with_strategy("orders", root, 0, MergeStrategy::MergeAggregateHandles);
 
     assert_eq!(
-        command.merge_strategy(),
+        command.effective_merge_strategy(),
         MergeStrategy::MergeAggregateHandles
+    );
+}
+
+/// An unset strategy (MERGE_UNSPECIFIED, the wire zero) and an unknown wire
+/// value are Commutative — never the raw UNSPECIFIED variant, which no gate
+/// matches.
+#[test]
+fn test_merge_strategy_unspecified_and_unknown_are_commutative() {
+    let root = Uuid::new_v4();
+    let unset = make_command_book_with_strategy("orders", root, 0, MergeStrategy::MergeUnspecified);
+    assert_eq!(
+        unset.effective_merge_strategy(),
+        MergeStrategy::MergeCommutative
+    );
+
+    let mut unknown = make_command_book("orders", root, 0);
+    unknown.pages[0].merge_strategy = 99;
+    assert_eq!(
+        unknown.effective_merge_strategy(),
+        MergeStrategy::MergeCommutative
     );
 }
 
@@ -289,7 +374,10 @@ fn test_merge_strategy_empty_pages_defaults_to_commutative() {
     };
 
     // Empty pages should default to Commutative
-    assert_eq!(command.merge_strategy(), MergeStrategy::MergeCommutative);
+    assert_eq!(
+        command.effective_merge_strategy(),
+        MergeStrategy::MergeCommutative
+    );
 }
 
 // ============================================================================
@@ -310,6 +398,7 @@ fn test_build_combined_events_merges_pages() {
         }),
         correlation_id: String::new(),
         edition: None,
+        ext: None,
     });
 
     let prior = EventBook {
@@ -322,7 +411,6 @@ fn test_build_combined_events_merges_pages() {
                 }),
                 payload: None,
                 created_at: None,
-                ..Default::default()
             },
             crate::proto::EventPage {
                 header: Some(PageHeader {
@@ -331,7 +419,6 @@ fn test_build_combined_events_merges_pages() {
                 }),
                 payload: None,
                 created_at: None,
-                ..Default::default()
             },
         ],
         snapshot: None,
@@ -347,7 +434,6 @@ fn test_build_combined_events_merges_pages() {
             }),
             payload: None,
             created_at: None,
-            ..Default::default()
         }],
         snapshot: None,
         next_sequence: 3,
@@ -370,6 +456,7 @@ fn test_build_combined_events_uses_received_snapshot() {
         }),
         correlation_id: String::new(),
         edition: None,
+        ext: None,
     });
 
     let prior = EventBook {
@@ -382,6 +469,7 @@ fn test_build_combined_events_uses_received_snapshot() {
                 value: vec![1, 2, 3],
             }),
             retention: 0,
+            created_at: None,
         }),
         next_sequence: 1,
     };
@@ -396,6 +484,7 @@ fn test_build_combined_events_uses_received_snapshot() {
                 value: vec![4, 5, 6],
             }),
             retention: 0,
+            created_at: None,
         }),
         next_sequence: 2,
     };
@@ -427,6 +516,7 @@ fn test_build_events_up_to_sequence_filters_correctly() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![
             crate::proto::EventPage {
@@ -436,7 +526,6 @@ fn test_build_events_up_to_sequence_filters_correctly() {
                 }),
                 payload: None,
                 created_at: None,
-                ..Default::default()
             },
             crate::proto::EventPage {
                 header: Some(PageHeader {
@@ -445,7 +534,6 @@ fn test_build_events_up_to_sequence_filters_correctly() {
                 }),
                 payload: None,
                 created_at: None,
-                ..Default::default()
             },
             crate::proto::EventPage {
                 header: Some(PageHeader {
@@ -454,7 +542,6 @@ fn test_build_events_up_to_sequence_filters_correctly() {
                 }),
                 payload: None,
                 created_at: None,
-                ..Default::default()
             },
             crate::proto::EventPage {
                 header: Some(PageHeader {
@@ -463,7 +550,6 @@ fn test_build_events_up_to_sequence_filters_correctly() {
                 }),
                 payload: None,
                 created_at: None,
-                ..Default::default()
             },
         ],
         snapshot: None,
@@ -487,6 +573,7 @@ fn test_build_events_up_to_sequence_zero_returns_empty() {
             }),
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![crate::proto::EventPage {
             header: Some(PageHeader {
@@ -495,7 +582,6 @@ fn test_build_events_up_to_sequence_zero_returns_empty() {
             }),
             payload: None,
             created_at: None,
-            ..Default::default()
         }],
         snapshot: None,
         next_sequence: 1,
@@ -623,6 +709,7 @@ fn test_parse_event_cover_missing_root() {
             root: None,
             correlation_id: String::new(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
         snapshot: None,
@@ -656,7 +743,6 @@ fn test_errmsg_constants_non_empty() {
     assert!(!errmsg::SEQUENCE_MISMATCH.is_empty());
     assert!(!errmsg::SEQUENCE_MISMATCH_OVERLAP.is_empty());
     assert!(!errmsg::SEQUENCE_MISMATCH_DLQ_SUFFIX.is_empty());
-    assert!(!errmsg::SPECULATIVE_REQUIRES_TEMPORAL.is_empty());
     assert!(!errmsg::FACT_EVENTS_MISSING_MARKER.is_empty());
 }
 
@@ -772,147 +858,48 @@ fn test_diff_test_state_fields_field_removed() {
 }
 
 // ============================================================================
-// Cascade / Two-Phase Commit Tests
+// Main-timeline edition spellings
 // ============================================================================
 
-fn make_cascade_event_page(
-    sequence: u32,
-    no_commit: bool,
-    cascade_id: Option<&str>,
-) -> crate::proto::EventPage {
-    crate::proto::EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(page_header::SequenceType::Sequence(sequence)),
+/// "", unset and "angzarr" name one timeline; the coordinator keys all of
+/// them as "" so history written under one spelling is read under another.
+#[test]
+fn test_main_timeline_spellings_share_one_key() {
+    use super::parsing::{edition_key, extract_edition, extract_event_edition};
+    assert_eq!(edition_key(""), "");
+    assert_eq!(edition_key("angzarr"), "");
+    assert_eq!(edition_key("branch-a"), "branch-a");
+
+    let with_edition = |name: Option<&str>| CommandBook {
+        cover: Some(Cover {
+            domain: "orders".into(),
+            edition: name.map(|n| crate::proto::Edition {
+                name: n.into(),
+                divergences: vec![],
+            }),
+            ..Default::default()
         }),
-        payload: Some(event_page::Payload::Event(Any {
-            type_url: "test.Event".to_string(),
-            value: vec![],
-        })),
-        created_at: None,
-        no_commit,
-        cascade_id: cascade_id.map(|s| s.to_string()),
+        pages: vec![],
+    };
+    for name in [None, Some(""), Some("angzarr")] {
+        assert_eq!(
+            extract_edition(&with_edition(name)).unwrap(),
+            "",
+            "{name:?}"
+        );
+        let events = EventBook {
+            cover: with_edition(name).cover,
+            ..Default::default()
+        };
+        assert_eq!(extract_event_edition(&events).unwrap(), "", "{name:?}");
     }
-}
-
-/// partition_by_commit_status separates committed from uncommitted events.
-///
-/// 2PC relies on this to identify which events are "locked" by in-flight
-/// cascades. Committed events are the stable base; uncommitted events
-/// are pending and may be confirmed or revoked.
-#[test]
-fn test_partition_all_committed() {
-    let root = Uuid::new_v4();
-    let mut book = make_event_book("test", root, None);
-    book.pages = vec![
-        make_cascade_event_page(1, false, None),
-        make_cascade_event_page(2, false, None),
-    ];
-
-    let (committed, uncommitted) = partition_by_commit_status(&book);
-    assert_eq!(committed.pages.len(), 2);
-    assert!(uncommitted.is_empty());
-}
-
-/// Uncommitted events from a cascade are correctly partitioned.
-///
-/// When a cascade writes events with no_commit=true, they must be
-/// separated so the conflict detection can identify locked fields.
-#[test]
-fn test_partition_with_uncommitted_cascade() {
-    let root = Uuid::new_v4();
-    let mut book = make_event_book("test", root, None);
-    book.pages = vec![
-        make_cascade_event_page(1, false, None),
-        make_cascade_event_page(2, true, Some("cascade-A")),
-        make_cascade_event_page(3, true, Some("cascade-A")),
-    ];
-
-    let (committed, uncommitted) = partition_by_commit_status(&book);
-    assert_eq!(committed.pages.len(), 1);
-    assert_eq!(uncommitted.len(), 2);
-    assert_eq!(uncommitted[0].cascade_id.as_deref(), Some("cascade-A"));
-}
-
-/// Mixed committed and uncommitted from multiple cascades.
-///
-/// Multiple cascades can have uncommitted events against the same aggregate.
-/// Partition must correctly separate all of them regardless of ordering.
-#[test]
-fn test_partition_multiple_cascades() {
-    let root = Uuid::new_v4();
-    let mut book = make_event_book("test", root, None);
-    book.pages = vec![
-        make_cascade_event_page(1, false, None),
-        make_cascade_event_page(2, true, Some("cascade-A")),
-        make_cascade_event_page(3, true, Some("cascade-B")),
-        make_cascade_event_page(4, false, None),
-    ];
-
-    let (committed, uncommitted) = partition_by_commit_status(&book);
-    assert_eq!(committed.pages.len(), 2, "should have 2 committed events");
-    assert_eq!(uncommitted.len(), 2, "should have 2 uncommitted events");
-}
-
-/// No uncommitted events means no cascade conflicts possible.
-///
-/// This is the fast path — when all events are committed, cascade
-/// conflict detection is a no-op.
-#[test]
-fn test_partition_empty_book() {
-    let root = Uuid::new_v4();
-    let book = make_event_book("test", root, None);
-
-    let (committed, uncommitted) = partition_by_commit_status(&book);
-    assert!(committed.pages.is_empty());
-    assert!(uncommitted.is_empty());
-}
-
-/// cascade_id accessor returns None for non-cascade contexts.
-///
-/// The default implementation in AggregateContext trait returns None,
-/// which the pipeline uses to skip 2PC transformation entirely.
-#[test]
-fn test_cascade_id_trait_default() {
-    use super::traits::AggregateContext;
-
-    struct DefaultCtx;
-    #[async_trait::async_trait]
-    impl AggregateContext for DefaultCtx {
-        async fn load_prior_events_with_divergence(
-            &self,
-            _: &str,
-            _: &str,
-            _: Uuid,
-            _: &TemporalQuery,
-            _: Option<u32>,
-        ) -> Result<EventBook, tonic::Status> {
-            unimplemented!()
-        }
-        async fn persist_events(
-            &self,
-            _: &EventBook,
-            _: &EventBook,
-            _: &str,
-            _: &str,
-            _: Uuid,
-            _: &str,
-            _: Option<&str>,
-            _: Option<&crate::storage::SourceInfo>,
-        ) -> Result<super::traits::PersistOutcome, tonic::Status> {
-            unimplemented!()
-        }
-        async fn post_persist(
-            &self,
-            _: &EventBook,
-        ) -> Result<Vec<crate::proto::Projection>, tonic::Status> {
-            unimplemented!()
-        }
-    }
-
-    let ctx = DefaultCtx;
-    assert!(
-        ctx.cascade_id().is_none(),
-        "default cascade_id should be None"
+    assert_eq!(
+        extract_edition(&with_edition(Some("branch-a"))).unwrap(),
+        "branch-a"
     );
+    let branch_events = EventBook {
+        cover: with_edition(Some("branch-a")).cover,
+        ..Default::default()
+    };
+    assert_eq!(extract_event_edition(&branch_events).unwrap(), "branch-a");
 }

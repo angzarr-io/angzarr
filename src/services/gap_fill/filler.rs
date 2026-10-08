@@ -10,6 +10,7 @@ use uuid::Uuid;
 use crate::proto::EventBook;
 use crate::proto_ext::EventPageExt;
 use crate::repository::EventBookRepository;
+use crate::transport::GrpcMessageLimits;
 
 use super::analysis::{analyze_gap, GapAnalysis};
 use super::error::{GapFillError, Result};
@@ -296,13 +297,15 @@ impl RemoteEventSource {
     pub async fn connect(address: &str) -> std::result::Result<Self, GapFillError> {
         use crate::proto::event_query_service_client::EventQueryServiceClient;
 
-        let channel = tonic::transport::Channel::from_shared(format!("http://{}", address))
+        let channel = crate::transport::tcp_endpoint(format!("http://{}", address))
             .map_err(|e| GapFillError::Transport(e.to_string()))?
             .connect()
             .await
             .map_err(|e| GapFillError::Transport(e.to_string()))?;
 
-        Ok(Self::new(EventQueryServiceClient::new(channel)))
+        Ok(Self::new(
+            EventQueryServiceClient::new(channel).with_message_limits(),
+        ))
     }
 }
 
@@ -331,6 +334,7 @@ impl EventSource for RemoteEventSource {
                     name: edition.to_string(),
                     divergences: vec![],
                 }),
+                ext: None,
             }),
             // Proto SequenceRange upper bound is inclusive.
             // EventSource trait uses [from, to) exclusive upper bound.

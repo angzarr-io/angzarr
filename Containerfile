@@ -29,6 +29,7 @@ COPY angzarr-project/ ./angzarr-project/
 COPY sererr/ ./sererr/
 COPY crates/ ./crates/
 COPY xtask/ ./xtask/
+COPY tools/ ./tools/
 
 # Create minimal stubs - just enough for cargo to run build.rs
 RUN mkdir -p src/bin tests/integration tests/interfaces migrations && \
@@ -69,6 +70,7 @@ COPY angzarr-project/ ./angzarr-project/
 COPY sererr/ ./sererr/
 COPY crates/ ./crates/
 COPY xtask/ ./xtask/
+COPY tools/ ./tools/
 
 # Copy pre-generated proto files from proto-gen stage
 COPY --from=proto-gen /proto-out/ /proto-cache/
@@ -121,11 +123,12 @@ RUN rm -rf target/container-dev/.fingerprint/angzarr-* \
     target/container-dev/angzarr-*
 
 # Build with real source
-RUN cargo build --profile container-dev --features otel,postgres,amqp \
+RUN cargo build --profile container-dev --features k8s \
     --bin angzarr-aggregate \
     --bin angzarr-projector \
     --bin angzarr-saga \
-    --bin angzarr-process-manager && \
+    --bin angzarr-process-manager \
+    --bin angzarr-status && \
     cp target/container-dev/angzarr-* /tmp/
 
 # =============================================================================
@@ -146,6 +149,7 @@ COPY angzarr-project/ ./angzarr-project/
 COPY sererr/ ./sererr/
 COPY crates/ ./crates/
 COPY xtask/ ./xtask/
+COPY tools/ ./tools/
 
 # Copy pre-generated proto files
 COPY --from=proto-gen /proto-out/ /proto-cache/
@@ -218,7 +222,8 @@ RUN TARGET=$(cat /tmp/target) && \
     --bin angzarr-aggregate \
     --bin angzarr-projector \
     --bin angzarr-saga \
-    --bin angzarr-process-manager && \
+    --bin angzarr-process-manager \
+    --bin angzarr-status && \
     cp target/$TARGET/production/angzarr-* /tmp/
 
 # =============================================================================
@@ -260,6 +265,11 @@ COPY --from=builder-dev /tmp/angzarr-process-manager ./server
 EXPOSE 1313 1314
 ENTRYPOINT ["./server"]
 
+FROM runtime-dev-base AS angzarr-status-dev
+COPY --from=builder-dev /tmp/angzarr-status ./server
+EXPOSE 1390
+ENTRYPOINT ["./server"]
+
 # =============================================================================
 # Release images (slow builds, minimal runtime, all features)
 # =============================================================================
@@ -280,5 +290,10 @@ ENTRYPOINT ["./server"]
 FROM runtime-release-base AS angzarr-process-manager
 COPY --from=builder-release /tmp/angzarr-process-manager ./server
 EXPOSE 1313 1314
+ENTRYPOINT ["./server"]
+
+FROM runtime-release-base AS angzarr-status
+COPY --from=builder-release /tmp/angzarr-status ./server
+EXPOSE 1390
 ENTRYPOINT ["./server"]
 

@@ -164,11 +164,22 @@ fn test_is_uds_address_tcp() {
 // max_grpc_message_size Tests
 // ============================================================================
 
+/// The message-size tests share one process-wide environment variable;
+/// running them in parallel let one test's value leak into another's read.
+static GRPC_MESSAGE_SIZE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn lock_message_size_env() -> std::sync::MutexGuard<'static, ()> {
+    GRPC_MESSAGE_SIZE_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// max_grpc_message_size returns default when env var not set.
 ///
 /// Default is 10MB (10240 KB * 1024 = 10485760 bytes).
 #[test]
 fn test_max_grpc_message_size_default() {
+    let _env = lock_message_size_env();
     // Save and clear env var
     let original = std::env::var(GRPC_MESSAGE_SIZE_KB_ENV).ok();
     std::env::remove_var(GRPC_MESSAGE_SIZE_KB_ENV);
@@ -185,6 +196,7 @@ fn test_max_grpc_message_size_default() {
 /// max_grpc_message_size reads env var value.
 #[test]
 fn test_max_grpc_message_size_from_env() {
+    let _env = lock_message_size_env();
     // Save original
     let original = std::env::var(GRPC_MESSAGE_SIZE_KB_ENV).ok();
 
@@ -204,6 +216,7 @@ fn test_max_grpc_message_size_from_env() {
 /// max_grpc_message_size falls back to default on invalid value.
 #[test]
 fn test_max_grpc_message_size_invalid_env() {
+    let _env = lock_message_size_env();
     // Save original
     let original = std::env::var(GRPC_MESSAGE_SIZE_KB_ENV).ok();
 
@@ -276,4 +289,79 @@ fn test_grpc_message_size_env_constant() {
 fn test_default_grpc_message_size_constant() {
     // 10 * 1024 = 10240 KB = 10 MB
     assert_eq!(DEFAULT_GRPC_MESSAGE_SIZE_KB, 10 * 1024);
+}
+
+// ============================================================================
+// prepare_uds_socket
+// ============================================================================
+
+/// A missing socket directory is created owner-only.
+#[test]
+fn test_prepare_uds_socket_creates_private_dir() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::TempDir::new().unwrap();
+    let dir = temp.path().join("sockets");
+    let path = dir.join("svc.sock");
+
+    let guard = prepare_uds_socket(&path).unwrap();
+
+    let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o700);
+    assert_eq!(guard.path(), path.as_path());
+}
+
+/// An existing directory (possibly shared) keeps its permissions.
+#[test]
+fn test_prepare_uds_socket_leaves_existing_dir_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let temp = tempfile::TempDir::new().unwrap();
+    std::fs::set_permissions(temp.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let _guard = prepare_uds_socket(&temp.path().join("svc.sock")).unwrap();
+
+    let mode = std::fs::metadata(temp.path()).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o755);
+}
+
+/// A stale socket from a previous run is removed so bind succeeds.
+#[test]
+fn test_prepare_uds_socket_removes_stale_socket() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let path = temp.path().join("svc.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    drop(listener);
+    assert!(path.exists());
+
+    let _guard = prepare_uds_socket(&path).unwrap();
+
+    assert!(!path.exists());
+    std::os::unix::net::UnixListener::bind(&path).expect("rebind after cleanup");
+}
+
+/// A socket path that cannot be inspected (here: its parent is a regular
+/// file) is an error up front, not a guard over a path bind will reject.
+#[test]
+fn test_prepare_uds_socket_uninspectable_path_is_an_error() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let not_a_dir = temp.path().join("file");
+    std::fs::write(&not_a_dir, b"data").unwrap();
+
+    let result = prepare_uds_socket(&not_a_dir.join("svc.sock"));
+
+    assert!(result.is_err());
+    assert_ne!(result.err().unwrap().kind(), std::io::ErrorKind::NotFound);
+}
+
+/// A regular file at the socket path (misconfiguration) is an error and is
+/// never deleted.
+#[test]
+fn test_prepare_uds_socket_refuses_to_delete_regular_file() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let path = temp.path().join("important.db");
+    std::fs::write(&path, b"data").unwrap();
+
+    let err = prepare_uds_socket(&path).err().expect("must refuse");
+
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&path).unwrap(), b"data");
 }

@@ -26,8 +26,9 @@ use serial_test::serial;
 /// Must be called before each test to ensure isolation.
 fn clear_angzarr_env_vars() {
     env::remove_var(CONFIG_ENV_VAR);
-    env::remove_var("ANGZARR__SERVER__CH_PORT");
-    env::remove_var("ANGZARR__SERVER__HOST");
+    env::remove_var("ANGZARR__TRANSPORT__TCP__PORT");
+    env::remove_var("ANGZARR_TRANSPORT__TCP__PORT");
+    env::remove_var("TARGET");
     env::remove_var("ANGZARR__STORAGE__STORAGE_TYPE");
     env::remove_var("ANGZARR__TRANSPORT__TRANSPORT_TYPE");
 }
@@ -48,15 +49,16 @@ fn test_load_from_explicit_path() {
     let config_path = dir.path().join("custom-config.yaml");
 
     let config_content = r#"
-server:
-  ch_port: 8888
+transport:
+  tcp:
+    port: 8888
 "#;
     fs::write(&config_path, config_content).unwrap();
 
     let config =
         Config::load(Some(config_path.to_str().unwrap())).expect("Should load from explicit path");
 
-    assert_eq!(config.server.ch_port, 8888);
+    assert_eq!(config.transport.tcp.port, 8888);
 }
 
 /// Config::load reads from CONFIG_ENV_VAR environment variable path.
@@ -71,8 +73,9 @@ fn test_load_from_env_var_path() {
     let config_path = dir.path().join("env-config.yaml");
 
     let config_content = r#"
-server:
-  ch_port: 7777
+transport:
+  tcp:
+    port: 7777
 "#;
     fs::write(&config_path, config_content).unwrap();
 
@@ -84,7 +87,7 @@ server:
     // Clean up
     clear_angzarr_env_vars();
 
-    assert_eq!(config.server.ch_port, 7777);
+    assert_eq!(config.transport.tcp.port, 7777);
 }
 
 // ============================================================================
@@ -105,13 +108,14 @@ fn test_env_vars_override_file_values() {
 
     // Create config with one value
     let config_content = r#"
-server:
-  ch_port: 1234
+transport:
+  tcp:
+    port: 1234
 "#;
     fs::write(&config_path, config_content).unwrap();
 
     // Set env var to override - must be set BEFORE loading
-    env::set_var("ANGZARR__SERVER__CH_PORT", "5678");
+    env::set_var("ANGZARR__TRANSPORT__TCP__PORT", "5678");
 
     let config =
         Config::load(Some(config_path.to_str().unwrap())).expect("Should load with env override");
@@ -119,7 +123,7 @@ server:
     // Clean up
     clear_angzarr_env_vars();
 
-    assert_eq!(config.server.ch_port, 5678);
+    assert_eq!(config.transport.tcp.port, 5678);
 }
 
 /// Explicit path argument overrides default config.yaml.
@@ -135,15 +139,16 @@ fn test_explicit_path_overrides_default_config() {
     // Create explicit config with a specific value
     let explicit_path = dir.path().join("explicit.yaml");
     let explicit_content = r#"
-server:
-  ch_port: 2222
+transport:
+  tcp:
+    port: 2222
 "#;
     fs::write(&explicit_path, explicit_content).unwrap();
 
     let config = Config::load(Some(explicit_path.to_str().unwrap()))
         .expect("Should load from explicit path");
 
-    assert_eq!(config.server.ch_port, 2222);
+    assert_eq!(config.transport.tcp.port, 2222);
 }
 
 // ============================================================================
@@ -197,9 +202,10 @@ fn test_load_fails_for_invalid_yaml() {
     let config_path = dir.path().join("bad.yaml");
 
     let invalid_yaml = r#"
-server:
-  ch_port: not_a_number
-  host: [invalid
+transport:
+  tcp:
+    port: not_a_number
+    host: [invalid
 "#;
     fs::write(&config_path, invalid_yaml).unwrap();
 
@@ -224,26 +230,34 @@ fn test_load_parses_nested_config() {
     let config_path = dir.path().join("nested.yaml");
 
     let config_content = r#"
-server:
-  ch_port: 1313
-  host: "localhost"
-
 storage:
-  type: "sqlite"
-  sqlite:
-    path: "/tmp/test.db"
+  backends:
+    main:
+      type: "sqlite"
+      path: "/tmp/test.db"
+  events:
+    use: main
+  snapshots:
+    use: main
+  positions:
+    use: main
 
 transport:
   type: "tcp"
+  tcp:
+    port: 1313
+    host: "localhost"
 "#;
     fs::write(&config_path, config_content).unwrap();
 
     let config =
         Config::load(Some(config_path.to_str().unwrap())).expect("Should parse nested config");
 
-    assert_eq!(config.server.ch_port, 1313);
-    assert_eq!(config.server.host, "localhost");
-    assert_eq!(config.storage.storage_type, "sqlite");
+    assert_eq!(config.transport.tcp.port, 1313);
+    assert_eq!(config.transport.tcp.host, "localhost");
+    assert_eq!(config.storage.events.backend, "main");
+    assert_eq!(config.storage.backends["main"].type_name(), "sqlite");
+    assert!(config.storage.validate().is_ok());
     assert_eq!(config.transport.transport_type, TransportType::Tcp);
 }
 
@@ -260,9 +274,9 @@ fn test_load_parses_optional_sections() {
 
     let config_content = r#"
 messaging:
-  type: "ipc"
-  ipc:
-    base_path: "/tmp/angzarr"
+  type: "amqp"
+  amqp:
+    url: "amqp://mq:5672"
 "#;
     fs::write(&config_path, config_content).unwrap();
 
@@ -271,7 +285,83 @@ messaging:
 
     assert!(config.messaging.is_some());
     let messaging = config.messaging.unwrap();
-    assert_eq!(messaging.messaging_type, "ipc");
+    assert_eq!(messaging.messaging_type, "amqp");
+    assert_eq!(messaging.amqp.url, "amqp://mq:5672");
+}
+
+// ============================================================================
+// Environment variable form
+// ============================================================================
+
+/// The supported env form is `ANGZARR__SECTION__KEY` (double underscore
+/// after the prefix), as documented in config.example.yaml.
+#[test]
+#[serial]
+fn test_documented_env_form_sets_nested_key() {
+    clear_angzarr_env_vars();
+    env::set_var("ANGZARR__TRANSPORT__TCP__PORT", "4321");
+
+    let config = Config::load(None).expect("loads");
+    clear_angzarr_env_vars();
+
+    assert_eq!(config.transport.tcp.port, 4321);
+}
+
+/// A single underscore after the prefix is not the config form and is
+/// ignored (it would otherwise be indistinguishable from ANGZARR_LOG and
+/// the other ANGZARR_* process variables).
+#[test]
+#[serial]
+fn test_single_underscore_env_form_is_ignored() {
+    clear_angzarr_env_vars();
+    env::set_var("ANGZARR_TRANSPORT__TCP__PORT", "4321");
+
+    let config = Config::load(None).expect("loads");
+    clear_angzarr_env_vars();
+
+    assert_ne!(config.transport.tcp.port, 4321);
+}
+
+/// Unprefixed environment variables never reach the config: a variable
+/// that happens to share a section's name (here `TARGET`) must not break
+/// loading by overwriting that section with a string.
+#[test]
+#[serial]
+fn test_unprefixed_env_var_does_not_shadow_section() {
+    clear_angzarr_env_vars();
+    env::set_var("TARGET", "not-a-target-section");
+
+    let result = Config::load(None);
+    clear_angzarr_env_vars();
+
+    let config = result.expect("unprefixed env must be ignored");
+    assert!(config.target.is_none());
+}
+
+/// Resource limits and saga compensation knobs are read from config.
+#[test]
+#[serial]
+fn test_limits_and_saga_compensation_load_from_file() {
+    clear_angzarr_env_vars();
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("limits.yaml");
+    fs::write(
+        &config_path,
+        r#"
+limits:
+  max_payload_bytes: 4096
+saga_compensation:
+  fallback_domain: "ops.failures"
+  fallback_send_to_dlq: true
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(Some(config_path.to_str().unwrap())).expect("loads");
+
+    assert_eq!(config.limits.max_payload_bytes, 4096);
+    assert_eq!(config.saga_compensation.fallback_domain, "ops.failures");
+    assert!(config.saga_compensation.fallback_send_to_dlq);
 }
 
 // ============================================================================
@@ -285,7 +375,7 @@ messaging:
 fn test_for_test_returns_safe_defaults() {
     let config = Config::for_test();
 
-    assert_eq!(config.server.host, "127.0.0.1");
+    assert_eq!(config.transport.tcp.host, "127.0.0.1");
 }
 
 /// Config::for_test has no optional services configured.
@@ -297,9 +387,6 @@ fn test_for_test_has_no_optional_services() {
 
     assert!(config.messaging.is_none());
     assert!(config.target.is_none());
-    assert!(config.client_logic.is_none());
-    assert!(config.projectors.is_none());
-    assert!(config.sagas.is_none());
 }
 
 // ============================================================================

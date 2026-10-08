@@ -170,3 +170,55 @@ fn test_parse_config_path_only_program_name() {
     let result = parse_config_path_from_args(&args);
     assert_eq!(result, None);
 }
+
+// ============================================================================
+// otlp_export_enabled Tests
+// ============================================================================
+//
+// Without a collector, exporters retry their connection forever and spam
+// the log; telemetry is exported only when an endpoint is configured.
+
+fn env_of(vars: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
+    let vars: Vec<(String, String)> = vars
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    move |name| vars.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone())
+}
+
+#[test]
+fn test_otlp_export_disabled_without_an_endpoint() {
+    assert!(!otlp_export_enabled(env_of(&[])));
+    assert!(!otlp_export_enabled(env_of(&[(
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "  "
+    )])));
+}
+
+#[test]
+fn test_otlp_export_enabled_by_any_endpoint() {
+    for name in [
+        "OTEL_EXPORTER_OTLP_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+        "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT",
+    ] {
+        assert!(
+            otlp_export_enabled(env_of(&[(name, "http://collector:4317")])),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn test_otlp_export_disabled_by_sdk_switch() {
+    let endpoint = ("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4317");
+    assert!(!otlp_export_enabled(env_of(&[
+        endpoint,
+        ("OTEL_SDK_DISABLED", "TRUE")
+    ])));
+    assert!(otlp_export_enabled(env_of(&[
+        endpoint,
+        ("OTEL_SDK_DISABLED", "false")
+    ])));
+}

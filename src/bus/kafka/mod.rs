@@ -17,6 +17,7 @@ use super::config::{EventBusMode, KafkaConfig, MessagingConfig};
 use super::error::Result;
 use super::factory::BusBackend;
 use super::traits::EventBus;
+use crate::advice::InstrumentedBus;
 
 pub use bus::KafkaEventBus;
 pub use config::KafkaEventBusConfig;
@@ -37,7 +38,12 @@ pub(crate) const MAX_MESSAGE_SIZE: usize = 1024 * 1024;
 
 inventory::submit! {
     BusBackend {
-        try_create: |config, mode| Box::pin(try_create(config, mode)),
+        try_create: |config, mode| {
+            // Clone before creating the 'static future (the &MessagingConfig
+            // borrow can't cross the await boundary) — same pattern as AMQP.
+            let config = config.clone();
+            Box::pin(async move { try_create(&config, mode).await })
+        },
     }
 }
 
@@ -56,13 +62,10 @@ async fn try_create(
             cfg = apply_kafka_security(cfg, &config.kafka);
             cfg
         }
-        EventBusMode::Subscriber { queue, domain } => {
-            let mut cfg = KafkaEventBusConfig::subscriber(
-                &config.kafka.bootstrap_servers,
-                queue,
-                vec![domain],
-            )
-            .with_topic_prefix(&config.kafka.topic_prefix);
+        EventBusMode::Subscriber { queue, domains } => {
+            let mut cfg =
+                KafkaEventBusConfig::subscriber(&config.kafka.bootstrap_servers, queue, domains)
+                    .with_topic_prefix(&config.kafka.topic_prefix);
             cfg = apply_kafka_security(cfg, &config.kafka);
             cfg
         }
@@ -82,7 +85,10 @@ async fn try_create(
     match KafkaEventBus::new(kafka_config).await {
         Ok(bus) => {
             info!(messaging_type = "kafka", "Event bus initialized");
-            Some(Ok(Arc::new(bus)))
+            // R2-WIRE-ADVICE: wrap with `InstrumentedBus` under "kafka".
+            Some(Ok(
+                Arc::new(InstrumentedBus::new(bus, "kafka")) as Arc<dyn EventBus>
+            ))
         }
         Err(e) => Some(Err(e)),
     }

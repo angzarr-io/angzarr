@@ -12,7 +12,13 @@ pub enum TemporalQuery {
     /// Events up to a specific sequence number (inclusive).
     AsOfSequence(u32),
     /// Events up to a specific timestamp.
-    AsOfTimestamp(String),
+    ///
+    /// C10: carries the typed `prost_types::Timestamp` end to end. It was
+    /// previously a `String` that each layer parsed/reformatted, which is
+    /// exactly the round-trip the storage `until: &str` footgun lived in —
+    /// keeping the typed value means the single normalization point is the
+    /// repository/storage boundary, not every intermediate hop.
+    AsOfTimestamp(prost_types::Timestamp),
 }
 
 /// Pipeline execution mode.
@@ -23,7 +29,7 @@ pub enum PipelineMode {
     /// Speculative: load temporal state → invoke → return (no persist/publish).
     Speculative {
         as_of_sequence: Option<u32>,
-        as_of_timestamp: Option<String>,
+        as_of_timestamp: Option<prost_types::Timestamp>,
     },
 }
 

@@ -3,6 +3,7 @@
 //! These are stateless helper functions used across the codebase.
 
 pub mod bootstrap;
+pub mod redact;
 pub mod response_builder;
 pub mod retry;
 pub mod saga_compensation;

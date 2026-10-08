@@ -36,6 +36,7 @@ fn make_test_command(domain: &str) -> CommandBook {
             }),
             correlation_id: "test-corr-123".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {

@@ -3,7 +3,9 @@
 //! Uses EventBookRepository for storage and K8s service discovery for projectors.
 //! client logic invocation is handled by the pipeline via gRPC client.
 
+use crate::transport::GrpcMessageLimits;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use tonic::Status;
@@ -11,58 +13,70 @@ use tracing::warn;
 use uuid::Uuid;
 
 use crate::bus::EventBus;
-use crate::discovery::ServiceDiscovery;
+use crate::discovery::{DiscoveredService, ServiceDiscovery};
 use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher, NoopDeadLetterPublisher};
+use crate::orchestration::channels::ChannelCache;
+use crate::orchestration::outbox::Outbox;
+use crate::orchestration::shared::{
+    read_executed_reactions, read_reaction_errors, ExecutedCommand,
+};
 use crate::proto::process_manager_coordinator_service_client::ProcessManagerCoordinatorServiceClient;
 use crate::proto::saga_coordinator_service_client::SagaCoordinatorServiceClient;
 use crate::proto::{
-    AngzarrDeferredSequence, CascadeErrorMode, CommandBook, Cover, Edition, EventBook, EventPage,
+    CascadeErrorMode, CascadeReactionError, CommandBook, Cover, Edition, EventBook, EventPage,
     EventRequest, MergeStrategy, ProcessManagerCoordinatorRequest, Projection, SagaHandleRequest,
-    Snapshot, SnapshotRetention, Uuid as ProtoUuid,
+    Snapshot, Uuid as ProtoUuid,
 };
-use crate::proto_ext::{correlated_request, CoverExt, EventPageExt};
+use crate::proto_ext::{
+    calculate_set_next_seq, correlated_request, CascadeErrorModeExt, CoverExt, EventPageExt,
+    StatusExt,
+};
 use crate::repository::EventBookRepository;
+use crate::repository::SnapshotRepository;
 use crate::services::upcaster::Upcaster;
-use crate::storage::{EventStore, SnapshotStore, StorageError};
+use crate::storage::{EventStore, StorageError};
 use crate::utils::single_sequence_check::sequence_mismatch_error_with_state;
 
 use crate::storage::AddOutcome;
 
 use super::sync_policy::{should_call_sync_projectors, should_skip_post_persist};
-use super::{
-    AggregateContext, AggregateContextFactory, ClientLogic, PersistOutcome, TemporalQuery,
-};
+use super::{AggregateContext, PersistOutcome, SyncFanout, TemporalQuery};
 
-/// Translate an `AngzarrDeferredSequence` into a `SourceInfo` for the
-/// storage layer's `find_by_source` lookup. Same shape as the local-impl
-/// helper — kept duplicated rather than hoisted to avoid a circular dep
-/// on `super::traits` from the storage module.
-fn deferred_to_source_info(
-    deferred: &AngzarrDeferredSequence,
-) -> Result<Option<crate::storage::SourceInfo>, Status> {
-    let Some(source) = deferred.source.as_ref() else {
-        return Ok(None);
-    };
-    if source.domain.is_empty() {
-        return Ok(None);
-    }
-    let Some(root_uuid) = source.root.as_ref() else {
-        return Ok(None);
-    };
-    let source_root = Uuid::from_slice(&root_uuid.value).map_err(|e| {
-        Status::invalid_argument(format!("deferred source root is not a valid UUID: {e}"))
-    })?;
-    let edition_str = source
-        .edition
+/// The cover persisted events are written under: the coordinator's resolved
+/// `(domain, root)` and validated correlation id, keeping the response's
+/// edition and `ext` metadata.
+///
+/// A response cover that names a different domain or root is a business-logic
+/// bug that would otherwise append events to another aggregate; it is refused
+/// (non-retryable). An empty domain or missing root is filled in.
+fn persist_target_cover(
+    received: &EventBook,
+    domain: &str,
+    root: Uuid,
+    correlation_id: &str,
+) -> Result<Cover, Status> {
+    let response_cover = received.cover.clone().unwrap_or_default();
+    let response_root = response_cover
+        .root
         .as_ref()
-        .map(|e| e.name.as_str())
-        .unwrap_or("");
-    Ok(Some(crate::storage::SourceInfo::new(
-        edition_str,
-        source.domain.as_str(),
-        source_root,
-        deferred.source_seq,
-    )))
+        .map(|r| Uuid::from_slice(&r.value).unwrap_or(Uuid::nil()));
+    let foreign_domain = !response_cover.domain.is_empty() && response_cover.domain != domain;
+    let foreign_root = response_root.is_some_and(|r| r != root);
+    if foreign_domain || foreign_root {
+        return Err(Status::failed_precondition(format!(
+            "Business response targets {}/{}, but the command targets {domain}/{root}",
+            response_cover.domain,
+            response_root.map(|r| r.to_string()).unwrap_or_default(),
+        )));
+    }
+    Ok(Cover {
+        domain: domain.to_string(),
+        root: Some(ProtoUuid {
+            value: root.as_bytes().to_vec(),
+        }),
+        correlation_id: correlation_id.to_string(),
+        ..response_cover
+    })
 }
 
 /// Build an EventBook with proper next_sequence set.
@@ -87,6 +101,7 @@ fn build_event_book(
                 name: edition.to_string(),
                 divergences: vec![],
             }),
+            ext: None,
         }),
         pages,
         snapshot,
@@ -96,22 +111,33 @@ fn build_event_book(
     book
 }
 
-/// Calculate and set next_sequence on an EventBook.
-fn calculate_set_next_seq(book: &mut EventBook) {
-    let max_from_pages = book.pages.last().map(|p| p.sequence_num()).unwrap_or(0);
-    let max_from_snapshot = book.snapshot.as_ref().map(|s| s.sequence).unwrap_or(0);
-    book.next_sequence = max_from_pages.max(max_from_snapshot) + 1;
+/// The book handed to event consumers (the bus and sync projectors): the
+/// persisted pages without the snapshot.
+///
+/// Snapshots are an aggregate-rehydration optimization; event consumers have
+/// no use for one, and `GapFiller::fill_if_needed` treats a book carrying a
+/// snapshot as already complete and skips gap repair. Returns `None` when
+/// there are no pages to deliver.
+fn consumer_book(events: &EventBook) -> Option<EventBook> {
+    if events.pages.is_empty() {
+        return None;
+    }
+    Some(EventBook {
+        cover: events.cover.clone(),
+        pages: events.pages.clone(),
+        snapshot: None,
+        next_sequence: events.next_sequence,
+    })
 }
 
 /// gRPC aggregate context using EventBookRepository and K8s service discovery.
 pub struct GrpcAggregateContext {
     event_store: Arc<dyn EventStore>,
     event_book_repo: Arc<EventBookRepository>,
-    snapshot_store: Arc<dyn SnapshotStore>,
+    snapshot_repo: Arc<SnapshotRepository>,
     discovery: Arc<dyn ServiceDiscovery>,
     event_bus: Arc<dyn EventBus>,
     upcaster: Option<Arc<Upcaster>>,
-    snapshot_write_enabled: bool,
     /// When Some, call projectors synchronously with this mode.
     /// When None, only publish to event bus (async mode).
     sync_mode: Option<crate::proto::SyncMode>,
@@ -119,16 +145,82 @@ pub struct GrpcAggregateContext {
     dlq_publisher: Arc<dyn DeadLetterPublisher>,
     /// Component name for DLQ metadata.
     component_name: String,
-    /// Cascade ID for 2PC atomic execution.
-    /// When set, events are persisted with `no_commit=true` and cascade_id stamped.
-    cascade_id: Option<String>,
+    /// How a failing sync fan-out target affects the command (CASCADE).
+    cascade_error_mode: CascadeErrorMode,
+    /// Channels to saga/PM coordinators, shared across commands.
+    channels: Arc<ChannelCache>,
+    /// Deadline for each sync fan-out call.
+    downstream_timeout: Duration,
+    /// Compensation outbox for CASCADE_ERROR_COMPENSATE.
+    outbox: Option<Arc<Outbox>>,
+}
+
+/// Default deadline for one synchronous projector / saga / PM call.
+pub const DEFAULT_DOWNSTREAM_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// A sync fan-out target: its registered name and component type.
+#[derive(Clone, Copy)]
+struct FanoutTarget<'a> {
+    name: &'a str,
+    component_type: &'static str,
+}
+
+impl<'a> FanoutTarget<'a> {
+    fn new(name: &'a str, component_type: &'static str) -> Self {
+        Self {
+            name,
+            component_type,
+        }
+    }
+}
+
+/// What a saga/PM coordinator reported for a CASCADE call.
+#[derive(Debug, Default)]
+struct Reported {
+    reaction_errors: Vec<CascadeReactionError>,
+    executed: Vec<ExecutedCommand>,
+}
+
+impl Reported {
+    fn from_metadata(metadata: &tonic::metadata::MetadataMap) -> Self {
+        Self {
+            reaction_errors: read_reaction_errors(metadata),
+            executed: read_executed_reactions(metadata),
+        }
+    }
+}
+
+/// A sync fan-out target that failed.
+#[derive(Debug)]
+struct FanoutFailure {
+    target: String,
+    status: Status,
+}
+
+impl FanoutFailure {
+    /// The status the command fails with: the target's code, naming it.
+    fn into_status(self) -> Status {
+        Status::new(
+            self.status.code(),
+            format!(
+                "Sync fan-out failed: {}: {}",
+                self.target,
+                self.status.message()
+            ),
+        )
+    }
 }
 
 impl GrpcAggregateContext {
     /// Create a new gRPC aggregate context (async mode - no sync projectors).
+    ///
+    /// Takes the `SnapshotRepository` directly so snapshot policy
+    /// (read_enabled / write_enabled) flows from a single source of
+    /// truth — see `crate::repository::SnapshotRepository`. The
+    /// underlying `EventBookRepository` shares the same instance.
     pub fn new(
         event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
+        snapshot_repo: Arc<SnapshotRepository>,
         discovery: Arc<dyn ServiceDiscovery>,
         event_bus: Arc<dyn EventBus>,
     ) -> Self {
@@ -136,45 +228,19 @@ impl GrpcAggregateContext {
             event_store: Arc::clone(&event_store),
             event_book_repo: Arc::new(EventBookRepository::new(
                 event_store,
-                Arc::clone(&snapshot_store),
+                Arc::clone(&snapshot_repo),
             )),
-            snapshot_store,
+            snapshot_repo,
             discovery,
             event_bus,
             upcaster: None,
-            snapshot_write_enabled: true,
             sync_mode: None,
             dlq_publisher: Arc::new(NoopDeadLetterPublisher),
             component_name: "aggregate".to_string(),
-            cascade_id: None,
-        }
-    }
-
-    /// Create with configurable snapshot behavior.
-    pub fn with_config(
-        event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
-        discovery: Arc<dyn ServiceDiscovery>,
-        event_bus: Arc<dyn EventBus>,
-        snapshot_read_enabled: bool,
-        snapshot_write_enabled: bool,
-    ) -> Self {
-        Self {
-            event_store: Arc::clone(&event_store),
-            event_book_repo: Arc::new(EventBookRepository::with_config(
-                event_store,
-                Arc::clone(&snapshot_store),
-                snapshot_read_enabled,
-            )),
-            snapshot_store,
-            discovery,
-            event_bus,
-            upcaster: None,
-            snapshot_write_enabled,
-            sync_mode: None,
-            dlq_publisher: Arc::new(NoopDeadLetterPublisher),
-            component_name: "aggregate".to_string(),
-            cascade_id: None,
+            cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast,
+            channels: Arc::new(ChannelCache::new()),
+            downstream_timeout: DEFAULT_DOWNSTREAM_TIMEOUT,
+            outbox: None,
         }
     }
 
@@ -205,186 +271,281 @@ impl GrpcAggregateContext {
         self
     }
 
-    /// Set the cascade ID for 2PC atomic execution.
-    ///
-    /// When cascade_id is set, events are written with `no_commit=true` and
-    /// the cascade_id stamped on each event. This enables atomic commit/rollback
-    /// across multiple aggregates.
-    pub fn with_cascade_id(mut self, cascade_id: impl Into<String>) -> Self {
-        self.cascade_id = Some(cascade_id.into());
+    /// Set how a failing sync fan-out target affects the command.
+    pub fn with_cascade_error_mode(mut self, mode: CascadeErrorMode) -> Self {
+        self.cascade_error_mode = mode;
         self
     }
 
-    /// Call sync sagas via service discovery for CASCADE mode.
+    /// Share saga/PM coordinator channels across contexts.
+    pub fn with_channel_cache(mut self, channels: Arc<ChannelCache>) -> Self {
+        self.channels = channels;
+        self
+    }
+
+    /// Record CASCADE_ERROR_COMPENSATE Compensate notifications in `outbox`.
+    pub fn with_outbox(mut self, outbox: Arc<Outbox>) -> Self {
+        self.outbox = Some(outbox);
+        self
+    }
+
+    /// Set the deadline for each sync fan-out call.
+    pub fn with_downstream_timeout(mut self, timeout: Duration) -> Self {
+        self.downstream_timeout = timeout;
+        self
+    }
+
+    /// Wrap a fan-out request with the correlation header and the deadline.
+    fn downstream_request<T>(&self, message: T, correlation_id: &str) -> tonic::Request<T> {
+        let mut request = correlated_request(message, correlation_id);
+        request.set_timeout(self.downstream_timeout);
+        request
+    }
+
+    /// Call one saga coordinator synchronously (CASCADE).
     ///
-    /// Sagas subscribed to this domain's events are called synchronously.
-    /// Each saga receives the events and may produce commands for other aggregates,
-    /// enabling recursive CASCADE execution.
-    #[tracing::instrument(name = "aggregate.sync_sagas", skip_all)]
-    async fn call_sync_sagas(
+    /// Returns what the coordinator reported: CONTINUE-mode reaction errors
+    /// and, under COMPENSATE, the reaction commands it executed.
+    async fn call_saga(
+        &self,
+        endpoint: &DiscoveredService,
+        events: &EventBook,
+    ) -> Result<Reported, Status> {
+        let channel = self.channels.channel(&endpoint.grpc_url())?;
+        let client = SagaCoordinatorServiceClient::new(channel).with_message_limits();
+        // A request that never reached the coordinator is sent again.
+        let response = crate::transport::retry_unconnected(|| {
+            let mut client = client.clone();
+            let request = self.downstream_request(
+                SagaHandleRequest {
+                    source: Some(events.clone()),
+                    sync_mode: crate::proto::SyncMode::Cascade.into(),
+                    cascade_error_mode: self.cascade_error_mode.into(),
+                },
+                events.correlation_id(),
+            );
+            async move { client.execute(request).await }
+        })
+        .await?;
+        Ok(Reported::from_metadata(response.metadata()))
+    }
+
+    /// Call one PM coordinator synchronously (CASCADE).
+    ///
+    /// Returns what the coordinator reported (see [`Self::call_saga`]).
+    async fn call_pm(
+        &self,
+        endpoint: &DiscoveredService,
+        events: &EventBook,
+    ) -> Result<Reported, Status> {
+        let channel = self.channels.channel(&endpoint.grpc_url())?;
+        let client = ProcessManagerCoordinatorServiceClient::new(channel).with_message_limits();
+        // A request that never reached the coordinator is sent again.
+        let response = crate::transport::retry_unconnected(|| {
+            let mut client = client.clone();
+            let request = self.downstream_request(
+                ProcessManagerCoordinatorRequest {
+                    trigger: Some(events.clone()),
+                    sync_mode: crate::proto::SyncMode::Cascade.into(),
+                    cascade_error_mode: self.cascade_error_mode.into(),
+                },
+                events.correlation_id(),
+            );
+            async move { client.handle(request).await }
+        })
+        .await?;
+        Ok(Reported::from_metadata(response.metadata()))
+    }
+
+    /// Call sagas, then PMs, subscribed to this domain (CASCADE).
+    ///
+    /// PMs need a correlation_id to locate their state, so books without one
+    /// skip the PM leg. Failures follow [`Self::cascade_error_mode`]; under
+    /// COMPENSATE the reaction commands the coordinators called so far
+    /// executed are compensated when one fails.
+    #[tracing::instrument(name = "aggregate.sync_cascade", skip_all)]
+    async fn call_sync_sagas_and_pms(
         &self,
         events: &EventBook,
-        sync_mode: crate::proto::SyncMode,
+        reaction_errors: &mut Vec<CascadeReactionError>,
     ) -> Result<(), Status> {
         let source_domain = events.domain();
-        let endpoints = self
+        let mut executed: Vec<ExecutedCommand> = Vec::new();
+
+        let sagas = self
             .discovery
             .get_saga_endpoints_for_domain(source_domain)
             .await;
-
-        if endpoints.is_empty() {
-            return Ok(());
+        for endpoint in &sagas {
+            let outcome = self.call_saga(endpoint, events).await;
+            let target = FanoutTarget::new(&endpoint.name, "saga");
+            self.settle_reaction(target, outcome, events, reaction_errors, &mut executed)
+                .await?;
         }
 
-        let correlation_id = events.correlation_id();
-
-        for endpoint in endpoints {
-            let address = endpoint.grpc_url();
-            let channel = tonic::transport::Channel::from_shared(address.clone())
-                .map_err(|e| Status::internal(format!("Invalid saga address: {e}")))?
-                .connect()
-                .await
-                .map_err(|e| {
-                    Status::unavailable(format!("Cannot connect to saga {}: {e}", endpoint.name))
-                })?;
-
-            let mut client = SagaCoordinatorServiceClient::new(channel);
-
-            let request = correlated_request(
-                SagaHandleRequest {
-                    source: Some(events.clone()),
-                    sync_mode: sync_mode.into(),
-                    cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-                    destination_sequences: std::collections::HashMap::new(), // Coordinator fetches sequences
-                },
-                correlation_id,
-            );
-
-            client.execute(request).await.map_err(|e| {
-                warn!(
-                    saga = %endpoint.name,
-                    error = %e,
-                    "Saga coordinator call failed"
-                );
-                Status::internal(format!("Saga {} failed: {e}", endpoint.name))
-            })?;
+        if !events.correlation_id().is_empty() {
+            let pms = self
+                .discovery
+                .get_pm_endpoints_for_domain(source_domain)
+                .await;
+            for endpoint in &pms {
+                let outcome = self.call_pm(endpoint, events).await;
+                let target = FanoutTarget::new(&endpoint.name, "process_manager");
+                self.settle_reaction(target, outcome, events, reaction_errors, &mut executed)
+                    .await?;
+            }
         }
 
         Ok(())
     }
 
-    /// Call sync PMs via service discovery for CASCADE mode.
-    ///
-    /// PMs subscribed to this domain's events are called synchronously.
-    /// Each PM receives the events and may produce commands for other aggregates,
-    /// enabling recursive CASCADE execution.
-    ///
-    /// PMs require correlation_id - events without one are skipped.
-    #[tracing::instrument(name = "aggregate.sync_pms", skip_all)]
-    async fn call_sync_pms(
+    /// Fold one saga/PM coordinator's outcome into the request: collect what
+    /// it reported, or apply the cascade error mode to its failure.
+    async fn settle_reaction(
         &self,
+        target: FanoutTarget<'_>,
+        outcome: Result<Reported, Status>,
         events: &EventBook,
-        sync_mode: crate::proto::SyncMode,
+        reaction_errors: &mut Vec<CascadeReactionError>,
+        executed: &mut Vec<ExecutedCommand>,
     ) -> Result<(), Status> {
-        let correlation_id = events.correlation_id();
-        if correlation_id.is_empty() {
-            // PMs require correlation_id for state lookup
-            return Ok(());
+        match outcome {
+            Ok(reported) => {
+                reaction_errors.extend(reported.reaction_errors);
+                executed.extend(reported.executed);
+                Ok(())
+            }
+            Err(status) => {
+                if CascadeErrorMode::or_default_fail_fast(self.cascade_error_mode as i32)
+                    == CascadeErrorMode::CascadeErrorCompensate
+                {
+                    self.compensate_executed(executed, &target, &status).await;
+                }
+                self.record_fanout_failure(target, status, events, reaction_errors)
+                    .await
+            }
         }
-
-        let source_domain = events.domain();
-        let endpoints = self
-            .discovery
-            .get_pm_endpoints_for_domain(source_domain)
-            .await;
-
-        if endpoints.is_empty() {
-            return Ok(());
-        }
-
-        for endpoint in endpoints {
-            let address = endpoint.grpc_url();
-            let channel = tonic::transport::Channel::from_shared(address.clone())
-                .map_err(|e| Status::internal(format!("Invalid PM address: {e}")))?
-                .connect()
-                .await
-                .map_err(|e| {
-                    Status::unavailable(format!("Cannot connect to PM {}: {e}", endpoint.name))
-                })?;
-
-            let mut client = ProcessManagerCoordinatorServiceClient::new(channel);
-
-            let request = correlated_request(
-                ProcessManagerCoordinatorRequest {
-                    trigger: Some(events.clone()),
-                    sync_mode: sync_mode.into(),
-                    cascade_error_mode: CascadeErrorMode::CascadeErrorFailFast.into(),
-                },
-                correlation_id,
-            );
-
-            client.handle(request).await.map_err(|e| {
-                warn!(
-                    pm = %endpoint.name,
-                    error = %e,
-                    "PM coordinator call failed"
-                );
-                Status::internal(format!("PM {} failed: {e}", endpoint.name))
-            })?;
-        }
-
-        Ok(())
     }
 
-    /// Call sync projectors via K8s service discovery.
+    /// Record a Compensate notification for every reaction command executed
+    /// earlier in this request (CASCADE_ERROR_COMPENSATE). The failed
+    /// coordinator compensates its own executed commands.
+    async fn compensate_executed(
+        &self,
+        executed: &[ExecutedCommand],
+        target: &FanoutTarget<'_>,
+        status: &Status,
+    ) {
+        let reason = format!("{}: {}", target.name, status.message());
+        let failures = crate::orchestration::shared::record_compensations(
+            self.outbox.as_ref(),
+            executed,
+            &reason,
+        )
+        .await;
+        for failure in failures {
+            tracing::error!(%failure, "Compensate notification not recorded");
+        }
+    }
+
+    /// Apply the cascade error mode to one failed fan-out target.
+    ///
+    /// FAIL_FAST and COMPENSATE stop at the first failure (`Err`). CONTINUE
+    /// records a reaction error and keeps going; the request succeeds with
+    /// the reactions that succeeded. DEAD_LETTER dead-letters the book for
+    /// that target and keeps going.
+    async fn record_fanout_failure(
+        &self,
+        target: FanoutTarget<'_>,
+        status: Status,
+        events: &EventBook,
+        reaction_errors: &mut Vec<CascadeReactionError>,
+    ) -> Result<(), Status> {
+        warn!(target = %target.name, error = %status, mode = ?self.cascade_error_mode, "Sync fan-out target failed");
+        let failure = FanoutFailure {
+            target: target.name.to_string(),
+            status,
+        };
+        match CascadeErrorMode::or_default_fail_fast(self.cascade_error_mode as i32) {
+            CascadeErrorMode::CascadeErrorFailFast
+            | CascadeErrorMode::CascadeErrorUnspecified
+            | CascadeErrorMode::CascadeErrorCompensate => Err(failure.into_status()),
+            CascadeErrorMode::CascadeErrorContinue => {
+                reaction_errors.push(CascadeReactionError {
+                    component: failure.target,
+                    target: None,
+                    command_type: String::new(),
+                    status_code: failure.status.code() as i32,
+                    message: failure.status.message().to_string(),
+                    code: failure.status.error_info_reason(),
+                });
+                Ok(())
+            }
+            CascadeErrorMode::CascadeErrorDeadLetter => {
+                let dead_letter = AngzarrDeadLetter::from_event_processing_failure(
+                    events,
+                    &format!("{}: {}", failure.target, failure.status.message()),
+                    0,
+                    crate::utils::retry::is_retryable_status(&failure.status),
+                    Vec::new(),
+                    &failure.target,
+                    target.component_type,
+                );
+                if let Err(e) = self.dlq_publisher.publish(dead_letter).await {
+                    tracing::error!(target = %failure.target, error = %e, "Failed to dead-letter cascade failure");
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Call sync projectors via service discovery.
+    ///
+    /// An endpoint answering `NotFound` (projector does not handle this
+    /// domain) or `Unimplemented` (endpoint does not serve the projector
+    /// coordinator) is skipped. Other failures follow the cascade error mode.
     #[tracing::instrument(name = "aggregate.sync_projectors", skip_all)]
     async fn call_sync_projectors(
         &self,
         events: &EventBook,
         sync_mode: crate::proto::SyncMode,
+        reaction_errors: &mut Vec<CascadeReactionError>,
     ) -> Result<Vec<Projection>, Status> {
         let clients = self.discovery.get_all_projectors().await.map_err(|e| {
             warn!(error = %e, "Failed to get projector coordinator clients");
             Status::unavailable(format!("Projector discovery failed: {e}"))
         })?;
 
-        if clients.is_empty() {
-            return Ok(vec![]);
-        }
-
         let correlation_id = events.correlation_id();
         let mut projections = Vec::new();
         for mut client in clients {
-            let request = correlated_request(
+            let request = self.downstream_request(
                 EventRequest {
                     events: Some(events.clone()),
                     sync_mode: sync_mode.into(),
-                    route_to_handler: false, // Projectors don't route to aggregates
+                    skip_handler: true,
                 },
                 correlation_id,
             );
             match client.handle_sync(request).await {
                 Ok(response) => projections.push(response.into_inner()),
-                Err(e) if e.code() == tonic::Code::NotFound => {
-                    // Projector doesn't handle this domain - skip
+                Err(e) if e.code() == tonic::Code::NotFound => {}
+                Err(e) if e.code() == tonic::Code::Unimplemented => {
+                    warn!(error = %e, "Projector endpoint does not serve ProjectorCoordinatorService; skipped");
                 }
                 Err(e) => {
-                    warn!(error = %e, "Projector sync call failed");
-                    return Err(Status::internal(format!("Projector sync failed: {e}")));
+                    let target = FanoutTarget::new("projector", "projector");
+                    self.record_fanout_failure(target, e, events, reaction_errors)
+                        .await?;
                 }
             }
         }
-
         Ok(projections)
     }
 }
 
 #[async_trait]
 impl AggregateContext for GrpcAggregateContext {
-    fn cascade_id(&self) -> Option<&str> {
-        self.cascade_id.as_deref()
-    }
-
     #[tracing::instrument(name = "aggregate.load_events", skip_all, fields(%domain, %root))]
     async fn load_prior_events_with_divergence(
         &self,
@@ -396,12 +557,42 @@ impl AggregateContext for GrpcAggregateContext {
     ) -> Result<EventBook, Status> {
         match temporal {
             TemporalQuery::Current => {
-                // For explicit divergence, skip snapshot and use get_with_divergence
-                // This loads events from main timeline up to divergence point
-                if explicit_divergence.is_some() {
+                // R2-SNAP-4: explicit_divergence used to unconditionally
+                // skip the snapshot store on the grounds that a fresh
+                // branch wouldn't have one. That's true for new branches
+                // but wrong for branches that have run long enough to
+                // accumulate their own snapshot — the framework's
+                // documented contract is "if a snapshot exists, load it
+                // and layer events from snapshot.sequence + 1 on top;
+                // otherwise from 0".
+                //
+                // Probe the snapshot store first. When a snapshot exists
+                // for this (domain, edition, root) the EventBookRepo
+                // handles the snapshot + post-snapshot events path
+                // identically to the no-divergence case. Only fall
+                // through to get_with_divergence when no snapshot
+                // exists — the new-branch case the original code was
+                // designed for.
+                if let Some(div) = explicit_divergence {
+                    let snapshot = self
+                        .snapshot_repo
+                        .get(domain, edition, root)
+                        .await
+                        .map_err(|e| Status::internal(format!("Failed to probe snapshot: {e}")))?;
+                    if snapshot.is_some() {
+                        tracing::debug!(
+                            ?div,
+                            "explicit_divergence + snapshot present; using snapshot path"
+                        );
+                        return self
+                            .event_book_repo
+                            .get(domain, edition, root)
+                            .await
+                            .map_err(|e| Status::internal(format!("Failed to load events: {e}")));
+                    }
                     tracing::debug!(
-                        ?explicit_divergence,
-                        "Using explicit divergence for event loading"
+                        ?div,
+                        "explicit_divergence + no snapshot; using get_with_divergence"
                     );
                     let events = self
                         .event_store
@@ -453,6 +644,9 @@ impl AggregateContext for GrpcAggregateContext {
             })
             .cloned()
             .collect();
+        // Stamped here, not only by the store, so the book that is
+        // published and returned carries the instant that is stored.
+        crate::storage::helpers::stamp_created_at(&mut new_pages);
 
         // Check if snapshot changed (compare state bytes)
         let snapshot_changed = match (&prior.snapshot, &received.snapshot) {
@@ -470,31 +664,13 @@ impl AggregateContext for GrpcAggregateContext {
             return Ok(PersistOutcome::NoOp(received.clone()));
         }
 
+        // Events are written to the aggregate the coordinator resolved and
+        // validated, never to wherever the business response's cover points.
+        let target_cover = persist_target_cover(received, domain, root, correlation_id)?;
+
         // Persist new events if any
         if !new_pages.is_empty() {
-            // 2PC: If cascade_id is set, stamp events with no_commit=true
-            if let Some(ref cascade_id) = self.cascade_id {
-                new_pages = new_pages
-                    .into_iter()
-                    .map(|mut page| {
-                        page.no_commit = true;
-                        page.cascade_id = Some(cascade_id.clone());
-                        page
-                    })
-                    .collect();
-            }
-
-            // Build cover from parameters if client didn't provide one
-            let cover = received.cover.clone().or_else(|| {
-                Some(Cover {
-                    domain: domain.to_string(),
-                    root: Some(ProtoUuid {
-                        value: root.as_bytes().to_vec(),
-                    }),
-                    correlation_id: correlation_id.to_string(),
-                    edition: None,
-                })
-            });
+            let cover = Some(target_cover.clone());
             let events_to_persist = EventBook {
                 cover,
                 pages: new_pages.clone(),
@@ -508,8 +684,8 @@ impl AggregateContext for GrpcAggregateContext {
                 .map_err(|e| match e {
                     StorageError::SequenceConflict { expected, actual } => {
                         Status::failed_precondition(format!(
-                            "Sequence conflict: expected {}, got {}",
-                            expected, actual
+                            "{}expected {expected}, got {actual}",
+                            crate::storage::errmsg::SEQUENCE_CONFLICT
                         ))
                     }
                     _ => Status::internal(format!("Failed to persist events: {e}")),
@@ -527,95 +703,99 @@ impl AggregateContext for GrpcAggregateContext {
             }
         }
 
-        // Persist snapshot if changed and enabled
-        if self.snapshot_write_enabled && snapshot_changed {
-            if let Some(ref snapshot) = received.snapshot {
-                if let Some(ref state) = snapshot.state {
-                    // Compute sequence from the last event
-                    let last_seq = new_pages
-                        .last()
-                        .map(|p| p.sequence_num())
-                        .or(prior_max_seq)
-                        .unwrap_or(0);
-                    let persisted_snapshot = Snapshot {
-                        sequence: last_seq,
-                        state: Some(state.clone()),
-                        retention: SnapshotRetention::RetentionDefault as i32,
-                    };
-                    self.snapshot_store
-                        .put(domain, edition, root, persisted_snapshot)
-                        .await
-                        .map_err(|e| {
-                            Status::internal(format!("Failed to persist snapshot: {e}"))
-                        })?;
-                }
+        // Persist snapshot only when the client-provided state actually
+        // changed since the last persist. write_enabled gating lives
+        // inside snapshot_repo (single source of truth); the
+        // snapshot_changed gate avoids re-writing identical bytes when
+        // the handler returns the same snapshot object across calls.
+
+        if snapshot_changed {
+            // Choose the sequence the snapshot represents: prefer the
+            // last NEW event's seq (this snapshot reflects state through
+            // it). When the handler emits a snapshot-only update with
+            // no new events, fall back to the prior tip so the snapshot
+            // is anchored at the most recent event we know about.
+            let new_max_seq = new_pages.last().map(|p| p.sequence_num());
+            let fallback_sequence = new_max_seq.or(prior_max_seq);
+            // O5: snapshot persistence is BEST-EFFORT. Events are the
+            // source of truth and were committed above; the snapshot is
+            // derived, rebuildable state (rehydration just replays more
+            // events until the next successful snapshot write). By this
+            // point the command HAS succeeded, so a snapshot-store blip
+            // must not surface as a command error: the resulting
+            // `Status::internal` is retryable (retry.rs), and re-entering
+            // the pipeline with events already stored means spurious
+            // retry-exhaust/DLQ reporting (STRICT/MANUAL) or a genuine
+            // double-apply (AGGREGATE_HANDLES re-runs the handler against
+            // state that already contains its own events).
+            if let Err(error) = crate::services::snapshot_handler::persist_snapshot_if_present(
+                &self.snapshot_repo,
+                received,
+                domain,
+                edition,
+                root,
+                fallback_sequence,
+            )
+            .await
+            {
+                tracing::error!(
+                    %domain,
+                    %edition,
+                    %root,
+                    %error,
+                    "snapshot persist failed after events committed; \
+                     continuing — snapshot is derived state and will be \
+                     rewritten on the next state change"
+                );
             }
         }
 
-        // Return with only new pages - ensure cover is set
-        let result_cover = received.cover.clone().or_else(|| {
-            Some(Cover {
-                domain: domain.to_string(),
-                root: Some(ProtoUuid {
-                    value: root.as_bytes().to_vec(),
-                }),
-                correlation_id: correlation_id.to_string(),
-                edition: None,
-            })
-        });
         Ok(PersistOutcome::Persisted(EventBook {
-            cover: result_cover,
+            cover: Some(target_cover),
             pages: new_pages,
             snapshot: received.snapshot.clone(),
             ..Default::default()
         }))
     }
 
-    #[tracing::instrument(name = "aggregate.post_persist", skip_all)]
-    async fn post_persist(&self, events: &EventBook) -> Result<Vec<Projection>, Status> {
+    #[tracing::instrument(name = "aggregate.publish", skip_all)]
+    async fn publish(&self, events: &EventBook) -> Result<(), Status> {
         if should_skip_post_persist(self.sync_mode) {
-            // ISOLATED mode short-circuit. See `should_skip_post_persist`.
-            return Ok(vec![]);
+            return Ok(());
         }
 
-        // Publish FIRST — ensures events reach the bus even if sync calls below fail.
-        // Without this ordering, a sync projector/saga/PM failure would leave events
-        // persisted in PostgreSQL but never published to the bus.
-        let bus_events = Arc::new(events.clone());
-        self.event_bus
-            .publish(bus_events)
-            .await
-            .map_err(|e| Status::unavailable(format!("Failed to publish events: {e}")))?;
+        if let Some(bus_events) = consumer_book(events) {
+            self.event_bus
+                .publish(Arc::new(bus_events))
+                .await
+                .map_err(|e| Status::unavailable(format!("Failed to publish events: {e}")))?;
+        }
+        Ok(())
+    }
 
-        // ASYNC mode: fire-and-forget — no sync projectors.
-        // SIMPLE and CASCADE: call sync projectors. DECISION / None / ISOLATED:
-        // skip (ISOLATED short-circuits above before reaching here). The
-        // policy is centralized in `super::sync_policy` so it cannot drift
-        // from the local context's identical decision; that drift was bug
-        // C-05.
-        let projections = if should_call_sync_projectors(self.sync_mode) {
-            // Unwrap is safe: should_call_sync_projectors returns true only
-            // for Some(Simple) / Some(Cascade), both of which carry a
-            // concrete SyncMode.
-            self.call_sync_projectors(events, self.sync_mode.unwrap())
-                .await?
-        } else {
-            vec![]
+    /// SIMPLE and CASCADE call sync projectors; CASCADE then calls sagas and
+    /// PMs.
+    #[tracing::instrument(name = "aggregate.sync_fanout", skip_all)]
+    async fn sync_fanout(&self, events: &EventBook) -> Result<SyncFanout, Status> {
+        let Some(sync_mode) = self.sync_mode else {
+            return Ok(SyncFanout::default());
         };
-
-        // CASCADE mode: call sync sagas and PMs after publishing to bus
-        let is_cascade = self.sync_mode == Some(crate::proto::SyncMode::Cascade);
-        if is_cascade {
-            // Call sagas synchronously - they may produce commands for other aggregates
-            self.call_sync_sagas(events, crate::proto::SyncMode::Cascade)
-                .await?;
-
-            // Call PMs synchronously - they may produce commands for other aggregates
-            self.call_sync_pms(events, crate::proto::SyncMode::Cascade)
+        let mut reaction_errors = Vec::new();
+        let projections = match consumer_book(events) {
+            Some(book) if should_call_sync_projectors(Some(sync_mode)) => {
+                self.call_sync_projectors(&book, sync_mode, &mut reaction_errors)
+                    .await?
+            }
+            _ => vec![],
+        };
+        if sync_mode == crate::proto::SyncMode::Cascade {
+            self.call_sync_sagas_and_pms(events, &mut reaction_errors)
                 .await?;
         }
-
-        Ok(projections)
+        Ok(SyncFanout {
+            projections,
+            reaction_errors,
+        })
     }
 
     #[tracing::instrument(name = "aggregate.pre_validate", skip_all, fields(%domain, %root, %expected))]
@@ -666,28 +846,40 @@ impl AggregateContext for GrpcAggregateContext {
     }
 
     /// Look up cached events for a saga-produced command by source provenance.
-    /// Mirrors the `LocalAggregateContext` impl — see that comment for the
-    /// at-least-once redelivery rationale.
+    ///
+    /// At-least-once redelivery rationale: a saga that emits a deferred
+    /// command may be redelivered by the bus after the destination
+    /// aggregate already persisted the resulting events. The destination
+    /// must return the cached EventBook rather than re-execute the
+    /// command, which would double-write. `find_by_source` looks up by
+    /// the full provenance stamped into the deferred header: the source
+    /// aggregate's `(domain, root, seq)` plus the producing component and
+    /// the command's index within its invocation (O1 — without the last
+    /// two, every command of one invocation shared a key and all but the
+    /// first were swallowed as duplicates).
     async fn check_deferred_idempotency(
         &self,
         domain: &str,
         edition: &str,
         root: Uuid,
-        deferred: &AngzarrDeferredSequence,
+        source_info: &crate::storage::SourceInfo,
     ) -> Result<Option<EventBook>, Status> {
-        let Some(source_info) = deferred_to_source_info(deferred)? else {
-            return Ok(None);
-        };
         let pages = self
             .event_store
-            .find_by_source(domain, edition, root, &source_info)
+            .find_by_source(domain, edition, root, source_info)
             .await
             .map_err(|e| Status::internal(format!("Deferred idempotency lookup failed: {e}")))?;
         Ok(pages.map(|pages| build_event_book(domain, edition, root, pages, None)))
     }
 
-    /// External-fact equivalent — see `LocalAggregateContext` impl for
-    /// the at-least-once webhook redelivery rationale.
+    /// External-fact idempotency lookup.
+    ///
+    /// Webhook providers retry on transient failures (network blips,
+    /// 5xx responses, ack timeouts). The framework must return the
+    /// cached EventBook for a previously-processed `external_id` rather
+    /// than re-execute the fact, which would double-write. Key shape
+    /// matches the producer's chosen `external_id` — typically the
+    /// webhook provider's event UUID.
     async fn check_external_idempotency(
         &self,
         domain: &str,
@@ -713,125 +905,75 @@ impl AggregateContext for GrpcAggregateContext {
         actual_sequence: u32,
         domain: &str,
     ) {
-        let dead_letter = AngzarrDeadLetter::from_sequence_mismatch(
+        publish_aggregate_sequence_mismatch_dlq(
+            &self.dlq_publisher,
             command,
             expected_sequence,
             actual_sequence,
-            MergeStrategy::MergeManual,
+            domain,
             &self.component_name,
-        );
+        )
+        .await;
+    }
 
+    /// B1: capture a persisted-but-unpublishable EventBook so operators can
+    /// replay it once the bus recovers. `is_transient: true` — the events
+    /// are valid; only delivery failed.
+    async fn dead_letter_unpublished(&self, events: &EventBook, reason: &str) {
+        let dead_letter = crate::dlq::AngzarrDeadLetter::from_event_processing_failure(
+            events,
+            reason,
+            super::pipeline::POST_PERSIST_ATTEMPTS,
+            true, // transient: bus outage, not bad data
+            Vec::new(),
+            &self.component_name,
+            "aggregate",
+        );
         if let Err(e) = self.dlq_publisher.publish(dead_letter).await {
             tracing::error!(
-                domain = %domain,
-                expected = expected_sequence,
-                actual = actual_sequence,
                 error = %e,
-                "Failed to publish to DLQ"
+                reason = %reason,
+                "CRITICAL: persisted-but-unpublished events ALSO failed DLQ \
+                 capture — recovery now requires manual event-store inspection"
             );
         }
     }
 }
 
-/// Factory that produces `GrpcAggregateContext` for distributed mode.
+/// Publish a MergeManual sequence-mismatch dead letter.
 ///
-/// One factory per aggregate domain, capturing storage and infrastructure.
-/// Used by the distributed coordinator sidecar.
-pub struct GrpcAggregateContextFactory {
-    domain: String,
-    event_store: Arc<dyn EventStore>,
-    snapshot_store: Arc<dyn SnapshotStore>,
-    discovery: Arc<dyn ServiceDiscovery>,
-    event_bus: Arc<dyn EventBus>,
-    client_logic: Arc<dyn ClientLogic>,
-    upcaster: Option<Arc<Upcaster>>,
-    sync_mode: Option<crate::proto::SyncMode>,
-    dlq_publisher: Arc<dyn DeadLetterPublisher>,
-    snapshot_read_enabled: bool,
-    snapshot_write_enabled: bool,
-}
+/// Extracted from `GrpcAggregateContext::send_to_dlq` so tests can
+/// exercise the publish-to-DLQ seam without constructing a full
+/// `GrpcAggregateContext` (event_store, snapshot_repo, discovery,
+/// client_logic, ...). The aggregate cucumber scenario in
+/// `features/client/dlq.feature` drives this directly; the production
+/// path goes through `send_to_dlq`, which is a thin wrapper around
+/// this fn. Same shape as `crate::orchestration::saga::publish_*_dlq`
+/// and `crate::orchestration::process_manager::publish_pm_*_dlq`.
+pub async fn publish_aggregate_sequence_mismatch_dlq(
+    publisher: &Arc<dyn DeadLetterPublisher>,
+    command: &CommandBook,
+    expected_sequence: u32,
+    actual_sequence: u32,
+    domain: &str,
+    component_name: &str,
+) {
+    let dead_letter = AngzarrDeadLetter::from_sequence_mismatch(
+        command,
+        expected_sequence,
+        actual_sequence,
+        MergeStrategy::MergeManual,
+        component_name,
+    );
 
-impl GrpcAggregateContextFactory {
-    /// Create a new factory for the given domain.
-    pub fn new(
-        domain: String,
-        event_store: Arc<dyn EventStore>,
-        snapshot_store: Arc<dyn SnapshotStore>,
-        discovery: Arc<dyn ServiceDiscovery>,
-        event_bus: Arc<dyn EventBus>,
-        client_logic: Arc<dyn ClientLogic>,
-    ) -> Self {
-        Self {
-            domain,
-            event_store,
-            snapshot_store,
-            discovery,
-            event_bus,
-            client_logic,
-            upcaster: None,
-            sync_mode: None,
-            dlq_publisher: Arc::new(NoopDeadLetterPublisher),
-            snapshot_read_enabled: true,
-            snapshot_write_enabled: true,
-        }
-    }
-
-    /// Set the upcaster for event version transformation.
-    pub fn with_upcaster(mut self, upcaster: Arc<Upcaster>) -> Self {
-        self.upcaster = Some(upcaster);
-        self
-    }
-
-    /// Set sync mode to call projectors synchronously.
-    pub fn with_sync_mode(mut self, mode: crate::proto::SyncMode) -> Self {
-        self.sync_mode = Some(mode);
-        self
-    }
-
-    /// Set the DLQ publisher for MERGE_MANUAL handling.
-    pub fn with_dlq_publisher(mut self, publisher: Arc<dyn DeadLetterPublisher>) -> Self {
-        self.dlq_publisher = publisher;
-        self
-    }
-
-    /// Configure snapshot behavior.
-    pub fn with_snapshot_config(mut self, read_enabled: bool, write_enabled: bool) -> Self {
-        self.snapshot_read_enabled = read_enabled;
-        self.snapshot_write_enabled = write_enabled;
-        self
-    }
-}
-
-impl AggregateContextFactory for GrpcAggregateContextFactory {
-    fn create(&self) -> Arc<dyn AggregateContext> {
-        let mut ctx = GrpcAggregateContext::with_config(
-            self.event_store.clone(),
-            self.snapshot_store.clone(),
-            self.discovery.clone(),
-            self.event_bus.clone(),
-            self.snapshot_read_enabled,
-            self.snapshot_write_enabled,
-        )
-        .with_dlq_publisher(self.dlq_publisher.clone())
-        .with_component_name(&self.domain);
-
-        if let Some(ref upcaster) = self.upcaster {
-            ctx = ctx.with_upcaster(upcaster.clone());
-        }
-
-        if let Some(mode) = self.sync_mode {
-            ctx = ctx.with_sync_mode(mode);
-        }
-
-        Arc::new(ctx)
-    }
-
-    fn domain(&self) -> &str {
-        &self.domain
-    }
-
-    fn client_logic(&self) -> Arc<dyn ClientLogic> {
-        self.client_logic.clone()
+    if let Err(e) = publisher.publish(dead_letter).await {
+        tracing::error!(
+            domain = %domain,
+            expected = expected_sequence,
+            actual = actual_sequence,
+            error = %e,
+            "Failed to publish to DLQ"
+        );
     }
 }
 

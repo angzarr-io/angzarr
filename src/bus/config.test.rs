@@ -1,123 +1,107 @@
-//! Tests for bus configuration types.
-//!
-//! The get_domains() method resolves domain subscriptions from two sources:
-//! - `domains`: explicit Vec<String> (preferred)
-//! - `domain`: single string supporting comma-separated values
-//!
-//! Why this matters: This dual-source pattern supports both YAML config
-//! (domains array) and env vars (single comma-separated string). The fallback
-//! logic enables simpler env var configuration while preserving full YAML
-//! flexibility.
-//!
-//! Key behaviors verified:
-//! - domains vec takes precedence over domain string
-//! - domain string supports comma-separated values
-//! - Whitespace is trimmed from comma-separated values
-//! - Empty configurations return empty vec (publisher-only mode)
+//! Tests for bus configuration helpers.
 
 use super::*;
 
+/// A saga/PM/projector that names its source domains must get a
+/// domain-scoped subscription. Subscribing to every domain instead makes
+/// the sidecar invoke its client for every event on the bus, and on
+/// per-domain-topic transports (Pub/Sub, SNS/SQS) an all-domains
+/// subscription has no topic to attach to at all.
+#[test]
+fn for_targets_scopes_subscription_to_target_domains() {
+    let targets = vec![
+        Target::new("order", vec!["OrderCreated"]),
+        Target::domain("inventory"),
+    ];
+
+    match EventBusMode::for_targets("saga-fulfillment", &targets) {
+        EventBusMode::Subscriber { queue, domains } => {
+            assert_eq!(queue, "saga-fulfillment");
+            assert_eq!(domains, vec!["order".to_string(), "inventory".to_string()]);
+        }
+        other => panic!("expected domain-scoped Subscriber, got {other:?}"),
+    }
+}
+
+/// Two targets on the same domain (different event types) must not bind
+/// the same domain twice — a duplicate binding would create a second
+/// per-domain topic subscription on Pub/Sub/SNS and double-deliver.
+#[test]
+fn for_targets_deduplicates_domains_in_first_seen_order() {
+    let targets = vec![
+        Target::new("order", vec!["OrderCreated"]),
+        Target::domain("payment"),
+        Target::new("order", vec!["OrderShipped"]),
+    ];
+
+    match EventBusMode::for_targets("pm-checkout", &targets) {
+        EventBusMode::Subscriber { domains, .. } => {
+            assert_eq!(domains, vec!["order".to_string(), "payment".to_string()]);
+        }
+        other => panic!("expected domain-scoped Subscriber, got {other:?}"),
+    }
+}
+
+/// No targets is the documented "receive everything" projector default.
+#[test]
+fn for_targets_without_targets_subscribes_to_all_domains() {
+    match EventBusMode::for_targets("projector-audit", &[]) {
+        EventBusMode::SubscriberAll { queue } => assert_eq!(queue, "projector-audit"),
+        other => panic!("expected SubscriberAll, got {other:?}"),
+    }
+}
+
 // ============================================================================
-// IpcBusConfig::get_domains Tests
+// DeliveryConfig
 // ============================================================================
 
-#[cfg(unix)]
-mod ipc_config {
-    use super::*;
+/// The budget is exhausted exactly at `max_attempts` failures — one
+/// earlier dead-letters an event that still had a retry left, one later
+/// lets a poison event block its key for an extra round.
+#[test]
+fn delivery_budget_exhausts_at_max_attempts() {
+    let cfg = DeliveryConfig {
+        max_attempts: 3,
+        ..Default::default()
+    };
+    assert!(!cfg.is_exhausted(2));
+    assert!(cfg.is_exhausted(3));
+    assert!(cfg.is_exhausted(4));
+}
 
-    /// When domains vec is set, use it directly (preferred source).
-    ///
-    /// YAML config typically sets this directly as an array.
-    #[test]
-    fn test_get_domains_prefers_domains_over_domain() {
-        let config = IpcBusConfig {
-            domains: Some(vec!["player".to_string(), "table".to_string()]),
-            domain: Some("hand".to_string()), // Should be ignored
-            ..Default::default()
-        };
+/// `max_attempts = 0` is the explicit opt-out: never dead-letter.
+#[test]
+fn delivery_budget_zero_means_unlimited() {
+    let cfg = DeliveryConfig {
+        max_attempts: 0,
+        ..Default::default()
+    };
+    assert!(!cfg.is_exhausted(0));
+    assert!(!cfg.is_exhausted(1_000_000));
+}
 
-        let result = config.get_domains();
+/// Backoff doubles from the initial delay and is capped, so a transient
+/// downstream outage is ridden out without a hot redelivery loop.
+#[test]
+fn delivery_backoff_doubles_and_caps() {
+    let cfg = DeliveryConfig {
+        max_attempts: 10,
+        initial_backoff_ms: 100,
+        max_backoff_ms: 450,
+    };
+    assert_eq!(cfg.backoff(1).as_millis(), 100);
+    assert_eq!(cfg.backoff(2).as_millis(), 200);
+    assert_eq!(cfg.backoff(3).as_millis(), 400);
+    assert_eq!(cfg.backoff(4).as_millis(), 450);
+    assert_eq!(cfg.backoff(64).as_millis(), 450);
+}
 
-        assert_eq!(result, vec!["player", "table"]);
-    }
-
-    /// When only domain is set, use it as fallback.
-    ///
-    /// Simpler env var path: ANGZARR_IPC_DOMAIN=player
-    #[test]
-    fn test_get_domains_falls_back_to_domain() {
-        let config = IpcBusConfig {
-            domains: None,
-            domain: Some("player".to_string()),
-            ..Default::default()
-        };
-
-        let result = config.get_domains();
-
-        assert_eq!(result, vec!["player"]);
-    }
-
-    /// Comma-separated values in domain field are split.
-    ///
-    /// Env var can specify multiple: ANGZARR_IPC_DOMAIN=player,table,hand
-    #[test]
-    fn test_get_domains_splits_comma_separated() {
-        let config = IpcBusConfig {
-            domains: None,
-            domain: Some("player,table,hand".to_string()),
-            ..Default::default()
-        };
-
-        let result = config.get_domains();
-
-        assert_eq!(result, vec!["player", "table", "hand"]);
-    }
-
-    /// Whitespace around commas is trimmed.
-    ///
-    /// User-friendly: "player, table, hand" works same as "player,table,hand"
-    #[test]
-    fn test_get_domains_trims_whitespace() {
-        let config = IpcBusConfig {
-            domains: None,
-            domain: Some("player , table , hand".to_string()),
-            ..Default::default()
-        };
-
-        let result = config.get_domains();
-
-        assert_eq!(result, vec!["player", "table", "hand"]);
-    }
-
-    /// When neither domains nor domain is set, return empty vec.
-    ///
-    /// Publisher-only mode: no subscriptions needed.
-    #[test]
-    fn test_get_domains_returns_empty_when_none_set() {
-        let config = IpcBusConfig {
-            domains: None,
-            domain: None,
-            ..Default::default()
-        };
-
-        let result = config.get_domains();
-
-        assert!(result.is_empty());
-    }
-
-    /// Empty domains vec is returned as-is (not fallen back to domain).
-    ///
-    /// Explicit empty array means "subscribe to nothing", not "check domain field".
-    #[test]
-    fn test_get_domains_empty_vec_is_explicit() {
-        let config = IpcBusConfig {
-            domains: Some(vec![]),
-            domain: Some("player".to_string()), // Should still be ignored
-            ..Default::default()
-        };
-
-        let result = config.get_domains();
-
-        assert!(result.is_empty());
-    }
+/// Defaults cap poison retries (the review's "blocks its key forever")
+/// while leaving roughly a minute for transient outages.
+#[test]
+fn delivery_defaults_cap_retries() {
+    let cfg = DeliveryConfig::default();
+    assert_eq!(cfg.max_attempts, 10);
+    assert_eq!(cfg.initial_backoff_ms, 200);
+    assert_eq!(cfg.max_backoff_ms, 10_000);
 }

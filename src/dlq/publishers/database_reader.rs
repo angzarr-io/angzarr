@@ -107,7 +107,8 @@ impl SqliteDlqReader {
         let pool = sqlx::SqlitePool::connect(uri)
             .await
             .map_err(|e| DlqError::Connection(format!("Failed to connect to SQLite: {}", e)))?;
-        info!(uri = %uri, "SQLite DLQ reader initialized");
+        super::database::ensure_sqlite_dlq_schema(&pool).await?;
+        info!(uri = %crate::utils::redact::redact_uri(uri), "SQLite DLQ reader initialized");
         Ok(Self { pool })
     }
 
@@ -199,6 +200,20 @@ impl DeadLetterReader for SqliteDlqReader {
         Ok(result.rows_affected() > 0)
     }
 
+    async fn delete_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DlqError> {
+        // occurred_at is stored as chrono's UTC RFC 3339 text, so string
+        // order is time order (same encoding the list filters bind).
+        let result = sqlx::query("DELETE FROM dlq_entries WHERE occurred_at < ?")
+            .bind(cutoff.to_rfc3339())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DlqError::QueryFailed(format!("SQLite retention delete: {}", e)))?;
+        Ok(result.rows_affected())
+    }
+
     fn source_id(&self) -> &'static str {
         "sqlite-dlq"
     }
@@ -262,7 +277,8 @@ impl PostgresDlqReader {
         let pool = sqlx::PgPool::connect(uri)
             .await
             .map_err(|e| DlqError::Connection(format!("Failed to connect to PostgreSQL: {}", e)))?;
-        info!(uri = %uri, "PostgreSQL DLQ reader initialized");
+        super::database::ensure_postgres_dlq_schema(&pool).await?;
+        info!(uri = %crate::utils::redact::redact_uri(uri), "PostgreSQL DLQ reader initialized");
         Ok(Self { pool })
     }
 
@@ -353,6 +369,20 @@ impl DeadLetterReader for PostgresDlqReader {
             .await
             .map_err(|e| DlqError::QueryFailed(format!("Postgres delete query: {}", e)))?;
         Ok(result.rows_affected() > 0)
+    }
+
+    async fn delete_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, DlqError> {
+        // occurred_at is stored as chrono's UTC RFC 3339 text, so string
+        // order is time order (same encoding the list filters bind).
+        let result = sqlx::query("DELETE FROM dlq_entries WHERE occurred_at < $1")
+            .bind(cutoff.to_rfc3339())
+            .execute(&self.pool)
+            .await
+            .map_err(|e| DlqError::QueryFailed(format!("Postgres retention delete: {}", e)))?;
+        Ok(result.rows_affected())
     }
 
     fn source_id(&self) -> &'static str {

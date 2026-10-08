@@ -33,6 +33,16 @@ pre-commit:
     check-submodules-clean:
       run: just check-submodules-clean
 
+    # Refuse staged secrets (gitleaks, pinned image; recipe from
+    # angzarr-project/submodule.just).
+    scan-secrets:
+      run: just scan-secrets
+
+    # Module-level layer rules (archlint.toml) over the Rust workspace.
+    archlint:
+      glob: "*.{rs,toml}"
+      run: just archlint
+
     # Rust - fmt + clippy + test in a SINGLE container invocation.
     # Running them as three separate `just _container ...` calls under
     # rootless docker triggers a `.cargo-lock` permission race because

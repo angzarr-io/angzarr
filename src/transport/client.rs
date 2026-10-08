@@ -65,6 +65,63 @@ pub async fn connect_to_address(address: &str) -> Result<Channel, Box<dyn std::e
         .into())
 }
 
+/// Bound on establishing one TCP connection to a service.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// HTTP/2 PING interval on an open connection.
+const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+/// How long an unanswered PING may wait before the connection is dropped.
+const KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The endpoint for an outbound TCP channel to `uri`.
+///
+/// Connecting is bounded, and HTTP/2 keepalive PINGs (also while idle)
+/// detect a peer that disappeared without closing its connection (a pod
+/// replaced behind a Service address), so calls on the dead connection fail
+/// promptly and the channel reconnects instead of hanging until their
+/// deadline.
+pub fn tcp_endpoint(uri: impl Into<String>) -> Result<Endpoint, tonic::transport::Error> {
+    Ok(Endpoint::from_shared(uri.into())?
+        .connect_timeout(CONNECT_TIMEOUT)
+        .http2_keep_alive_interval(KEEPALIVE_INTERVAL)
+        .keep_alive_timeout(KEEPALIVE_TIMEOUT)
+        .keep_alive_while_idle(true))
+}
+
+/// Attempts a call makes while its target cannot be connected to (a
+/// coordinator restarting behind its Service address).
+pub const UNCONNECTED_ATTEMPTS: u32 = 5;
+/// Pause between those attempts.
+const UNCONNECTED_BACKOFF: Duration = Duration::from_millis(200);
+
+/// Whether a call failed before any connection to its target existed, so
+/// the request was never delivered and may be sent again.
+pub fn is_unconnected(status: &tonic::Status) -> bool {
+    status.code() == tonic::Code::Unavailable
+        && ["tcp connect error", "error trying to connect", "dns error"]
+            .iter()
+            .any(|marker| status.message().contains(marker))
+}
+
+/// Run `call` again, a bounded number of times, while it fails without
+/// having reached its target; any other outcome is returned as is.
+pub async fn retry_unconnected<T, F, Fut>(mut call: F) -> Result<T, tonic::Status>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, tonic::Status>>,
+{
+    let mut attempt = 1;
+    loop {
+        match call().await {
+            Err(status) if attempt < UNCONNECTED_ATTEMPTS && is_unconnected(&status) => {
+                warn!(attempt, error = %status, "target not reachable; sending again");
+                attempt += 1;
+                tokio::time::sleep(UNCONNECTED_BACKOFF).await;
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
 /// Single connection attempt (internal helper).
 async fn connect_to_address_once(address: &str) -> Result<Channel, Box<dyn std::error::Error>> {
     if address.starts_with('/') || address.starts_with("./") {
@@ -105,7 +162,7 @@ async fn connect_to_address_once(address: &str) -> Result<Channel, Box<dyn std::
 
         // Note: Message size limits are set on the generated client types,
         // not on the channel. See max_grpc_message_size() for the configured limit.
-        let channel = Channel::from_shared(uri)?.connect().await?;
+        let channel = tcp_endpoint(uri)?.connect().await?;
         Ok(channel)
     }
 }
@@ -194,7 +251,7 @@ async fn connect_with_transport_once(
             );
             // Note: Message size limits are set on the generated client types,
             // not on the channel. See max_grpc_message_size() for the configured limit.
-            let channel = Channel::from_shared(uri)?.connect().await?;
+            let channel = tcp_endpoint(uri)?.connect().await?;
             Ok(channel)
         }
         TransportType::Uds => {
@@ -273,3 +330,47 @@ impl ServiceEndpointConfig {
         connect_with_transport(transport, &self.name, self.qualifier.as_deref(), tcp_addr).await
     }
 }
+
+/// Applies the framework's gRPC message-size limit
+/// ([`max_grpc_message_size`](super::max_grpc_message_size)) to a generated
+/// client, matching the limit set on every server.
+///
+/// Generated clients default to tonic's 4 MiB decode limit, so without
+/// this a response between 4 MiB and the server limit (an event book with
+/// a long history, a large projection) fails with `OutOfRange` on the
+/// caller even though the server sent it.
+pub trait GrpcMessageLimits: Sized {
+    /// Return the client with encode and decode limits set.
+    fn with_message_limits(self) -> Self;
+}
+
+macro_rules! impl_grpc_message_limits {
+    ($($client:ty),* $(,)?) => {
+        $(
+            impl GrpcMessageLimits for $client {
+                fn with_message_limits(self) -> Self {
+                    let limit = super::max_grpc_message_size();
+                    self.max_decoding_message_size(limit)
+                        .max_encoding_message_size(limit)
+                }
+            }
+        )*
+    };
+}
+
+impl_grpc_message_limits!(
+    crate::proto::command_handler_service_client::CommandHandlerServiceClient<Channel>,
+    crate::proto::command_handler_coordinator_service_client::CommandHandlerCoordinatorServiceClient<Channel>,
+    crate::proto::event_query_service_client::EventQueryServiceClient<Channel>,
+    crate::proto::saga_service_client::SagaServiceClient<Channel>,
+    crate::proto::saga_coordinator_service_client::SagaCoordinatorServiceClient<Channel>,
+    crate::proto::process_manager_service_client::ProcessManagerServiceClient<Channel>,
+    crate::proto::process_manager_coordinator_service_client::ProcessManagerCoordinatorServiceClient<Channel>,
+    crate::proto::projector_service_client::ProjectorServiceClient<Channel>,
+    crate::proto::projector_coordinator_service_client::ProjectorCoordinatorServiceClient<Channel>,
+    crate::proto::upcaster_service_client::UpcasterServiceClient<Channel>,
+);
+
+#[cfg(test)]
+#[path = "client.test.rs"]
+mod tests;

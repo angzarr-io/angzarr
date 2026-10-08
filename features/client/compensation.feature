@@ -70,7 +70,7 @@ Feature: Compensation - Saga Rejection Handling
     When I build a Notification from the context
     Then the notification should have a cover
     And the notification payload should contain RejectionNotification
-    And the payload type_url should be "type.googleapis.com/angzarr.RejectionNotification"
+    And the payload type_url should be "type.googleapis.com/io.angzarr.v1.RejectionNotification"
 
   Scenario: Notification has sent_at timestamp
     When I build a Notification from a CompensationContext

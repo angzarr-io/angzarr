@@ -2,6 +2,7 @@
 members = [
     ".",
     "crates/trivial-delegation",
+    "tools/archlint",
     "xtask",
 ]
 # sererr is a submodule with its own cargo workspace. Cargo's auto-discovery
@@ -71,7 +72,6 @@ aws-k8s = ["dynamo", "sns-sqs", "s3", "otel"]
 # =============================================================================
 amqp = ["dep:lapin", "dep:deadpool-lapin"]
 kafka = ["dep:rdkafka"]
-nats = ["dep:async-nats"]
 pubsub = ["dep:gcloud-pubsub", "dep:gcloud-googleapis"]
 sns-sqs = ["dep:aws-sdk-sns", "dep:aws-sdk-sqs", "dep:aws-config"]
 
@@ -184,9 +184,6 @@ redis = { version = "0.27", features = ["aio", "connection-manager", "tokio-comp
 
 # Kafka (optional)
 rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl"], optional = true }
-
-# NATS JetStream (optional)
-async-nats = { version = "0.38", optional = true }
 
 # Google Pub/Sub (optional)
 # gcloud-pubsub is yoshidan's crate (was google-cloud-pubsub before name donation to Google)
@@ -314,12 +311,6 @@ name = "storage_immudb"
 required-features = ["immudb"]
 
 [[test]]
-name = "storage_nats"
-# NATS JetStream provides distributed event storage with replay. Testing ensures
-# events, snapshots, and positions persist correctly in the JetStream KV store.
-required-features = ["nats"]
-
-[[test]]
 name = "storage_sqlite"
 # SQLite provides embedded storage for local-dev mode. Testing ensures all three
 # stores (Event, Snapshot, Position) work correctly with in-memory SQLite.
@@ -331,37 +322,138 @@ name = "storage_postgres"
 # work correctly with full SQL support including historical snapshot queries.
 required-features = ["postgres"]
 
-# --- Bus Contract Tests ---
+[[test]]
+name = "storage_bigtable"
+# Bigtable (via the Cloud Bigtable emulator). Runs the same contract macros as
+# the SQL backends: conditional row writes, prefix/range scans, cascade index.
+required-features = ["bigtable"]
 
 [[test]]
-name = "bus_nats"
-# NATS JetStream as event bus. Testing ensures publish/subscribe semantics,
-# consumer groups, and message acknowledgment work correctly.
-required-features = ["nats"]
+name = "storage_dynamo"
+# DynamoDB (via DynamoDB Local). Runs the same contract macros as the SQL
+# backends: conditional/transactional writes, GSIs and result pagination.
+required-features = ["dynamo"]
+
+# --- Bus Contract Tests ---
 
 [[test]]
 name = "bus_amqp"
 # RabbitMQ/AMQP as event bus. Testing ensures exchange/queue bindings,
 # message routing, acknowledgment, and dead-letter queue handling work correctly.
-required-features = ["amqp"]
+required-features = ["amqp", "test-utils"]
 
 [[test]]
 name = "bus_kafka"
 # Apache Kafka as event bus. Testing ensures topic partitioning, consumer groups,
 # offset management, and at-least-once delivery semantics work correctly.
-required-features = ["kafka"]
+required-features = ["kafka", "test-utils"]
 
 [[test]]
 name = "bus_pubsub"
 # Google Cloud Pub/Sub as event bus. Testing ensures topic/subscription management,
 # message ordering, and acknowledgment deadlines work correctly with the emulator.
-required-features = ["pubsub"]
+required-features = ["pubsub", "test-utils"]
 
 [[test]]
 name = "bus_sns_sqs"
 # AWS SNS/SQS as event bus. Testing ensures SNS fan-out to SQS queues,
 # message attributes, and visibility timeout handling work correctly with LocalStack.
-required-features = ["sns-sqs"]
+required-features = ["sns-sqs", "test-utils"]
+
+# --- DLQ Gherkin acceptance harness ---
+# Cucumber-rs harness against features/client/dlq.feature. `harness = false`
+# hands main() control to cucumber's runner so the standard rust test
+# harness doesn't intercept. Runs the saga/PM/projector scenarios via
+# public orchestrate_saga / orchestrate_pm / ProjectorEventHandler::handle,
+# and the aggregate scenario via publish_aggregate_sequence_mismatch_dlq.
+# Each scenario gets a fresh tempfile SQLite DLQ publisher+reader pair.
+# features/operator/dlq_boot.feature stays out of scope (needs bin spawning;
+# init_dlq_publisher/init_dlq_reader unit tests pin those contracts).
+[[test]]
+name = "dlq_features"
+harness = false
+required-features = ["test-utils"]
+
+# --- Deployed-cluster acceptance harness (T14) ---
+# Cucumber-rs harness against features/acceptance/end_to_end.feature, driving
+# a DEPLOYED angzarr system (kind + skaffold blackjack examples) through the
+# public gRPC surface via the tests/common fixture layer. Opt-in: exits 0
+# unless ANGZARR_ACCEPTANCE=1 so plain `cargo test` needs no cluster. The
+# compensation_* features still need harness coverage (saga topology).
+[[test]]
+name = "acceptance_features"
+harness = false
+required-features = ["test-utils"]
+
+# --- B1 e2e: persisted events ALWAYS reach the bus ---
+# Real aggregate pipeline + real SQLite store + real RabbitMQ. Pins the
+# persisted-but-never-published class (the 2026-04-07 full-sail interleave
+# bug, fixed in c2fa2beb) with deterministic publish-failure injection and
+# the original fact/command race shape.
+[[test]]
+name = "interleave_publish_amqp"
+required-features = ["amqp", "test-utils"]
+
+# --- Aggregate pipeline -> EventStore integration ---
+# Runs the aggregate command pipeline (AggregateService.handle_command)
+# through a real in-memory SqliteEventStore. Catches drift between the
+# pipeline's persist logic and the production storage backend that
+# MockEventStore-based unit tests can't see. Closes the highest-leverage
+# Category B drift gap from the R2-15 audit.
+[[test]]
+name = "aggregate_pipeline_event_store"
+required-features = ["test-utils"]
+
+# --- PM persist -> EventStore integration ---
+# Runs persist_pm_event_book (extracted from
+# GrpcPMContext::persist_pm_events) against a real in-memory
+# SqliteEventStore + a recording EventBus. PM events are the part of
+# the framework that writes directly to storage without going through
+# the aggregate command pipeline; PmWithEvents in unit tests stubs the
+# outcome. Closes the second Category B drift gap from the R2-15 audit.
+[[test]]
+name = "pm_persist_event_store"
+required-features = ["test-utils"]
+
+# --- Status DLQ admin gRPC -> Reader -> DB integration ---
+# Drives DlqAdminHandler's gRPC trait methods (list_dead_letters,
+# get_dead_letter, delete_dead_letter) against a real SqliteDlqReader
+# backed by a populated database. Closes the third Category B drift
+# gap from the R2-15 audit -- the operator-facing publisher -> reader
+# -> admin gRPC loop end-to-end.
+[[test]]
+name = "status_dlq_admin_grpc"
+required-features = ["test-utils"]
+
+# --- Aggregate pipeline -> SnapshotRepository integration ---
+# Drives AggregateService.handle_command with a real SqliteSnapshotStore
+# wired into SnapshotRepository. Catches snapshot-write policy bugs and
+# pipeline-read-snapshot drift that MockSnapshotStore can't see.
+[[test]]
+name = "aggregate_pipeline_snapshot"
+required-features = ["test-utils"]
+
+# --- Projector publish -> EventBus.publish shape verification ---
+# Closes the deep-shape-verification gap on the projector's publish
+# path. Real-broker serialization is owned by bus_*.rs testcontainer
+# suites; the unit tests only check publish_count. This test inspects
+# the published EventBook (domain prefix, correlation_id, edition,
+# decoded projection payload, sequence) via MockEventBus.
+[[test]]
+name = "projector_publish_event_bus"
+required-features = ["test-utils"]
+
+# --- C02: non-AMQP messaging.type reaches a real bus via init_event_bus ---
+# The aggregate/PM sidecar binaries used to hand-roll a match that fell
+# back to MockEventBus for every non-AMQP messaging type (silent total
+# event loss). Both now call init_event_bus directly; this test drives the
+# real AggregateService pipeline with a bus built via
+# init_event_bus(&MessagingConfig{messaging_type: "kafka", ..}, ..) against
+# a real Redpanda container and asserts an independent Kafka consumer
+# (also built via init_event_bus) observes the published event.
+[[test]]
+name = "aggregate_pipeline_kafka_bus"
+required-features = ["kafka", "test-utils"]
 
 # === Build Profiles ===
 

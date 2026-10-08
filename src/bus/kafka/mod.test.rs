@@ -1,5 +1,4 @@
 use super::*;
-use crate::proto::{Cover, Uuid};
 
 // Test fixtures - not real credentials
 // lgtm[rust/hardcoded-credentials]
@@ -7,25 +6,10 @@ const TEST_USER: &str = "test-user"; // codeql[rust/hard-coded-credentials]
                                      // lgtm[rust/hardcoded-credentials]
 const TEST_PASSWORD: &str = "test-password"; // codeql[rust/hard-coded-credentials]
 
-#[test]
-fn test_message_key_generation() {
-    let book = EventBook {
-        cover: Some(Cover {
-            domain: "orders".to_string(),
-            root: Some(Uuid {
-                value: b"test-123".to_vec(),
-            }),
-        }),
-        pages: vec![],
-        snapshot: None,
-        correlation_id: String::new(),
-    };
-
-    assert_eq!(
-        KafkaEventBus::message_key(&book),
-        Some("746573742d313233".to_string())
-    );
-}
+// NOTE: the old `test_message_key_generation` / `test_extract_domain*`
+// tests were deleted: `KafkaEventBus::message_key` / `extract_domain`
+// no longer exist. The partition-key boundary is now `validate_publish_key`,
+// covered by the H-10 regression suite in bus.test.rs.
 
 #[test]
 fn test_topic_for_domain() {
@@ -81,29 +65,22 @@ fn test_ssl_config() {
     assert_eq!(config.ssl_ca_location, Some("/path/to/ca.crt".to_string()));
 }
 
+/// A subscriber derived from a publisher keeps the brokers, topic prefix
+/// and SASL/SSL settings, so it reads the publisher's topics over the same
+/// authenticated connection.
 #[test]
-fn test_extract_domain() {
-    let book = EventBook {
-        cover: Some(Cover {
-            domain: "orders".to_string(),
-            root: None,
-        }),
-        pages: vec![],
-        snapshot: None,
-        correlation_id: String::new(),
-    };
-
-    assert_eq!(KafkaEventBus::extract_domain(&book), Some("orders"));
-}
-
-#[test]
-fn test_extract_domain_missing_cover() {
-    let book = EventBook {
-        cover: None,
-        pages: vec![],
-        snapshot: None,
-        correlation_id: String::new(),
-    };
-
-    assert_eq!(KafkaEventBus::extract_domain(&book), None);
+fn test_subscriber_config_keeps_prefix_and_security() {
+    let publisher = KafkaEventBusConfig::publisher("broker:9092")
+        .with_topic_prefix("tenant-a")
+        .with_sasl(TEST_USER, TEST_PASSWORD, "SCRAM-SHA-512")
+        .with_ssl_ca("/ca.pem");
+    let sub = publisher.subscriber_config("audit", Some("orders"));
+    assert_eq!(sub.bootstrap_servers, "broker:9092");
+    assert_eq!(sub.topic_prefix, "tenant-a");
+    assert_eq!(sub.sasl_username.as_deref(), Some(TEST_USER));
+    assert_eq!(sub.sasl_mechanism.as_deref(), Some("SCRAM-SHA-512"));
+    assert_eq!(sub.ssl_ca_location.as_deref(), Some("/ca.pem"));
+    assert_eq!(sub.group_id.as_deref(), Some("audit"));
+    assert_eq!(sub.domains, Some(vec!["orders".to_string()]));
+    assert_eq!(publisher.subscriber_config("all", None).domains, None);
 }

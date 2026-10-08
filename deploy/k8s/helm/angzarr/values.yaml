@@ -22,18 +22,6 @@ images:
     repository: ghcr.io/angzarr-io/angzarr-process-manager
     pullPolicy: IfNotPresent
     tag: "latest"
-  log:
-    repository: ghcr.io/angzarr-io/angzarr-log
-    pullPolicy: IfNotPresent
-    tag: "latest"
-  stream:
-    repository: ghcr.io/angzarr-io/angzarr-stream
-    pullPolicy: IfNotPresent
-    tag: "latest"
-  upcaster:
-    repository: ghcr.io/angzarr-io/angzarr-upcaster
-    pullPolicy: IfNotPresent
-    tag: "latest"
 
 imagePullSecrets: []
 nameOverride: ""
@@ -109,8 +97,8 @@ debug:
 # Angzarr gRPC ports
 service:
   type: ClusterIP
-  aggregatePort: 1310     # Aggregate sidecar gRPC
-  queryPort: 1315         # Aggregate sidecar client logic port (EventQuery)
+  aggregatePort: 1310     # Sidecar gRPC (aggregate coordinator + EventQuery; saga/PM coordinator)
+  queryPort: 1315         # Projector sidecar gRPC health
   # NodePort for local development access
   nodePort:
     enabled: false
@@ -125,33 +113,6 @@ serviceDiscovery:
 
 # Infrastructure services (standalone, not sidecars)
 infrastructure:
-  # Log service - prints events to stdout for debugging
-  log:
-    enabled: false
-    replicas: 1
-    port: 50051           # Projector gRPC (receives events from sidecar)
-    resources:
-      limits:
-        cpu: 200m
-        memory: 256Mi
-      requests:
-        cpu: 50m
-        memory: 64Mi
-
-  # Event stream service - broadcasts events to registered subscribers
-  stream:
-    enabled: false
-    replicas: 1
-    port: 1340            # Stream gRPC
-    projectorPort: 1345   # Stream's internal projector port
-    resources:
-      limits:
-        cpu: 500m
-        memory: 512Mi
-      requests:
-        cpu: 100m
-        memory: 128Mi
-
   # Operations console - cluster-wide DLQ admin / health / event browser /
   # command injection / projection viewer / load metrics.
   # See plans/virtual-spinning-flute.md.
@@ -249,8 +210,12 @@ infrastructure:
       repository: ghcr.io/angzarr-io/angzarr-grpc-gateway
       tag: latest
       pullPolicy: IfNotPresent
-    # Target gRPC coordinator (aggregate service)
-    grpcTarget: ""  # e.g., "angzarr-player:1310"
+    # Per-domain aggregate target; {domain} is replaced by the request's
+    # domain. Empty = {domain}-aggregate.<namespace>.svc.cluster.local:<aggregatePort>.
+    aggregateTargetTemplate: ""
+    # Optional single target for requests without a domain
+    # (e.g. GET /v1/query/aggregates). Empty = such requests are rejected.
+    grpcTarget: ""
     # ConfigMap containing types.bin for proto type discovery
     # Create with: kubectl create configmap gateway-descriptor --from-file=types.bin=examples/types.bin
     descriptorConfigMap: "gateway-descriptor"
@@ -346,24 +311,31 @@ storage:
     # Redis connection URI
     uri: "redis://angzarr-redis:6379"
 
-# Upcaster configuration
-# Upcaster transforms old event versions to current versions during replay.
-# By default, the client binary implements UpcasterService alongside AggregateService.
-# The aggregate coordinator calls the client's UpcasterService on the same address.
-upcaster:
-  # Enable upcaster transformation during event replay
-  enabled: false
-  # Optional: separate address for upcaster service (if not on same server as client logic)
-  # If not set, uses the same address as client logic (default and recommended)
-  # address: "localhost:50053"
-
-# Command bus configuration (async command delivery)
-# When enabled, aggregates subscribe to a command topic for async commands
-# in addition to accepting gRPC commands directly.
-commandBus:
-  enabled: true
-  # Topic pattern: commands.{domain} (e.g., commands.player)
-  # Commands wrapped in EventBook format, extracted by aggregate handler
+# Sidecar configuration file, rendered verbatim as config.yaml into the
+# `<release>-sidecar-config` Secret and mounted at /etc/angzarr/config.yaml
+# (ANGZARR_CONFIG) in every angzarr sidecar and in angzarr-status.
+# Holds the settings that have no env-var form; ANGZARR__SECTION__KEY env
+# vars set by the chart still override it. Keys: dlq, limits,
+# saga_compensation, payload_offload, messaging.delivery, ...
+config:
+  dlq:
+    # Dead-letter destinations, tried in order (empty = dead letters are
+    # logged and dropped). Example:
+    #   - type: database
+    #     database:
+    #       storage_type: postgres
+    #       postgres:
+    #         uri: postgres://angzarr:...@angzarr-db-rw:5432/angzarr
+    targets: []
+    # Store angzarr-status reads dead letters from and records replays in
+    # (unset = empty console, replays unrecorded):
+    #   audit:
+    #     storage_type: postgres
+    #     postgres:
+    #       uri: postgres://...
+    # Days angzarr-status keeps dead letters in the audit store (unset =
+    # forever):
+    #   retention_days: 30
 
 # Messaging configuration
 messaging:
@@ -429,6 +401,14 @@ applications:
   #   # go:
   #   #   library: /app/libbusiness.so
   #   resources: {}
+  #   # Upcaster: the sidecar upcasts this aggregate's events on load by
+  #   # calling the client's UpcasterService (same address unless set)
+  #   upcaster:
+  #     enabled: false
+  #     # address: "localhost:50053"
+  #   # Snapshot every N events (passed to the client as
+  #   # ANGZARR_SNAPSHOT_EVERY; unset = the client's own default)
+  #   snapshotEvery: 20
   #   # Debug access - expose this application's sidecar via NodePort
   #   debug:
   #     enabled: false
@@ -478,6 +458,30 @@ applications:
   #   debug:
   #     enabled: false
   #     nodePort: null
+
+  # Process managers - correlate events across domains, own a domain stream
+  processManagers: []
+  # - name: checkout
+  #   image:
+  #     repository: checkout-pm
+  #     tag: "latest"
+  #   port: 50051
+  #   # The PM's own domain (its event stream); carried by the
+  #   # angzarr.io/pm label
+  #   domain: "checkout"
+  #   # Source domains/events it subscribes to
+  #   topics:
+  #     - "order.*"
+  #     - "payment.PaymentSettled"
+
+# Readiness of the business-logic container in every application pod (an
+# application entry's `readinessProbe` overrides it): the pod takes traffic
+# only once the business logic accepts connections on its gRPC port.
+applicationReadinessProbe:
+  tcpSocket:
+    port: grpc
+  initialDelaySeconds: 2
+  periodSeconds: 5
 
 # Default resources for application containers
 applicationResources:

@@ -10,14 +10,10 @@
 
 mod bus;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use angzarr::bus::amqp::{AmqpConfig, AmqpEventBus};
-use angzarr::bus::{BusError, EventBus, EventHandler};
-use angzarr::proto::EventBook;
-use futures::future::BoxFuture;
+use angzarr::bus::EventBus;
 use testcontainers::{
     core::{IntoContainerPort, WaitFor},
     runners::AsyncRunner,
@@ -46,10 +42,16 @@ async fn start_rabbitmq() -> (testcontainers::ContainerAsync<GenericImage>, Stri
         .await
         .expect("Failed to get mapped port");
 
-    let host = container
-        .get_host()
-        .await
-        .expect("Failed to get container host");
+    // See storage_postgres.rs: dind wrapper sets TESTCONTAINERS_HOST because
+    // the bridge-gateway fallback is unreachable under rootless docker.
+    let host = match std::env::var("TESTCONTAINERS_HOST") {
+        Ok(h) => h,
+        Err(_) => container
+            .get_host()
+            .await
+            .expect("Failed to get container host")
+            .to_string(),
+    };
 
     let amqp_url = format!("amqp://guest:guest@{}:{}", host, host_port);
 
@@ -79,6 +81,21 @@ async fn test_amqp_event_bus() {
 
     // Run shared tests (without DLQ - those need separate container lifetime)
     run_event_bus_tests!(&bus, &prefix);
+    run_all_domains_subscription_test!(&bus, &prefix);
+
+    let domain = format!("{}-order-after-fail", prefix);
+    let subscriber = bus
+        .create_subscriber(&format!("{}-sub-order-after-fail", prefix), Some(&domain))
+        .await
+        .expect("create subscriber");
+    bus::event_bus_tests::test_root_order_preserved_after_handler_failure(
+        subscriber,
+        &bus,
+        &domain,
+        std::time::Duration::from_secs(20),
+    )
+    .await;
+    println!("  test_root_order_preserved_after_handler_failure: PASSED");
 
     println!("=== All AMQP EventBus tests PASSED ===");
 }
@@ -126,34 +143,6 @@ async fn test_publisher_confirms_enabled_on_every_channel() {
     println!("=== publisher-confirms enabled on every channel: PASSED ===");
 }
 
-/// Handler that fails its first N invocations and succeeds afterwards.
-///
-/// Used to drive the C-10 redelivery test: after the broker re-delivers a
-/// nacked message, the next invocation must succeed and the call count
-/// must reach N+1 (proving redelivery actually happened).
-struct FlakyHandler {
-    fail_until: usize,
-    calls: Arc<AtomicUsize>,
-}
-
-impl EventHandler for FlakyHandler {
-    fn handle(&self, _book: Arc<EventBook>) -> BoxFuture<'static, Result<(), BusError>> {
-        let fail_until = self.fail_until;
-        let calls = self.calls.clone();
-        Box::pin(async move {
-            let attempt = calls.fetch_add(1, Ordering::SeqCst) + 1;
-            if attempt <= fail_until {
-                Err(BusError::ProjectorFailed {
-                    name: "amqp-c10-flaky".to_string(),
-                    message: format!("synthetic failure (attempt {})", attempt),
-                })
-            } else {
-                Ok(())
-            }
-        })
-    }
-}
-
 /// Regression test for finding C-10 (AMQP transport): when a handler
 /// returns `Err`, the AMQP consumer must NOT ack the delivery; the broker
 /// must re-deliver the message until either the handler succeeds or the
@@ -168,9 +157,10 @@ impl EventHandler for FlakyHandler {
 /// requeue: true, multiple: false })` when dispatch fails, so the broker
 /// re-queues the message and the handler observes >= 2 invocations.
 ///
-/// We use a `FlakyHandler` that fails the first call and succeeds on the
-/// second so the test terminates rather than looping forever under
-/// `requeue: true`.
+/// T7: the FlakyHandler + assertion logic moved to the shared suite
+/// (bus::event_bus_tests::test_handler_err_triggers_redelivery) so every
+/// broker pins this contract, not just AMQP. RabbitMQ requeues nacked
+/// messages immediately, so a 5s deadline is generous.
 #[tokio::test]
 async fn test_handler_err_triggers_amqp_redelivery() {
     println!("=== AMQP handler-failure redelivery test (C-10) ===");
@@ -183,61 +173,15 @@ async fn test_handler_err_triggers_amqp_redelivery() {
         .await
         .expect("Failed to create AMQP publisher");
 
-    let subscriber = publisher
-        .create_subscriber(&queue, Some(&domain))
-        .await
-        .expect("Failed to create AMQP subscriber");
+    bus::event_bus_tests::test_handler_err_triggers_redelivery(
+        &publisher,
+        &domain,
+        &queue,
+        Duration::from_secs(5),
+    )
+    .await;
 
-    let calls = Arc::new(AtomicUsize::new(0));
-    subscriber
-        .subscribe(Box::new(FlakyHandler {
-            fail_until: 1,
-            calls: calls.clone(),
-        }))
-        .await
-        .expect("Failed to subscribe FlakyHandler");
-
-    subscriber
-        .start_consuming()
-        .await
-        .expect("Failed to start consuming");
-
-    // Let the consumer attach.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    let book = Arc::new(bus::event_bus_tests::make_event_book(&domain));
-    publisher
-        .publish(book)
-        .await
-        .expect("Failed to publish event");
-
-    // Wait long enough that, if the broker is NOT going to re-deliver, the
-    // call count would stay at 1. With redelivery enabled, RabbitMQ
-    // re-queues nacked messages immediately, so attempt #2 lands within a
-    // few hundred milliseconds. Use a polling deadline to keep the test
-    // robust against scheduler jitter.
-    let deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while std::time::Instant::now() < deadline {
-        if calls.load(Ordering::SeqCst) >= 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-
-    let observed = calls.load(Ordering::SeqCst);
-    assert!(
-        observed >= 2,
-        "expected handler to observe >= 2 invocations after failing the \
-         first (broker must re-deliver nacked messages), but saw {}. \
-         Baseline (pre-C-10) acks unconditionally and the message is \
-         silently lost — observed = 1.",
-        observed
-    );
-
-    println!(
-        "=== handler-failure redelivery: PASSED (observed {} invocations) ===",
-        observed
-    );
+    println!("=== handler-failure redelivery: PASSED ===");
 }
 
 /// Regression test for finding H-06: malformed messages must land in the
@@ -356,4 +300,72 @@ async fn test_decode_failure_routes_to_dead_letter_queue() {
         expected_dlq,
         payload.len()
     );
+}
+
+/// D1 regression: a dead letter published through the AMQP DLQ target must
+/// be RETAINED by the broker even when no per-domain consumer queue exists.
+///
+/// Baseline (pre-D1): `AmqpDeadLetterPublisher` declared only the topic
+/// exchange — no queue, no binding, no publisher confirms, no `mandatory`
+/// flag. A topic exchange DISCARDS unroutable messages, so every dead
+/// letter "published successfully" into the void: the chained-publisher
+/// fallback never fired and the capture was simply gone.
+///
+/// After D1: init declares the durable catch-all queue (`#` binding),
+/// publishes with confirms + mandatory, and this test proves the dead
+/// letter is actually sitting in the queue, byte-decodable, after publish.
+#[tokio::test]
+async fn test_dlq_publisher_retains_dead_letter_in_catchall_queue() {
+    use lapin::options::BasicGetOptions;
+    use lapin::{Connection, ConnectionProperties};
+    use prost::Message;
+
+    println!("=== AMQP D1 DLQ-retention test ===");
+    let (_container, url) = start_rabbitmq().await;
+
+    // Exercise the same factory + publish path production uses. The shared
+    // helper publishes one dead letter with reason "Handler threw an
+    // exception" to domain "orders".
+    let dlq_config = angzarr::dlq::DlqConfig::amqp(url.clone());
+    bus::event_bus_tests::test_dlq_publish(&dlq_config).await;
+
+    // Side-channel: read the catch-all queue directly and prove retention.
+    let conn = Connection::connect(&url, ConnectionProperties::default())
+        .await
+        .expect("raw lapin connect");
+    let channel = conn.create_channel().await.expect("raw channel");
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut got: Option<Vec<u8>> = None;
+    while std::time::Instant::now() < deadline {
+        match channel
+            .basic_get(
+                angzarr::dlq::AmqpDeadLetterPublisher::DLQ_CATCHALL_QUEUE,
+                BasicGetOptions { no_ack: true },
+            )
+            .await
+        {
+            Ok(Some(delivery)) => {
+                got = Some(delivery.data.clone());
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => panic!("basic_get on DLQ catch-all failed: {}", e),
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+
+    let payload = got.expect(
+        "dead letter must be retained in the catch-all queue; an empty \
+         queue means the broker discarded it (pre-D1 silent-loss behavior)",
+    );
+
+    let decoded = angzarr::proto::AngzarrDeadLetter::decode(payload.as_slice())
+        .expect("retained dead letter must decode as proto AngzarrDeadLetter");
+    assert_eq!(
+        decoded.rejection_reason, "Handler threw an exception",
+        "decoded dead letter must round-trip the rejection reason"
+    );
+
+    println!("=== D1 DLQ-retention: PASSED (dead letter retained + decoded) ===");
 }

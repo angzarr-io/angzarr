@@ -1,0 +1,225 @@
+# llm-tool-killer rules for angzarr/core — enforced by the PreToolUse hook in
+# .claude/settings.json (`ltk evaluate`). This is a hand-maintained config (NOT
+# the generated DEFAULTS.md copy): the block below the marker is the shipped
+# default footgun set as installed by `ltk manage install`; the block under
+# "angzarr-specific" enforces the two standing project rules from CLAUDE.md:
+#   1. All reusable compilation/analysis goes through `just` targets (container
+#      toolchain) — host cargo/go has no toolchain and skips feature-gated
+#      backends. mode: confirm, so a human can force the raw command by repeating.
+#   2. Releases go through versionator (`versionator release push` fires the
+#      GitHub Release via the atomic tag+branch+push); host cargo-mutants is
+#      forbidden. These stay firm (no mode) — repeating does NOT get through.
+# Rule model: docs/RULES.md in llm-tool-killer. First matching deny wins.
+version: 1
+
+defaults:
+  on_parse_error: allow
+  repeat_window_seconds: 30
+
+rules:
+  - id: tests-via-task-runner
+    match: { command: [go, test] }
+    message: "Run tests through the project task runner, not the compiler directly."
+    suggest: "just test"
+  - id: no-reset-hard
+    match: { command: [git, reset, --hard] }
+    message: "`git reset --hard` discards uncommitted work irreversibly. Stash or commit first."
+    suggest: "git stash --include-untracked"
+  - id: no-git-clean
+    match: { command: [git, clean] }
+    message: "`git clean` deletes untracked files for good. Preview with `-n`, or stash."
+    suggest: "git stash --include-untracked"
+  - id: no-skip-commit-hooks
+    match: { command: [git, commit, --no-verify] }
+    message: "Don't bypass commit hooks with --no-verify — fix what the hook flags, then commit."
+  - id: no-skip-push-hooks
+    match: { command: [git, push, --no-verify] }
+    message: "Don't bypass push hooks with --no-verify — fix the failure, then push."
+  - id: no-force-push
+    match: { command: [git, push, --force] }
+    message: "A plain force-push can overwrite a teammate's commits."
+    suggest: "git push --force-with-lease"
+  - id: stage-explicitly
+    match: { command: [git, add], args_any: ["-A", "--all", "."] }
+    message: "Stage the files this change actually touches, not the whole tree."
+    suggest: "git add <path> [<path> …]"
+  - id: no-rewrite-git-identity
+    match: { command: [git, config], args_any: ["user.email", "user.name"] }
+    message: "Don't change the git identity from inside the agent; set it once in your own global config."
+  - id: rm-rf-careful
+    match: { command: rm, args_all: ["-r", "-f"] }
+    message: "Double-check the path before a recursive force-delete; delete specific paths, not trees, when you can."
+  - id: no-sudo
+    match: { command: sudo }
+    message: "Don't escalate privileges from inside the agent — ask a human to run anything that needs sudo."
+  - id: no-pkill
+    match: { command: pkill }
+    message: "Avoid pkill by name (wrong-PID risk) — find the specific PID and `kill` it."
+  - id: no-killall
+    match: { command: killall }
+    message: "Avoid killall by name (wrong-PID risk) — find the specific PID and `kill` it."
+
+  # ─── angzarr-specific ──────────────────────────────────────────────────────
+  # Reusable compilation / analysis → just (container toolchain). mode: confirm,
+  # so repeating the exact command within the window forces it. `go test` is
+  # already covered firm by tests-via-task-runner above.
+  - id: cargo-build-via-just
+    match: { command: [cargo, build] }
+    mode: confirm
+    message: "Build through the container toolchain so feature-gated backends and the pinned toolchain match CI; host cargo has no toolchain."
+    suggest: "just build        # or: just build-release"
+  - id: cargo-test-via-just
+    match: { command: [cargo, test] }
+    mode: confirm
+    message: "Run tests through the container so every backend/feature is exercised the way CI runs them."
+    suggest: "just test         # or: just cov / just bus"
+  - id: cargo-check-via-just
+    match: { command: [cargo, check] }
+    mode: confirm
+    message: "Check through the container toolchain."
+    suggest: "just check        # or: just check-full"
+  - id: cargo-clippy-via-just
+    match: { command: [cargo, clippy] }
+    mode: confirm
+    message: "Lint through the container so the clippy.toml gates (incl. cognitive-complexity) apply."
+    suggest: "just lint         # or: just cognitive"
+  - id: cargo-fmt-via-just
+    match: { command: [cargo, fmt] }
+    mode: confirm
+    message: "Format through the container so rustfmt matches the pinned toolchain."
+    suggest: "just fmt"
+  - id: go-build-via-just
+    match: { command: [go, build] }
+    mode: confirm
+    message: "Build the gateway through the container toolchain."
+    suggest: "just gateway-build   # or: just build"
+  - id: go-vet-via-just
+    match: { command: [go, vet] }
+    mode: confirm
+    message: "Vet through the container toolchain."
+    suggest: "just lint"
+  - id: gofmt-via-just
+    match: { command: gofmt, args_any: ["-w"] }
+    mode: confirm
+    message: "Don't reformat the tree by hand."
+    suggest: "just fmt"
+  - id: lizard-via-just
+    match: { command: lizard }
+    mode: confirm
+    message: "lizard lives in the angzarr-rust image, not on the host. Run the complexity analysis through the container."
+    suggest: "just complexity    # or: just complexity-csv / just cognitive"
+  - id: buf-via-just
+    match: { command: buf }
+    mode: confirm
+    message: "Drive buf/protoc through the container so generated bindings match the pinned plugins."
+    suggest: "just buf-build     # buf-lint / buf-push / gateway-gen"
+  - id: cargo-llvm-cov-via-just
+    match: { command: [cargo, llvm-cov] }
+    mode: confirm
+    message: "Run coverage through the container so the proto/build.rs ignore filters and feature set match; a host run reports the wrong numbers."
+    suggest: "just cov           # cov-unit / cov-gherkin / cov-full"
+  - id: cargo-xtask-via-just
+    match: { command: [cargo, xtask] }
+    mode: confirm
+    message: "Run xtask through the container toolchain (e.g. mutation-exclusion regen)."
+    suggest: "just gen-mutants-exclude"
+  - id: black-via-just
+    match: { command: black }
+    mode: confirm
+    message: "Format Python through the language container so the version matches CI; host black drifts from the pinned image."
+    suggest: "just fmt-python"
+  - id: ruff-via-just
+    match: { command: ruff }
+    mode: confirm
+    message: "Run ruff through the language container so the pinned ruleset/version matches CI."
+    suggest: "just fmt-python"
+
+  # ─── Image builds → Skaffold / just (no manual builds) ─────────────────────
+  # CLAUDE.md: Kind caches images by tag; a manual `docker build` + `helm
+  # upgrade` leaves stale images. Image builds go through skaffold or the
+  # `images`/`gateway-image` just targets (content-addressable tags).
+  - id: docker-build-via-just
+    match: { command: [docker, build] }
+    mode: confirm
+    message: "Don't build images by hand — Kind caches by tag and a manual build goes stale. Build through skaffold or the just image targets."
+    suggest: "just images build <lang>   # gateway-image / framework-build (skaffold)"
+  - id: podman-build-via-just
+    match: { command: [podman, build] }
+    mode: confirm
+    message: "Don't build images by hand — Kind caches by tag and a manual build goes stale. Build through skaffold or the just image targets."
+    suggest: "just images build <lang>   # gateway-image / framework-build (skaffold)"
+
+  # ─── Cluster & deploy → just wrappers (carry the dep chain) ────────────────
+  # The just targets add cluster-ready/skaffold-ready dependencies and
+  # idempotency guards; bare invocations skip cluster/secret/operator setup.
+  - id: skaffold-via-just
+    match: { command: skaffold, args_any: ["build", "run", "dev"] }
+    mode: confirm
+    message: "Bare skaffold skips the cluster-ready/skaffold-ready dep chain. Drive it through the just deploy targets."
+    suggest: "just deploy        # framework-build / dev / framework-dev"
+  - id: kind-via-just
+    match: { command: kind, args_any: ["create", "delete", "load"] }
+    mode: confirm
+    message: "Manage the Kind cluster through just so the config file and idempotency guard apply."
+    suggest: "just cluster-create   # cluster-delete / images load / kind up"
+  - id: helm-via-just
+    match: { command: helm, args_any: ["upgrade", "install", "uninstall"] }
+    mode: confirm
+    message: "Deploy through the just infra/operators targets so chart ordering and namespaces are orchestrated; don't helm by hand."
+    suggest: "just infra         # operators / infra-destroy / kind up / down"
+
+  # ─── OpenTofu → just tofu <cmd> <env> (picks the env dir) ──────────────────
+  # Bare tofu runs in the wrong directory; the just targets cd into
+  # environments/<env>. apply/destroy are destructive.
+  - id: tofu-via-just
+    match: { command: tofu, args_any: ["init", "plan", "apply", "destroy", "validate", "test", "fmt"] }
+    mode: confirm
+    message: "Run OpenTofu through the just tofu targets so it executes in the right environment directory."
+    suggest: "just tofu apply <env>   # plan / destroy / init / validate / test / fmt"
+
+  # Hard prohibitions — firm (no mode): repeating does NOT get through.
+  - id: no-host-cargo-mutants
+    match: { command: [cargo, mutants] }
+    message: "Host cargo-mutants is FORBIDDEN — it would mutate the working tree. Mutation runs go through the ephemeral container helper (CLAUDE.md: Mutation Testing)."
+    suggest: "just mutants <file>   # or mutants-core / mutants-bus / mutants-orchestration"
+  - id: no-manual-git-tag
+    match: { command: [git, tag] }
+    message: "Releases and version tags go through versionator, not a hand-cut tag. `versionator release push` fires the GitHub Release via the atomic tag+branch+push."
+    suggest: "versionator release push    # see /versionator-release"
+  - id: no-cargo-publish
+    match: { command: [cargo, publish] }
+    message: "Publishing is part of the versionator/GitHub release flow, not a manual cargo publish."
+    suggest: "versionator release push"
+  # Submodule-state mutations → confirm. These advance/remove/repoint the
+  # pinned submodule and break the check-submodules-clean precommit invariant.
+  # `git submodule status` and a plain `git submodule update` (restore to the
+  # pinned commit) are NOT matched — only the state-changing subcommands.
+  - id: submodule-mutation-via-confirm
+    match: { command: [git, submodule], args_any: ["--remote", "deinit", "sync", "set-url", "set-branch", "foreach", "absorbgitdirs"] }
+    mode: confirm
+    message: "This mutates submodule state (re-pins / removes / repoints) and can break the check-submodules-clean precommit gate. Make submodule changes in the submodule's own repo, then bump the pointer deliberately."
+
+  # ─── File-edit guards (match.path → Edit/Write/MultiEdit/NotebookEdit) ──────
+  # These fire only because the PreToolUse matcher was broadened beyond
+  # Bash|PowerShell to include the edit tools. Firm (no mode): repeating a
+  # hand-edit does not make it correct — the file is owned by a generator.
+  - id: no-hand-edit-version
+    match: { path: ["VERSION", "**/VERSION"] }
+    message: "VERSION is owned by versionator — a hand-edit desyncs the tag/branch/release flow. Bump it through versionator."
+    suggest: "versionator release push    # see /versionator-release"
+  - id: no-hand-edit-generated-proto
+    match: { path: ["**/*.pb.rs", "**/*.pb.go", "**/*_pb2.py", "**/*_pb2_grpc.py", "**/*_pb.js", "**/*_pb.d.ts"] }
+    message: "This is generated proto code — any hand-edit is overwritten on the next regen. Change the .proto source, then regenerate."
+    suggest: "just gateway-gen    # or: just proto / just buf-build"
+  - id: no-hand-edit-generated-dirs
+    match: { path: ["gateway/gen/"] }
+    message: "gateway/gen/ holds generated bindings — edits are lost on regen. Change the .proto source and regenerate."
+    suggest: "just gateway-gen"
+  # Edits inside a submodule (angzarr-project, sererr) belong in that
+  # submodule's own repo/PR, not this superproject. confirm (not firm): the
+  # proto source-of-truth lives in angzarr-project and IS edited here, so this
+  # is a speed bump — repeat to confirm you mean to edit in place.
+  - id: submodule-edit-confirm
+    match: { path: ["@submodules"] }
+    mode: confirm
+    message: "This file is inside a git submodule — its changes are committed in the submodule's own repo, not the superproject. Repeat to confirm an intentional in-place edit (e.g. proto source)."

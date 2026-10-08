@@ -4,17 +4,18 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use backon::{BackoffBuilder, ExponentialBuilder};
+use backon::BackoffBuilder;
 use gcloud_pubsub::client::{Client, ClientConfig};
 use gcloud_pubsub::publisher::Publisher;
 use prost::Message;
 use tokio::sync::RwLock;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 use super::config::PubSubConfig;
 use super::consumer::{ensure_subscription_exists, process_message_payload, ProcessResult};
 use super::{CORRELATION_ID_ATTR, DOMAIN_ATTR, ROOT_ID_ATTR};
 use crate::bus::error::{BusError, Result};
+use crate::bus::ordering::{require_ordering_key, AwaitingRedelivery};
 use crate::bus::traits::{EventBus, EventHandler, PublishResult};
 use crate::proto::EventBook;
 use crate::proto_ext::CoverExt;
@@ -80,7 +81,7 @@ impl PubSubEventBus {
             .await
             .map_err(|e| BusError::Publish(format!("Failed to check topic existence: {}", e)))?
         {
-            topic.create(None, None).await.map_err(|e| {
+            super::tolerate_already_exists(topic.create(None, None).await).map_err(|e| {
                 BusError::Publish(format!("Failed to create topic {}: {}", topic_name, e))
             })?;
             info!(topic = %topic_name, "Created Pub/Sub topic");
@@ -103,7 +104,7 @@ impl EventBus for PubSubEventBus {
     #[tracing::instrument(name = "bus.publish", skip_all, fields(domain = %book.domain()))]
     async fn publish(&self, book: Arc<EventBook>) -> Result<PublishResult> {
         let domain = book.domain();
-        let root_id = book.root_id_hex().unwrap_or_default();
+        let root_id = require_ordering_key(&book, "Pub/Sub")?;
         let correlation_id = book.correlation_id().to_string();
 
         let publisher = self.get_publisher(domain).await?;
@@ -162,13 +163,12 @@ impl EventBus for PubSubEventBus {
             )
         })?;
 
-        // Determine which topics to subscribe to
-        let topics: Vec<String> = if self.config.domains.is_empty() {
-            warn!("No domains specified. Subscribe-side filtering will be used.");
-            vec!["events".to_string()]
-        } else {
-            self.config.domains.clone()
-        };
+        // One topic per domain: an all-domains subscriber has no topic to
+        // attach to, so it must name its domains.
+        if self.config.domains.is_empty() {
+            return Err(BusError::AllDomainsUnsupported(subscription_id.clone()));
+        }
+        let topics: Vec<String> = self.config.domains.clone();
 
         // Subscribe to each domain's topic
         for domain in &topics {
@@ -185,11 +185,9 @@ impl EventBus for PubSubEventBus {
             tokio::spawn(async move {
                 info!(subscription = %sub_name, "Starting Pub/Sub consumer");
 
-                let backoff_builder = ExponentialBuilder::default()
-                    .with_min_delay(Duration::from_millis(100))
-                    .with_max_delay(Duration::from_secs(30))
-                    .with_jitter();
+                let backoff_builder = crate::bus::reconnect_backoff();
                 let mut backoff_iter = backoff_builder.build();
+                let mut awaiting = AwaitingRedelivery::default();
 
                 loop {
                     match subscription.pull(10, None).await {
@@ -197,6 +195,20 @@ impl EventBus for PubSubEventBus {
                             backoff_iter = backoff_builder.build();
 
                             for message in messages {
+                                // Empty ordering key = unordered message: it
+                                // neither waits nor is waited for.
+                                let ordering_key = Some(message.message.ordering_key.clone())
+                                    .filter(|k| !k.is_empty());
+                                let message_id = message.message.message_id.clone();
+                                if let Some(key) = ordering_key.as_deref() {
+                                    if awaiting.must_wait(key, &message_id) {
+                                        // Redelivered behind the failed
+                                        // message of the same ordering key.
+                                        let _ = message.nack().await;
+                                        continue;
+                                    }
+                                }
+
                                 let data = message.message.data.as_slice();
                                 let msg_domain = message
                                     .message
@@ -205,19 +217,10 @@ impl EventBus for PubSubEventBus {
                                     .map(|s| s.as_str())
                                     .unwrap_or("unknown");
 
-                                // Extract trace context from attributes
-                                #[cfg(feature = "otel")]
-                                {
-                                    let consume_span = tracing::Span::current();
-                                    super::otel::pubsub_extract_trace_context(
-                                        &message.message.attributes,
-                                        &consume_span,
-                                    );
-                                }
-
                                 match process_message_payload(
                                     data,
                                     msg_domain,
+                                    &message.message.attributes,
                                     &handlers,
                                     &filter_domains,
                                 )
@@ -226,9 +229,15 @@ impl EventBus for PubSubEventBus {
                                     ProcessResult::Success
                                     | ProcessResult::Filtered
                                     | ProcessResult::DecodeError => {
+                                        if let Some(key) = ordering_key.as_deref() {
+                                            awaiting.record_handled(key, &message_id);
+                                        }
                                         let _ = message.ack().await;
                                     }
                                     ProcessResult::HandlerFailed => {
+                                        if let Some(key) = ordering_key.as_deref() {
+                                            awaiting.record_failure(key, &message_id);
+                                        }
                                         let _ = message.nack().await;
                                     }
                                 }
@@ -262,10 +271,7 @@ impl EventBus for PubSubEventBus {
         name: &str,
         domain_filter: Option<&str>,
     ) -> Result<Arc<dyn EventBus>> {
-        let config = match domain_filter {
-            Some(d) => PubSubConfig::subscriber(&self.config.project_id, name, vec![d.to_string()]),
-            None => PubSubConfig::subscriber_all(&self.config.project_id, name),
-        };
+        let config = self.config.subscriber_config(name, domain_filter);
         let bus = PubSubEventBus::new(config).await?;
         Ok(Arc::new(bus))
     }

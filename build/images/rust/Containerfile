@@ -74,6 +74,14 @@ RUN rustup component add llvm-tools-preview && \
 # CI mutation job.
 RUN cargo install cargo-mutants --locked
 
+# Install lizard (per-function cyclomatic complexity analyzer) for the
+# `just complexity` / `just complexity-csv` recipes. It's a Python tool;
+# --break-system-packages is required because Debian trixie marks the
+# system interpreter PEP 668 externally-managed.
+RUN apt-get update && apt-get install -y --no-install-recommends python3-pip \
+    && pip install --no-cache-dir --break-system-packages lizard \
+    && rm -rf /var/lib/apt/lists/*
+
 # Configure cargo to use mold linker by default
 RUN mkdir -p /usr/local/cargo && \
     echo '[target.x86_64-unknown-linux-gnu]' >> /usr/local/cargo/config.toml && \

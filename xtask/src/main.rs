@@ -6,7 +6,7 @@
 //! - `gen-mutants-exclude`: Scan for `#[trivial_delegation]` and update mutants.toml
 
 use std::{collections::BTreeSet, fs, path::Path};
-use syn::{visit::Visit, Attribute, ImplItem, ItemFn, ItemImpl};
+use syn::{visit::Visit, Attribute, ImplItem, ItemFn, ItemImpl, ItemTrait, TraitItem};
 
 fn main() {
     let args: Vec<_> = std::env::args().collect();
@@ -148,6 +148,23 @@ impl<'ast> Visit<'ast> for TrivialDelegationVisitor {
         syn::visit::visit_item_impl(self, node);
 
         self.current_impl = None;
+    }
+
+    fn visit_item_trait(&mut self, node: &'ast ItemTrait) {
+        // Default method bodies on a trait: cargo-mutants names them
+        // "TraitName::method".
+        for item in &node.items {
+            if let TraitItem::Fn(method) = item {
+                if method.default.is_some() && has_trivial_delegation(&method.attrs) {
+                    self.found.push(format!(
+                        r"{}::{}",
+                        regex_escape(&node.ident.to_string()),
+                        regex_escape(&method.sig.ident.to_string())
+                    ));
+                }
+            }
+        }
+        syn::visit::visit_item_trait(self, node);
     }
 
     fn visit_impl_item(&mut self, node: &'ast ImplItem) {

@@ -1,0 +1,17 @@
+{{- /*
+Configuration file shared by every angzarr sidecar and angzarr-status,
+mounted at /etc/angzarr/config.yaml (ANGZARR_CONFIG). Carries the
+sections that have no env-var form, notably `dlq` (targets list and the
+status audit reader). A Secret because DLQ targets hold credentials.
+*/}}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ include "angzarr.sidecar-config-name" . }}
+  labels:
+    {{- include "angzarr.labels" . | nindent 4 }}
+type: Opaque
+stringData:
+  config.yaml: |
+    {{- toYaml .Values.config | nindent 4 }}

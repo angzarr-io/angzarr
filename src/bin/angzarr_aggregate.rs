@@ -26,14 +26,11 @@
 //! - bigtable: GCP Bigtable (ANGZARR__STORAGE__PROJECT_ID, TABLE_NAME)
 //! - dynamodb: AWS DynamoDB (ANGZARR__STORAGE__TABLE_NAME)
 //!
-//! ### Messaging (ANGZARR__MESSAGING__*)
-//! - amqp: RabbitMQ (ANGZARR__MESSAGING__AMQP_URL)
-//! - kafka: Kafka/Redpanda (ANGZARR__MESSAGING__BOOTSTRAP_SERVERS)
-//! - pubsub: GCP Pub/Sub (ANGZARR__MESSAGING__PROJECT_ID)
-//! - sns-sqs: AWS SNS/SQS (ANGZARR__MESSAGING__AWS_REGION)
-//! - nats: NATS JetStream (ANGZARR__MESSAGING__NATS_URL)
-//! - ipc: Unix domain sockets (local-dev mode)
-//! - channel: In-memory (testing only)
+//! ### Messaging (ANGZARR__MESSAGING__*, required)
+//! - amqp: RabbitMQ (ANGZARR__MESSAGING__AMQP__URL)
+//! - kafka: Kafka/Redpanda (ANGZARR__MESSAGING__KAFKA__BOOTSTRAP_SERVERS)
+//! - pubsub: GCP Pub/Sub (ANGZARR__MESSAGING__PUBSUB__PROJECT_ID)
+//! - sns-sqs: AWS SNS/SQS (ANGZARR__MESSAGING__SNS_SQS__REGION)
 //!
 //! ## Embedded Mode
 //! When `target.command` is configured, the sidecar will:
@@ -57,21 +54,23 @@ use tonic::transport::Server;
 use tonic_health::server::health_reporter;
 use tracing::{error, info, warn};
 
-#[cfg(feature = "amqp")]
-use angzarr::bus::AmqpEventBus;
-use angzarr::bus::{EventBus, IpcEventBus, MockEventBus};
+use angzarr::bus::{init_event_bus, EventBus, EventBusMode};
 use angzarr::config::{Config, DISCOVERY_ENV_VAR, DISCOVERY_STATIC};
 #[cfg(feature = "k8s")]
 use angzarr::discovery::K8sServiceDiscovery;
 use angzarr::discovery::{ServiceDiscovery, StaticServiceDiscovery};
+use angzarr::dlq::init_dlq_publisher;
+use angzarr::payload_store::{init_payload_offload, with_offload};
 use angzarr::proto::{
     command_handler_coordinator_service_server::CommandHandlerCoordinatorServiceServer,
     command_handler_service_client::CommandHandlerServiceClient,
     event_query_service_server::EventQueryServiceServer,
 };
 use angzarr::services::{AggregateService, EventQueryService, Upcaster};
-use angzarr::storage::init_storage;
-use angzarr::transport::{grpc_trace_layer, max_grpc_message_size, serve_with_transport};
+use angzarr::storage::{init_event_store, init_snapshot_store};
+use angzarr::transport::{
+    grpc_trace_layer, max_grpc_message_size, serve_with_transport, GrpcMessageLimits,
+};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -88,7 +87,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Starting angzarr-aggregate sidecar");
 
-    let (event_store, snapshot_store) = init_storage(&config.storage).await?;
+    // R2-15 hard-fail boot: if the operator configured DLQ but the chosen
+    // backend cannot be reached, fail loudly here rather than silently
+    // dropping dead letters for the lifetime of the process. Runs before
+    // any heavier init (storage, client logic, k8s discovery) so the
+    // failure path is as cheap as possible.
+    let dlq_publisher = init_dlq_publisher(&config.dlq).await.map_err(|e| {
+        error!("DLQ publisher init failed (boot abort): {}", e);
+        e
+    })?;
+    if config.dlq.targets.is_empty() {
+        warn!(
+            "dlq.targets is empty; dead letters will be discarded by the \
+             default noop publisher. Set dlq.targets in config.yaml to \
+             route MergeManual sequence-mismatch dead letters to a backend."
+        );
+    } else {
+        info!(
+            target_count = config.dlq.targets.len(),
+            "DLQ publisher initialized"
+        );
+    }
+
+    let event_store = init_event_store(&config.storage).await?;
+    let snapshot_store = init_snapshot_store(&config.storage).await?;
     info!("Storage initialized");
 
     let target = config
@@ -109,7 +131,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     use angzarr::transport::connect_to_address;
     let channel = connect_to_address(&address).await?;
 
-    let client_logic_client = CommandHandlerServiceClient::new(channel.clone());
+    let client_logic_client =
+        CommandHandlerServiceClient::new(channel.clone()).with_message_limits();
 
     // Create upcaster if enabled
     // By default, upcaster uses the same channel as client logic (same server)
@@ -131,29 +154,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let event_bus: Arc<dyn EventBus> = match &config.messaging {
-        #[cfg(feature = "amqp")]
-        Some(messaging) if messaging.messaging_type == "amqp" => {
-            info!(
-                "Connecting to AMQP for event publishing: {}",
-                messaging.amqp.url
-            );
-            let amqp_bus_config = angzarr::bus::AmqpConfig::publisher(&messaging.amqp.url);
-            Arc::new(AmqpEventBus::new(amqp_bus_config).await?)
-        }
-        Some(messaging) if messaging.messaging_type == "ipc" => {
-            info!(
-                "Using IPC for event publishing: {}",
-                messaging.ipc.base_path
-            );
-            let ipc_config = angzarr::bus::IpcConfig::publisher(&messaging.ipc.base_path);
-            Arc::new(IpcEventBus::new(ipc_config))
-        }
-        _ => {
-            warn!("No messaging configured, using mock event bus (events not published)");
-            Arc::new(MockEventBus::new())
-        }
-    };
+    // Publisher from the self-registering bus factory; an unset or unknown
+    // messaging type fails boot.
+    let messaging = config
+        .messaging
+        .as_ref()
+        .ok_or("Aggregate sidecar requires 'messaging' configuration")?;
+    info!(messaging_type = %messaging.messaging_type, "Using messaging backend");
+    let event_bus: Arc<dyn EventBus> = init_event_bus(messaging, EventBusMode::Publisher)
+        .await
+        .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+    let offload = init_payload_offload(&config.payload_offload).await?;
+    let event_bus = with_offload(event_bus, offload.as_ref());
 
     // Load service discovery for sync processing
     // With DISCOVERY_ENV_VAR=static we skip K8s entirely
@@ -190,13 +202,42 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         };
 
+    // Snapshot read/write policy from `storage.snapshots_enable`.
+    let snapshot_repo = Arc::new(angzarr::repository::SnapshotRepository::from_config(
+        snapshot_store.clone(),
+        &config.storage.snapshots_enable,
+    ));
+
+    // Compensation outbox for CASCADE_ERROR_COMPENSATE: Compensate
+    // notifications are recorded in this aggregate's event store and
+    // delivered to their targets' HandleCompensation.
+    let outbox = angzarr::orchestration::outbox::Outbox::start(
+        domain,
+        "aggregate",
+        Arc::new(angzarr::orchestration::outbox::EventStoreOutboxLog::new(
+            event_store.clone(),
+            domain,
+        )),
+        Arc::new(angzarr::orchestration::outbox::CoordinatorDeliverer::new(
+            Arc::new(
+                angzarr::orchestration::outbox::DiscoveryCompensationSender::new(discovery.clone()),
+            ),
+        )),
+        &config.outbox,
+        dlq_publisher.clone(),
+    )
+    .await?;
+
     let mut aggregate_service = AggregateService::new(
         event_store.clone(),
-        snapshot_store.clone(),
+        snapshot_repo,
         client_logic_client,
         event_bus,
         discovery,
-    );
+    )
+    .with_dlq_publisher(dlq_publisher)
+    .with_limits(config.limits.clone())
+    .with_outbox(outbox);
 
     if let Some(upcaster) = upcaster {
         aggregate_service = aggregate_service.with_upcaster(upcaster);
@@ -216,7 +257,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let router = Server::builder()
         .layer(grpc_trace_layer())
         .add_service(health_service)
-        .add_service(angzarr::proto_reflect::reflection_service())
+        // Framework-internal binary: no gRPC reflection. The status binary is
+        // the only public-API surface (see H-33 in deep-review-remediation.md);
+        // advertising the public descriptor subset here would falsely list
+        // DlqAdminService while hiding the framework services this binary
+        // actually serves.
         .add_service(
             CommandHandlerCoordinatorServiceServer::new(aggregate_service)
                 .max_decoding_message_size(msg_size)

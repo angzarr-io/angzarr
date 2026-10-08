@@ -21,6 +21,7 @@ fn make_command_for_domain(domain: &str) -> CommandBook {
             }),
             correlation_id: "corr-123".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
     }
@@ -82,8 +83,9 @@ async fn test_execute_not_found_maps_to_rejected() {
     let outcome = executor.execute(command, SyncMode::Simple).await;
 
     match outcome {
-        CommandOutcome::Rejected(reason) => {
-            assert!(reason.contains(errmsg::NO_AGGREGATE_FOR_DOMAIN));
+        CommandOutcome::Rejected { code, message, .. } => {
+            assert_eq!(code, tonic::Code::NotFound);
+            assert!(message.contains(errmsg::NO_AGGREGATE_FOR_DOMAIN));
         }
         other => panic!("Expected Rejected, got {:?}", other),
     }

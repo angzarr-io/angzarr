@@ -9,7 +9,8 @@
 
 use super::*;
 use crate::proto::{
-    command_page, page_header, CommandPage, Cover, MergeStrategy, PageHeader, Uuid as ProtoUuid,
+    command_page, page_header, CommandBook, CommandPage, Cover, EventBook, MergeStrategy,
+    PageHeader, Uuid as ProtoUuid,
 };
 use prost_types::Any;
 
@@ -26,6 +27,7 @@ fn make_command_book(with_correlation: bool) -> CommandBook {
                 String::new()
             },
             edition: None,
+            ext: None,
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
@@ -80,6 +82,7 @@ fn test_extract_rejects_invalid_format() {
             }),
             correlation_id: "invalid/chars!here".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![],
     };
@@ -88,4 +91,24 @@ fn test_extract_rejects_invalid_format() {
     assert!(result.is_err());
     let status = result.unwrap_err();
     assert_eq!(status.code(), tonic::Code::InvalidArgument);
+}
+
+/// Facts carry a correlation id like commands do; a malformed one must be
+/// refused before anything is persisted under it.
+#[test]
+fn test_event_book_correlation_validated_like_commands() {
+    let mut book = EventBook {
+        cover: Some(Cover {
+            domain: "test".to_string(),
+            correlation_id: "fact-correlation".to_string(),
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    assert_eq!(extract_correlation_id(&book).unwrap(), "fact-correlation");
+    book.cover.as_mut().unwrap().correlation_id = "bad\ncorrelation".to_string();
+    assert_eq!(
+        extract_correlation_id(&book).unwrap_err().code(),
+        tonic::Code::InvalidArgument
+    );
 }

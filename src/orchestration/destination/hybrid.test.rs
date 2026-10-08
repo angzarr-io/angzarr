@@ -8,7 +8,8 @@
 //! Key behaviors tested:
 //! - Local domain queries use local storage
 //! - Non-local domain queries delegate to remote fetcher
-//! - Correlation ID is preserved in responses
+//! - O9 error contract: fetch FAILURES surface as Err, never as Ok(None) —
+//!   Ok(None) is reserved for "the store answered and holds no state"
 
 use super::*;
 use crate::proto::{Cover, Edition, EventBook, Uuid as ProtoUuid};
@@ -24,6 +25,7 @@ use uuid::Uuid;
 struct MockRemoteFetcher {
     fetch_response: Option<EventBook>,
     fetch_by_correlation_response: Option<EventBook>,
+    error: Option<Status>,
 }
 
 impl MockRemoteFetcher {
@@ -31,6 +33,7 @@ impl MockRemoteFetcher {
         Self {
             fetch_response: None,
             fetch_by_correlation_response: None,
+            error: None,
         }
     }
 
@@ -43,20 +46,31 @@ impl MockRemoteFetcher {
         self.fetch_by_correlation_response = Some(book);
         self
     }
+
+    fn with_error(mut self, status: Status) -> Self {
+        self.error = Some(status);
+        self
+    }
 }
 
 #[async_trait]
 impl DestinationFetcher for MockRemoteFetcher {
-    async fn fetch(&self, _cover: &Cover) -> Option<EventBook> {
-        self.fetch_response.clone()
+    async fn fetch(&self, _cover: &Cover) -> Result<Option<EventBook>, Status> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        Ok(self.fetch_response.clone())
     }
 
     async fn fetch_by_correlation(
         &self,
         _domain: &str,
         _correlation_id: &str,
-    ) -> Option<EventBook> {
-        self.fetch_by_correlation_response.clone()
+    ) -> Result<Option<EventBook>, Status> {
+        if let Some(e) = &self.error {
+            return Err(e.clone());
+        }
+        Ok(self.fetch_by_correlation_response.clone())
     }
 }
 
@@ -79,6 +93,7 @@ fn make_cover(domain: &str, root: Uuid, correlation_id: &str) -> Cover {
             name: "main".to_string(),
             divergences: vec![],
         }),
+        ext: None,
     }
 }
 
@@ -97,13 +112,28 @@ fn create_hybrid_fetcher(
 ) -> HybridDestinationFetcher {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let snapshot_repo = Arc::new(crate::repository::SnapshotRepository::new(snapshot_store));
 
-    HybridDestinationFetcher::new(
+    HybridDestinationFetcher::new(local_domain.to_string(), event_store, snapshot_repo, remote)
+}
+
+/// Same as `create_hybrid_fetcher` but hands back the event store so a test
+/// can inject storage failures (O9).
+fn create_hybrid_fetcher_with_store(
+    local_domain: &str,
+    remote: Arc<dyn DestinationFetcher>,
+) -> (HybridDestinationFetcher, Arc<MockEventStore>) {
+    let event_store = Arc::new(MockEventStore::new());
+    let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let snapshot_repo = Arc::new(crate::repository::SnapshotRepository::new(snapshot_store));
+
+    let fetcher = HybridDestinationFetcher::new(
         local_domain.to_string(),
-        event_store,
-        snapshot_store,
+        event_store.clone(),
+        snapshot_repo,
         remote,
-    )
+    );
+    (fetcher, event_store)
 }
 
 // ============================================================================
@@ -123,12 +153,13 @@ async fn test_fetch_non_local_domain_delegates_to_remote() {
     let cover = make_cover("order", Uuid::new_v4(), "corr-123");
     let result = fetcher.fetch(&cover).await;
 
-    assert!(result.is_some(), "Should return remote response");
-    let book = result.unwrap();
+    let book = result
+        .expect("remote fetch should succeed")
+        .expect("Should return remote response");
     assert_eq!(book.cover.as_ref().unwrap().domain, "order");
 }
 
-/// Remote fetcher None response is passed through.
+/// Remote fetcher Ok(None) ("no state") response is passed through.
 #[tokio::test]
 async fn test_fetch_non_local_domain_returns_none_from_remote() {
     let remote = Arc::new(MockRemoteFetcher::new()); // No response configured
@@ -137,14 +168,33 @@ async fn test_fetch_non_local_domain_returns_none_from_remote() {
     let cover = make_cover("inventory", Uuid::new_v4(), "corr-456");
     let result = fetcher.fetch(&cover).await;
 
-    assert!(result.is_none(), "Should return None from remote");
+    assert!(
+        result.expect("remote fetch should succeed").is_none(),
+        "Should return Ok(None) from remote"
+    );
 }
 
-/// Local domain queries with missing root return None.
-///
-/// Cover must have a valid root UUID to fetch from local storage.
+/// O9: remote fetch ERRORS propagate through the hybrid — a transport blip
+/// on another domain's query must not be presented as "no state".
 #[tokio::test]
-async fn test_fetch_local_domain_missing_root_returns_none() {
+async fn test_fetch_non_local_domain_propagates_remote_error() {
+    let remote =
+        Arc::new(MockRemoteFetcher::new().with_error(Status::unavailable("connection refused")));
+    let fetcher = create_hybrid_fetcher("pm-order-flow", remote);
+
+    let cover = make_cover("order", Uuid::new_v4(), "corr-123");
+    let result = fetcher.fetch(&cover).await;
+
+    let status = result.expect_err("remote error must propagate, not become Ok(None)");
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+}
+
+/// Local domain queries with missing root are INVALID_ARGUMENT.
+///
+/// Cover must have a valid root UUID to fetch from local storage. A
+/// malformed request is an error, not evidence of absent state (O9).
+#[tokio::test]
+async fn test_fetch_local_domain_missing_root_is_invalid_argument() {
     let remote = Arc::new(MockRemoteFetcher::new());
     let fetcher = create_hybrid_fetcher("pm-order-flow", remote);
 
@@ -153,15 +203,17 @@ async fn test_fetch_local_domain_missing_root_returns_none() {
         root: None, // Missing root
         correlation_id: "corr-123".to_string(),
         edition: None,
+        ext: None,
     };
     let result = fetcher.fetch(&cover).await;
 
-    assert!(result.is_none(), "Should return None for missing root");
+    let status = result.expect_err("missing root must be an error, not 'no state'");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
 }
 
-/// Local domain queries with invalid root bytes return None.
+/// Local domain queries with invalid root bytes are INVALID_ARGUMENT.
 #[tokio::test]
-async fn test_fetch_local_domain_invalid_root_returns_none() {
+async fn test_fetch_local_domain_invalid_root_is_invalid_argument() {
     let remote = Arc::new(MockRemoteFetcher::new());
     let fetcher = create_hybrid_fetcher("pm-order-flow", remote);
 
@@ -172,10 +224,31 @@ async fn test_fetch_local_domain_invalid_root_returns_none() {
         }),
         correlation_id: "corr-123".to_string(),
         edition: None,
+        ext: None,
     };
     let result = fetcher.fetch(&cover).await;
 
-    assert!(result.is_none(), "Should return None for invalid root");
+    let status = result.expect_err("invalid root must be an error, not 'no state'");
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
+}
+
+/// O9 (the defect's local flavor): a local STORAGE failure surfaces as Err.
+/// Pre-fix it was mapped to None and the PM restarted the workflow from
+/// empty even though its state was sitting in the store.
+#[tokio::test]
+async fn test_fetch_local_domain_storage_error_is_err_not_none() {
+    let remote = Arc::new(MockRemoteFetcher::new());
+    let (fetcher, event_store) = create_hybrid_fetcher_with_store("pm-order-flow", remote);
+    event_store.set_fail_on_get(true).await;
+
+    let cover = make_cover("pm-order-flow", Uuid::new_v4(), "corr-123");
+    let result = fetcher.fetch(&cover).await;
+
+    let status = result.expect_err(
+        "a storage failure must surface as Err — Ok(None) would be read as \
+         'no state' and restart the workflow (O9)",
+    );
+    assert_eq!(status.code(), tonic::Code::Internal);
 }
 
 // ============================================================================
@@ -192,12 +265,13 @@ async fn test_fetch_by_correlation_non_local_delegates_to_remote() {
 
     let result = fetcher.fetch_by_correlation("order", "corr-789").await;
 
-    assert!(result.is_some(), "Should return remote response");
-    let book = result.unwrap();
+    let book = result
+        .expect("remote fetch should succeed")
+        .expect("Should return remote response");
     assert_eq!(book.cover.as_ref().unwrap().domain, "order");
 }
 
-/// Remote fetcher None response is passed through for correlation queries.
+/// Remote fetcher Ok(None) response is passed through for correlation queries.
 #[tokio::test]
 async fn test_fetch_by_correlation_non_local_returns_none_from_remote() {
     let remote = Arc::new(MockRemoteFetcher::new()); // No response configured
@@ -205,7 +279,115 @@ async fn test_fetch_by_correlation_non_local_returns_none_from_remote() {
 
     let result = fetcher.fetch_by_correlation("inventory", "corr-xyz").await;
 
-    assert!(result.is_none(), "Should return None from remote");
+    assert!(
+        result.expect("remote fetch should succeed").is_none(),
+        "Should return Ok(None) from remote"
+    );
+}
+
+/// O9: remote correlation-fetch ERRORS propagate through the hybrid.
+#[tokio::test]
+async fn test_fetch_by_correlation_non_local_propagates_remote_error() {
+    let remote =
+        Arc::new(MockRemoteFetcher::new().with_error(Status::unavailable("connection refused")));
+    let fetcher = create_hybrid_fetcher("pm-order-flow", remote);
+
+    let result = fetcher.fetch_by_correlation("order", "corr-789").await;
+
+    let status = result.expect_err("remote error must propagate, not become Ok(None)");
+    assert_eq!(status.code(), tonic::Code::Unavailable);
+}
+
+/// O9 regression guard: a local correlation lookup that finds NOTHING is the
+/// one genuine "no state" case — Ok(None), a brand-new workflow. Error
+/// propagation must not turn absence into failure.
+#[tokio::test]
+async fn test_fetch_by_correlation_local_no_state_is_ok_none() {
+    let remote = Arc::new(MockRemoteFetcher::new());
+    let fetcher = create_hybrid_fetcher("pm-order-flow", remote);
+
+    let result = fetcher
+        .fetch_by_correlation("pm-order-flow", "corr-new-workflow")
+        .await;
+
+    assert!(
+        result
+            .expect("an empty store is not an error — the lookup succeeded")
+            .is_none(),
+        "no matching local state means Ok(None): a genuinely new workflow"
+    );
+}
+
+/// A correlation_id spans domains: `get_by_correlation` returns books from
+/// EVERY domain participating in the workflow (order, inventory, the PM
+/// itself, ...). The domain filter in the `find` is what stops the PM from
+/// adopting another domain's aggregate as its own state — if the filter
+/// inverted (`!=`), the PM would re-fetch by the WRONG root and come back
+/// with an empty book for a live workflow.
+///
+/// Seeds one wrong-domain book and one local-domain book under the same
+/// correlation (one each, so the pick is deterministic regardless of store
+/// iteration order) and asserts the LOCAL book — identified by its root and
+/// pages — is the one returned.
+#[tokio::test]
+async fn test_fetch_by_correlation_local_selects_own_domain_among_mixed_correlation() {
+    use crate::storage::AddMeta;
+    use crate::test_utils::make_event_page;
+
+    let remote = Arc::new(MockRemoteFetcher::new());
+    let (fetcher, event_store) = create_hybrid_fetcher_with_store("pm-order-flow", remote);
+
+    let wrong_domain_root = Uuid::new_v4();
+    let local_root = Uuid::new_v4();
+    let meta = AddMeta {
+        correlation_id: "corr-mix",
+        ..Default::default()
+    };
+    // Wrong-domain book sharing the correlation (seeded first).
+    event_store
+        .add(
+            "order",
+            "",
+            wrong_domain_root,
+            vec![make_event_page(0)],
+            &meta,
+        )
+        .await
+        .expect("seed wrong-domain book");
+    // The PM's own state under the same correlation.
+    event_store
+        .add(
+            "pm-order-flow",
+            "",
+            local_root,
+            vec![make_event_page(0), make_event_page(1)],
+            &meta,
+        )
+        .await
+        .expect("seed local-domain book");
+
+    let book = fetcher
+        .fetch_by_correlation("pm-order-flow", "corr-mix")
+        .await
+        .expect("lookup succeeds")
+        .expect("local state exists for this correlation");
+
+    let cover = book.cover.as_ref().expect("fetched book carries a cover");
+    assert_eq!(
+        cover.root.as_ref().map(|r| r.value.clone()),
+        Some(local_root.as_bytes().to_vec()),
+        "must re-fetch by the LOCAL domain book's root, not the other domain's"
+    );
+    assert_eq!(
+        book.pages.len(),
+        2,
+        "must return the local book's pages — the wrong root would find nothing \
+         in the local store and silently present a live workflow as empty"
+    );
+    assert_eq!(
+        cover.correlation_id, "corr-mix",
+        "the in-flight correlation must be preserved on the result"
+    );
 }
 
 // ============================================================================
@@ -217,14 +399,114 @@ async fn test_fetch_by_correlation_non_local_returns_none_from_remote() {
 fn test_hybrid_fetcher_stores_local_domain() {
     let event_store = Arc::new(MockEventStore::new());
     let snapshot_store = Arc::new(MockSnapshotStore::new());
+    let snapshot_repo = Arc::new(crate::repository::SnapshotRepository::new(snapshot_store));
     let remote: Arc<dyn DestinationFetcher> = Arc::new(MockRemoteFetcher::new());
 
     let fetcher = HybridDestinationFetcher::new(
         "my-local-domain".to_string(),
         event_store,
-        snapshot_store,
+        snapshot_repo,
         remote,
     );
 
     assert_eq!(fetcher.local_domain, "my-local-domain");
+}
+
+// ============================================================================
+// fetch_pm_state: root + edition, no correlation scan
+// ============================================================================
+
+fn pm_page(seq: u32, marker: &str) -> crate::proto::EventPage {
+    crate::proto::EventPage {
+        header: Some(crate::proto::PageHeader {
+            sync_mode: None,
+            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(seq)),
+        }),
+        payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
+            type_url: marker.to_string(),
+            value: vec![],
+        })),
+        ..Default::default()
+    }
+}
+
+/// PM state is the aggregate at the correlation-derived root on the
+/// trigger's edition; a same-correlation book on another edition is never
+/// picked instead.
+#[tokio::test]
+async fn test_fetch_pm_state_reads_trigger_edition_at_correlation_root() {
+    use crate::orchestration::shared::CorrelationRootExt;
+    use crate::storage::{AddMeta, EventStore};
+    let (fetcher, store) =
+        create_hybrid_fetcher_with_store("pm-flow", Arc::new(MockRemoteFetcher::new()));
+    let root = "corr-pm".correlation_root();
+    let meta = AddMeta {
+        correlation_id: "corr-pm",
+        ..Default::default()
+    };
+    store
+        .add("pm-flow", "", root, vec![pm_page(0, "main.Event")], &meta)
+        .await
+        .unwrap();
+    store
+        .add(
+            "pm-flow",
+            "branch",
+            root,
+            vec![pm_page(0, "branch.Event")],
+            &meta,
+        )
+        .await
+        .unwrap();
+
+    for (edition, expected) in [("branch", "branch.Event"), ("", "main.Event")] {
+        let book = fetcher
+            .fetch_pm_state("pm-flow", edition, "corr-pm")
+            .await
+            .unwrap()
+            .expect("state exists");
+        let crate::proto::event_page::Payload::Event(any) =
+            book.pages.last().unwrap().payload.as_ref().unwrap()
+        else {
+            panic!("event payload expected");
+        };
+        assert_eq!(any.type_url, expected, "edition {edition:?}");
+        assert_eq!(book.cover.unwrap().correlation_id, "corr-pm");
+    }
+}
+
+/// A workflow with no PM events is new: Ok(None), not an empty book.
+#[tokio::test]
+async fn test_fetch_pm_state_unknown_workflow_is_none() {
+    let fetcher = create_hybrid_fetcher("pm-flow", Arc::new(MockRemoteFetcher::new()));
+    assert!(fetcher
+        .fetch_pm_state("pm-flow", "", "never-seen")
+        .await
+        .unwrap()
+        .is_none());
+}
+
+/// Another domain's state is the remote fetcher's to answer.
+#[tokio::test]
+async fn test_fetch_pm_state_other_domain_delegates_to_remote() {
+    let remote_book = make_event_book("order", Uuid::new_v4(), "corr-x");
+    let remote =
+        Arc::new(MockRemoteFetcher::new().with_fetch_by_correlation_response(remote_book.clone()));
+    let fetcher = create_hybrid_fetcher("pm-flow", remote);
+    assert_eq!(
+        fetcher.fetch_pm_state("order", "", "corr-x").await.unwrap(),
+        Some(remote_book)
+    );
+}
+
+/// A storage failure is an error, never "new workflow" (O9).
+#[tokio::test]
+async fn test_fetch_pm_state_storage_failure_is_err() {
+    let (fetcher, store) =
+        create_hybrid_fetcher_with_store("pm-flow", Arc::new(MockRemoteFetcher::new()));
+    store.set_fail_on_get(true).await;
+    assert!(fetcher
+        .fetch_pm_state("pm-flow", "", "corr-pm")
+        .await
+        .is_err());
 }

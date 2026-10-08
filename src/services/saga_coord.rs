@@ -18,14 +18,14 @@ use tracing::{debug, error};
 
 use crate::bus::CommandBus;
 use crate::orchestration::command::CommandExecutor;
-use crate::orchestration::destination::DestinationFetcher;
 use crate::orchestration::saga::{orchestrate_saga, OutputDomainValidator, SagaContextFactory};
 use crate::orchestration::FactExecutor;
+use crate::proto::CascadeErrorMode;
 use crate::proto::{
     saga_coordinator_service_server::SagaCoordinatorService, SagaHandleRequest, SagaResponse,
     SpeculateSagaRequest, SyncMode,
 };
-use crate::proto_ext::CoverExt;
+use crate::proto_ext::{CascadeErrorModeExt, CoverExt, SyncModeExt};
 use crate::services::gap_fill::{GapFiller, NoOpPositionStore, RemoteEventSource};
 
 /// Saga coordinator service.
@@ -39,9 +39,6 @@ pub struct SagaCoord {
     executor: Arc<dyn CommandExecutor>,
     /// Command bus for ASYNC mode (optional).
     command_bus: Option<Arc<dyn CommandBus>>,
-    /// Destination fetcher (unused in new model, kept for interface).
-    #[allow(dead_code)]
-    fetcher: Option<Arc<dyn DestinationFetcher>>,
     /// Fact executor for injecting saga-produced facts.
     fact_executor: Option<Arc<dyn FactExecutor>>,
     /// Output domain validator for routing validation.
@@ -59,7 +56,6 @@ impl SagaCoord {
             factory,
             executor,
             command_bus: None,
-            fetcher: None,
             fact_executor: None,
             output_validator: None,
             backoff: ExponentialBuilder::default(),
@@ -134,7 +130,9 @@ impl SagaCoordinatorService for SagaCoord {
         let source = req
             .source
             .ok_or_else(|| Status::invalid_argument("SagaHandleRequest requires source events"))?;
-        let sync_mode = SyncMode::try_from(req.sync_mode).unwrap_or(SyncMode::Async);
+        // Unknown ints resolve to the zero-value defaults (Async / FailFast).
+        let sync_mode = SyncMode::or_default_async(req.sync_mode);
+        let cascade_error_mode = CascadeErrorMode::or_default_fail_fast(req.cascade_error_mode);
 
         let correlation_id = source.correlation_id().to_string();
         let saga_name = self.factory.name();
@@ -152,27 +150,34 @@ impl SagaCoordinatorService for SagaCoord {
         // Create context and orchestrate
         let ctx = self.factory.create(Arc::new(source));
 
-        orchestrate_saga(
+        let report = orchestrate_saga(
             ctx.as_ref(),
             self.executor.as_ref(),
             self.command_bus.as_deref(),
-            None, // fetcher unused in new model
             self.fact_executor.as_deref(),
             saga_name,
             &correlation_id,
             self.output_validator.as_deref(),
             sync_mode,
             self.backoff,
+            Some(cascade_error_mode),
         )
         .await
-        .map_err(|e| Status::internal(format!("Saga orchestration failed: {}", e)))?;
+        .map_err(|e| super::orchestration_status("Saga", e))?;
 
-        // The saga response is built by the context during handle()
-        // For now, return empty response - commands were delivered during orchestration
-        Ok(Response::new(SagaResponse {
-            commands: vec![],
-            events: vec![],
-        }))
+        // Commands were delivered during orchestration; the response carries
+        // CONTINUE-mode reaction errors and, for a COMPENSATE caller, the
+        // reaction commands executed (so it can compensate them if another
+        // reaction fails), in its metadata.
+        let mut response = Response::new(SagaResponse::default());
+        crate::orchestration::shared::attach_reaction_errors(&mut response, report.reaction_errors);
+        if cascade_error_mode == CascadeErrorMode::CascadeErrorCompensate {
+            crate::orchestration::shared::attach_executed_reactions(
+                &mut response,
+                &report.executed,
+            );
+        }
+        Ok(response)
     }
 
     /// Speculative execution - returns commands without side effects.
@@ -205,19 +210,16 @@ impl SagaCoordinatorService for SagaCoord {
         // so the gRPC saga context stamps it on the wire (H-17). Speculative
         // execution still respects the requested mode even though it produces
         // no side effects — handlers can inspect the inherited mode.
-        let sync_mode = SyncMode::try_from(req.sync_mode).unwrap_or(SyncMode::Async);
+        // Unspecified (proto3 zero value) and unknown ints resolve to Async.
+        let sync_mode = SyncMode::or_default_async(req.sync_mode);
 
         // Create context and call handle() directly (no command delivery)
-        // For speculative execution, pass empty sequences since we're not actually delivering commands
         let ctx = self.factory.create(Arc::new(source));
 
-        let response = ctx
-            .handle(std::collections::HashMap::new(), sync_mode)
-            .await
-            .map_err(|e| {
-                error!(error = %e, "Saga handler failed");
-                Status::internal(format!("Saga handler failed: {}", e))
-            })?;
+        let response = ctx.handle(sync_mode).await.map_err(|e| {
+            error!(error = %e, "Saga handler failed");
+            Status::internal(format!("Saga handler failed: {}", e))
+        })?;
 
         Ok(Response::new(response))
     }

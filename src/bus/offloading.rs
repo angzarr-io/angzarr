@@ -28,16 +28,22 @@ use super::{BusError, EventBus, EventHandler, PublishResult, Result};
 use crate::payload_store::{PayloadStore, PayloadStoreError};
 use crate::proto::{EventBook, EventPage};
 
+/// Bytes kept free below a bus's advertised message limit for the
+/// transport envelope (message attributes, trace context, headers), which
+/// count toward the limit on some transports (SNS/SQS) but are not part of
+/// the encoded book.
+pub const ENVELOPE_RESERVE_BYTES: usize = 8 * 1024;
+
 /// Configuration for payload offloading.
-pub struct OffloadingConfig<S: PayloadStore> {
+pub struct OffloadingConfig<S: PayloadStore + ?Sized> {
     /// The payload store to use for offloading.
     pub store: Arc<S>,
-    /// Minimum payload size to trigger offloading.
-    /// Default: use bus's max_message_size() if available.
+    /// Maximum encoded book size to publish inline. Default: the inner
+    /// bus's `max_message_size()` less [`ENVELOPE_RESERVE_BYTES`].
     pub threshold: Option<usize>,
 }
 
-impl<S: PayloadStore> OffloadingConfig<S> {
+impl<S: PayloadStore + ?Sized> OffloadingConfig<S> {
     /// Create new offloading config with the given payload store.
     pub fn new(store: Arc<S>) -> Self {
         Self {
@@ -58,13 +64,13 @@ impl<S: PayloadStore> OffloadingConfig<S> {
 /// Wraps any EventBus and automatically:
 /// - On publish: offloads large event payloads to external storage
 /// - On subscribe: resolves payload references back to full events
-pub struct OffloadingEventBus<S: PayloadStore> {
+pub struct OffloadingEventBus<S: PayloadStore + ?Sized> {
     inner: Arc<dyn EventBus>,
     store: Arc<S>,
     threshold: Option<usize>,
 }
 
-impl<S: PayloadStore + 'static> OffloadingEventBus<S> {
+impl<S: PayloadStore + ?Sized + 'static> OffloadingEventBus<S> {
     /// Wrap an event bus with payload offloading.
     pub fn wrap(inner: Arc<dyn EventBus>, config: OffloadingConfig<S>) -> Arc<Self> {
         Arc::new(Self {
@@ -76,91 +82,83 @@ impl<S: PayloadStore + 'static> OffloadingEventBus<S> {
 
     /// Get effective threshold for this bus.
     fn effective_threshold(&self) -> Option<usize> {
-        self.threshold.or_else(|| self.inner.max_message_size())
+        self.threshold.or_else(|| {
+            self.inner
+                .max_message_size()
+                .map(|max| max.saturating_sub(ENVELOPE_RESERVE_BYTES))
+        })
     }
 
     /// Process an event book for publishing, offloading large payloads.
     ///
-    /// Accepts and returns `Arc<EventBook>` to avoid cloning in the common case
-    /// where no offloading is needed (passthrough).
+    /// Books within the threshold pass through untouched (zero-copy).
+    /// Otherwise event payloads are moved to the store largest-first until
+    /// the book fits. A book that still exceeds the threshold — its
+    /// snapshot or its non-event pages are too large on their own — is
+    /// rejected rather than handed to a transport that would refuse it.
     async fn process_for_publish(&self, book: Arc<EventBook>) -> Result<Arc<EventBook>> {
+        use crate::proto::event_page::Payload;
+
         let threshold = match self.effective_threshold() {
             Some(t) => t,
             None => return Ok(book), // No limit, pass through (zero-copy)
         };
-
-        // Check total serialized size first
-        let total_size = book.encoded_len();
-        if total_size <= threshold {
-            return Ok(book); // Small enough, pass through (zero-copy)
+        if book.encoded_len() <= threshold {
+            return Ok(book);
         }
 
-        // Need to offload - process each page
-        use crate::proto::event_page::Payload;
+        let mut candidates: Vec<usize> = book
+            .pages
+            .iter()
+            .enumerate()
+            .filter(|(_, page)| matches!(page.payload, Some(Payload::Event(_))))
+            .map(|(i, _)| i)
+            .collect();
+        candidates.sort_by_key(|&i| std::cmp::Reverse(book.pages[i].encoded_len()));
 
-        let mut new_pages = Vec::with_capacity(book.pages.len());
-
-        for page in &book.pages {
-            let page_size = page.encoded_len();
-
-            // Only offload pages that are large
-            if page_size > threshold / 2 {
-                // Offload if page is >50% of threshold
-                if let Some(Payload::Event(ref event)) = page.payload {
-                    let payload_bytes = event.encode_to_vec();
-
-                    // H-02: `store.put` failure must surface as `Err`. The
-                    // previous behaviour (warn! + silently inline the
-                    // oversized payload) either produced an opaque
-                    // inner-bus rejection later on the call path or — if
-                    // the inner bus accepted it — silently violated the
-                    // size-bounded contract the offloading wrapper
-                    // promises. The bus refuses to lie; the caller is in
-                    // the right position to decide retry / DLQ / circuit
-                    // break. Matches the explicit-Err idiom landed for
-                    // C-12 in `sns_sqs/bus.rs`.
-                    let reference = self.store.put(&payload_bytes).await.map_err(|e| {
-                        error!(
-                            error = %e,
-                            page_size = page_size,
-                            threshold = threshold,
-                            "Payload store rejected put; refusing silent inline fallback"
-                        );
-                        BusError::Publish(format!(
-                            "Payload offload failed: {} (inline fallback refused — \
-                             the offloading wrapper will not silently exceed the \
-                             inner bus's size limit)",
-                            e
-                        ))
-                    })?;
-
-                    debug!(
-                        original_size = payload_bytes.len(),
-                        uri = %reference.uri,
-                        "Offloaded large event payload"
-                    );
-
-                    new_pages.push(EventPage {
-                        header: page.header.clone(),
-                        created_at: page.created_at,
-                        payload: Some(Payload::External(reference)),
-                        no_commit: page.no_commit,
-                        cascade_id: page.cascade_id.clone(),
-                    });
-                    continue;
-                }
+        let mut out = EventBook::clone(&book);
+        for index in candidates {
+            if out.encoded_len() <= threshold {
+                break;
             }
+            let Some(Payload::Event(event)) = out.pages[index].payload.as_ref() else {
+                continue;
+            };
+            let payload_bytes = event.encode_to_vec();
 
-            // Keep original page (small or non-event payload)
-            new_pages.push(page.clone());
+            // H-02: `store.put` failure must surface as `Err` rather than
+            // inlining an oversized payload the inner bus will reject.
+            let reference = self.store.put(&payload_bytes).await.map_err(|e| {
+                error!(
+                    error = %e,
+                    threshold = threshold,
+                    "Payload store rejected put; refusing silent inline fallback"
+                );
+                BusError::Publish(format!(
+                    "Payload offload failed: {} (inline fallback refused — \
+                     the offloading wrapper will not silently exceed the \
+                     inner bus's size limit)",
+                    e
+                ))
+            })?;
+
+            debug!(
+                original_size = payload_bytes.len(),
+                uri = %reference.uri,
+                "Offloaded large event payload"
+            );
+            out.pages[index].payload = Some(Payload::External(reference));
         }
 
-        Ok(Arc::new(EventBook {
-            cover: book.cover.clone(),
-            pages: new_pages,
-            snapshot: book.snapshot.clone(),
-            next_sequence: book.next_sequence,
-        }))
+        let size = out.encoded_len();
+        if size > threshold {
+            return Err(BusError::Publish(format!(
+                "Event book is {} bytes after offloading every event payload, over the \
+                 {} byte limit (snapshot or non-event pages too large to publish)",
+                size, threshold
+            )));
+        }
+        Ok(Arc::new(out))
     }
 
     /// Resolve external payload references in an event book.
@@ -170,7 +168,7 @@ impl<S: PayloadStore + 'static> OffloadingEventBus<S> {
 }
 
 #[async_trait]
-impl<S: PayloadStore + 'static> EventBus for OffloadingEventBus<S> {
+impl<S: PayloadStore + ?Sized + 'static> EventBus for OffloadingEventBus<S> {
     async fn publish(&self, book: Arc<EventBook>) -> Result<PublishResult> {
         // Process for offloading (zero-copy passthrough when no offloading needed)
         let processed = self.process_for_publish(book).await?;
@@ -225,7 +223,7 @@ impl From<PayloadStoreError> for BusError {
 ///
 /// Standalone function for use by `ResolvingHandler`. Fetches external payloads
 /// from the store and replaces references with inline events.
-async fn resolve_payloads_with_store<S: PayloadStore>(
+async fn resolve_payloads_with_store<S: PayloadStore + ?Sized>(
     store: &S,
     book: &EventBook,
 ) -> Result<EventBook> {
@@ -275,8 +273,6 @@ async fn resolve_payloads_with_store<S: PayloadStore>(
                 header: page.header.clone(),
                 created_at: page.created_at,
                 payload: Some(Payload::Event(event)),
-                no_commit: page.no_commit,
-                cascade_id: page.cascade_id.clone(),
             });
             continue;
         }
@@ -298,12 +294,12 @@ async fn resolve_payloads_with_store<S: PayloadStore>(
 /// When the `OffloadingEventBus` receives events with external payload references,
 /// this handler fetches the actual payloads from the store before passing them
 /// to the wrapped handler. This makes payload offloading transparent to consumers.
-struct ResolvingHandler<S: PayloadStore> {
+struct ResolvingHandler<S: PayloadStore + ?Sized> {
     inner: Arc<dyn EventHandler>,
     store: Arc<S>,
 }
 
-impl<S: PayloadStore + 'static> EventHandler for ResolvingHandler<S> {
+impl<S: PayloadStore + ?Sized + 'static> EventHandler for ResolvingHandler<S> {
     fn handle(
         &self,
         book: Arc<EventBook>,

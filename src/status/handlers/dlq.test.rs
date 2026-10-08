@@ -307,6 +307,7 @@ fn row_with_real_payload() -> StoredDeadLetter {
             root: None,
             correlation_id: "trace-payload-view".to_string(),
             edition: None,
+            ext: None,
         }),
         rejection_reason: "for the operator's eyes".to_string(),
         source_component: "agg-player".to_string(),
@@ -468,6 +469,7 @@ fn cmd_dl_row(id: i64, correlation: &str) -> StoredDeadLetter {
             root: None,
             correlation_id: correlation.to_string(),
             edition: None,
+            ext: None,
         }),
         pages: vec![CommandPage {
             header: Some(PageHeader {
@@ -487,6 +489,7 @@ fn cmd_dl_row(id: i64, correlation: &str) -> StoredDeadLetter {
             root: None,
             correlation_id: correlation.to_string(),
             edition: None,
+            ext: None,
         }),
         rejection_reason: "sequence mismatch".to_string(),
         source_component: "agg-player".to_string(),
@@ -643,6 +646,7 @@ async fn replay_of_event_dead_letter_returns_400_unsupported() {
                     root: None,
                     correlation_id: "ev".to_string(),
                     edition: None,
+                    ext: None,
                 }),
                 rejection_reason: "event processing failed".to_string(),
                 source_component: "saga-x".to_string(),

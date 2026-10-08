@@ -10,7 +10,6 @@ pub mod errmsg {
     pub const NOT_FOUND: &str = "Event not found: ";
     pub const SEQUENCE_CONFLICT: &str = "Sequence conflict: ";
     pub const INVALID_TIMESTAMP: &str = "Invalid timestamp: ";
-    pub const INVALID_TIMESTAMP_FORMAT: &str = "Invalid timestamp format: ";
     pub const INVALID_DIVERGENCE_POINT: &str = "Invalid divergence point: ";
     pub const INVALID_UUID: &str = "Invalid UUID: ";
     pub const DATABASE_ERROR: &str = "Database error: ";
@@ -19,7 +18,7 @@ pub mod errmsg {
     pub const MISSING_ROOT: &str = "Root UUID missing from Cover";
     pub const REDIS_ERROR: &str = "Redis error: ";
     pub const NOT_IMPLEMENTED: &str = "Not implemented: ";
-    pub const NATS_ERROR: &str = "NATS error: ";
+    pub const BACKEND_ERROR: &str = "Backend error: ";
     pub const UNKNOWN_TYPE: &str = "Unknown storage type: ";
     pub const MAIN_TIMELINE_PROTECTED: &str = "Main timeline is protected: ";
 }
@@ -35,9 +34,6 @@ pub enum StorageError {
 
     #[error("{}seconds={seconds}, nanos={nanos}", errmsg::INVALID_TIMESTAMP)]
     InvalidTimestamp { seconds: i64, nanos: i32 },
-
-    #[error("{}{}", errmsg::INVALID_TIMESTAMP_FORMAT, .0)]
-    InvalidTimestampFormat(String),
 
     #[error("{}{}", errmsg::INVALID_DIVERGENCE_POINT, .0)]
     InvalidDivergencePoint(String),
@@ -65,9 +61,14 @@ pub enum StorageError {
     #[error("{}{}", errmsg::NOT_IMPLEMENTED, .0)]
     NotImplemented(String),
 
-    #[cfg(feature = "nats")]
-    #[error("{}{}", errmsg::NATS_ERROR, .0)]
-    Nats(String),
+    /// Backend-specific runtime error that isn't covered by a typed variant.
+    ///
+    /// Use for cloud-SDK errors (DynamoDB, Bigtable, ImmuDB) where the
+    /// underlying error type doesn't implement `From` into a typed variant.
+    /// Distinct from `NotImplemented` — the backend IS implemented and the
+    /// trait method exists; the runtime call just failed.
+    #[error("{}{}", errmsg::BACKEND_ERROR, .0)]
+    Backend(String),
 
     #[error("{}{}", errmsg::UNKNOWN_TYPE, .0)]
     UnknownType(String),

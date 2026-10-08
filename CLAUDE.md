@@ -8,6 +8,16 @@ Prototype codebase. If you encounter broken things, note the issue, check with m
 ### In-process vs Distributed
 Keep the in-process and distributed code paths as similar as possible—differ only where necessary (process count, bus transports, storage).
 
+**No in-process bus transport (C14):** A `ChannelEventBus` existed once and was removed, but its
+default `messaging.type: channel` and scattered doc references survived, so an unconfigured
+deployment silently pointed at a nonexistent backend. C14 deleted the phantom default rather than
+rebuild an in-process transport — `messaging.type` is now unset by default and `init_event_bus`
+hard-fails with an actionable error until an operator sets it to `amqp`, `kafka`, `pubsub`, or
+`sns-sqs`. This is a conscious, temporary concession of the parity thesis above: there is currently
+no in-process/embedded bus, so in-process deployments and tests must go through a real transport
+(or a test double like `MockEventBus`) rather than a lightweight channel-backed one. Rebuilding a
+genuine in-process transport is future work, not blocked by anything in this change.
+
 ### Priorities
 1. Understanding — minimize cognitive load, avoid foot-guns
 2. Architectural correctness — reduce churn, enable change
@@ -16,7 +26,9 @@ Keep the in-process and distributed code paths as similar as possible—differ o
 Plan everything and run it by me. Ask about meaningful decisions.
 
 ## Examples
-CQRS-ES poker system. Player domain: functional aggregates. Others: object-oriented.
+CQRS-ES blackjack system (`angzarr-examples-{lang}`): player and table aggregates, a buy-in
+process manager, sagas between player and table, a ledger projector. Protos live in
+`angzarr-project/proto/io/angzarr/examples/blackjack/v1`.
 
 ### Definition of Done
 **Nothing is "done" until tests prove it works.**
@@ -165,7 +177,10 @@ All pure functions—100% unit testable without mocks. Same pattern across langu
 ### Sagas
 Domain translators. Events from domain A → commands to domain B. **Stateless.** Minimal logic—just field mapping.
 
-**Destination sequences:** Framework provides `destination_sequences` map. Use `StampCommand(cmd, domain)` helper.
+**Deferred commands:** Saga commands carry `angzarr_deferred` provenance and no expected
+sequence; the destination appends them at its head with no sequence or merge-strategy check.
+Their idempotency key is the provenance tuple. A rejection is delivered to the command's
+source (`angzarr_deferred.source`) as a RejectionNotification through the coordinator outbox.
 
 Name: `saga-{source}-{target}`
 
@@ -175,7 +190,21 @@ Events in → external output (DB, API, files). Name: `projector-{source}-{featu
 ### Process Managers
 Multi-domain event correlation via correlation ID. Own aggregate (correlation ID = root). Stateful.
 
-**Destination sequences:** Framework provides `destination_sequences` map (same as sagas).
+**Deferred commands:** Same as sagas: PM commands are deferred, and a PM command that fails
+transiently after the PM's events are persisted is redelivered from the coordinator outbox.
+A rejected PM command is handed back to the PM itself (C-0434): the coordinator triggers the PM
+with a Notification carrying the RejectionNotification before it returns and executes the PM's
+answer; a compensation command the PM issues while handling a rejection is dead-lettered if it is
+refused, never handed back again.
+
+### Compensation
+Compensation signals are Notifications (RejectionNotification or Compensate) delivered to the
+target's `HandleCompensation` from the raising coordinator's durable outbox
+(`src/orchestration/outbox`): recorded before the trigger is acknowledged, retried with backoff,
+dead-lettered after the configured budget (or at once on UNIMPLEMENTED), deduplicated at the
+target by (kind, provenance tuple). A Notification is never written to a business stream; only
+the events the compensation handler emits are. `CASCADE_ERROR_COMPENSATE` records one Compensate
+per reaction command its target executed.
 
 ### Saga/PM Design Philosophy: Facts Over State Rebuilding
 
@@ -192,18 +221,17 @@ Sagas and PMs can emit two types of output to destination aggregates:
 
 **Facts (typical for sagas and inter-domain messages)**
 ```rust
-// Saga translates domain A event into domain B fact
-let fact = PlayerSeated { player_root, seat, table_id };
-// Fact is injected directly — destination aggregate records it
+// saga-table-player-settlement: the table's decision is final, so the
+// player records it as a fact (external_id = hex(hold_id))
+let fact = TopUpSettled { hold_id, amount };
 ```
 
 **Commands (when validation/rejection is needed)**
 ```rust
-// PM sends command when aggregate must decide
-let cmd = SeatPlayer { player_root, seat, amount };
-destinations.stamp_command(&mut cmd, "table")?;
-// With SyncMode::Simple, PM receives immediate accept/reject
-// Handle rejection via on_rejected()
+// saga-player-table: the table may refuse the top-up
+let cmd = AddChips { player_root, hold_id, amount };
+// Emitted deferred (no expected sequence). A rejection is delivered to the
+// player's compensation handler, which emits TopUpRefused.
 ```
 
 #### Design Principles
@@ -211,7 +239,7 @@ destinations.stamp_command(&mut cmd, "table")?;
 1. **Let aggregates decide** — Business logic belongs in aggregates, not coordinators
 2. **Facts are the norm for inter-domain flow** — Sagas typically emit facts, not commands
 3. **Use commands when rejection matters** — Commands let the destination validate and reject
-4. **Use sequences for stamping** — Destinations provide `next_sequence` for command headers
+4. **Commands are deferred** — Sagas/PMs never stamp destination sequences; the destination appends at its head
 
 #### Anti-pattern: Decision Making in Sagas
 
@@ -234,7 +262,7 @@ def handle_order(self, event, ctx):
     # If validation is needed, use a command instead
 ```
 
-**Key insight:** Sagas/PMs receive only sequence numbers, not EventBooks. They cannot (and should not) rebuild destination aggregate state.
+**Key insight:** Sagas receive only the source events (PMs also their own state), never destination state or sequences. They cannot (and should not) rebuild destination aggregate state.
 
 ### Event Design
 - Sagas/projectors: no querying, enrich at source aggregate
@@ -267,7 +295,7 @@ Runtime observation builds graph. Nodes: first event processed. Edges: event flo
 | Events | Immutable facts. Past tense. Via commands or facts. |
 | Commands | Action requests. Sequenced, validated, rejectable. |
 | Facts | Direct event injection, no validation. Cannot reject. |
-| Notifications | Unsequenced coordination messages. Not persisted. |
+| Notifications | Compensation signals (RejectionNotification, Compensate) delivered through the coordinator outbox. Never persisted to business streams. |
 | Correlation ID | Cross-domain process identifier. PM aggregate root. |
 
 **Correlation propagation:** Client provides on initial command. Framework propagates through sagas/PMs. PMs require it (guarded at router).

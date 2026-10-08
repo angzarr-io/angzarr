@@ -14,7 +14,7 @@ use crate::proto::{Cover, Edition, EventBook, EventPage, PageHeader, Snapshot, U
 use crate::proto_ext::EventPageExt;
 use crate::repository::EventBookRepository;
 use crate::storage::{
-    AddOutcome, CascadeParticipant, EventStore, Result as StorageResult, SnapshotStore, SourceInfo,
+    AddMeta, AddOutcome, EventStore, Result as StorageResult, SnapshotStore, SourceInfo,
 };
 
 use super::*;
@@ -91,9 +91,7 @@ impl EventStore for MockEventStore {
         _edition: &str,
         _root: Uuid,
         _pages: Vec<EventPage>,
-        _correlation_id: &str,
-        _external_id: Option<&str>,
-        _source_info: Option<&SourceInfo>,
+        _meta: &AddMeta<'_>,
     ) -> StorageResult<AddOutcome> {
         unimplemented!("Not needed for gap-fill tests")
     }
@@ -178,7 +176,7 @@ impl EventStore for MockEventStore {
         _domain: &str,
         _edition: &str,
         _root: Uuid,
-        _until: &str,
+        _until: &prost_types::Timestamp,
     ) -> StorageResult<Vec<EventPage>> {
         unimplemented!("Not needed for gap-fill tests")
     }
@@ -208,17 +206,6 @@ impl EventStore for MockEventStore {
     }
 
     async fn delete_edition_events(&self, _domain: &str, _edition: &str) -> StorageResult<u32> {
-        unimplemented!("Not needed for gap-fill tests")
-    }
-
-    async fn query_stale_cascades(&self, _threshold: &str) -> StorageResult<Vec<String>> {
-        unimplemented!("Not needed for gap-fill tests")
-    }
-
-    async fn query_cascade_participants(
-        &self,
-        _cascade_id: &str,
-    ) -> StorageResult<Vec<CascadeParticipant>> {
         unimplemented!("Not needed for gap-fill tests")
     }
 }
@@ -274,7 +261,6 @@ fn make_event_page(sequence: u32) -> EventPage {
         }),
         created_at: None,
         payload: None,
-        ..Default::default()
     }
 }
 
@@ -290,6 +276,7 @@ fn make_event_book(domain: &str, root: Uuid, edition: &str, sequences: Vec<u32>)
                 name: edition.to_string(),
                 divergences: vec![],
             }),
+            ext: None,
         }),
         snapshot: None,
         pages: sequences.into_iter().map(make_event_page).collect(),
@@ -302,6 +289,7 @@ fn make_snapshot(sequence: u32) -> Snapshot {
         sequence,
         state: None,
         retention: 0, // TRANSIENT
+        created_at: None,
     }
 }
 
@@ -310,10 +298,10 @@ fn test_root() -> Uuid {
 }
 
 fn make_repo(event_store: Arc<MockEventStore>) -> Arc<EventBookRepository> {
-    Arc::new(EventBookRepository::new(
-        event_store,
-        Arc::new(NoOpSnapshotStore),
-    ))
+    let snapshot_repo = Arc::new(crate::repository::SnapshotRepository::new(Arc::new(
+        NoOpSnapshotStore,
+    )));
+    Arc::new(EventBookRepository::new(event_store, snapshot_repo))
 }
 
 fn make_event_source(event_store: Arc<MockEventStore>) -> LocalEventSource {
@@ -507,4 +495,25 @@ impl HandlerPositionStore for ArcPositionStore {
     async fn put(&self, root: &[u8], sequence: u32) -> Result<()> {
         self.0.put(root, sequence).await
     }
+}
+
+/// A remote EventQuery service that cannot be reached is a gap-fill
+/// error, never an empty book: an empty book would read as "no missing
+/// events" and the projector would silently skip the gap.
+#[tokio::test]
+async fn test_remote_event_source_unreachable_is_an_error() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let channel = tonic::transport::Channel::from_shared(format!("http://127.0.0.1:{port}"))
+        .unwrap()
+        .connect_lazy();
+    let source = RemoteEventSource::new(
+        crate::proto::event_query_service_client::EventQueryServiceClient::new(channel),
+    );
+    let err = source
+        .get_from_to("orders", "", Uuid::new_v4(), 0, 5)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, GapFillError::Grpc(_)), "{err:?}");
 }

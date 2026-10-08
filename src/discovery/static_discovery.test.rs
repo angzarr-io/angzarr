@@ -360,3 +360,63 @@ async fn test_static_discovery_has_no_pms_initially() {
     let discovery = StaticServiceDiscovery::new();
     assert!(!discovery.has_pms().await);
 }
+
+// ============================================================================
+// replace_aggregates / replace_projectors (K8s watcher mirror)
+// ============================================================================
+
+fn svc(name: &str, domain: &str, address: &str) -> DiscoveredService {
+    DiscoveredService {
+        name: name.to_string(),
+        service_address: address.to_string(),
+        port: 1310,
+        domain: Some(domain.to_string()),
+    }
+}
+
+/// Replacing the aggregate registry evicts aggregates absent from the new
+/// set: a deleted domain stops resolving instead of routing to a dead
+/// Service forever.
+#[tokio::test]
+async fn test_replace_aggregates_evicts_absent_domains() {
+    let discovery = StaticServiceDiscovery::new();
+    discovery
+        .register_aggregate("orders", "orders-aggregate.ns", 1310)
+        .await;
+    discovery
+        .register_aggregate("payments", "payments-aggregate.ns", 1310)
+        .await;
+
+    discovery
+        .replace_aggregates(vec![svc(
+            "payments-aggregate",
+            "payments",
+            "payments-aggregate.ns",
+        )])
+        .await;
+
+    assert_eq!(
+        discovery.aggregate_domains().await,
+        vec!["payments".to_string()]
+    );
+    assert!(matches!(
+        discovery.get_aggregate("orders").await,
+        Err(DiscoveryError::DomainNotFound(_))
+    ));
+}
+
+/// Replacing the projector registry evicts projectors absent from the new
+/// set, so synchronous fan-out stops calling deleted projectors.
+#[tokio::test]
+async fn test_replace_projectors_evicts_absent_projectors() {
+    let discovery = StaticServiceDiscovery::new();
+    discovery
+        .register_projector("old-projector", "orders", "old.ns", 1310)
+        .await;
+    assert!(discovery.has_projectors().await);
+
+    discovery.replace_projectors(Vec::new()).await;
+
+    assert!(!discovery.has_projectors().await);
+    assert!(discovery.get_all_projectors().await.unwrap().is_empty());
+}

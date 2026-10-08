@@ -87,6 +87,61 @@ storage:
     );
 }
 
+/// R2-15 hard-fail boot contract for angzarr-aggregate: when the
+/// operator configures a DLQ target whose backend cannot be constructed,
+/// the bin must exit non-zero rather than silently downgrade to a noop
+/// publisher and start serving requests. Triggered here by an unknown
+/// `dlq_type` -- the same path that runs when a configured AMQP/Kafka/
+/// Postgres broker is unreachable (a feature-gate mismatch or backend
+/// registration miss produces the same `UnknownType` error).
+///
+/// Why this matters: a bin that boots successfully with a misconfigured
+/// DLQ silently drops dead letters for its entire lifetime. Operators
+/// only discover the gap when something has already gone wrong and the
+/// audit trail they expected to consult turns out to be empty. The
+/// loud-boot-failure path forces the misconfiguration into the CI/Helm
+/// deploy stage where it's cheap to fix.
+#[test]
+#[ignore = "requires pre-built binaries"]
+fn test_aggregate_fails_when_dlq_backend_unknown() {
+    let dir = tempdir().unwrap();
+    let config_path = dir.path().join("dlq-unknown.yaml");
+
+    // Minimal config that's valid up to the DLQ-init step. Target is
+    // included so the bin would otherwise proceed past target validation
+    // -- proves the DLQ init is what's failing the boot, not a missing
+    // target check.
+    let config_content = r#"
+server:
+  ch_port: 1313
+storage:
+  type: "sqlite"
+target:
+  domain: "test"
+dlq:
+  targets:
+    - type: "no-such-backend"
+"#;
+    fs::write(&config_path, config_content).unwrap();
+
+    let output = run_binary("angzarr-aggregate", &["-c", config_path.to_str().unwrap()]);
+
+    assert!(
+        !output.status.success(),
+        "bin must exit non-zero on DLQ init failure; instead got status {:?}",
+        output.status
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("DLQ") || stderr.contains("dlq") || stderr.contains("no-such-backend"),
+        "stderr should mention the DLQ init failure (so an operator can \
+         diagnose the misconfiguration without spelunking through trace \
+         logs), got: {}",
+        stderr
+    );
+}
+
 // ============================================================================
 // angzarr-projector Tests
 // ============================================================================

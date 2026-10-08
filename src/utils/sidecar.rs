@@ -1,7 +1,7 @@
 //! Sidecar bootstrap utilities shared across saga and process manager binaries.
 //!
-//! Extracts common patterns: config loading, target process spawning,
-//! static endpoint connection, and subscriber lifecycle.
+//! Extracts common patterns: config loading, static endpoint connection,
+//! and subscriber setup.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -10,19 +10,56 @@ use std::time::Duration;
 use backon::Retryable;
 use tracing::{error, info, warn};
 
-use crate::bus::{init_event_bus, EventBusMode, EventHandler, MessagingConfig};
+use crate::bus::{
+    init_event_bus, DeadLetteringHandler, EventBus, EventBusMode, EventHandler, MessagingConfig,
+    TargetFilterHandler,
+};
 use crate::config::{Config, TargetConfig};
+use crate::descriptor::Target;
+use crate::dlq::DeadLetterPublisher;
 use crate::orchestration::command::grpc::GrpcCommandExecutor;
-use crate::orchestration::command::CommandExecutor;
 use crate::orchestration::destination::grpc::GrpcDestinationFetcher;
 use crate::orchestration::destination::DestinationFetcher;
 use crate::orchestration::fact::grpc::GrpcFactExecutor;
 use crate::orchestration::FactExecutor;
+use crate::payload_store::{with_offload, PayloadOffload};
 use crate::proto::command_handler_coordinator_service_client::CommandHandlerCoordinatorServiceClient;
 use crate::proto::event_query_service_client::EventQueryServiceClient;
-use crate::transport::connect_to_address;
+use crate::transport::{connect_to_address, GrpcMessageLimits, TransportConfig};
 use crate::utils::bootstrap::{init_tracing, parse_static_endpoints};
 use crate::utils::retry::connection_backoff;
+
+/// Environment variable overriding the TCP port a saga or process-manager
+/// coordinator serves on.
+pub const COORDINATOR_PORT_ENV_VAR: &str = "ANGZARR_COORDINATOR_PORT";
+
+/// Transport a saga or process-manager coordinator serves on.
+///
+/// Follows `transport.type`. Over UDS the socket is named like every other
+/// sidecar's (`{domain}-{service}.sock`). Over TCP the coordinator binds all
+/// interfaces — aggregates in other pods call it — on `port_override`
+/// (the value of [`COORDINATOR_PORT_ENV_VAR`]) or `default_port`. An
+/// override that is not a port number is an error rather than a silent
+/// fallback to a port nobody routes to.
+pub fn coordinator_transport(
+    transport: &TransportConfig,
+    port_override: Option<&str>,
+    default_port: u16,
+) -> Result<TransportConfig, String> {
+    let port = match port_override {
+        Some(raw) => raw.trim().parse::<u16>().map_err(|_| {
+            format!(
+                "{} must be a TCP port number, got {:?}",
+                COORDINATOR_PORT_ENV_VAR, raw
+            )
+        })?,
+        None => default_port,
+    };
+    let mut coordinator = transport.clone();
+    coordinator.tcp.host = "0.0.0.0".to_string();
+    coordinator.tcp.port = port;
+    Ok(coordinator)
+}
 
 /// Result of bootstrapping a sidecar binary.
 ///
@@ -76,7 +113,7 @@ pub async fn connect_endpoints(
     endpoints_str: &str,
 ) -> Result<
     (
-        Arc<dyn CommandExecutor>,
+        Arc<GrpcCommandExecutor>,
         Arc<dyn DestinationFetcher>,
         Arc<dyn FactExecutor>,
     ),
@@ -95,7 +132,9 @@ pub async fn connect_endpoints(
             let a = addr.clone();
             async move {
                 let channel = connect_to_address(&a).await.map_err(|e| e.to_string())?;
-                Ok::<_, String>(CommandHandlerCoordinatorServiceClient::new(channel))
+                Ok::<_, String>(
+                    CommandHandlerCoordinatorServiceClient::new(channel).with_message_limits(),
+                )
             }
         })
         .retry(connection_backoff())
@@ -113,7 +152,9 @@ pub async fn connect_endpoints(
             let a = addr.clone();
             async move {
                 let channel = connect_to_address(&a).await.map_err(|e| e.to_string())?;
-                Ok::<_, String>(CommandHandlerCoordinatorServiceClient::new(channel))
+                Ok::<_, String>(
+                    CommandHandlerCoordinatorServiceClient::new(channel).with_message_limits(),
+                )
             }
         })
         .retry(connection_backoff())
@@ -129,7 +170,7 @@ pub async fn connect_endpoints(
             let a = addr.clone();
             async move {
                 let channel = connect_to_address(&a).await.map_err(|e| e.to_string())?;
-                Ok::<_, String>(EventQueryServiceClient::new(channel))
+                Ok::<_, String>(EventQueryServiceClient::new(channel).with_message_limits())
             }
         })
         .retry(connection_backoff())
@@ -142,40 +183,60 @@ pub async fn connect_endpoints(
         info!(domain = %domain, address = %address, "Connected to aggregate");
     }
 
-    let executor: Arc<dyn CommandExecutor> = Arc::new(GrpcCommandExecutor::new(command_clients));
+    let executor = Arc::new(GrpcCommandExecutor::new(command_clients));
     let fetcher: Arc<dyn DestinationFetcher> = Arc::new(GrpcDestinationFetcher::new(query_clients));
     let fact_executor: Arc<dyn FactExecutor> = Arc::new(GrpcFactExecutor::new(fact_clients));
 
     Ok((executor, fetcher, fact_executor))
 }
 
-/// Subscribe a handler to the event bus and block until Ctrl+C.
+/// Start the bus subscriber for a saga, process-manager or projector sidecar.
 ///
-/// Creates a subscriber on the given queue, registers the handler,
-/// starts consuming, and waits for shutdown signal.
-pub async fn run_subscriber(
+/// The subscription is scoped to the domains named by `targets` (all
+/// domains when empty), the handler only sees events matching `targets`,
+/// handler failures are redelivered under `messaging.delivery` before the
+/// event is dead-lettered through `dlq`, and claim-check references are
+/// resolved when `offload` is set. Returns the subscriber, which must be
+/// kept alive for consumption to continue.
+#[allow(clippy::too_many_arguments)]
+pub async fn start_subscriber(
     messaging: &MessagingConfig,
-    queue_name: String,
+    queue: String,
+    targets: Vec<Target>,
     handler: Box<dyn EventHandler>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let subscriber_mode = EventBusMode::SubscriberAll { queue: queue_name };
-    let subscriber = init_event_bus(messaging, subscriber_mode)
+    dlq: Arc<dyn DeadLetterPublisher>,
+    offload: Option<&PayloadOffload>,
+    component: &str,
+    component_type: &str,
+) -> Result<Arc<dyn EventBus>, Box<dyn std::error::Error>> {
+    let mode = EventBusMode::for_targets(queue.clone(), &targets);
+    let subscriber = init_event_bus(messaging, mode)
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e })?;
+    let subscriber = with_offload(subscriber, offload);
+
+    let filtered = TargetFilterHandler::new(handler, targets);
+    let capped = DeadLetteringHandler::new(
+        Box::new(filtered),
+        messaging.delivery.clone(),
+        dlq,
+        component,
+        component_type,
+    );
 
     subscriber
-        .subscribe(handler)
+        .subscribe(Box::new(capped))
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-
     subscriber
         .start_consuming()
         .await
         .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
 
-    info!("Sidecar running, press Ctrl+C to exit");
-
-    tokio::signal::ctrl_c().await?;
-
-    Ok(())
+    info!(queue = %queue, "Bus subscriber started");
+    Ok(subscriber)
 }
+
+#[cfg(test)]
+#[path = "sidecar.test.rs"]
+mod tests;

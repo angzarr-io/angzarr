@@ -7,14 +7,11 @@ mod client;
 mod limits;
 mod server;
 
-pub use client::{
-    ProcessManagerClientConfig, SagaCompensationConfig, ServiceEndpoint, TimeoutConfig,
-    DEFAULT_SAGA_FALLBACK_DOMAIN,
-};
+pub use client::{SagaCompensationConfig, ServiceEndpoint, DEFAULT_SAGA_FALLBACK_DOMAIN};
 pub use limits::ResourceLimits;
 pub use server::{
-    ConfigError, ExternalServiceConfig, HealthCheckConfig, ServerConfig, ServiceConfig,
-    ServiceConfigRef, TargetConfig,
+    ConfigError, ExternalServiceConfig, HealthCheckConfig, ServiceConfig, ServiceConfigRef,
+    TargetConfig,
 };
 
 /// Default configuration file name.
@@ -67,9 +64,6 @@ pub const UPCASTER_ENABLED_ENV_VAR: &str = "ANGZARR_UPCASTER_ENABLED";
 /// Environment variable for upcaster address.
 pub const UPCASTER_ADDRESS_ENV_VAR: &str = "ANGZARR_UPCASTER_ADDRESS";
 
-/// Environment variable for outbox enablement.
-pub const OUTBOX_ENABLED_ENV_VAR: &str = "ANGZARR_OUTBOX_ENABLED";
-
 /// Environment variable for OpenTelemetry service name.
 pub const OTEL_SERVICE_NAME_ENV_VAR: &str = "OTEL_SERVICE_NAME";
 
@@ -79,41 +73,34 @@ use crate::bus::MessagingConfig;
 use crate::dlq::DlqConfig;
 use crate::payload_store::PayloadOffloadConfig;
 use crate::services::UpcasterConfig;
-use crate::storage::StorageConfig;
+use crate::storage::StorageRegistryConfig;
 use crate::transport::TransportConfig;
 
 /// Main application configuration.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
-    /// Server configuration.
-    pub server: ServerConfig,
     /// Storage configuration.
-    pub storage: StorageConfig,
+    pub storage: StorageRegistryConfig,
     /// Transport configuration.
     pub transport: TransportConfig,
     /// Messaging configuration (optional).
     pub messaging: Option<MessagingConfig>,
     /// Target service for sidecar mode.
     pub target: Option<TargetConfig>,
-    /// Client logic endpoints (gateway mode).
-    pub client_logic: Option<Vec<ServiceEndpoint>>,
-    /// Projector endpoints.
-    pub projectors: Option<Vec<ServiceEndpoint>>,
-    /// Saga endpoints.
-    pub sagas: Option<Vec<ServiceEndpoint>>,
-    /// Process manager configurations.
-    pub process_managers: Option<Vec<ProcessManagerClientConfig>>,
-    /// Saga compensation configuration.
-    pub saga_compensation: Option<SagaCompensationConfig>,
+    /// Saga compensation configuration (saga sidecar).
+    pub saga_compensation: SagaCompensationConfig,
     /// Upcaster configuration for event version transformation.
     pub upcaster: UpcasterConfig,
-    /// Resource limits for message processing and queries.
+    /// Resource limits for command validation (aggregate sidecar).
     pub limits: ResourceLimits,
     /// Payload offloading configuration for oversized messages.
     pub payload_offload: PayloadOffloadConfig,
     /// Dead letter queue configuration.
     pub dlq: DlqConfig,
+    /// Coordinator outbox retry schedule (compensation notifications and
+    /// PM command redelivery).
+    pub outbox: crate::orchestration::outbox::OutboxConfig,
 }
 
 impl Config {
@@ -123,13 +110,16 @@ impl Config {
     /// 1. `config.yaml` in current directory (if exists)
     /// 2. File specified by `path` argument (if provided)
     /// 3. File specified by `CONFIG_ENV_VAR` environment variable (if set)
-    /// 4. Environment variables with `CONFIG_ENV_PREFIX` prefix
+    /// 4. Environment variables of the form `ANGZARR__SECTION__KEY`
+    ///    (`CONFIG_ENV_PREFIX`, then `__` between every path segment)
+    ///
+    /// Top-level keys that match no section are ignored with a warning
+    /// naming them, so a typo or a stale setting is visible in the logs.
     pub fn load(path: Option<&str>) -> Result<Self, Box<dyn std::error::Error>> {
         use ::config::{Config as ConfigLib, Environment, File, FileFormat};
 
         let mut builder = ConfigLib::builder()
             // Start with defaults from config.yaml in current directory
-            .add_source(File::new("config", FileFormat::Yaml).required(false))
             .add_source(File::new(DEFAULT_CONFIG_FILE, FileFormat::Yaml).required(false));
 
         // Add config file from path argument if provided
@@ -149,9 +139,20 @@ impl Config {
                     .separator("__")
                     .try_parsing(true),
             )
-            // Legacy env vars for backwards compatibility
-            .add_source(Environment::default().try_parsing(true))
             .build()?;
+
+        let top_level: Vec<String> = config
+            .clone()
+            .try_deserialize::<std::collections::HashMap<String, ::config::Value>>()
+            .map(|table| table.into_keys().collect())
+            .unwrap_or_default();
+        let unknown = unknown_sections(&top_level);
+        if !unknown.is_empty() {
+            tracing::warn!(
+                keys = ?unknown,
+                "ignoring unknown configuration sections (typo or removed setting?)"
+            );
+        }
 
         let config: Config = config.try_deserialize()?;
         Ok(config)
@@ -161,6 +162,31 @@ impl Config {
     pub fn for_test() -> Self {
         Self::default()
     }
+}
+
+/// Top-level configuration sections `Config` reads.
+pub const CONFIG_SECTIONS: &[&str] = &[
+    "storage",
+    "transport",
+    "messaging",
+    "target",
+    "saga_compensation",
+    "upcaster",
+    "limits",
+    "payload_offload",
+    "dlq",
+    "cascade_reaper",
+];
+
+/// Keys among `keys` that are not configuration sections, sorted.
+pub fn unknown_sections(keys: &[String]) -> Vec<String> {
+    let mut unknown: Vec<String> = keys
+        .iter()
+        .filter(|k| !CONFIG_SECTIONS.contains(&k.as_str()))
+        .cloned()
+        .collect();
+    unknown.sort();
+    unknown
 }
 
 /// Get the base directory for resolving file references in configs.

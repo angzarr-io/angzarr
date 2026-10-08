@@ -12,6 +12,7 @@ fn make_event_book(domain: &str, event_types: &[&str]) -> EventBook {
             }),
             correlation_id: "test-correlation".to_string(),
             edition: None,
+            ext: None,
         }),
         pages: event_types
             .iter()
@@ -26,7 +27,6 @@ fn make_event_book(domain: &str, event_types: &[&str]) -> EventBook {
                     type_url: format!("type.googleapis.com/example.{}", et),
                     value: vec![],
                 })),
-                ..Default::default()
             })
             .collect(),
         snapshot: None,
@@ -34,10 +34,15 @@ fn make_event_book(domain: &str, event_types: &[&str]) -> EventBook {
     }
 }
 
+/// C14: there is no in-process transport, so `MessagingConfig::default()`
+/// must not resolve to a phantom `"channel"` backend. Leaving
+/// `messaging_type` empty makes `init_event_bus` fail fast with an
+/// actionable error (see `factory::init_event_bus_missing_type_is_actionable`)
+/// instead of a confusing `UnknownType("channel")`.
 #[test]
-fn test_messaging_config_default() {
+fn test_messaging_config_default_has_no_messaging_type() {
     let config = MessagingConfig::default();
-    assert_eq!(config.messaging_type, "channel");
+    assert_eq!(config.messaging_type, "");
     assert_eq!(config.amqp.url, "amqp://localhost:5672");
 }
 
@@ -79,6 +84,24 @@ fn test_target_matches_event_type_not_present() {
         types: vec!["OrderShipped".to_string()],
     };
     assert!(!target_matches(&book, &target));
+}
+
+/// R2-01: short subscription names must not widen to events that
+/// merely end with the substring (e.g., `Created` must not match
+/// `OrderCreated`). Pins `target_matches` to the token-boundary rule
+/// owned by `Target::matches_type` so this delegation cannot regress
+/// to a raw `ends_with`.
+#[test]
+fn target_matches_short_name_does_not_widen() {
+    let book = make_event_book("order", &["OrderCreated"]);
+    let target = Target {
+        domain: "order".to_string(),
+        types: vec!["Created".to_string()],
+    };
+    assert!(
+        !target_matches(&book, &target),
+        "subscription to short name \"Created\" must NOT match an OrderCreated event"
+    );
 }
 
 #[test]
@@ -252,4 +275,32 @@ mod offloading_wrapper {
             Some(event_page::Payload::Event(_))
         ));
     }
+}
+
+// ============================================================================
+// reconnect_backoff
+// ============================================================================
+
+/// The reconnect backoff keeps producing delays past the builder's default
+/// three attempts and grows toward the 30 s cap, so a long broker outage
+/// is retried with an exponential (not fixed) schedule.
+#[test]
+fn reconnect_backoff_never_runs_dry_and_grows_to_cap() {
+    use backon::BackoffBuilder;
+    use std::time::Duration;
+
+    let delays: Vec<Duration> = reconnect_backoff().build().take(20).collect();
+    assert_eq!(
+        delays.len(),
+        20,
+        "backoff must not stop after a few attempts"
+    );
+    assert!(delays[0] >= Duration::from_millis(100) && delays[0] < Duration::from_millis(250));
+    // Jitter adds up to one extra delay; the base never exceeds 30 s.
+    assert!(delays.iter().all(|d| *d <= Duration::from_secs(60)));
+    assert!(
+        delays[19] >= Duration::from_secs(30),
+        "reaches the cap: {:?}",
+        delays[19]
+    );
 }

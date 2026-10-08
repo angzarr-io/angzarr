@@ -1,8 +1,5 @@
 //! Single-value sequence comparison helpers for `AggregateService`.
 //!
-//! DOC: This file is referenced in docs/docs/operations/error-recovery.mdx
-//!      Update documentation when making changes to sequence validation.
-//!
 //! **Scope.** This module compares a single expected `u32` against a single
 //! actual `u32` and produces the standard `FailedPrecondition` status when
 //! they disagree. The name was previously `sequence_validator`, which

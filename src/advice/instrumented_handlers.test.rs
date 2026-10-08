@@ -51,11 +51,7 @@ struct MockSagaHandler;
 
 #[async_trait]
 impl SagaHandler for MockSagaHandler {
-    async fn handle(
-        &self,
-        _source: &EventBook,
-        _destination_sequences: &std::collections::HashMap<String, u32>,
-    ) -> Result<SagaResponse, Status> {
+    async fn handle(&self, _source: &EventBook) -> Result<SagaResponse, Status> {
         Ok(SagaResponse::default())
     }
 }
@@ -67,9 +63,43 @@ async fn test_instrumented_saga_delegates() {
     let handler = InstrumentedSagaHandler::new(inner, "test-saga");
 
     let source = EventBook::default();
-    let sequences = std::collections::HashMap::new();
-    let result = handler.handle(&source, &sequences).await;
+    let result = handler.handle(&source).await;
     assert!(result.is_ok());
+}
+
+/// Answers with one command and one fact per source page, so the response
+/// depends on the input.
+struct TranslatingSagaHandler;
+
+#[async_trait]
+impl SagaHandler for TranslatingSagaHandler {
+    async fn handle(&self, source: &EventBook) -> Result<SagaResponse, Status> {
+        if source.pages.is_empty() {
+            return Err(Status::invalid_argument("no source events"));
+        }
+        Ok(SagaResponse {
+            commands: vec![crate::proto::CommandBook::default(); source.pages.len()],
+            events: vec![EventBook::default(); source.pages.len()],
+        })
+    }
+}
+
+/// The instrumented saga returns exactly what the inner saga produced,
+/// success or failure: instrumentation never alters the translation.
+#[tokio::test]
+async fn test_instrumented_saga_passes_result_through_unchanged() {
+    let handler = InstrumentedSagaHandler::new(TranslatingSagaHandler, "test-saga");
+
+    let source = EventBook {
+        pages: vec![crate::proto::EventPage::default(); 2],
+        ..Default::default()
+    };
+    let response = handler.handle(&source).await.unwrap();
+    assert_eq!(response.commands.len(), 2);
+    assert_eq!(response.events.len(), 2);
+
+    let status = handler.handle(&EventBook::default()).await.unwrap_err();
+    assert_eq!(status.code(), tonic::Code::InvalidArgument);
 }
 
 // ============================================================================

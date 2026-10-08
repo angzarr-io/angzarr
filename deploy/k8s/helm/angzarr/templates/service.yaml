@@ -17,16 +17,11 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    # Angzarr sidecar aggregate coordinator (external access)
+    # Angzarr sidecar: coordinator and event query on one gRPC server
     - port: {{ $.Values.service.aggregatePort }}
       targetPort: aggregate
       protocol: TCP
       name: grpc
-    # Angzarr sidecar event query (external access)
-    - port: {{ $.Values.service.queryPort }}
-      targetPort: query
-      protocol: TCP
-      name: query
     {{- if $.Values.ports.coordinatorDebug.enabled }}
     # Coordinator debug port (base + 2)
     - port: {{ add $.Values.service.aggregatePort 2 }}
@@ -111,8 +106,9 @@ metadata:
   labels:
     {{- include "angzarr.labels" $ | nindent 4 }}
     app.kubernetes.io/component: saga
-    {{- if .sourceDomain }}
-    angzarr.io/source-domain: {{ .sourceDomain }}
+    {{- $sourceDomain := .sourceDomain | default (first (splitList "," (include "angzarr.topic-domains" (.topics | default list)))) }}
+    {{- if $sourceDomain }}
+    angzarr.io/source-domain: {{ $sourceDomain }}
     {{- end }}
     {{- if .domain }}
     angzarr.io/domain: {{ .domain }}
@@ -122,9 +118,9 @@ metadata:
 spec:
   type: ClusterIP
   ports:
-    # Saga coordinator gRPC service
-    - port: {{ .port | default 50051 }}
-      targetPort: grpc
+    # Saga coordinator (CASCADE) served by the angzarr sidecar
+    - port: {{ $.Values.service.aggregatePort }}
+      targetPort: coordinator
       protocol: TCP
       name: grpc
     {{- if $.Values.ports.coordinatorDebug.enabled }}
@@ -159,29 +155,25 @@ metadata:
   labels:
     {{- include "angzarr.labels" $ | nindent 4 }}
     app.kubernetes.io/component: process-manager
-    angzarr.io/pm: {{ .name }}
-    {{- if .domain }}
-    angzarr.io/domain: {{ .domain }}
-    {{- end }}
+    angzarr.io/pm: {{ include "angzarr.pm-domain" . }}
   annotations:
     angzarr.io/dns-name: "{{ include "angzarr.pm-service-name" (dict "name" .name) }}.{{ $.Release.Namespace }}.svc.cluster.local"
+    # Domains this PM subscribes to; K8s discovery fans CASCADE events
+    # for these domains out to it (an annotation: label values cannot
+    # hold the comma-separated list).
+    angzarr.io/subscriptions: {{ include "angzarr.topic-domains" (.topics | default list) | quote }}
 spec:
   type: ClusterIP
   ports:
-    # Process manager coordinator gRPC service
+    # Process manager coordinator (CASCADE) served by the angzarr sidecar
     - port: {{ $.Values.service.aggregatePort }}
-      targetPort: aggregate
+      targetPort: coordinator
       protocol: TCP
       name: grpc
-    # Event query port
-    - port: {{ $.Values.service.queryPort }}
-      targetPort: query
-      protocol: TCP
-      name: query
   selector:
     {{- include "angzarr.selectorLabels" $ | nindent 4 }}
     app.kubernetes.io/component: process-manager
-    angzarr.io/pm: {{ .name }}
+    angzarr.io/pm: {{ include "angzarr.pm-domain" . }}
 {{- end }}
 
 {{- /* Headless service for service discovery (optional) */}}
@@ -204,36 +196,6 @@ spec:
       name: command
   selector:
     {{- include "angzarr.selectorLabels" . | nindent 4 }}
-{{- end }}
-
-{{- /* Event Stream service */}}
-{{- if .Values.infrastructure.stream.enabled }}
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: {{ include "angzarr.fullname" . }}-stream
-  namespace: {{ .Release.Namespace }}
-  labels:
-    {{- include "angzarr.labels" . | nindent 4 }}
-    app.kubernetes.io/component: infrastructure
-    angzarr.io/service: stream
-  annotations:
-    angzarr.io/dns-name: "{{ include "angzarr.fullname" . }}-stream.{{ .Release.Namespace }}.svc.cluster.local"
-spec:
-  type: {{ .Values.infrastructure.stream.serviceType | default "ClusterIP" }}
-  ports:
-    - port: {{ .Values.infrastructure.stream.port }}
-      targetPort: grpc
-      protocol: TCP
-      name: grpc
-      {{- if and (eq (.Values.infrastructure.stream.serviceType | default "ClusterIP") "NodePort") .Values.infrastructure.stream.nodePort }}
-      nodePort: {{ .Values.infrastructure.stream.nodePort }}
-      {{- end }}
-  selector:
-    {{- include "angzarr.selectorLabels" . | nindent 4 }}
-    app.kubernetes.io/component: infrastructure
-    angzarr.io/service: stream
 {{- end }}
 
 {{- /* NodePort service for local development aggregate access */}}

@@ -21,11 +21,12 @@ use crate::orchestration::command::CommandExecutor;
 use crate::orchestration::destination::DestinationFetcher;
 use crate::orchestration::process_manager::{orchestrate_pm, PMContextFactory};
 use crate::orchestration::FactExecutor;
+use crate::proto::CascadeErrorMode;
 use crate::proto::{
     process_manager_coordinator_service_server::ProcessManagerCoordinatorService,
     ProcessManagerCoordinatorRequest, ProcessManagerHandleResponse, SpeculatePmRequest, SyncMode,
 };
-use crate::proto_ext::CoverExt;
+use crate::proto_ext::{CascadeErrorModeExt, CoverExt, SyncModeExt};
 use crate::services::gap_fill::{GapFiller, NoOpPositionStore, RemoteEventSource};
 
 /// Process Manager coordinator service.
@@ -120,7 +121,9 @@ impl ProcessManagerCoordinatorService for PmCoord {
         let trigger = req.trigger.ok_or_else(|| {
             Status::invalid_argument("ProcessManagerCoordinatorRequest requires trigger events")
         })?;
-        let sync_mode = SyncMode::try_from(req.sync_mode).unwrap_or(SyncMode::Async);
+        // Unknown ints resolve to the zero-value defaults (Async / FailFast).
+        let sync_mode = SyncMode::or_default_async(req.sync_mode);
+        let cascade_error_mode = CascadeErrorMode::or_default_fail_fast(req.cascade_error_mode);
 
         let correlation_id = trigger.correlation_id();
         if correlation_id.is_empty() {
@@ -146,7 +149,7 @@ impl ProcessManagerCoordinatorService for PmCoord {
         // Create context and orchestrate
         let ctx = self.factory.create();
 
-        orchestrate_pm(
+        let report = orchestrate_pm(
             ctx.as_ref(),
             self.fetcher.as_ref(),
             self.executor.as_ref(),
@@ -157,16 +160,24 @@ impl ProcessManagerCoordinatorService for PmCoord {
             &correlation_id,
             sync_mode,
             self.backoff,
+            Some(cascade_error_mode),
         )
         .await
-        .map_err(|e| Status::internal(format!("PM orchestration failed: {}", e)))?;
+        .map_err(|e| super::orchestration_status("PM", e))?;
 
-        // Return empty response - commands were delivered during orchestration
-        Ok(Response::new(ProcessManagerHandleResponse {
-            process_events: vec![],
-            commands: vec![],
-            facts: vec![],
-        }))
+        // Commands were delivered during orchestration; the response carries
+        // CONTINUE-mode reaction errors and, for a COMPENSATE caller, the
+        // reaction commands executed (so it can compensate them if another
+        // reaction fails), in its metadata.
+        let mut response = Response::new(ProcessManagerHandleResponse::default());
+        crate::orchestration::shared::attach_reaction_errors(&mut response, report.reaction_errors);
+        if cascade_error_mode == CascadeErrorMode::CascadeErrorCompensate {
+            crate::orchestration::shared::attach_executed_reactions(
+                &mut response,
+                &report.executed,
+            );
+        }
+        Ok(response)
     }
 
     /// Speculative execution - returns commands without side effects.
@@ -207,6 +218,7 @@ impl ProcessManagerCoordinatorService for PmCoord {
             process_events: response.process_events,
             commands: response.commands,
             facts: response.facts,
+            notification: None,
         }))
     }
 }

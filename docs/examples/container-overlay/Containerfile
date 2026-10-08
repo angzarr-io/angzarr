@@ -1,3 +1,0 @@
-# Minimal image with make (~8MB total)
-FROM docker.io/alpine:latest
-RUN apk add --no-cache make
