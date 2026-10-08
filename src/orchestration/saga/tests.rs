@@ -2227,6 +2227,7 @@ async fn saga_command_runs_with_the_stronger_of_callers_and_own_mode() {
         (SyncMode::Simple, SyncMode::Decision, SyncMode::Simple),
         (SyncMode::Decision, SyncMode::Simple, SyncMode::Simple),
         (SyncMode::Simple, SyncMode::Cascade, SyncMode::Cascade),
+        (SyncMode::Cascade, SyncMode::Isolated, SyncMode::Isolated),
     ] {
         let ctx = SagaWithNoDeferredAndSyncMode { override_mode: own };
         let executor = ModeRecordingExecutor {

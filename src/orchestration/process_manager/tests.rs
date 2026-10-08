@@ -3291,8 +3291,8 @@ fn test_sequence_process_events_is_fill_only() {
 // ============================================================================
 
 /// C-0508: a PM's reaction command runs with the stronger of the caller's
-/// mode and its own. (ISOLATED commands stay ISOLATED pending the decision
-/// on the CASCADE/ISOLATED row.)
+/// mode and its own; an ISOLATED command stays ISOLATED under any caller
+/// (C-0512: its events set off nothing downstream, ending the chain).
 #[tokio::test]
 async fn pm_command_runs_with_the_stronger_of_callers_and_own_mode() {
     use SyncMode::*;
@@ -3305,6 +3305,10 @@ async fn pm_command_runs_with_the_stronger_of_callers_and_own_mode() {
         (Cascade, Async, Cascade),
         (Cascade, Decision, Cascade),
         (Cascade, Simple, Cascade),
+        (Async, Isolated, Isolated),
+        (Decision, Isolated, Isolated),
+        (Simple, Isolated, Isolated),
+        (Cascade, Isolated, Isolated),
     ] {
         let ctx = PmWithSyncOverride {
             override_mode: Some(own),

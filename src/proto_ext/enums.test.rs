@@ -175,8 +175,8 @@ fn sync_mode_floor_without_own_mode_is_the_callers() {
 }
 
 /// ISOLATED sits outside the ordering: an ISOLATED command stays ISOLATED
-/// (pending the decision on C-0508's CASCADE/ISOLATED row), and under an
-/// unordered caller mode the command's own mode applies.
+/// under any caller (C-0508, C-0512), and under an unordered caller mode the
+/// command's own mode applies.
 #[test]
 fn sync_mode_floor_leaves_isolated_outside_the_ordering() {
     for caller in [SyncMode::Async, SyncMode::Cascade] {

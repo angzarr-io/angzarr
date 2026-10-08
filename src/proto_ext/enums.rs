@@ -26,8 +26,10 @@ pub trait SyncModeExt {
     /// mode is a floor, so the stronger of the two in the ordering
     /// ASYNC < DECISION < SIMPLE < CASCADE applies, and a CASCADE caller
     /// observes the whole chain. Without an own mode the caller's applies.
-    /// ISOLATED is outside the ordering: an ISOLATED command stays ISOLATED,
-    /// and under an unordered caller mode the command's own mode applies.
+    /// ISOLATED is outside the ordering and always holds: an ISOLATED
+    /// command stays ISOLATED under any caller (its events set off nothing
+    /// downstream, ending the chain); under an unordered caller mode the
+    /// command's own mode applies.
     fn floor_for(self, own: Option<SyncMode>) -> SyncMode;
 }
 
