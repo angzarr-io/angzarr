@@ -29,6 +29,7 @@ COPY angzarr-project/ ./angzarr-project/
 COPY sererr/ ./sererr/
 COPY crates/ ./crates/
 COPY xtask/ ./xtask/
+COPY tools/ ./tools/
 
 # Create minimal stubs - just enough for cargo to run build.rs
 RUN mkdir -p src/bin tests/integration tests/interfaces migrations && \
@@ -69,6 +70,7 @@ COPY angzarr-project/ ./angzarr-project/
 COPY sererr/ ./sererr/
 COPY crates/ ./crates/
 COPY xtask/ ./xtask/
+COPY tools/ ./tools/
 
 # Copy pre-generated proto files from proto-gen stage
 COPY --from=proto-gen /proto-out/ /proto-cache/
@@ -147,6 +149,7 @@ COPY angzarr-project/ ./angzarr-project/
 COPY sererr/ ./sererr/
 COPY crates/ ./crates/
 COPY xtask/ ./xtask/
+COPY tools/ ./tools/
 
 # Copy pre-generated proto files
 COPY --from=proto-gen /proto-out/ /proto-cache/
