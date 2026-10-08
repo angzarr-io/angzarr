@@ -2122,3 +2122,23 @@ async fn test_fact_other_persist_failures_are_not_retried() {
         assert_eq!(ctx.inner.persisted.lock().unwrap().len(), 1);
     }
 }
+
+/// A redelivered fact (its external_id already answered) returns the cached
+/// events without invoking the handler or persisting again.
+#[tokio::test]
+async fn test_redelivered_fact_answers_from_the_cache_before_the_handler() {
+    let mut first = book_with_domain("dest", "");
+    first.pages = vec![make_event_page(0)];
+    let ctx = FactCtx {
+        persisted: std::sync::Mutex::new(vec![first.clone()]),
+        stored_by_winner: Some(first),
+        ..Default::default()
+    };
+    let response = execute_fact_pipeline(&ctx, None, fact_book("conv-1"))
+        .await
+        .expect("a redelivery is answered");
+    assert!(response.already_processed);
+    assert_eq!(response.events.pages.len(), 1);
+    assert_eq!(ctx.inner.persist_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(ctx.inner.load_calls.load(Ordering::SeqCst), 0);
+}
