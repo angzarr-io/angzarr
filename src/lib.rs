@@ -22,7 +22,6 @@ pub mod process;
 pub mod proto;
 pub mod proto_ext;
 pub mod proto_reflect;
-pub mod registration;
 pub mod repository;
 pub mod services;
 pub mod status;
