@@ -125,13 +125,6 @@ fn test_target_command_env_var_constant() {
 // Config Default Tests
 // ============================================================================
 
-/// Default config has no client logic endpoints.
-#[test]
-fn test_config_default_no_client_logic() {
-    let config = Config::default();
-    assert!(config.client_logic.is_none());
-}
-
 /// Default config has no projectors.
 #[test]
 fn test_config_default_no_projectors() {
@@ -144,13 +137,6 @@ fn test_config_default_no_projectors() {
 fn test_config_default_no_sagas() {
     let config = Config::default();
     assert!(config.sagas.is_none());
-}
-
-/// Default config has no process managers.
-#[test]
-fn test_config_default_no_process_managers() {
-    let config = Config::default();
-    assert!(config.process_managers.is_none());
 }
 
 /// Default config has no saga compensation config.

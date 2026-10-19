@@ -97,13 +97,6 @@ server:
 #   address: localhost:50051
 #   domain: orders
 
-# client logic services (gateway mode)
-# client_logic:
-#   - domain: orders
-#     address: localhost:50051
-#   - domain: inventory
-#     address: localhost:50052
-
 # Projector endpoints
 # projectors:
 #   - name: ui_projector

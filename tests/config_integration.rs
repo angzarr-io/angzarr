@@ -306,7 +306,6 @@ fn test_for_test_has_no_optional_services() {
 
     assert!(config.messaging.is_none());
     assert!(config.target.is_none());
-    assert!(config.client_logic.is_none());
     assert!(config.projectors.is_none());
     assert!(config.sagas.is_none());
 }

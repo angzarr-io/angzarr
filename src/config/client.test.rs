@@ -5,7 +5,7 @@
 //!
 //! Why this matters: Misconfigured endpoints cause silent failures (commands
 //! routed to wrong service). Saga compensation defaults affect error recovery
-//! behavior. Process manager domain mapping is critical for state isolation.
+//! behavior.
 //!
 //! Defaults are verified to be safe and explicit configuration required
 //! for optional features.
@@ -42,32 +42,4 @@ fn test_saga_compensation_config_default() {
     assert!(config.fallback_emit_system_revocation);
     assert!(!config.fallback_send_to_dlq);
     assert!(!config.fallback_escalate);
-}
-
-// ============================================================================
-// ProcessManagerClientConfig Tests
-// ============================================================================
-
-/// Process manager config defaults to empty (requires explicit config).
-#[test]
-fn test_process_manager_client_config_default() {
-    let config = ProcessManagerClientConfig::default();
-    assert_eq!(config.name, "");
-    assert_eq!(config.address, "");
-    assert!(config.timeouts.is_none());
-    assert_eq!(config.domain(), "");
-}
-
-/// Process manager domain equals its name.
-///
-/// PMs store state in their own domain, keyed by correlation ID.
-/// The name is both the identifier and the storage domain.
-#[test]
-fn test_process_manager_client_config_domain() {
-    let config = ProcessManagerClientConfig {
-        name: "order-fulfillment".to_string(),
-        address: "localhost:50060".to_string(),
-        timeouts: None,
-    };
-    assert_eq!(config.domain(), "order-fulfillment");
 }

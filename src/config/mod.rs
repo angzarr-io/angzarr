@@ -7,10 +7,7 @@ mod client;
 mod limits;
 mod server;
 
-pub use client::{
-    ProcessManagerClientConfig, SagaCompensationConfig, ServiceEndpoint, TimeoutConfig,
-    DEFAULT_SAGA_FALLBACK_DOMAIN,
-};
+pub use client::{SagaCompensationConfig, ServiceEndpoint, DEFAULT_SAGA_FALLBACK_DOMAIN};
 pub use limits::ResourceLimits;
 pub use server::{
     ConfigError, ExternalServiceConfig, HealthCheckConfig, ServerConfig, ServiceConfig,
@@ -93,14 +90,10 @@ pub struct Config {
     pub messaging: Option<MessagingConfig>,
     /// Target service for sidecar mode.
     pub target: Option<TargetConfig>,
-    /// Client logic endpoints (gateway mode).
-    pub client_logic: Option<Vec<ServiceEndpoint>>,
     /// Projector endpoints.
     pub projectors: Option<Vec<ServiceEndpoint>>,
     /// Saga endpoints.
     pub sagas: Option<Vec<ServiceEndpoint>>,
-    /// Process manager configurations.
-    pub process_managers: Option<Vec<ProcessManagerClientConfig>>,
     /// Saga compensation configuration.
     pub saga_compensation: Option<SagaCompensationConfig>,
     /// Upcaster configuration for event version transformation.
