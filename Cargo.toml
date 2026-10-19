@@ -95,7 +95,6 @@ s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
 # Observability & Utilities
 # =============================================================================
 otel = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:opentelemetry-appender-tracing", "dep:tracing-opentelemetry"]
-lossy = ["dep:rand"]
 # Test utilities for integration tests
 test-utils = []
 # Enable #[coverage(off)] attribute on nightly (for trivial_delegation)
@@ -105,10 +104,10 @@ coverage_nightly = []
 # All Features (for CI/development)
 # =============================================================================
 # Note: sqlite is always compiled, not listed here
-full = ["k8s", "gcp-cloudrun", "gcp-k8s", "aws-k8s", "kafka", "redis", "immudb", "lossy"]
+full = ["k8s", "gcp-cloudrun", "gcp-k8s", "aws-k8s", "kafka", "redis", "immudb"]
 # full-musl: For musl static builds - excludes kafka (requires librdkafka with OpenSSL)
 # GCP crates use rustls-tls feature for musl compatibility
-full-musl = ["k8s", "gcp-cloudrun", "gcp-k8s", "aws-k8s", "redis", "immudb", "lossy"]
+full-musl = ["k8s", "gcp-cloudrun", "gcp-k8s", "aws-k8s", "redis", "immudb"]
 
 [dependencies]
 # gRPC
@@ -206,9 +205,6 @@ gcloud-storage = { version = "1.2", optional = true }
 
 # Google Cloud Bigtable (optional, for event store)
 bigtable_rs = { version = "0.2", optional = true }
-
-# Random (for lossy testing bus)
-rand = { version = "0.9", optional = true }
 
 # Kubernetes API (for gateway service discovery) - optional, k8s feature only
 kube = { version = "0.98", features = ["runtime", "client"], optional = true }

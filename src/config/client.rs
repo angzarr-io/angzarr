@@ -58,41 +58,6 @@ impl Default for SagaCompensationConfig {
     }
 }
 
-/// Process Manager client/deployment configuration.
-///
-/// Used for distributed mode connectivity and timeout settings.
-///
-/// Process managers coordinate long-running workflows across multiple aggregates.
-/// They maintain event-sourced state and can subscribe to multiple domains.
-///
-/// WARNING: Only use when saga + queries is insufficient. Consider:
-/// - Can a simple saga + destination queries solve this?
-/// - Is the "state" derivable from existing aggregates?
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct ProcessManagerClientConfig {
-    /// Name of the process manager. Also used as the domain for PM state.
-    pub name: String,
-    /// gRPC address (host:port).
-    pub address: String,
-    /// Timeout configurations by type (e.g., "payment", "reservation").
-    pub timeouts: Option<std::collections::HashMap<String, TimeoutConfig>>,
-}
-
-impl ProcessManagerClientConfig {
-    /// Domain = name. Process manager stores its state in its own domain.
-    pub fn domain(&self) -> &str {
-        &self.name
-    }
-}
-
-/// Timeout configuration for process manager stages.
-#[derive(Debug, Clone, Deserialize)]
-pub struct TimeoutConfig {
-    /// Duration in minutes before timeout is triggered.
-    pub duration_minutes: u32,
-}
-
 #[cfg(test)]
 #[path = "client.test.rs"]
 mod tests;
