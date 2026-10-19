@@ -200,10 +200,58 @@ _container-dind +ARGS: _build-images
 _container-ephemeral +ARGS: _build-images
     #!/usr/bin/env bash
     set -euo pipefail
+    # The ephemeral procedure, parametrised on where it runs: copy SRC into
+    # a scratch WORK tree, run there, and persist only reports to OUT, so
+    # mutated source never lands in SRC. JUSTFILE is the container justfile.
+    EPHEMERAL='
+            # Self-heal: image should ship cargo-mutants, but install on
+            # demand (cached in /cargo-home) if the image is older.
+            if ! command -v cargo-mutants >/dev/null; then
+                echo "[ephemeral] cargo-mutants missing from image; installing to cached CARGO_HOME"
+                cargo install cargo-mutants --locked
+            fi
+            echo "[ephemeral] copying $SRC -> $WORK"
+            mkdir -p $WORK
+            # tar|tar: rsync is not in the base image. Excludes mirror what
+            # rsync would skip — build artifacts, prior mutation output,
+            # host-side cargo caches, and the new mutants cache itself.
+            tar -C $SRC \
+                --exclude=./target \
+                --exclude=./.cargo-container \
+                --exclude=./.mutants-cache \
+                --exclude=./mutants.out \
+                --exclude=./mutants.out.old \
+                -cf - . \
+                | tar -C $WORK -xf -
+            # Mount the container-side justfile into the copy so `just` finds
+            # it (the original $SRC is read-only, but $WORK is writable).
+            cp $JUSTFILE $WORK/justfile
+            cd $WORK
+            # cargo mutants exits non-zero when mutants survive — that is a
+            # RESULT, not a tooling failure. Capture the exit code so the
+            # outcomes copy below still runs; `just mutants-summary` /
+            # `mutants-survivors` read the copied outcomes.json and were
+            # blind to every run that actually had survivors before this.
+            rc=0
+            just {{ARGS}} || rc=$?
+            # Persist ONLY outcomes.json back to host. Mutated source trees
+            # and intermediate working dirs die with the container.
+            if [ -f $WORK/mutants.out/outcomes.json ]; then
+                cp $WORK/mutants.out/outcomes.json $OUT/outcomes.json
+                echo "[ephemeral] outcomes.json copied to host mutants.out/"
+            fi
+            exit $rc
+    '
     if [ "${DEVCONTAINER:-}" = "true" ]; then
-        # Already inside a devcontainer — that container IS the ephemeral
-        # boundary. Run directly; the outer just wrapper ensures --rm.
-        just --justfile "{{TOP}}/justfile.container" {{ARGS}}
+        # Inside a devcontainer or a ctxloom agent container the workspace is
+        # a live bind mount of the real tree, not a throwaway copy, so the
+        # procedure runs here against a scratch dir instead of in place.
+        mkdir -p "{{TOP}}/mutants.out"
+        WORK=$(mktemp -d)
+        trap 'rm -rf "$WORK"' EXIT
+        SRC="{{TOP}}" WORK="$WORK" OUT="{{TOP}}/mutants.out" JUSTFILE="{{TOP}}/justfile.container" \
+            MUTANTS_EPHEMERAL=1 MUTANTS_OUT_DIR="{{TOP}}/mutants.out" CARGO_TARGET_DIR="{{TOP}}/.mutants-cache/cargo-target" \
+            bash -eu -o pipefail -c "$EPHEMERAL"
         exit 0
     fi
     IMAGE=$(just _image-tag angzarr-rust)
@@ -221,45 +269,8 @@ _container-ephemeral +ARGS: _build-images
         -e MUTANTS_EPHEMERAL=1 \
         -e MUTANTS_OUT_DIR=/out \
         -w /work \
-        "$IMAGE" bash -eu -o pipefail -c '
-            # Self-heal: image should ship cargo-mutants, but install on
-            # demand (cached in /cargo-home) if the image is older.
-            if ! command -v cargo-mutants >/dev/null; then
-                echo "[ephemeral] cargo-mutants missing from image; installing to cached CARGO_HOME"
-                cargo install cargo-mutants --locked
-            fi
-            echo "[ephemeral] copying /src -> /work (container overlay)"
-            mkdir -p /work
-            # tar|tar: rsync is not in the base image. Excludes mirror what
-            # rsync would skip — build artifacts, prior mutation output,
-            # host-side cargo caches, and the new mutants cache itself.
-            tar -C /src \
-                --exclude=./target \
-                --exclude=./.cargo-container \
-                --exclude=./.mutants-cache \
-                --exclude=./mutants.out \
-                --exclude=./mutants.out.old \
-                -cf - . \
-                | tar -C /work -xf -
-            # Mount the container-side justfile into the copy so `just` finds
-            # it (the original /src is read-only, but /work is writable).
-            cp /etc/angzarr-justfile /work/justfile
-            cd /work
-            # cargo mutants exits non-zero when mutants survive — that is a
-            # RESULT, not a tooling failure. Capture the exit code so the
-            # outcomes copy below still runs; `just mutants-summary` /
-            # `mutants-survivors` read the copied outcomes.json and were
-            # blind to every run that actually had survivors before this.
-            rc=0
-            just {{ARGS}} || rc=$?
-            # Persist ONLY outcomes.json back to host. Mutated source trees
-            # and intermediate working dirs die with the container.
-            if [ -f /work/mutants.out/outcomes.json ]; then
-                cp /work/mutants.out/outcomes.json /out/outcomes.json
-                echo "[ephemeral] outcomes.json copied to host mutants.out/"
-            fi
-            exit $rc
-        '
+        -e SRC=/src -e WORK=/work -e OUT=/out -e JUSTFILE=/etc/angzarr-justfile \
+        "$IMAGE" bash -eu -o pipefail -c "$EPHEMERAL"
 
 default:
     @just --list
