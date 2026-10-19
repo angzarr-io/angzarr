@@ -869,12 +869,6 @@ infra-redis:
         -n angzarr --create-namespace \
         --set auth.password=angzarr --wait
 
-# Deploy NATS (optional - alternative event bus)
-infra-nats:
-    helm dependency update "{{HELM_K8S}}/nats"
-    helm upgrade --install angzarr-nats "{{HELM_K8S}}/nats" \
-        -n angzarr --create-namespace --wait
-
 # Deploy Floci (AWS emulator - LocalStack alternative)
 infra-floci:
     helm upgrade --install angzarr-floci "{{HELM_K8S}}/floci" \

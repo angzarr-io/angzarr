@@ -55,12 +55,6 @@ kafka: namespace operators
         --namespace {{NAMESPACE}} \
         --wait --timeout 5m
 
-# Deploy NATS
-nats: namespace
-    helm upgrade --install angzarr-mq "{{TOP}}/deploy/k8s/helm/nats" \
-        --namespace {{NAMESPACE}} \
-        --wait --timeout 5m
-
 # Deploy PostgreSQL
 postgres: namespace
     helm upgrade --install angzarr-db "{{TOP}}/deploy/k8s/helm/postgres" \
@@ -88,10 +82,6 @@ infra-standard: rabbit postgres redis
 # Deploy Kafka infra: Kafka + Postgres + Redis
 infra-kafka: kafka postgres redis
     @echo "Kafka infrastructure deployed (Kafka + PostgreSQL + Redis)"
-
-# Deploy NATS infra: NATS + Postgres + Redis
-infra-nats: nats postgres redis
-    @echo "NATS infrastructure deployed (NATS + PostgreSQL + Redis)"
 
 # === Application Deployment ===
 
