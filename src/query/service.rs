@@ -12,13 +12,13 @@ use tonic::{Request, Response, Status};
 use tracing::debug;
 use uuid::Uuid;
 
+use super::RegistrationSource;
 use crate::proto::{
     event_query_service_server::EventQueryService as EventQueryTrait, query::Selection,
     temporal_query::PointInTime, CorrelationQuery, Cover, EventBook, EventPage, Query, Snapshot,
     TemporalQuery, Uuid as ProtoUuid,
 };
 use crate::proto_ext::EventBookExt;
-use crate::registry::ComponentRegistry;
 use crate::rules_version::SnapshotRules;
 use crate::storage::{EventStore, SnapshotStore, StreamRef};
 use crate::upcast::EventUpcaster;
@@ -40,28 +40,35 @@ pub mod errmsg {
 pub struct EventQueryService {
     event_store: Arc<dyn EventStore>,
     snapshot_store: Arc<dyn SnapshotStore>,
-    registry: Arc<ComponentRegistry>,
+    registration: Option<Arc<dyn RegistrationSource>>,
     rules: Arc<SnapshotRules>,
     upcaster: Option<Arc<dyn EventUpcaster>>,
 }
 
 impl EventQueryService {
-    /// A query service; `registry` holds this coordinator's registration,
-    /// whose version decides, under `rules`, which snapshots a result may
-    /// carry.
+    /// A query service over `event_store` and `snapshot_store`, judging
+    /// snapshots under `rules`. It holds no registration until one is given
+    /// ([`Self::with_registration`]), so it offers no snapshot and every book
+    /// starts at sequence 0 (C-0556).
     pub fn new(
         event_store: Arc<dyn EventStore>,
         snapshot_store: Arc<dyn SnapshotStore>,
-        registry: Arc<ComponentRegistry>,
         rules: Arc<SnapshotRules>,
     ) -> Self {
         Self {
             event_store,
             snapshot_store,
-            registry,
+            registration: None,
             rules,
             upcaster: None,
         }
+    }
+
+    /// Judge snapshots against `registration` (the mounting coordinator's
+    /// own, decision 14.21).
+    pub fn with_registration(mut self, registration: Arc<dyn RegistrationSource>) -> Self {
+        self.registration = Some(registration);
+        self
     }
 
     /// Upcast every returned page (readers see only current shapes).
@@ -98,7 +105,7 @@ impl EventQueryService {
         stream: StreamRef<'_>,
         limit: Option<u64>,
     ) -> Result<Option<Snapshot>, Status> {
-        let Some(registration) = self.registry.get() else {
+        let Some(registration) = self.registration.as_ref().and_then(|r| r.registration()) else {
             return Ok(None);
         };
         let snapshot = self
@@ -303,5 +310,5 @@ impl EventQueryTrait for EventQueryService {
 }
 
 #[cfg(test)]
-#[path = "mod.test.rs"]
+#[path = "service.test.rs"]
 mod tests;

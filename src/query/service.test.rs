@@ -35,7 +35,6 @@ async fn service() -> EventQueryService {
     EventQueryService::new(
         store,
         Arc::new(crate::storage::MemorySnapshotStore::new()),
-        Arc::new(ComponentRegistry::new()),
         Arc::new(SnapshotRules::default()),
     )
 }
@@ -263,4 +262,62 @@ async fn test_query_results_are_upcast() {
         .flat_map(|b| b.as_ref().unwrap().pages.iter())
         .all(|p| p.payload.as_ref().unwrap().type_url == "/orders.v2.ItemAdded"));
     assert!(upcaster.calls() >= 3);
+}
+
+// ---------------------------------------------------------------------------
+// Snapshots and the registration seam (built without the pipeline)
+// ---------------------------------------------------------------------------
+
+async fn with_snapshot(store: Arc<MemoryEventStore>) -> Arc<crate::storage::MemorySnapshotStore> {
+    let (c, k) = (root(100), root(200));
+    store
+        .append(
+            StreamRef::main(DOMAIN, root(9)),
+            &(0..8).map(|s| page(s, c, k, 10)).collect::<Vec<_>>(),
+        )
+        .await
+        .unwrap();
+    let snapshots = Arc::new(crate::storage::MemorySnapshotStore::new());
+    snapshots
+        .put(
+            StreamRef::main(DOMAIN, root(9)),
+            &crate::storage::contract::snapshot(5),
+        )
+        .await
+        .unwrap();
+    snapshots
+}
+
+/// Holding no registration, a query service uses no snapshot (C-0556).
+#[tokio::test]
+async fn test_without_registration_no_snapshot() {
+    let store = Arc::new(MemoryEventStore::new());
+    let snapshots = with_snapshot(store.clone()).await;
+    let svc = EventQueryService::new(store, snapshots, Arc::new(SnapshotRules::default()));
+    let book = one(&svc, query(Some(9), None)).await;
+    assert!(book.snapshot.is_none());
+    assert_eq!(sequences(&book), (0..8).collect::<Vec<_>>());
+}
+
+/// Given a registration source that accepts the snapshot, the book starts
+/// from it; when the source holds nothing, it does not.
+#[tokio::test]
+async fn test_registration_source_decides_snapshots() {
+    let store = Arc::new(MemoryEventStore::new());
+    let snapshots = with_snapshot(store.clone()).await;
+    let registry = Arc::new(crate::registry::ComponentRegistry::new());
+    let svc = EventQueryService::new(store, snapshots, Arc::new(SnapshotRules::default()))
+        .with_registration(registry.clone());
+    assert!(one(&svc, query(Some(9), None)).await.snapshot.is_none());
+    registry
+        .register(crate::test_utils::aggregate_descriptor(
+            "order",
+            "/orders.v1.OrderState",
+            "1.4.9",
+            false,
+        ))
+        .unwrap();
+    let book = one(&svc, query(Some(9), None)).await;
+    assert_eq!(book.snapshot.as_ref().map(|s| s.sequence), Some(5));
+    assert_eq!(sequences(&book), [6, 7]);
 }

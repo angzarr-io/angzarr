@@ -20,6 +20,7 @@ pub mod orchestration;
 pub mod process;
 pub mod proto;
 pub mod proto_ext;
+pub mod query;
 pub mod registration;
 pub mod registry;
 pub mod rules_version;

@@ -26,11 +26,11 @@ use angzarr::proto::{
     EventBook, EventMeta, EventPage, EventRef, Projection, ProjectorFailure, Query, Snapshot,
     TemporalQuery,
 };
+use angzarr::query::EventQueryService;
 use angzarr::registration::{DescribeOutcome, DescriptorSource, FailureTracker, Registrar};
 use angzarr::registry::ComponentRegistry;
 use angzarr::rules_version::{SnapshotCompatibilityConfig, SnapshotRuleConfig, SnapshotRules};
 use angzarr::services::aggregate::{AggregateService, SyncProjectors};
-use angzarr::services::EventQueryService;
 use angzarr::storage::{EventStore, SnapshotStore, StreamRef};
 use angzarr::test_utils::*;
 
@@ -102,6 +102,8 @@ struct Contract {
     failed_calls: usize,
     config: Option<angzarr::config::Config>,
     upcaster: Option<Arc<RenamingUpcaster>>,
+    /// The answering query server holds no registration (C-0556).
+    no_query_registration: bool,
 }
 
 impl std::fmt::Debug for Contract {
@@ -162,6 +164,7 @@ impl Contract {
             failed_calls: 0,
             config: None,
             upcaster: None,
+            no_query_registration: false,
         };
         world.register_local("1.0.0", false);
         world
@@ -393,7 +396,7 @@ async fn query_by_instance(w: &mut Contract, order: String, version: String) {
 
 #[given(regex = r#"^the answering query server holds no registration for the "order" aggregate$"#)]
 async fn none_registered(w: &mut Contract) {
-    w.h.registry.deregister();
+    w.no_query_registration = true;
 }
 
 #[when(regex = r#"^the instance at "([^"]*)" decides an AddItem command for order "([^"]*)"$"#)]
@@ -666,12 +669,12 @@ async fn run_query_with(
     registry: Arc<ComponentRegistry>,
     selection: Option<Selection>,
 ) {
-    let mut service = EventQueryService::new(
-        w.h.events.clone(),
-        w.h.snapshots.clone(),
-        registry,
-        w.rules(),
-    );
+    // Constructed without the pipeline; the coordinator mounts it with its
+    // own registration (decision 14.21).
+    let mut service = EventQueryService::new(w.h.events.clone(), w.h.snapshots.clone(), w.rules());
+    if !w.no_query_registration {
+        service = service.with_registration(registry);
+    }
     if let Some(upcaster) = &w.upcaster {
         service = service.with_upcaster(upcaster.clone());
     }

@@ -58,11 +58,12 @@ use angzarr::proto::{
     command_handler_service_client::CommandHandlerServiceClient,
     event_query_service_server::EventQueryServiceServer,
 };
+use angzarr::query::EventQueryService;
 use angzarr::registration::{GrpcDescriptorSource, Registrar};
 use angzarr::registry::ComponentRegistry;
 use angzarr::rules_version::SnapshotRules;
 use angzarr::services::aggregate::DiscoveredSyncProjectors;
-use angzarr::services::{AggregateService, EventQueryService, Upcaster};
+use angzarr::services::{AggregateService, Upcaster};
 use angzarr::storage::{init_event_store, init_snapshot_store};
 use angzarr::transport::{
     connect_watched, grpc_trace_layer, max_grpc_message_size, serve_with_transport,
@@ -171,8 +172,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let aggregate_service =
         AggregateService::new(pipeline, Arc::new(DiscoveredSyncProjectors::new(discovery)))
             .with_limits(config.limits.clone());
-    let mut event_query =
-        EventQueryService::new(event_store, snapshot_store, registry, snapshot_rules);
+    let mut event_query = EventQueryService::new(event_store, snapshot_store, snapshot_rules)
+        .with_registration(registry);
     if let Some(upcaster) = upcaster {
         event_query = event_query.with_upcaster(upcaster);
     }
