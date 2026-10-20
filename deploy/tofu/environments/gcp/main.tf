@@ -38,7 +38,6 @@ locals {
     coordinator_projector = "${var.image_registry}/angzarr-projector:${var.image_tag}"
     coordinator_pm        = "${var.image_registry}/angzarr-pm:${var.image_tag}"
     stream                = "${var.image_registry}/angzarr-stream:${var.image_tag}"
-    upcaster_noop         = "${var.image_registry}/angzarr-upcaster-noop:${var.image_tag}"
   }
 
   # Domain-specific images

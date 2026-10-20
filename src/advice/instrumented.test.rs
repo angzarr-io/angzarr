@@ -1,78 +1,47 @@
-//! Tests for metrics instrumentation wrapper.
+//! Tests for the metrics instrumentation wrapper.
 //!
-//! The Instrumented wrapper adds OpenTelemetry metrics to storage operations:
-//! - Duration histograms for all operations
-//! - Event/snapshot counters by domain and storage type
-//! - Position update counters by handler
-//!
-//! Why this matters: Observability without polluting business logic.
-//! Storage implementations stay pure; metrics are applied at composition time.
-//!
-//! Key behaviors verified:
-//! - Wrapper delegates to inner implementation
-//! - Errors propagate unchanged
-//!
-//! Note: Metric emission tests require integration tests with OTel collector.
-//! These unit tests verify the wrapper doesn't break storage behavior.
+//! Why this matters: the wrapper sits in front of every production store;
+//! it must be transparent (same results, same errors) or instrumentation
+//! would change behaviour.
 
 use super::*;
-use crate::storage::MockEventStore;
+use crate::storage::contract::{main, page, root};
+use crate::storage::{MemoryEventStore, MemorySnapshotStore, StorageError};
 
-/// Instrumented wrapper delegates to inner storage.
-///
-/// All operations pass through; wrapper is transparent.
 #[tokio::test]
 async fn test_instrumented_delegates_to_inner() {
-    let inner = MockEventStore::new();
-    let instrumented = Instrumented::new(inner, "mock");
-
-    let root = Uuid::new_v4();
-
-    // Should delegate and succeed
-    let events = instrumented.get("test", "angzarr", root).await.unwrap();
-    assert!(events.is_empty());
+    let store = Instrumented::new(MemoryEventStore::new(), "memory");
+    store
+        .append(main(1), &[page(0, root(100), root(200), 10)])
+        .await
+        .unwrap();
+    assert_eq!(store.read(main(1), 0, None).await.unwrap().len(), 1);
+    assert_eq!(store.head(main(1)).await.unwrap().next_sequence, 1);
 }
 
-/// Errors from inner storage propagate through wrapper.
-///
-/// Wrapper doesn't swallow or transform errors.
 #[tokio::test]
 async fn test_instrumented_preserves_errors() {
-    let inner = MockEventStore::new();
-    inner.set_fail_on_get(true).await;
-
-    let instrumented = Instrumented::new(inner, "mock");
-    let root = Uuid::new_v4();
-
-    // Should propagate error
-    let result = instrumented.get("test", "angzarr", root).await;
-    assert!(result.is_err());
+    let store = Instrumented::new(MemoryEventStore::new(), "memory");
+    let err = store
+        .append(main(1), &[page(3, root(100), root(200), 10)])
+        .await
+        .unwrap_err();
+    assert!(matches!(err, StorageError::SequenceConflict { .. }));
 }
 
-// ============================================================================
-// Accessor Method Tests
-// ============================================================================
+#[tokio::test]
+async fn test_instrumented_snapshot_store_delegates() {
+    let store = Instrumented::new(MemorySnapshotStore::new(), "memory");
+    store
+        .put(main(1), &crate::storage::contract::snapshot(4))
+        .await
+        .unwrap();
+    assert_eq!(store.get(main(1)).await.unwrap().unwrap().sequence, 4);
+}
 
-/// inner() provides read access to wrapped storage.
-///
-/// Useful for inspecting state or calling methods not in the trait.
 #[test]
-fn test_instrumented_inner_access() {
-    let inner = MockEventStore::new();
-    let instrumented = Instrumented::new(inner, "mock");
-
-    // Should provide reference to inner
+fn test_instrumented_accessors() {
+    let instrumented = Instrumented::new(MemoryEventStore::new(), "memory");
     let _ = instrumented.inner();
-}
-
-/// into_inner() unwraps and returns the inner storage.
-///
-/// Allows recovering the original storage after instrumentation is no longer needed.
-#[test]
-fn test_instrumented_into_inner() {
-    let inner = MockEventStore::new();
-    let instrumented = Instrumented::new(inner, "mock");
-
-    // Should consume wrapper and return inner
-    let _recovered: MockEventStore = instrumented.into_inner();
+    let _recovered: MemoryEventStore = instrumented.into_inner();
 }

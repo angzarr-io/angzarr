@@ -9,14 +9,10 @@ use futures::future::BoxFuture;
 use tracing::debug;
 
 use super::chained::ChainedDlqPublisher;
-use super::config::{DatabaseDlqConfig, DlqConfig, DlqTargetConfig};
+use super::config::{DlqConfig, DlqTargetConfig};
 use super::error::{errmsg, DlqError, Result};
 use super::publishers::NoopDeadLetterPublisher;
-#[cfg(feature = "postgres")]
-use super::publishers::PostgresDlqReader;
-use super::publishers::SqliteDlqReader;
-use super::reader::NoopDeadLetterReader;
-use super::{DeadLetterPublisher, DeadLetterReader};
+use super::DeadLetterPublisher;
 
 // ============================================================================
 // Backend Registration
@@ -122,35 +118,6 @@ pub async fn init_dlq_publisher(
 /// The `audit` config is intentionally separate from `dlq.targets` so
 /// operators can route delivery to a queue (AMQP, Pub/Sub) while still
 /// reading from a query-friendly database. See R2-15 decision #5.
-pub async fn init_dlq_reader(
-    audit: Option<&DatabaseDlqConfig>,
-) -> std::result::Result<Arc<dyn DeadLetterReader>, Box<dyn std::error::Error>> {
-    let Some(audit) = audit else {
-        debug!("No dlq.audit configured, using noop reader");
-        return Ok(Arc::new(NoopDeadLetterReader));
-    };
-    match audit.storage_type.as_str() {
-        "sqlite" => {
-            let reader = SqliteDlqReader::new(&audit.sqlite.uri()).await?;
-            Ok(Arc::new(reader) as Arc<dyn DeadLetterReader>)
-        }
-        #[cfg(feature = "postgres")]
-        "postgres" => {
-            let reader = PostgresDlqReader::new(&audit.postgres.uri).await?;
-            Ok(Arc::new(reader) as Arc<dyn DeadLetterReader>)
-        }
-        #[cfg(not(feature = "postgres"))]
-        "postgres" => Err(Box::new(DlqError::InvalidArgument(
-            "dlq.audit.storage_type='postgres' requires the postgres cargo feature".to_string(),
-        ))),
-        other => Err(Box::new(DlqError::UnknownType(format!(
-            "{}{}",
-            errmsg::UNKNOWN_TYPE,
-            other
-        )))),
-    }
-}
-
 #[cfg(test)]
 #[path = "factory.test.rs"]
 mod tests;

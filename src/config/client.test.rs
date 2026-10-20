@@ -23,23 +23,3 @@ fn test_service_endpoint_default() {
     assert_eq!(endpoint.name, "");
     assert_eq!(endpoint.address, "");
 }
-
-// ============================================================================
-// SagaCompensationConfig Tests
-// ============================================================================
-
-/// Saga compensation defaults emit system revocation but don't escalate.
-///
-/// Conservative default: log compensation failures and emit events for
-/// observability, but don't send to DLQ or trigger alerts without
-/// explicit configuration.
-#[test]
-fn test_saga_compensation_config_default() {
-    let config = SagaCompensationConfig::default();
-    assert_eq!(config.fallback_domain, DEFAULT_SAGA_FALLBACK_DOMAIN);
-    assert!(config.dead_letter_queue_url.is_none());
-    assert!(config.escalation_webhook_url.is_none());
-    assert!(config.fallback_emit_system_revocation);
-    assert!(!config.fallback_send_to_dlq);
-    assert!(!config.fallback_escalate);
-}

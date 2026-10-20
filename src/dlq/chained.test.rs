@@ -18,7 +18,7 @@
 use super::*;
 use crate::dlq::publishers::NoopDeadLetterPublisher;
 use crate::dlq::DeadLetterPayload;
-use crate::proto::EventBook;
+use crate::proto::{ComponentKind, EventBook};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -70,14 +70,13 @@ impl DeadLetterPublisher for SuccessPublisher {
 
 fn make_test_dead_letter() -> AngzarrDeadLetter {
     AngzarrDeadLetter {
-        cover: None,
         payload: DeadLetterPayload::Events(EventBook::default()),
         rejection_reason: "test".to_string(),
         rejection_details: None,
         occurred_at: None,
         metadata: HashMap::new(),
         source_component: "test".to_string(),
-        source_component_type: "test".to_string(),
+        source_component_kind: ComponentKind::Unspecified,
     }
 }
 

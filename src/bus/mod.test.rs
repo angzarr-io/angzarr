@@ -1,33 +1,25 @@
 use super::*;
 use crate::descriptor::Target;
-use crate::proto::{event_page, page_header, Cover, EventPage, PageHeader, Uuid as ProtoUuid};
+use crate::proto::{Cover, EventPage};
 use prost_types::Any;
 
 fn make_event_book(domain: &str, event_types: &[&str]) -> EventBook {
     EventBook {
         cover: Some(Cover {
             domain: domain.to_string(),
-            root: Some(ProtoUuid {
-                value: uuid::Uuid::new_v4().as_bytes().to_vec(),
-            }),
-            correlation_id: "test-correlation".to_string(),
+            root: Some(uuid::Uuid::new_v4().into()),
             edition: None,
-            ext: None,
         }),
         pages: event_types
             .iter()
             .enumerate()
             .map(|(i, et)| EventPage {
-                header: Some(PageHeader {
-                    sync_mode: None,
-                    sequence_type: Some(page_header::SequenceType::Sequence(i as u32)),
-                }),
-                created_at: None,
-                payload: Some(event_page::Payload::Event(Any {
+                payload: Some(Any {
                     type_url: format!("type.googleapis.com/example.{}", et),
                     value: vec![],
-                })),
-                ..Default::default()
+                }),
+                sequence: i as u64,
+                meta: None,
             })
             .collect(),
         snapshot: None,
@@ -209,66 +201,4 @@ fn test_domain_matches_any_no_match() {
     let patterns = vec!["order".to_string(), "inventory".to_string()];
     assert!(!domain_matches_any("shipping", &patterns));
     assert!(!domain_matches_any("customer", &patterns));
-}
-
-// ============================================================================
-// wrap_with_offloading tests
-// ============================================================================
-
-mod offloading_wrapper {
-    use super::*;
-    use crate::payload_store::FilesystemPayloadStore;
-    use tempfile::TempDir;
-
-    #[tokio::test]
-    async fn test_wrap_with_offloading_none_store_returns_original() {
-        let mock_bus = Arc::new(MockEventBus::new());
-        let bus: Arc<dyn EventBus> = mock_bus.clone();
-
-        let wrapped = wrap_with_offloading::<FilesystemPayloadStore>(bus.clone(), None, None);
-
-        // Should return the same bus (not wrapped)
-        // We can verify by checking max_message_size behavior
-        assert_eq!(wrapped.max_message_size(), bus.max_message_size());
-    }
-
-    #[tokio::test]
-    async fn test_wrap_with_offloading_with_store() {
-        let temp_dir = TempDir::new().unwrap();
-        let store = Arc::new(FilesystemPayloadStore::new(temp_dir.path()).await.unwrap());
-
-        let mock_bus = Arc::new(MockEventBus::new());
-        let bus: Arc<dyn EventBus> = mock_bus.clone();
-
-        let wrapped = wrap_with_offloading(bus, Some(store), Some(1024));
-
-        // Should work - we can publish through the wrapped bus
-        let book = make_event_book("test", &["TestEvent"]);
-        let result = wrapped.publish(Arc::new(book)).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_wrap_with_offloading_uses_threshold() {
-        let temp_dir = TempDir::new().unwrap();
-        let store = Arc::new(FilesystemPayloadStore::new(temp_dir.path()).await.unwrap());
-
-        let mock_bus = Arc::new(MockEventBus::new());
-        let bus: Arc<dyn EventBus> = mock_bus.clone();
-
-        let threshold = 100;
-        let wrapped = wrap_with_offloading(bus, Some(store), Some(threshold));
-
-        // Create a small event book that won't be offloaded
-        let small_book = make_event_book("test", &["SmallEvent"]);
-        wrapped.publish(Arc::new(small_book)).await.unwrap();
-
-        // Check the published book - should still have inline event
-        let published = mock_bus.take_published().await;
-        assert_eq!(published.len(), 1);
-        assert!(matches!(
-            &published[0].pages[0].payload,
-            Some(event_page::Payload::Event(_))
-        ));
-    }
 }

@@ -1,351 +1,198 @@
-//! Aggregate service (AggregateCoordinator).
+//! The command entry point (`CommandHandlerCoordinatorService`,
+//! command_handler.proto): one RPC per command mode.
+//!
+//! - `Handle` (DECISION): run the pipeline, answer with the decision.
+//! - `HandleSync` (SIMPLE): as Handle, then wait for the domain's
+//!   synchronous projectors; a projector failure never undoes the decision
+//!   and is reported in `Outcome.projector_failures`.
+//! - `HandleAsync` (ASYNC): validate, then enqueue durably. No durable
+//!   command queue exists in this port yet, so a valid command is refused
+//!   UNIMPLEMENTED after validation (never silently dropped).
 
 use std::sync::Arc;
 
-use tonic::transport::Channel;
+use async_trait::async_trait;
 use tonic::{Request, Response, Status};
+use tracing::warn;
 
-use crate::bus::EventBus;
 use crate::config::ResourceLimits;
 use crate::discovery::ServiceDiscovery;
-use crate::dlq::{DeadLetterPublisher, NoopDeadLetterPublisher};
-use crate::orchestration::aggregate::grpc::GrpcAggregateContext;
-use crate::orchestration::aggregate::{
-    execute_command_pipeline, execute_command_with_retry, execute_fact_pipeline,
-    parse_command_cover, AggregateContext, ClientLogic, GrpcBusinessLogic, PipelineMode,
-    TemporalQuery,
-};
+use crate::orchestration::aggregate::validate::validate;
+use crate::orchestration::aggregate::{AggregatePipeline, Decided, Delivery};
 use crate::proto::{
-    business_response,
-    command_handler_coordinator_service_server::CommandHandlerCoordinatorService,
-    command_handler_service_client::CommandHandlerServiceClient, BusinessResponse, CommandRequest,
-    CommandResponse, ContextualCommand, EventRequest, FactInjectionResponse,
-    SpeculateCommandHandlerRequest,
+    command_handler_coordinator_service_server::CommandHandlerCoordinatorService, CommandBook,
+    CommandResponse, DeliveryOutcome, EventBook, Outcome, Projection, ProjectorFailure,
 };
-use crate::proto_ext::CoverExt;
-use crate::repository::SnapshotRepository;
-use crate::services::upcaster::Upcaster;
-use crate::storage::EventStore;
-use crate::utils::retry::saga_backoff;
-use crate::validation::validate_command_book;
+use crate::proto_ext::{correlated_request, CoverExt};
 
-/// Aggregate service.
-///
-/// Receives commands, loads prior state, calls client logic,
-/// persists new events, and notifies projectors.
-///
-/// Uses the shared aggregate pipeline for both async and sync operations.
-pub struct AggregateService {
-    event_store: Arc<dyn EventStore>,
-    snapshot_repo: Arc<SnapshotRepository>,
-    business: Arc<dyn ClientLogic>,
-    event_bus: Arc<dyn EventBus>,
-    /// Service discovery for projectors (sync operations).
+/// Refusal messages.
+pub mod errmsg {
+    pub const PAYLOAD_TOO_LARGE: &str = "command payload exceeds the configured maximum of ";
+    pub const ASYNC_UNAVAILABLE: &str =
+        "HandleAsync needs a durable command queue, which this coordinator does not have yet; \
+         use Handle or HandleSync";
+}
+
+/// The domain's synchronous projectors, called by HandleSync.
+#[async_trait]
+pub trait SyncProjectors: Send + Sync {
+    /// Project `events`; every projector either succeeds or is reported
+    /// failed, by name.
+    async fn project(&self, events: &EventBook) -> (Vec<Projection>, Vec<ProjectorFailure>);
+}
+
+/// [`SyncProjectors`] found through service discovery: every projector
+/// discovered for the events' domain.
+pub struct DiscoveredSyncProjectors {
     discovery: Arc<dyn ServiceDiscovery>,
-    /// Upcaster for event version transformation.
-    upcaster: Option<Arc<Upcaster>>,
-    /// Resource limits for validation.
+}
+
+impl DiscoveredSyncProjectors {
+    pub fn new(discovery: Arc<dyn ServiceDiscovery>) -> Self {
+        Self { discovery }
+    }
+}
+
+#[async_trait]
+impl SyncProjectors for DiscoveredSyncProjectors {
+    async fn project(&self, events: &EventBook) -> (Vec<Projection>, Vec<ProjectorFailure>) {
+        let mut projections = Vec::new();
+        let mut failures = Vec::new();
+        let projectors = match self.discovery.get_all_projectors().await {
+            Ok(projectors) => projectors,
+            Err(e) => {
+                warn!(error = %e, "projector discovery failed");
+                return (projections, failures);
+            }
+        };
+        let domain = events.domain();
+        let correlation = events
+            .pages
+            .first()
+            .and_then(|p| p.meta.as_ref())
+            .and_then(|m| m.correlation_id.as_ref())
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        for (service, mut client) in projectors {
+            if service
+                .domain
+                .as_deref()
+                .is_some_and(|d| d != domain && d != "*")
+            {
+                continue;
+            }
+            match client
+                .handle_sync(correlated_request(events.clone(), &correlation))
+                .await
+            {
+                Ok(projection) => projections.push(projection.into_inner()),
+                Err(status) => failures.push(ProjectorFailure {
+                    projector: service.name.clone(),
+                    code: status.code() as i32,
+                    message: status.message().to_string(),
+                }),
+            }
+        }
+        (projections, failures)
+    }
+}
+
+/// `CommandHandlerCoordinatorService` over one domain's pipeline.
+pub struct AggregateService {
+    pipeline: Arc<AggregatePipeline>,
+    sync_projectors: Arc<dyn SyncProjectors>,
     limits: ResourceLimits,
-    /// DLQ publisher threaded down to every constructed
-    /// [`GrpcAggregateContext`]. Defaults to a noop so callers that don't
-    /// care about DLQ (in-process tests, embedded mode without operator
-    /// config) stay zero-touch. The bin overrides it at startup via
-    /// `with_dlq_publisher(init_dlq_publisher(&config.dlq).await?)`
-    /// (R2-15). Hard-fail boot on init error happens at the call site,
-    /// not here.
-    dlq_publisher: Arc<dyn DeadLetterPublisher>,
 }
 
 impl AggregateService {
-    /// Create a new aggregate service.
-    ///
-    /// Snapshot policy (read_enabled / write_enabled) lives on the
-    /// passed-in `SnapshotRepository`. Callers building one with
-    /// defaults: `Arc::new(SnapshotRepository::new(store))`. Callers
-    /// wanting explicit flags:
-    /// `Arc::new(SnapshotRepository::with_flags(store, read, write))`.
-    pub fn new(
-        event_store: Arc<dyn EventStore>,
-        snapshot_repo: Arc<SnapshotRepository>,
-        business_client: CommandHandlerServiceClient<Channel>,
-        event_bus: Arc<dyn EventBus>,
-        discovery: Arc<dyn ServiceDiscovery>,
-    ) -> Self {
+    pub fn new(pipeline: Arc<AggregatePipeline>, sync_projectors: Arc<dyn SyncProjectors>) -> Self {
         Self {
-            event_store,
-            snapshot_repo,
-            business: Arc::new(GrpcBusinessLogic::new(business_client)),
-            event_bus,
-            discovery,
-            upcaster: None,
+            pipeline,
+            sync_projectors,
             limits: ResourceLimits::default(),
-            dlq_publisher: Arc::new(NoopDeadLetterPublisher),
         }
     }
 
-    /// Set the upcaster for event version transformation.
-    pub fn with_upcaster(mut self, upcaster: Arc<Upcaster>) -> Self {
-        self.upcaster = Some(upcaster);
-        self
-    }
-
-    /// Set resource limits for validation.
+    /// Resource limits checked before the pipeline.
     pub fn with_limits(mut self, limits: ResourceLimits) -> Self {
         self.limits = limits;
         self
     }
 
-    /// Set the DLQ publisher (R2-15). The bin calls this at startup with
-    /// the result of `init_dlq_publisher(&config.dlq).await?` so dead
-    /// letters from `MergeManual` sequence mismatches reach the
-    /// operator-configured backend instead of the default noop.
-    pub fn with_dlq_publisher(mut self, publisher: Arc<dyn DeadLetterPublisher>) -> Self {
-        self.dlq_publisher = publisher;
-        self
-    }
-
-    /// Create a new aggregate service with injected business logic.
-    ///
-    /// Test-only constructor: accepts `Arc<dyn ClientLogic>` directly
-    /// instead of a gRPC client.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn with_business_logic(
-        event_store: Arc<dyn EventStore>,
-        snapshot_repo: Arc<SnapshotRepository>,
-        business: Arc<dyn ClientLogic>,
-        event_bus: Arc<dyn EventBus>,
-        discovery: Arc<dyn ServiceDiscovery>,
-    ) -> Self {
-        Self {
-            event_store,
-            snapshot_repo,
-            business,
-            event_bus,
-            discovery,
-            upcaster: None,
-            limits: ResourceLimits::default(),
-            dlq_publisher: Arc::new(NoopDeadLetterPublisher),
+    fn check_limits(&self, book: &CommandBook) -> Result<(), Status> {
+        use crate::proto::command_page::Body;
+        let size = match book.page.as_ref().and_then(|p| p.body.as_ref()) {
+            Some(Body::Command(c)) => c.payload.as_ref().map(|p| p.value.len()),
+            Some(Body::Fact(f)) => f.payload.as_ref().map(|p| p.value.len()),
+            None => None,
+        };
+        match size {
+            Some(len) if len > self.limits.max_payload_bytes => {
+                Err(Status::invalid_argument(format!(
+                    "{}{} bytes",
+                    errmsg::PAYLOAD_TOO_LARGE,
+                    self.limits.max_payload_bytes
+                )))
+            }
+            _ => Ok(()),
         }
     }
 
-    /// Create an async context (no sync projector calls).
-    fn create_async_context(&self) -> GrpcAggregateContext {
-        let mut ctx = GrpcAggregateContext::new(
-            self.event_store.clone(),
-            self.snapshot_repo.clone(),
-            self.discovery.clone(),
-            self.event_bus.clone(),
-        )
-        .with_dlq_publisher(self.dlq_publisher.clone());
-        if let Some(ref upcaster) = self.upcaster {
-            ctx = ctx.with_upcaster(upcaster.clone());
-        }
-        ctx
+    async fn decide(&self, book: CommandBook) -> Result<Decided, Status> {
+        self.check_limits(&book)?;
+        self.pipeline
+            .execute(book, Delivery::Client)
+            .await
+            .map_err(|e| e.to_status())
     }
+}
 
-    /// Create a sync context (calls sync projectors).
-    fn create_sync_context(&self, sync_mode: crate::proto::SyncMode) -> GrpcAggregateContext {
-        let mut ctx = GrpcAggregateContext::new(
-            self.event_store.clone(),
-            self.snapshot_repo.clone(),
-            self.discovery.clone(),
-            self.event_bus.clone(),
-        )
-        .with_sync_mode(sync_mode)
-        .with_dlq_publisher(self.dlq_publisher.clone());
-        if let Some(ref upcaster) = self.upcaster {
-            ctx = ctx.with_upcaster(upcaster.clone());
-        }
-        ctx
-    }
-
-    /// Create context for the given sync mode integer value.
-    ///
-    /// Parses the proto sync mode and creates async context for Async mode,
-    /// sync context otherwise. This consolidates the repeated pattern of
-    /// extracting sync mode and conditionally creating the right context type.
-    fn create_context_for_sync_mode(&self, sync_mode_int: i32) -> GrpcAggregateContext {
-        let sync_mode = crate::proto::SyncMode::try_from(sync_mode_int)
-            .unwrap_or(crate::proto::SyncMode::Async);
-        if sync_mode == crate::proto::SyncMode::Async {
-            self.create_async_context()
-        } else {
-            self.create_sync_context(sync_mode)
-        }
+fn response(
+    decided: Decided,
+    projections: Vec<Projection>,
+    failures: Vec<ProjectorFailure>,
+) -> CommandResponse {
+    CommandResponse {
+        events: Some(decided.events),
+        outcome: Some(Outcome {
+            delivery: decided.delivery as i32,
+            projections,
+            projector_failures: failures,
+        }),
     }
 }
 
 #[tonic::async_trait]
 impl CommandHandlerCoordinatorService for AggregateService {
-    /// Handle command with optional sync mode (default: async fire-and-forget).
-    #[tracing::instrument(name = "aggregate.handle_command", skip_all)]
-    async fn handle_command(
+    #[tracing::instrument(name = "aggregate.handle", skip_all)]
+    async fn handle(
         &self,
-        request: Request<CommandRequest>,
+        request: Request<CommandBook>,
     ) -> Result<Response<CommandResponse>, Status> {
-        let sync_request = request.into_inner();
-        let command_book = sync_request.command.ok_or_else(|| {
-            Status::invalid_argument(super::errmsg::COMMAND_REQUEST_MISSING_COMMAND)
-        })?;
-
-        // Validate command book before processing
-        validate_command_book(&command_book, &self.limits)?;
-
-        let mut ctx = self.create_context_for_sync_mode(sync_request.sync_mode);
-        if let Some(ref cascade_id) = sync_request.cascade_id {
-            ctx = ctx.with_cascade_id(cascade_id);
-        }
-
-        let result =
-            execute_command_with_retry(&ctx, &*self.business, command_book, saga_backoff()).await;
-
-        Ok(Response::new(result?))
+        let decided = self.decide(request.into_inner()).await?;
+        Ok(Response::new(response(decided, Vec::new(), Vec::new())))
     }
 
-    /// Speculative: execute command against temporal state without persisting.
-    #[tracing::instrument(name = "aggregate.handle_sync_speculative", skip_all)]
-    async fn handle_sync_speculative(
+    #[tracing::instrument(name = "aggregate.handle_sync", skip_all)]
+    async fn handle_sync(
         &self,
-        request: Request<SpeculateCommandHandlerRequest>,
+        request: Request<CommandBook>,
     ) -> Result<Response<CommandResponse>, Status> {
-        let speculate_req = request.into_inner();
-        let command_book = speculate_req.command.ok_or_else(|| {
-            Status::invalid_argument(super::errmsg::SPECULATE_AGG_MISSING_COMMAND)
-        })?;
-
-        // Validate command book before processing
-        validate_command_book(&command_book, &self.limits)?;
-
-        let (as_of_sequence, as_of_timestamp) = match speculate_req.point_in_time {
-            Some(temporal) => match temporal.point_in_time {
-                Some(crate::proto::temporal_query::PointInTime::AsOfSequence(seq)) => {
-                    (Some(seq), None)
-                }
-                Some(crate::proto::temporal_query::PointInTime::AsOfTime(ts)) => {
-                    let ts_str = format!("{}.{}", ts.seconds, ts.nanos);
-                    (None, Some(ts_str))
-                }
-                None => (None, None),
-            },
-            None => (None, None),
-        };
-
-        let ctx = self.create_async_context();
-
-        let response = execute_command_pipeline(
-            &ctx,
-            &*self.business,
-            command_book,
-            PipelineMode::Speculative {
-                as_of_sequence,
-                as_of_timestamp,
-            },
-        )
-        .await?;
-
-        Ok(Response::new(response))
+        let decided = self.decide(request.into_inner()).await?;
+        let (projections, failures) =
+            if decided.delivery == DeliveryOutcome::Applied && !decided.events.pages.is_empty() {
+                self.sync_projectors.project(&decided.events).await
+            } else {
+                (Vec::new(), Vec::new())
+            };
+        Ok(Response::new(response(decided, projections, failures)))
     }
 
-    /// Handle compensation flow - returns BusinessResponse for saga compensation handling.
-    ///
-    /// Unlike normal HandleCommand, this returns the raw BusinessResponse so the caller
-    /// can inspect revocation flags and decide how to handle (quarantine, notify, etc.).
-    /// If business logic returns events, they are persisted before returning.
-    #[tracing::instrument(name = "aggregate.handle_compensation", skip_all)]
-    async fn handle_compensation(
-        &self,
-        request: Request<CommandRequest>,
-    ) -> Result<Response<BusinessResponse>, Status> {
-        let sync_request = request.into_inner();
-        let command_book = sync_request.command.ok_or_else(|| {
-            Status::invalid_argument(super::errmsg::COMMAND_REQUEST_MISSING_COMMAND)
-        })?;
-        let (domain, root_uuid) = parse_command_cover(&command_book)?;
-        let edition = command_book.edition().unwrap_or_default().to_string();
-        let correlation_id =
-            crate::orchestration::correlation::extract_correlation_id(&command_book)?;
-
-        let ctx = self.create_context_for_sync_mode(sync_request.sync_mode);
-
-        // Load prior events
-        let prior_events = ctx
-            .load_prior_events(&domain, &edition, root_uuid, &TemporalQuery::Current)
-            .await?;
-
-        // Transform events (upcasting)
-        let prior_events = ctx.transform_events(&domain, prior_events).await?;
-
-        // Invoke business logic
-        let contextual_command = ContextualCommand {
-            events: Some(prior_events.clone()),
-            command: Some(command_book),
-        };
-
-        let response = self.business.invoke(contextual_command).await?;
-
-        // If business returned events, persist them
-        if let Some(business_response::Result::Events(ref events)) = response.result {
-            if !events.pages.is_empty() {
-                ctx.persist_events(
-                    &prior_events,
-                    events,
-                    &domain,
-                    &edition,
-                    root_uuid,
-                    &correlation_id,
-                    None,
-                    None, // speculative path doesn't carry source provenance
-                )
-                .await?;
-
-                // Post-persist: publish to bus
-                ctx.post_persist(events).await?;
-            }
-        }
-
-        Ok(Response::new(response))
-    }
-
-    /// Handle event (fact) injection - external realities that cannot be rejected.
-    ///
-    /// Facts are events that already happened externally and cannot be rejected by business logic.
-    /// They are persisted unconditionally with coordinator-assigned sequence numbers.
-    ///
-    /// `route_to_handler`: When true (default), invokes the aggregate's handle_fact method
-    /// for validation/error checking before persistence. The aggregate cannot reject facts,
-    /// but can validate data integrity and log warnings. When false, facts are persisted
-    /// directly without aggregate involvement.
-    ///
-    /// Idempotent: subsequent requests with same external_id return original events.
-    #[tracing::instrument(name = "aggregate.handle_event", skip_all)]
-    async fn handle_event(
-        &self,
-        request: Request<EventRequest>,
-    ) -> Result<Response<FactInjectionResponse>, Status> {
-        let sync_event_book = request.into_inner();
-        let fact_events = sync_event_book
-            .events
-            .ok_or_else(|| Status::invalid_argument(super::errmsg::EVENT_REQUEST_MISSING_EVENTS))?;
-
-        let ctx = self.create_context_for_sync_mode(sync_event_book.sync_mode);
-
-        // Use aggregate handler if route_to_handler is true (default behavior)
-        let business: Option<&dyn ClientLogic> = if sync_event_book.route_to_handler {
-            Some(&*self.business)
-        } else {
-            None
-        };
-
-        let fact_response = execute_fact_pipeline(&ctx, business, fact_events).await?;
-
-        Ok(Response::new(FactInjectionResponse {
-            events: Some(fact_response.events),
-            already_processed: fact_response.already_processed,
-            projections: fact_response.projections,
-        }))
+    #[tracing::instrument(name = "aggregate.handle_async", skip_all)]
+    async fn handle_async(&self, request: Request<CommandBook>) -> Result<Response<()>, Status> {
+        let book = request.into_inner();
+        self.check_limits(&book)?;
+        validate(&book, self.pipeline.domain(), Delivery::Async)?;
+        Err(Status::unimplemented(errmsg::ASYNC_UNAVAILABLE))
     }
 }
-
-#[cfg(test)]
-#[path = "aggregate.test.rs"]
-mod tests;

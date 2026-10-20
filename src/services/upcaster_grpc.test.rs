@@ -15,9 +15,8 @@
 //! A mock upcaster service simulates the client implementation.
 
 use super::*;
-use crate::proto::event_page;
 use crate::proto::upcaster_service_server::{UpcasterService, UpcasterServiceServer};
-use crate::proto::{page_header, PageHeader, UpcastRequest, UpcastResponse};
+use crate::proto::{UpcastRequest, UpcastResponse};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
 use tonic::transport::Server;
@@ -68,7 +67,7 @@ impl UpcasterService for MockUpcasterService {
             .events
             .into_iter()
             .map(|mut page| {
-                if let Some(event_page::Payload::Event(ref mut event)) = page.payload {
+                if let Some(ref mut event) = page.payload {
                     // Simulate V1 -> V2 transformation
                     if event.type_url.ends_with("V1") {
                         event.type_url = event.type_url.replace("V1", "V2");
@@ -108,18 +107,14 @@ async fn start_mock_server(service: MockUpcasterService) -> SocketAddr {
     local_addr
 }
 
-fn make_test_event(seq: u32, type_url: &str, value: Vec<u8>) -> EventPage {
+fn make_test_event(seq: u64, type_url: &str, value: Vec<u8>) -> EventPage {
     EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(page_header::SequenceType::Sequence(seq)),
-        }),
-        created_at: None,
-        payload: Some(event_page::Payload::Event(prost_types::Any {
+        sequence: seq,
+        payload: Some(prost_types::Any {
             type_url: type_url.to_string(),
             value,
-        })),
-        ..Default::default()
+        }),
+        meta: None,
     }
 }
 
@@ -151,14 +146,14 @@ async fn test_upcaster_transforms_events() {
 
     // Verify V1 -> V2 transformation
     let event0 = match &result[0].payload {
-        Some(event_page::Payload::Event(e)) => e,
+        Some(e) => e,
         _ => panic!("Expected event payload"),
     };
     assert_eq!(event0.type_url, "example.OrderCreatedV2");
     assert_eq!(event0.value, vec![1, 2, 3, 0xFF]); // Migration marker added
 
     let event1 = match &result[1].payload {
-        Some(event_page::Payload::Event(e)) => e,
+        Some(e) => e,
         _ => panic!("Expected event payload"),
     };
     assert_eq!(event1.type_url, "example.OrderUpdatedV2");
@@ -183,7 +178,7 @@ async fn test_upcaster_preserves_non_v1_events() {
 
     assert_eq!(result.len(), 1);
     let event = match &result[0].payload {
-        Some(event_page::Payload::Event(e)) => e,
+        Some(e) => e,
         _ => panic!("Expected event payload"),
     };
     assert_eq!(event.type_url, "example.OrderCreated"); // Unchanged
@@ -209,9 +204,9 @@ async fn test_upcaster_preserves_sequence_numbers() {
     let result = upcaster.upcast("test", events).await.unwrap();
 
     assert_eq!(result.len(), 3);
-    assert_eq!(result[0].sequence_num(), 5);
-    assert_eq!(result[1].sequence_num(), 6);
-    assert_eq!(result[2].sequence_num(), 7);
+    assert_eq!(result[0].sequence, 5);
+    assert_eq!(result[1].sequence, 6);
+    assert_eq!(result[2].sequence, 7);
 }
 
 /// Empty events short-circuit without calling server.
@@ -284,7 +279,7 @@ async fn test_upcaster_from_channel() {
 
     assert_eq!(result.len(), 1);
     let event = match &result[0].payload {
-        Some(event_page::Payload::Event(e)) => e,
+        Some(e) => e,
         _ => panic!("Expected event payload"),
     };
     assert_eq!(event.type_url, "example.EventV2");

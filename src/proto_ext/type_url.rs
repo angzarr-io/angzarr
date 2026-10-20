@@ -12,7 +12,7 @@
 //! both a forward (`angzarr.io`) and reverse (`io.angzarr`) form:
 //!
 //! ```text
-//! /io.angzarr.v1.Notification
+//! /io.angzarr.v1.EventPage
 //! ```
 //!
 //! Because this equals what prost generates, the constants below are
@@ -30,32 +30,6 @@
 /// (empty type-domain). The segment after it is the fully-qualified
 /// proto name.
 pub const PREFIX: &str = "/";
-
-/// Suffix for notification types (used for routing).
-pub const NOTIFICATION_SUFFIX: &str = "Notification";
-
-/// Suffix for CloudEvents response types.
-pub const CLOUD_EVENTS_RESPONSE_SUFFIX: &str = "CloudEventsResponse";
-
-// Canonical type URLs for angzarr framework messages (PREFIX + FQN).
-/// Type URL for Notification messages.
-pub const NOTIFICATION: &str = "/io.angzarr.v1.Notification";
-/// Type URL for RejectionNotification messages.
-pub const REJECTION_NOTIFICATION: &str = "/io.angzarr.v1.RejectionNotification";
-/// Type URL for SagaCompensationFailed messages.
-pub const SAGA_COMPENSATION_FAILED: &str = "/io.angzarr.v1.SagaCompensationFailed";
-
-// Two-phase commit framework events
-/// Type URL for Confirmation messages (2PC commit).
-pub const CONFIRMATION: &str = "/io.angzarr.v1.Confirmation";
-/// Type URL for Revocation messages (2PC rollback).
-pub const REVOCATION: &str = "/io.angzarr.v1.Revocation";
-/// Type URL for Compensate messages (client-implemented rollback).
-pub const COMPENSATE: &str = "/io.angzarr.v1.Compensate";
-/// Type URL for NoOp messages (filtered event placeholder).
-pub const NOOP: &str = "/io.angzarr.v1.NoOp";
-/// Type URL for CommandBook messages wrapped for bus transport.
-pub const COMMAND_BOOK: &str = "/io.angzarr.v1.CommandBook";
 
 /// Build a canonical angzarr type URL for a fully-qualified proto name.
 ///
@@ -86,6 +60,14 @@ pub fn strip_prefix(type_url: &str) -> &str {
     type_url.strip_prefix(PREFIX).unwrap_or(type_url)
 }
 
+/// True when two type URLs name the same message: their fully-qualified
+/// names (the text after the last `/`) are equal, whatever their prefixes
+/// (types.proto, "Type URLs"). `orders.OrderCreated` never matches
+/// `OrderCreated` or `orders.v2.OrderCreated`.
+pub fn same_message(a: &str, b: &str) -> bool {
+    fqn(a) == fqn(b)
+}
+
 /// Fully-qualified proto name carried by any type URL, regardless of its
 /// resolver-host prefix (the segment after the last `/`, or the whole
 /// string if there is none).
@@ -99,10 +81,10 @@ pub fn strip_prefix(type_url: &str) -> &str {
 /// # Example
 /// ```
 /// use angzarr::proto_ext::type_url;
-/// assert_eq!(type_url::fqn("/io.angzarr.v1.Confirmation"), "io.angzarr.v1.Confirmation");
+/// assert_eq!(type_url::fqn("/io.angzarr.v1.EventPage"), "io.angzarr.v1.EventPage");
 /// assert_eq!(
-///     type_url::fqn("type.googleapis.com/io.angzarr.v1.Confirmation"),
-///     "io.angzarr.v1.Confirmation"
+///     type_url::fqn("type.googleapis.com/io.angzarr.v1.EventPage"),
+///     "io.angzarr.v1.EventPage"
 /// );
 /// ```
 pub fn fqn(type_url: &str) -> &str {

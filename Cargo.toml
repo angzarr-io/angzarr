@@ -1,6 +1,5 @@
 [workspace]
 members = [
-    ".",
     "crates/trivial-delegation",
     "xtask",
 ]
@@ -13,7 +12,7 @@ members = [
 # sererr/packages/rust/Cargo.toml so that the inheritance resolves to the
 # right values even when claimed by the wrong workspace. Sync if sererr's
 # upstream values change.
-exclude = ["sererr"]
+exclude = ["sererr", "angzarr-project"]
 resolver = "2"
 
 # Mirrored from sererr/packages/rust/Cargo.toml's [workspace.package].
@@ -56,40 +55,16 @@ default = ["otel"]
 # =============================================================================
 # Deployment Profiles (opinionated stacks)
 # =============================================================================
-# Note: sqlite is always compiled (no feature gate) for local orchestration support
-# k8s: Generic Kubernetes with Postgres + RabbitMQ
-k8s = ["postgres", "amqp", "otel", "dep:kube", "dep:k8s-openapi"]
-# gcp-cloudrun: GCP serverless with Cloud SQL + Pub/Sub + GCS
-gcp-cloudrun = ["postgres", "pubsub", "gcs", "otel"]
-# gcp-k8s: GCP Kubernetes with Bigtable + Pub/Sub + GCS
-gcp-k8s = ["bigtable", "pubsub", "gcs", "otel"]
-# aws-k8s: AWS Kubernetes with DynamoDB + SNS/SQS + S3
-aws-k8s = ["dynamo", "sns-sqs", "s3", "otel"]
+# Note: sqlite is always compiled (no feature gate) for local orchestration support.
+# k8s: Generic Kubernetes with RabbitMQ. (The Postgres backend and the GCP and
+# AWS profiles are not yet ported to the latest proto; restore them from
+# 16db7169 as they are ported.)
+k8s = ["amqp", "otel", "dep:kube", "dep:k8s-openapi"]
 
 # =============================================================================
 # Messaging Backends
 # =============================================================================
 amqp = ["dep:lapin", "dep:deadpool-lapin"]
-kafka = ["dep:rdkafka"]
-pubsub = ["dep:gcloud-pubsub", "dep:gcloud-googleapis"]
-sns-sqs = ["dep:aws-sdk-sns", "dep:aws-sdk-sqs", "dep:aws-config"]
-
-# =============================================================================
-# Storage Backends
-# =============================================================================
-# Note: sqlx/sea-query are always compiled with sqlite; these features add additional backends
-postgres = ["sqlx/postgres", "sqlx/uuid", "sea-query-binder/sqlx-postgres"]
-# sqlite is always enabled (no feature gate) - required for local orchestration
-redis = ["dep:redis"]
-immudb = ["sqlx/postgres", "sqlx/uuid"]  # Uses pgsql wire protocol
-bigtable = ["dep:bigtable_rs"]
-dynamo = ["dep:aws-sdk-dynamodb", "dep:aws-config"]
-
-# =============================================================================
-# Payload Store Backends (claim check pattern)
-# =============================================================================
-gcs = ["dep:gcloud-storage"]
-s3 = ["dep:aws-sdk-s3", "dep:aws-config"]
 
 # =============================================================================
 # Observability & Utilities
@@ -104,10 +79,8 @@ coverage_nightly = []
 # All Features (for CI/development)
 # =============================================================================
 # Note: sqlite is always compiled, not listed here
-full = ["k8s", "gcp-cloudrun", "gcp-k8s", "aws-k8s", "kafka", "redis", "immudb"]
-# full-musl: For musl static builds - excludes kafka (requires librdkafka with OpenSSL)
-# GCP crates use rustls-tls feature for musl compatibility
-full-musl = ["k8s", "gcp-cloudrun", "gcp-k8s", "aws-k8s", "redis", "immudb"]
+full = ["k8s"]
+full-musl = ["k8s"]
 
 [dependencies]
 # gRPC
@@ -144,7 +117,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 
 # Core utilities
-uuid = { version = "1", features = ["v4", "v5"] }
+uuid = { version = "1", features = ["v4", "v5", "v7"] }
 async-trait = "0.1"
 thiserror = "2"
 futures = "0.3"
@@ -152,6 +125,8 @@ chrono = "0.4"
 hex = "0.4"
 serde_json = "1"
 inventory = "0.3"
+regex = "1"
+semver = "1"
 
 # Protobuf reflection (for logging projector)
 prost-reflect = { version = "0.16", features = ["serde"] }
@@ -177,35 +152,6 @@ base64 = "0.22"
 lapin = { version = "2", optional = true }
 deadpool-lapin = { version = "0.12", optional = true }
 
-# Redis (optional)
-redis = { version = "0.27", features = ["aio", "connection-manager", "tokio-comp"], optional = true }
-
-# Kafka (optional)
-rdkafka = { version = "0.36", features = ["cmake-build", "ssl", "sasl"], optional = true }
-
-# Google Pub/Sub (optional)
-# gcloud-pubsub is yoshidan's crate (was google-cloud-pubsub before name donation to Google)
-gcloud-pubsub = { version = "1.6", optional = true }
-gcloud-googleapis = { version = "1.3", features = ["pubsub"], optional = true }
-
-# AWS SNS/SQS (optional)
-aws-sdk-sns = { version = "1", optional = true }
-aws-sdk-sqs = { version = "1", optional = true }
-aws-config = { version = "1", optional = true }
-
-# AWS S3 (optional, for payload store)
-aws-sdk-s3 = { version = "1", optional = true }
-
-# AWS DynamoDB (optional, for event store)
-aws-sdk-dynamodb = { version = "1", optional = true }
-
-# Google Cloud Storage (optional, for payload store)
-# gcloud-storage is yoshidan's crate (was google-cloud-storage before name donation to Google)
-gcloud-storage = { version = "1.2", optional = true }
-
-# Google Cloud Bigtable (optional, for event store)
-bigtable_rs = { version = "0.2", optional = true }
-
 # Kubernetes API (for gateway service discovery) - optional, k8s feature only
 kube = { version = "0.98", features = ["runtime", "client"], optional = true }
 k8s-openapi = { version = "0.24", features = ["v1_29"], optional = true }
@@ -214,15 +160,17 @@ sha2 = "0.10.9"
 mutants = "0.0.4"
 trivial-delegation = { path = "crates/trivial-delegation" }
 
+# The io.angzarr.v1 wire types: angzarr-project's angzarr-proto crate, at the
+# submodule's commit (the submodule pin is the version pin). build.rs
+# generates only the service stubs it lacks, extern-pathed onto these types.
+angzarr-proto = { path = "angzarr-project/rust/angzarr-proto" }
+
 # Structured stack-trace + error-chain capture.
 #   - `sererr` provides plain Rust types (no proto dep) used as the
 #     in-process representation in `src/dlq/mod.rs`.
-#   - `sererr-proto` provides the prost-generated `sererr.v1.*` types
-#     referenced from `types.proto` via `import "sererr/sererr.proto"`.
-#     angzarr's build.rs uses `extern_path` to wire the generated
-#     `EventProcessingFailedDetails.stack_trace` field to
-#     `sererr_proto::sererr_v1::CapturedError` instead of generating
-#     a duplicate definition.
+#   - `sererr-proto` converts them to the prost `sererr.v1.CapturedError`;
+#     the dead-letter wire type is angzarr-proto's copy of the same message,
+#     reached by re-encoding (see `src/dlq/mod.rs`).
 sererr = { path = "sererr/packages/rust/sererr" }
 sererr-proto = { path = "sererr/packages/rust/sererr-proto" }
 
@@ -235,6 +183,7 @@ nix = { version = "0.29", features = ["signal", "process", "fs", "user"] }
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
 
 [build-dependencies]
+heck = "0.5"
 tonic-prost-build = "0.14"
 prost-build = "0.14"
 prost = "0.14"
@@ -247,22 +196,6 @@ path = "src/bin/angzarr_aggregate.rs"
 [[bin]]
 name = "angzarr-projector"
 path = "src/bin/angzarr_projector.rs"
-
-[[bin]]
-name = "angzarr-saga"
-path = "src/bin/angzarr_saga.rs"
-
-[[bin]]
-name = "angzarr-process-manager"
-path = "src/bin/angzarr_process_manager.rs"
-
-[[bin]]
-name = "angzarr-upcaster"
-path = "src/bin/angzarr_upcaster.rs"
-
-[[bin]]
-name = "angzarr-status"
-path = "src/bin/angzarr_status.rs"
 
 [dev-dependencies]
 tokio-test = "0.4"
@@ -288,35 +221,6 @@ rand = "0.9"
 # Bus tests verify: EventBus trait (publish, subscribe, ack/nack, DLQ)
 # =============================================================================
 
-# --- Storage Contract Tests (Macro-based) ---
-# All storage backends use macro-based tests for consistency and reduced overhead.
-# Tests are organized by trait (EventStore, SnapshotStore, PositionStore) with
-# reusable test suites in tests/storage/*.rs.
-
-[[test]]
-name = "storage_redis"
-# Redis provides high-performance caching for snapshots. Testing ensures
-# snapshot store/restore works correctly with Redis's eventual consistency model.
-required-features = ["redis"]
-
-[[test]]
-name = "storage_immudb"
-# ImmuDB provides cryptographically verifiable event storage. Testing ensures
-# events persist correctly via the PostgreSQL wire protocol adapter.
-required-features = ["immudb"]
-
-[[test]]
-name = "storage_sqlite"
-# SQLite provides embedded storage for local-dev mode. Testing ensures all three
-# stores (Event, Snapshot, Position) work correctly with in-memory SQLite.
-# Note: sqlite is always compiled, no required-features needed
-
-[[test]]
-name = "storage_postgres"
-# PostgreSQL provides production-grade storage. Testing ensures all three stores
-# work correctly with full SQL support including historical snapshot queries.
-required-features = ["postgres"]
-
 # --- Bus Contract Tests ---
 
 [[test]]
@@ -324,107 +228,6 @@ name = "bus_amqp"
 # RabbitMQ/AMQP as event bus. Testing ensures exchange/queue bindings,
 # message routing, acknowledgment, and dead-letter queue handling work correctly.
 required-features = ["amqp", "test-utils"]
-
-[[test]]
-name = "bus_kafka"
-# Apache Kafka as event bus. Testing ensures topic partitioning, consumer groups,
-# offset management, and at-least-once delivery semantics work correctly.
-required-features = ["kafka", "test-utils"]
-
-[[test]]
-name = "bus_pubsub"
-# Google Cloud Pub/Sub as event bus. Testing ensures topic/subscription management,
-# message ordering, and acknowledgment deadlines work correctly with the emulator.
-required-features = ["pubsub", "test-utils"]
-
-[[test]]
-name = "bus_sns_sqs"
-# AWS SNS/SQS as event bus. Testing ensures SNS fan-out to SQS queues,
-# message attributes, and visibility timeout handling work correctly with LocalStack.
-required-features = ["sns-sqs", "test-utils"]
-
-# --- DLQ Gherkin acceptance harness ---
-# Cucumber-rs harness against features/client/dlq.feature. `harness = false`
-# hands main() control to cucumber's runner so the standard rust test
-# harness doesn't intercept. Runs the saga/PM/projector scenarios via
-# public orchestrate_saga / orchestrate_pm / ProjectorEventHandler::handle,
-# and the aggregate scenario via publish_aggregate_sequence_mismatch_dlq.
-# Each scenario gets a fresh tempfile SQLite DLQ publisher+reader pair.
-# features/operator/dlq_boot.feature stays out of scope (needs bin spawning;
-# init_dlq_publisher/init_dlq_reader unit tests pin those contracts).
-[[test]]
-name = "dlq_features"
-harness = false
-required-features = ["test-utils"]
-
-# --- Deployed-cluster acceptance harness (T14) ---
-# Cucumber-rs harness against features/acceptance/end_to_end.feature, driving
-# a DEPLOYED angzarr system (kind + skaffold poker examples) through the
-# public gRPC surface via the tests/common fixture layer. Opt-in: exits 0
-# unless ANGZARR_ACCEPTANCE=1 so plain `cargo test` needs no cluster. The
-# compensation_* features still need harness coverage (saga topology).
-[[test]]
-name = "acceptance_features"
-harness = false
-required-features = ["test-utils"]
-
-# --- B1 e2e: persisted events ALWAYS reach the bus ---
-# Real aggregate pipeline + real SQLite store + real RabbitMQ. Pins the
-# persisted-but-never-published class (the 2026-04-07 full-sail interleave
-# bug, fixed in c2fa2beb) with deterministic publish-failure injection and
-# the original fact/command race shape.
-[[test]]
-name = "interleave_publish_amqp"
-required-features = ["amqp", "test-utils"]
-
-# --- Aggregate pipeline -> EventStore integration ---
-# Runs the aggregate command pipeline (AggregateService.handle_command)
-# through a real in-memory SqliteEventStore. Catches drift between the
-# pipeline's persist logic and the production storage backend that
-# MockEventStore-based unit tests can't see. Closes the highest-leverage
-# Category B drift gap from the R2-15 audit.
-[[test]]
-name = "aggregate_pipeline_event_store"
-required-features = ["test-utils"]
-
-# --- PM persist -> EventStore integration ---
-# Runs persist_pm_event_book (extracted from
-# GrpcPMContext::persist_pm_events) against a real in-memory
-# SqliteEventStore + a recording EventBus. PM events are the part of
-# the framework that writes directly to storage without going through
-# the aggregate command pipeline; PmWithEvents in unit tests stubs the
-# outcome. Closes the second Category B drift gap from the R2-15 audit.
-[[test]]
-name = "pm_persist_event_store"
-required-features = ["test-utils"]
-
-# --- Status DLQ admin gRPC -> Reader -> DB integration ---
-# Drives DlqAdminHandler's gRPC trait methods (list_dead_letters,
-# get_dead_letter, delete_dead_letter) against a real SqliteDlqReader
-# backed by a populated database. Closes the third Category B drift
-# gap from the R2-15 audit -- the operator-facing publisher -> reader
-# -> admin gRPC loop end-to-end.
-[[test]]
-name = "status_dlq_admin_grpc"
-required-features = ["test-utils"]
-
-# --- Aggregate pipeline -> SnapshotRepository integration ---
-# Drives AggregateService.handle_command with a real SqliteSnapshotStore
-# wired into SnapshotRepository. Catches snapshot-write policy bugs and
-# pipeline-read-snapshot drift that MockSnapshotStore can't see.
-[[test]]
-name = "aggregate_pipeline_snapshot"
-required-features = ["test-utils"]
-
-# --- Projector publish -> EventBus.publish shape verification ---
-# Closes the deep-shape-verification gap on the projector's publish
-# path. Real-broker serialization is owned by bus_*.rs testcontainer
-# suites; the unit tests only check publish_count. This test inspects
-# the published EventBook (domain prefix, correlation_id, edition,
-# decoded projection payload, sequence) via MockEventBus.
-[[test]]
-name = "projector_publish_event_bus"
-required-features = ["test-utils"]
 
 # === Build Profiles ===
 

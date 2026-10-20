@@ -165,10 +165,7 @@ pub trait EventBus: Send + Sync {
 /// }
 /// ```
 pub fn target_matches(book: &EventBook, target: &Target) -> bool {
-    let routing_key = book.routing_key();
-
-    // Routing key must match target domain (edition-prefixed)
-    if target.domain != routing_key {
+    if target.domain != book.domain() {
         return false;
     }
 
@@ -179,11 +176,9 @@ pub fn target_matches(book: &EventBook, target: &Target) -> bool {
 
     // Check if any event matches any target type
     book.pages.iter().any(|page| {
-        if let Some(crate::proto::event_page::Payload::Event(event)) = &page.payload {
-            target.matches_type(&event.type_url)
-        } else {
-            false
-        }
+        page.payload
+            .as_ref()
+            .is_some_and(|event| target.matches_type(&event.type_url))
     })
 }
 

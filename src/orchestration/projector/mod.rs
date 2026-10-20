@@ -1,82 +1,47 @@
-//! Projector abstraction shared across in-process and distributed modes.
-
-use std::sync::Arc;
+//! The projector abstraction shared by the bus consumer and the
+//! synchronous projector path.
 
 use async_trait::async_trait;
-use tokio::sync::Mutex;
+use tonic::transport::Channel;
 use tonic::Status;
 
 use crate::proto::projector_service_client::ProjectorServiceClient;
 use crate::proto::{EventBook, Projection};
-use crate::proto_ext::{correlated_request, CoverExt};
+use crate::proto_ext::correlated_request;
 
-/// Execution mode for projectors.
-///
-/// Passed to `ProjectorHandler::handle()` so implementations can skip
-/// persistence during speculative execution while keeping all business
-/// logic (event decoding, field computation) identical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ProjectionMode {
-    /// Normal execution: compute and persist projection.
-    Execute,
-    /// Speculative execution: compute projection, skip persistence.
-    ///
-    /// The handler must produce the same `Projection` as `Execute` mode
-    /// but must NOT write to databases, files, or external systems.
-    Speculate,
-}
-
-/// Projector handler for building read models.
-///
-/// Implement this trait to react to events and update read models.
-/// Projectors can be synchronous (blocking command response) or
-/// asynchronous (running in background).
-///
-/// The same handler instance is used for both normal and speculative
-/// execution. Business logic runs identically in both modes — only
-/// persistence side effects are gated on `ProjectionMode`.
+/// A projector: events in, a projection out (projector.proto,
+/// `ProjectorService.Handle`).
 #[async_trait]
 pub trait ProjectorHandler: Send + Sync + 'static {
-    /// Handle events and update read model.
-    ///
-    /// `mode` controls whether persistence side effects should occur:
-    /// - `Execute`: compute and persist (normal path)
-    /// - `Speculate`: compute only, skip all writes
-    ///
-    /// Returns a Projection with any data to include in command response
-    /// (only used for synchronous projectors).
-    async fn handle(&self, events: &EventBook, mode: ProjectionMode) -> Result<Projection, Status>;
+    /// Project one book of one stream's events.
+    async fn handle(&self, events: &EventBook) -> Result<Projection, Status>;
 }
 
-/// gRPC projector handler that forwards to a remote `Projector` service.
-///
-/// Client logic implements the simple `Projector` service (not `ProjectorCoordinator`).
-/// Skips calls in `Speculate` mode since remote side effects can't be controlled.
+/// [`ProjectorHandler`] over gRPC: the projection binary's
+/// `ProjectorService`.
 pub struct GrpcProjectorHandler {
-    client: Arc<Mutex<ProjectorServiceClient<tonic::transport::Channel>>>,
+    client: ProjectorServiceClient<Channel>,
 }
 
 impl GrpcProjectorHandler {
-    /// Wrap a gRPC projector client as a `ProjectorHandler`.
-    pub fn new(client: ProjectorServiceClient<tonic::transport::Channel>) -> Self {
-        Self {
-            client: Arc::new(Mutex::new(client)),
-        }
+    pub fn new(client: ProjectorServiceClient<Channel>) -> Self {
+        Self { client }
     }
 }
 
 #[async_trait]
 impl ProjectorHandler for GrpcProjectorHandler {
-    async fn handle(&self, events: &EventBook, mode: ProjectionMode) -> Result<Projection, Status> {
-        if mode == ProjectionMode::Speculate {
-            return Ok(Projection::default());
-        }
-        let correlation_id = events.correlation_id();
-        Ok(self
-            .client
-            .lock()
-            .await
-            .handle(correlated_request(events.clone(), correlation_id))
+    async fn handle(&self, events: &EventBook) -> Result<Projection, Status> {
+        let correlation = events
+            .pages
+            .first()
+            .and_then(|p| p.meta.as_ref())
+            .and_then(|m| m.correlation_id.as_ref())
+            .map(|c| c.to_string())
+            .unwrap_or_default();
+        let mut client = self.client.clone();
+        Ok(client
+            .handle(correlated_request(events.clone(), &correlation))
             .await?
             .into_inner())
     }

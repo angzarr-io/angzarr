@@ -28,11 +28,9 @@ fn test_routing_key_generation() {
         cover: Some(Cover {
             domain: "orders".to_string(),
             root: Some(Uuid {
-                value: b"test-123".to_vec(),
+                value: b"test-123".to_vec().into(),
             }),
-            correlation_id: String::new(),
             edition: None,
-            ..Default::default()
         }),
         pages: vec![],
         snapshot: None,

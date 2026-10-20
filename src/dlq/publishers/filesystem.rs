@@ -72,26 +72,9 @@ impl FilesystemDeadLetterPublisher {
     fn generate_filename(&self, dead_letter: &AngzarrDeadLetter) -> String {
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f");
         let domain = dead_letter.domain().unwrap_or("unknown");
+        // UUID text is already filename-safe.
         let correlation_id = dead_letter
-            .cover
-            .as_ref()
-            .map(|c| {
-                if c.correlation_id.is_empty() {
-                    "no-correlation".to_string()
-                } else {
-                    // Sanitize correlation ID for filename
-                    c.correlation_id
-                        .chars()
-                        .map(|c| {
-                            if c.is_alphanumeric() || c == '-' || c == '_' {
-                                c
-                            } else {
-                                '_'
-                            }
-                        })
-                        .collect()
-                }
-            })
+            .correlation_id()
             .unwrap_or_else(|| "no-correlation".to_string());
 
         let ext = match self.format.as_str() {
@@ -129,11 +112,11 @@ impl DeadLetterPublisher for FilesystemDeadLetterPublisher {
 
                 let json = serde_json::json!({
                     "domain": dead_letter.domain().unwrap_or("unknown"),
-                    "correlation_id": dead_letter.cover.as_ref().map(|c| &c.correlation_id),
+                    "correlation_id": dead_letter.correlation_id(),
                     "rejection_reason": dead_letter.rejection_reason,
                     "reason_type": dead_letter.reason_type(),
                     "source_component": dead_letter.source_component,
-                    "source_component_type": dead_letter.source_component_type,
+                    "source_component_kind": dead_letter.source_component_kind.as_str_name(),
                     "metadata": dead_letter.metadata,
                     "occurred_at": dead_letter.occurred_at.as_ref().map(|ts| {
                         chrono::DateTime::from_timestamp(ts.seconds, ts.nanos as u32)

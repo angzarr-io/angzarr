@@ -112,7 +112,13 @@ pub trait ServiceDiscovery: Send + Sync {
     /// Get all projector clients.
     async fn get_all_projectors(
         &self,
-    ) -> Result<Vec<ProjectorCoordinatorServiceClient<Channel>>, DiscoveryError>;
+    ) -> Result<
+        Vec<(
+            DiscoveredService,
+            ProjectorCoordinatorServiceClient<Channel>,
+        )>,
+        DiscoveryError,
+    >;
 
     /// Get projector client by name.
     async fn get_projector_by_name(

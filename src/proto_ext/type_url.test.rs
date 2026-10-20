@@ -1,78 +1,52 @@
-//! Tests for type URL utilities.
+//! Tests for type URL helpers.
 //!
-//! Type URLs identify protobuf message types in Any fields.
-//! angzarr's canonical form is bare: "/{package}.{MessageType}".
-//!
-//! Key behaviors verified:
-//! - for_type() builds correct canonical URLs
-//! - strip_prefix() extracts the message type from a canonical URL
-//! - fqn() extracts the FQN regardless of resolver prefix (recognition)
+//! Why this matters: the coordinator compares type URLs from many producers
+//! (prost stamps "/", other languages "type.googleapis.com/"); a wrong
+//! comparison would offer a snapshot of the wrong state type, or refuse a
+//! valid one.
 
 use super::*;
 
-/// for_type() prepends the bare canonical prefix.
 #[test]
 fn test_for_type() {
     assert_eq!(
         for_type("io.angzarr.examples.v1.OrderCreated"),
         "/io.angzarr.examples.v1.OrderCreated"
     );
-    // Round-trips with the framework constants.
-    assert_eq!(for_type("io.angzarr.v1.Notification"), NOTIFICATION);
 }
 
-/// strip_prefix() removes the bare canonical prefix, passes through other URLs.
 #[test]
 fn test_strip_prefix() {
     assert_eq!(
-        strip_prefix("/io.angzarr.examples.v1.OrderCreated"),
-        "io.angzarr.examples.v1.OrderCreated"
+        strip_prefix("/io.angzarr.v1.EventPage"),
+        "io.angzarr.v1.EventPage"
     );
-    assert_eq!(strip_prefix(NOTIFICATION), "io.angzarr.v1.Notification");
-    // A URL without the bare prefix passes through unchanged — strip_prefix
-    // only peels angzarr's own canonical form, not arbitrary resolver hosts.
-    assert_eq!(
-        strip_prefix("type.googleapis.com/io.angzarr.v1.Notification"),
-        "type.googleapis.com/io.angzarr.v1.Notification"
-    );
+    assert_eq!(strip_prefix("no.prefix.Here"), "no.prefix.Here");
 }
 
-/// fqn() yields the absolute proto name regardless of resolver prefix — the
-/// basis for recognizing inbound framework/client events.
 #[test]
 fn test_fqn_is_prefix_agnostic() {
-    // angzarr's bare canonical form.
-    assert_eq!(fqn(NOTIFICATION), "io.angzarr.v1.Notification");
-    // Other-language Any.Pack() default.
+    assert_eq!(fqn("/io.angzarr.v1.EventPage"), "io.angzarr.v1.EventPage");
     assert_eq!(
-        fqn("type.googleapis.com/io.angzarr.v1.Confirmation"),
-        "io.angzarr.v1.Confirmation"
+        fqn("type.googleapis.com/io.angzarr.v1.EventPage"),
+        "io.angzarr.v1.EventPage"
     );
-    // No `/` at all — whole string is the name.
-    assert_eq!(fqn("io.angzarr.v1.NoOp"), "io.angzarr.v1.NoOp");
+    assert_eq!(fqn("io.angzarr.v1.EventPage"), "io.angzarr.v1.EventPage");
 }
 
-/// The canonical constants are the bare form: a leading `/` then the FQN,
-/// no resolver host and no `angzarr` org duplication.
+/// types.proto: "/orders.OrderCreated", "type.googleapis.com/orders.OrderCreated"
+/// and "orders.OrderCreated" all name the same message; a different package
+/// or a bare short name never does.
 #[test]
-fn test_constants_are_bare_canonical() {
-    for url in [
-        NOTIFICATION,
-        REJECTION_NOTIFICATION,
-        SAGA_COMPENSATION_FAILED,
-        CONFIRMATION,
-        REVOCATION,
-        COMPENSATE,
-        NOOP,
-        COMMAND_BOOK,
-    ] {
-        assert!(
-            url.starts_with("/io.angzarr.v1."),
-            "{url} must be a bare canonical URL"
-        );
-        assert!(
-            !url.contains("googleapis") && !url.contains("angzarr.io"),
-            "{url} must not home in a resolver host"
-        );
-    }
+fn test_same_message_compares_full_names_exactly() {
+    assert!(same_message(
+        "/orders.OrderCreated",
+        "type.googleapis.com/orders.OrderCreated"
+    ));
+    assert!(same_message("orders.OrderCreated", "/orders.OrderCreated"));
+    assert!(!same_message("/orders.OrderCreated", "/OrderCreated"));
+    assert!(!same_message(
+        "/orders.OrderCreated",
+        "/orders.v2.OrderCreated"
+    ));
 }

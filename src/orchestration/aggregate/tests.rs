@@ -1,929 +1,443 @@
-//! Tests for aggregate orchestration utilities.
-//!
-//! Aggregates are the core of domain logic — they accept commands, validate them
-//! against current state, and emit events. This module tests the parsing and
-//! validation utilities that support aggregate orchestration:
-//!
-//! - Cover parsing: Extract domain and root_id from commands/events
-//! - Sequence handling: Track aggregate version for optimistic concurrency
-//! - Merge strategies: Determine how concurrent commands are handled
-//! - Event combining: Merge prior events with command output for state replay
-//! - State diffing: Compare before/after state to detect field changes
-//!
-//! These utilities are framework plumbing — business logic uses higher-level
-//! aggregate traits. Tests here ensure the plumbing is correct.
+//! Unit tests for the aggregate pipeline's structural behaviour: id
+//! assignment, provenance stamping, the append, publishing, output
+//! validation and parked facts. The coordinator-contract scenarios
+//! (conflict resolution, rules versions, snapshot selection) are bound in
+//! `tests/coordinator_contract.rs`.
 
-use super::*;
-// Direct imports from merge module for test utilities
-use super::merge::{
-    build_combined_events, build_events_up_to_sequence, diff_state_fields,
-    partition_by_commit_status,
-};
-use crate::proto::{
-    command_page, event_page, page_header, CommandBook, CommandPage, Cover, EventBook,
-    MergeStrategy, PageHeader, Uuid as ProtoUuid,
-};
-use crate::proto_ext::{calculate_set_next_seq, CommandBookExt, EventBookExt};
-use prost_types::Any;
+use tonic::Code;
 use uuid::Uuid;
 
-// ============================================================================
-// Test Helpers
-// ============================================================================
+use super::*;
+use crate::proto::{
+    event_meta::Causation, CommandHandlerResponse, ConflictResolution, DeliveryOutcome, EventBook,
+    EventMeta, EventPage,
+};
+use crate::storage::{EventStore, StreamRef};
+use crate::test_utils::*;
 
-fn make_command_book(domain: &str, root: Uuid, sequence: u32) -> CommandBook {
-    make_command_book_with_strategy(domain, root, sequence, MergeStrategy::MergeCommutative)
+const DOMAIN: &str = "order";
+const VERSION: &str = "1.4.2+build.7";
+
+fn root() -> Uuid {
+    Uuid::from_u128(0x0192_0c8e_7b3a_7cc2_9f4e_5a1b_2c3d_4e5f)
 }
 
-fn make_command_book_with_strategy(
-    domain: &str,
-    root: Uuid,
-    sequence: u32,
-    strategy: MergeStrategy,
-) -> CommandBook {
-    CommandBook {
-        cover: Some(Cover {
-            domain: domain.to_string(),
-            root: Some(ProtoUuid {
-                value: root.as_bytes().to_vec(),
-            }),
-            correlation_id: String::new(),
-            edition: None,
-            ext: None,
-        }),
-        pages: vec![CommandPage {
-            header: Some(PageHeader {
-                sync_mode: None,
-                sequence_type: Some(page_header::SequenceType::Sequence(sequence)),
-            }),
-            payload: Some(command_page::Payload::Command(Any {
-                type_url: "test.Command".to_string(),
-                value: vec![],
-            })),
-            merge_strategy: strategy as i32,
-        }],
-    }
+fn registered() -> Harness {
+    let h = Harness::new(DOMAIN, Answer::events(&["/orders.v1.ItemAdded"], VERSION));
+    h.registry
+        .register(
+            DOMAIN,
+            "local",
+            aggregate_descriptor("order", "/orders.v1.OrderState", VERSION, false),
+        )
+        .unwrap();
+    h
 }
 
-fn make_event_book(domain: &str, root: Uuid, last_sequence: Option<u32>) -> EventBook {
-    use crate::proto::EventPage;
+async fn stored(h: &Harness) -> Vec<EventPage> {
+    h.events
+        .read(StreamRef::main(DOMAIN, root()), 0, None)
+        .await
+        .unwrap()
+}
 
-    let pages = if let Some(seq) = last_sequence {
-        vec![EventPage {
-            header: Some(PageHeader {
-                sync_mode: None,
-                sequence_type: Some(page_header::SequenceType::Sequence(seq)),
-            }),
-            payload: Some(event_page::Payload::Event(Any {
-                type_url: "test.Event".to_string(),
-                value: vec![],
-            })),
-            created_at: None,
-            ..Default::default()
-        }]
-    } else {
-        vec![]
+/// Without a registration the coordinator cannot vet a response's version,
+/// so it serves nothing (UNAVAILABLE, retryable) rather than guessing.
+#[tokio::test]
+async fn test_unregistered_coordinator_answers_unavailable() {
+    let h = Harness::new(DOMAIN, Answer::events(&["/orders.v1.ItemAdded"], VERSION));
+    let err = h
+        .pipeline()
+        .execute(
+            command(DOMAIN, root(), "/orders.v1.AddItem"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_status().code(), Code::Unavailable);
+    assert!(h.business.received().is_empty());
+}
+
+/// A client command without ids gets a minted v7 command id, and its
+/// correlation is that command id (types.proto, command_identity).
+#[tokio::test]
+async fn test_minted_command_id_is_v7_and_is_the_correlation() {
+    let h = registered();
+    let decided = h
+        .pipeline()
+        .execute(
+            command(DOMAIN, root(), "/orders.v1.AddItem"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    assert_eq!(decided.delivery, DeliveryOutcome::Applied);
+    let meta = decided.events.pages[0].meta.clone().unwrap();
+    let Some(Causation::CommandId(id)) = meta.causation else {
+        panic!("causation must be the command id");
     };
-
-    let mut book = EventBook {
-        cover: Some(Cover {
-            domain: domain.to_string(),
-            root: Some(ProtoUuid {
-                value: root.as_bytes().to_vec(),
-            }),
-            correlation_id: String::new(),
-            edition: None,
-            ext: None,
-        }),
-        pages,
-        snapshot: None,
-        ..Default::default()
-    };
-    calculate_set_next_seq(&mut book);
-    book
+    let id = Uuid::try_from(&id).unwrap();
+    assert_eq!(id.get_version_num(), 7);
+    assert_eq!(Uuid::try_from(&meta.correlation_id.unwrap()).unwrap(), id);
 }
 
-// ============================================================================
-// Cover Parsing Tests
-// ============================================================================
-//
-// The cover contains domain and root_id which identify the aggregate instance.
-// Parsing must be strict — malformed covers cause routing failures downstream.
-
-/// Valid cover parses to domain and root_id.
-#[test]
-fn test_parse_command_cover_valid() {
-    let root = Uuid::new_v4();
-    let command = make_command_book("orders", root, 0);
-
-    let (domain, parsed_root) = parse_command_cover(&command).unwrap();
-
-    assert_eq!(domain, "orders");
-    assert_eq!(parsed_root, root);
-}
-
-/// Missing cover returns error — commands must identify their target.
-///
-/// Commands without covers cannot be routed. Early rejection with clear error
-/// helps clients debug integration issues.
-#[test]
-fn test_parse_command_cover_missing_cover() {
-    let command = CommandBook {
-        cover: None,
-        pages: vec![],
-    };
-
-    let result = parse_command_cover(&command);
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .message()
-        .contains(crate::orchestration::errmsg::COMMAND_BOOK_MISSING_COVER));
-}
-
-/// Missing root returns error — aggregate instance must be specified.
-///
-/// Domain alone is insufficient; root_id identifies the specific aggregate
-/// instance. Without it, the framework can't load or persist state.
-#[test]
-fn test_parse_command_cover_missing_root() {
-    let command = CommandBook {
-        cover: Some(Cover {
-            domain: "orders".to_string(),
-            root: None,
-            correlation_id: String::new(),
-            edition: None,
-            ext: None,
-        }),
-        pages: vec![],
-    };
-
-    let result = parse_command_cover(&command);
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .message()
-        .contains(crate::orchestration::errmsg::COVER_MISSING_ROOT));
-}
-
-// ============================================================================
-// Sequence Handling Tests
-// ============================================================================
-//
-// Sequences provide optimistic concurrency control. Each event has a sequence
-// number; commands must target the next expected sequence. Mismatches indicate
-// concurrent modification.
-
-/// Command sequence extracted from first page.
-#[test]
-fn test_extract_command_sequence() {
-    let root = Uuid::new_v4();
-    let command = make_command_book("orders", root, 5);
-
-    assert_eq!(extract_command_sequence(&command), 5);
-}
-
-/// Empty pages default to sequence 0 — new aggregate creation.
-#[test]
-fn test_extract_command_sequence_empty_pages() {
-    let command = CommandBook {
-        cover: None,
-        pages: vec![],
-    };
-
-    assert_eq!(extract_command_sequence(&command), 0);
-}
-
-/// Next sequence is last event sequence + 1.
-#[test]
-fn test_next_sequence_from_events() {
-    let root = Uuid::new_v4();
-    let events = make_event_book("orders", root, Some(4));
-
-    assert_eq!(events.next_sequence(), 5);
-}
-
-/// Empty event stream has next_sequence 0.
-#[test]
-fn test_next_sequence_empty_events() {
-    let root = Uuid::new_v4();
-    let events = make_event_book("orders", root, None);
-
-    assert_eq!(events.next_sequence(), 0);
-}
-
-/// Snapshot sequence takes precedence over event pages.
-///
-/// Snapshots capture aggregate state at a point in time. When present,
-/// next_sequence is snapshot.sequence + 1 (events since snapshot are
-/// in pages, but snapshot establishes the baseline).
-#[test]
-fn test_next_sequence_from_snapshot() {
-    use crate::proto::{Snapshot, SnapshotRetention};
-
-    let root = Uuid::new_v4();
-    let mut events = make_event_book("orders", root, None);
-    events.snapshot = Some(Snapshot {
-        sequence: 10,
-        state: None,
-        retention: SnapshotRetention::RetentionDefault as i32,
-        created_at: None,
-    });
-    calculate_set_next_seq(&mut events);
-
-    assert_eq!(events.next_sequence(), 11);
-}
-
-// ============================================================================
-// Merge Strategy Tests
-// ============================================================================
-//
-// Merge strategies control how the framework handles concurrent commands:
-// - MergeStrict: Reject if sequence mismatch (traditional optimistic locking)
-// - MergeCommutative: Allow if commands modify disjoint fields
-// - MergeAggregateHandles: Delegate conflict resolution to aggregate
-
-/// Default merge strategy is commutative — maximizes throughput.
-///
-/// Commutative merging allows concurrent commands that touch different fields
-/// to succeed without conflict. This is the common case for most domains.
-#[test]
-fn test_merge_strategy_default_is_commutative() {
-    let root = Uuid::new_v4();
-    let command = make_command_book("orders", root, 0);
-
-    assert_eq!(command.merge_strategy(), MergeStrategy::MergeCommutative);
-}
-
-/// Strict strategy requires exact sequence match.
-///
-/// Used when any concurrent modification is unsafe — all fields are coupled.
-/// Example: financial transactions where partial state is dangerous.
-#[test]
-fn test_merge_strategy_strict() {
-    let root = Uuid::new_v4();
-    let command = make_command_book_with_strategy("orders", root, 0, MergeStrategy::MergeStrict);
-
-    assert_eq!(command.merge_strategy(), MergeStrategy::MergeStrict);
-}
-
-/// Aggregate-handles strategy delegates conflict resolution.
-///
-/// The aggregate receives both the command and current state, allowing it to
-/// implement domain-specific merge logic (e.g., last-writer-wins for certain
-/// fields, reject for others).
-#[test]
-fn test_merge_strategy_aggregate_handles() {
-    let root = Uuid::new_v4();
-    let command =
-        make_command_book_with_strategy("orders", root, 0, MergeStrategy::MergeAggregateHandles);
-
+/// Supplied ids are kept verbatim, whatever their UUID version.
+#[tokio::test]
+async fn test_supplied_ids_are_kept() {
+    let h = registered();
+    let mut book = command(DOMAIN, root(), "/orders.v1.AddItem");
+    let page = book.page.as_mut().unwrap();
+    page.command_id = Some(Uuid::from_u128(11).into());
+    page.correlation_id = Some(Uuid::from_u128(12).into());
+    let decided = h.pipeline().execute(book, Delivery::Client).await.unwrap();
+    let meta = decided.events.pages[0].meta.clone().unwrap();
     assert_eq!(
-        command.merge_strategy(),
-        MergeStrategy::MergeAggregateHandles
+        meta.causation,
+        Some(Causation::CommandId(Uuid::from_u128(11).into()))
     );
+    assert_eq!(meta.correlation_id, Some(Uuid::from_u128(12).into()));
 }
 
-/// Empty pages default to commutative — safe default for malformed commands.
-#[test]
-fn test_merge_strategy_empty_pages_defaults_to_commutative() {
-    let command = CommandBook {
-        cover: None,
-        pages: vec![],
-    };
-
-    // Empty pages should default to Commutative
-    assert_eq!(command.merge_strategy(), MergeStrategy::MergeCommutative);
+/// Every event of one write is sequenced from the head, shares one meta,
+/// is appended, and is published with the stream's cover.
+#[tokio::test]
+async fn test_events_are_sequenced_stamped_appended_and_published() {
+    let h = registered();
+    h.business.then(Answer::events(
+        &["/orders.v1.ItemAdded", "/orders.v1.ShippingQuoted"],
+        VERSION,
+    ));
+    let pipeline = h.pipeline();
+    pipeline
+        .execute(
+            command(DOMAIN, root(), "/orders.v1.AddItem"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    pipeline
+        .execute(
+            command(DOMAIN, root(), "/orders.v1.AddItem"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    let pages = stored(&h).await;
+    assert_eq!(
+        pages.iter().map(|p| p.sequence).collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
+    assert_eq!(pages[0].meta, pages[1].meta);
+    assert_ne!(pages[1].meta, pages[2].meta);
+    let published = h.bus.published().await;
+    assert_eq!(published.len(), 2);
+    assert_eq!(published[1].next_sequence, 3);
+    assert_eq!(published[1].cover, Some(cover(DOMAIN, root())));
 }
 
-// ============================================================================
-// Combined Events Builder Tests
-// ============================================================================
-//
-// For post-execution commutative merge checks, we combine prior events with
-// the command's new events to replay the aggregate state after the command.
-
-/// Combines prior events with new events from command response.
-#[test]
-fn test_build_combined_events_merges_pages() {
-    let root = Uuid::new_v4();
-    let cover = Some(Cover {
-        domain: "test".to_string(),
-        root: Some(ProtoUuid {
-            value: root.as_bytes().to_vec(),
-        }),
-        correlation_id: String::new(),
-        edition: None,
-        ext: None,
-    });
-
-    let prior = EventBook {
-        cover: cover.clone(),
-        pages: vec![
-            crate::proto::EventPage {
-                header: Some(PageHeader {
-                    sync_mode: None,
-                    sequence_type: Some(page_header::SequenceType::Sequence(0)),
-                }),
-                payload: None,
-                created_at: None,
-                ..Default::default()
-            },
-            crate::proto::EventPage {
-                header: Some(PageHeader {
-                    sync_mode: None,
-                    sequence_type: Some(page_header::SequenceType::Sequence(1)),
-                }),
-                payload: None,
-                created_at: None,
-                ..Default::default()
-            },
-        ],
-        snapshot: None,
-        next_sequence: 2,
+/// The delivered command has its Handling resolved: an absent expected
+/// sequence is stamped with the head.
+#[tokio::test]
+async fn test_absent_expected_sequence_is_stamped_with_the_head() {
+    let h = registered();
+    let pipeline = h.pipeline();
+    for _ in 0..2 {
+        pipeline
+            .execute(
+                command(DOMAIN, root(), "/orders.v1.AddItem"),
+                Delivery::Client,
+            )
+            .await
+            .unwrap();
+    }
+    let delivered = h.business.received();
+    let stamped = |i: usize| {
+        delivered[i]
+            .command
+            .as_ref()
+            .unwrap()
+            .handling
+            .as_ref()
+            .unwrap()
+            .expected_sequence
     };
+    assert_eq!(stamped(0), Some(0));
+    assert_eq!(stamped(1), Some(1));
+    assert_eq!(delivered[1].events.as_ref().unwrap().next_sequence, 1);
+}
 
-    let received = EventBook {
-        cover: cover.clone(),
-        pages: vec![crate::proto::EventPage {
-            header: Some(PageHeader {
-                sync_mode: None,
-                sequence_type: Some(page_header::SequenceType::Sequence(2)),
-            }),
-            payload: None,
-            created_at: None,
+/// recorded_at never goes backwards within a stream, even when the clock
+/// steps back (EventMeta.recorded_at).
+#[tokio::test]
+async fn test_recorded_at_is_monotonic_across_a_clock_step_back() {
+    let h = registered();
+    let pipeline = h.pipeline();
+    h.clock.set(2_000);
+    pipeline
+        .execute(
+            command(DOMAIN, root(), "/orders.v1.AddItem"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    h.clock.set(1_000);
+    pipeline
+        .execute(
+            command(DOMAIN, root(), "/orders.v1.AddItem"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    let pages = stored(&h).await;
+    let at = |p: &EventPage| p.meta.as_ref().unwrap().recorded_at.unwrap().seconds;
+    assert_eq!(at(&pages[0]), 2_000);
+    assert_eq!(at(&pages[1]), 2_000);
+}
+
+fn raw(pages: Vec<EventPage>, cover: Option<crate::proto::Cover>) -> Answer {
+    Answer::Raw(CommandHandlerResponse {
+        events: Some(EventBook {
+            cover,
+            pages,
             ..Default::default()
-        }],
-        snapshot: None,
-        next_sequence: 3,
-    };
-
-    let combined = build_combined_events(&prior, &received);
-
-    assert_eq!(combined.pages.len(), 3, "should have 3 total pages");
-    assert_eq!(combined.next_sequence, 3, "next_sequence from received");
-}
-
-/// Uses snapshot from received events if present.
-#[test]
-fn test_build_combined_events_uses_received_snapshot() {
-    let root = Uuid::new_v4();
-    let cover = Some(Cover {
-        domain: "test".to_string(),
-        root: Some(ProtoUuid {
-            value: root.as_bytes().to_vec(),
         }),
-        correlation_id: String::new(),
-        edition: None,
-        ext: None,
-    });
-
-    let prior = EventBook {
-        cover: cover.clone(),
-        pages: vec![],
-        snapshot: Some(crate::proto::Snapshot {
-            sequence: 0,
-            state: Some(Any {
-                type_url: "old.Snapshot".to_string(),
-                value: vec![1, 2, 3],
-            }),
-            retention: 0,
-            created_at: None,
-        }),
-        next_sequence: 1,
-    };
-
-    let received = EventBook {
-        cover: cover.clone(),
-        pages: vec![],
-        snapshot: Some(crate::proto::Snapshot {
-            sequence: 1,
-            state: Some(Any {
-                type_url: "new.Snapshot".to_string(),
-                value: vec![4, 5, 6],
-            }),
-            retention: 0,
-            created_at: None,
-        }),
-        next_sequence: 2,
-    };
-
-    let combined = build_combined_events(&prior, &received);
-
-    assert!(combined.snapshot.is_some());
-    let snap = combined.snapshot.unwrap();
-    assert_eq!(snap.sequence, 1, "should use received snapshot");
+        rules_version: VERSION.to_string(),
+    })
 }
 
-// ============================================================================
-// Event Filtering Tests
-// ============================================================================
-//
-// When a command targets sequence N, the aggregate should only see events
-// 0..N-1. Events N+ represent concurrent modifications the command doesn't
-// know about. Filtering ensures consistent "as of" views.
-
-/// Events filtered to sequence N excludes events >= N.
-#[test]
-fn test_build_events_up_to_sequence_filters_correctly() {
-    let root = Uuid::new_v4();
-    let events = EventBook {
-        cover: Some(Cover {
-            domain: "test".to_string(),
-            root: Some(ProtoUuid {
-                value: root.as_bytes().to_vec(),
-            }),
-            correlation_id: String::new(),
-            edition: None,
-            ext: None,
-        }),
-        pages: vec![
-            crate::proto::EventPage {
-                header: Some(PageHeader {
-                    sync_mode: None,
-                    sequence_type: Some(page_header::SequenceType::Sequence(0)),
-                }),
-                payload: None,
-                created_at: None,
-                ..Default::default()
-            },
-            crate::proto::EventPage {
-                header: Some(PageHeader {
-                    sync_mode: None,
-                    sequence_type: Some(page_header::SequenceType::Sequence(1)),
-                }),
-                payload: None,
-                created_at: None,
-                ..Default::default()
-            },
-            crate::proto::EventPage {
-                header: Some(PageHeader {
-                    sync_mode: None,
-                    sequence_type: Some(page_header::SequenceType::Sequence(2)),
-                }),
-                payload: None,
-                created_at: None,
-                ..Default::default()
-            },
-            crate::proto::EventPage {
-                header: Some(PageHeader {
-                    sync_mode: None,
-                    sequence_type: Some(page_header::SequenceType::Sequence(3)),
-                }),
-                payload: None,
-                created_at: None,
-                ..Default::default()
-            },
-        ],
-        snapshot: None,
-        next_sequence: 4,
-    };
-
-    let filtered = build_events_up_to_sequence(&events, 2);
-    assert_eq!(filtered.pages.len(), 2, "should have events 0 and 1");
-    assert_eq!(filtered.next_sequence, 2);
-}
-
-/// Sequence 0 means "create new aggregate" — no prior events.
-#[test]
-fn test_build_events_up_to_sequence_zero_returns_empty() {
-    let root = Uuid::new_v4();
-    let events = EventBook {
-        cover: Some(Cover {
-            domain: "test".to_string(),
-            root: Some(ProtoUuid {
-                value: root.as_bytes().to_vec(),
-            }),
-            correlation_id: String::new(),
-            edition: None,
-            ext: None,
-        }),
-        pages: vec![crate::proto::EventPage {
-            header: Some(PageHeader {
-                sync_mode: None,
-                sequence_type: Some(page_header::SequenceType::Sequence(0)),
-            }),
-            payload: None,
-            created_at: None,
-            ..Default::default()
-        }],
-        snapshot: None,
-        next_sequence: 1,
-    };
-
-    let filtered = build_events_up_to_sequence(&events, 0);
-    assert!(filtered.pages.is_empty(), "up_to 0 should return empty");
-}
-
-// ============================================================================
-// Type URL Diff Tests
-// ============================================================================
-//
-// State diffing must handle type URL mismatches (schema evolution) and
-// unknown types (unregistered aggregates). These tests verify fallback
-// behavior.
-
-/// Different type URLs return wildcard — incomparable states.
-///
-/// Schema evolution may change type URLs. When before/after have different
-/// types, field-level comparison is meaningless — treat as total conflict.
-#[test]
-fn test_diff_state_fields_different_types() {
-    let before = Any {
-        type_url: "type.a".to_string(),
-        value: vec![1, 2, 3],
-    };
-    let after = Any {
-        type_url: "type.b".to_string(),
-        value: vec![1, 2, 3],
-    };
-
-    let changed = diff_state_fields(&before, &after);
-    assert!(
-        changed.contains("*"),
-        "different types should return wildcard"
-    );
-}
-
-/// Identical bytes return empty change set.
-#[test]
-fn test_diff_state_fields_same_bytes() {
-    let before = Any {
-        type_url: "test.Unknown".to_string(),
-        value: vec![1, 2, 3],
-    };
-    let after = Any {
-        type_url: "test.Unknown".to_string(),
-        value: vec![1, 2, 3],
-    };
-
-    let changed = diff_state_fields(&before, &after);
-    assert!(
-        changed.is_empty(),
-        "identical bytes should return empty set"
-    );
-}
-
-/// Unknown type with different bytes returns wildcard — conservative fallback.
-///
-/// When the framework can't parse state (unregistered type), it can't determine
-/// which fields changed. Wildcard ensures no silent corruption.
-#[test]
-fn test_diff_state_fields_different_bytes_unknown_type() {
-    let before = Any {
-        type_url: "test.Unknown".to_string(),
-        value: vec![1, 2, 3],
-    };
-    let after = Any {
-        type_url: "test.Unknown".to_string(),
-        value: vec![4, 5, 6],
-    };
-
-    let changed = diff_state_fields(&before, &after);
-    assert!(
-        changed.contains("*"),
-        "different bytes with unknown type should return wildcard"
-    );
-}
-
-// ============================================================================
-// Fact Pipeline Parsing Tests
-// ============================================================================
-//
-// Facts are events injected directly into aggregates, bypassing command
-// validation. They represent external realities the aggregate must accept.
-// Parsing validates the cover before injection.
-
-/// Valid event cover parses to domain and root.
-#[test]
-fn test_parse_event_cover_valid() {
-    let root = Uuid::new_v4();
-    let event = make_event_book("inventory", root, Some(0));
-
-    let (domain, parsed_root) = parse_event_cover(&event).unwrap();
-
-    assert_eq!(domain, "inventory");
-    assert_eq!(parsed_root, root);
-}
-
-/// Missing cover returns error — facts must identify their target.
-#[test]
-fn test_parse_event_cover_missing_cover() {
-    let event = EventBook {
-        cover: None,
-        pages: vec![],
-        snapshot: None,
-        next_sequence: 0,
-    };
-
-    let result = parse_event_cover(&event);
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .message()
-        .contains(crate::orchestration::errmsg::EVENT_BOOK_MISSING_COVER));
-}
-
-/// Missing root returns error — aggregate instance must be specified.
-#[test]
-fn test_parse_event_cover_missing_root() {
-    let event = EventBook {
-        cover: Some(Cover {
-            domain: "test".to_string(),
-            root: None,
-            correlation_id: String::new(),
-            edition: None,
-            ext: None,
-        }),
-        pages: vec![],
-        snapshot: None,
-        next_sequence: 0,
-    };
-
-    let result = parse_event_cover(&event);
-    assert!(result.is_err());
-    assert!(result
-        .unwrap_err()
-        .message()
-        .contains(crate::orchestration::errmsg::COVER_MISSING_ROOT));
-}
-
-// ============================================================================
-// Error Message Constant Tests
-// ============================================================================
-//
-// Error messages are exported as constants in crate::orchestration::errmsg.
-// Tests verify constants are non-empty and prefix constants end appropriately.
-
-/// All orchestration error message constants are non-empty.
-#[test]
-fn test_errmsg_constants_non_empty() {
-    use crate::orchestration::errmsg;
-
-    assert!(!errmsg::COMMAND_BOOK_MISSING_COVER.is_empty());
-    assert!(!errmsg::EVENT_BOOK_MISSING_COVER.is_empty());
-    assert!(!errmsg::COVER_MISSING_ROOT.is_empty());
-    assert!(!errmsg::INVALID_UUID.is_empty());
-    assert!(!errmsg::SEQUENCE_MISMATCH.is_empty());
-    assert!(!errmsg::SEQUENCE_MISMATCH_OVERLAP.is_empty());
-    assert!(!errmsg::SEQUENCE_MISMATCH_DLQ_SUFFIX.is_empty());
-    assert!(!errmsg::SPECULATIVE_REQUIRES_TEMPORAL.is_empty());
-    assert!(!errmsg::FACT_EVENTS_MISSING_MARKER.is_empty());
-}
-
-/// Prefix constants end with colon-space for appending dynamic values.
-#[test]
-fn test_errmsg_prefix_constants_format() {
-    use crate::orchestration::errmsg;
-
-    // Prefix constants should end with ": " for consistent formatting
-    assert!(errmsg::INVALID_UUID.ends_with(": "));
-    assert!(errmsg::SEQUENCE_MISMATCH.ends_with(' '));
-    assert!(errmsg::SEQUENCE_MISMATCH_OVERLAP.ends_with(' '));
-}
-
-/// Error messages can be used in format! and produce expected output.
-#[test]
-fn test_errmsg_format_usage() {
-    use crate::orchestration::errmsg;
-
-    let error = format!("{}bad-uuid", errmsg::INVALID_UUID);
-    assert!(error.starts_with(errmsg::INVALID_UUID));
-    assert!(error.contains("bad-uuid"));
-
-    let error = format!("{}5, aggregate at 10", errmsg::SEQUENCE_MISMATCH);
-    assert!(error.starts_with(errmsg::SEQUENCE_MISMATCH));
-    assert!(error.contains("5"));
-    assert!(error.contains("10"));
-}
-
-// ============================================================================
-// Test State Parsing Tests
-// ============================================================================
-//
-// JSON-based state diffing for test aggregates. This enables commutative
-// merge testing without requiring proto reflection. Tests use the test_support
-// module included via #[path] in merge.rs.
-
-use super::merge::test_support::{diff_test_state_fields, parse_test_state_fields};
-
-/// Simple JSON parses to field map.
-#[test]
-fn test_parse_test_state_fields_simple() {
-    let fields = parse_test_state_fields(r#"{"field_a":100,"field_b":"hello"}"#);
-    assert_eq!(fields.get("field_a"), Some(&"100".to_string()));
-    assert_eq!(fields.get("field_b"), Some(&"\"hello\"".to_string()));
-}
-
-/// Empty JSON parses to empty map.
-#[test]
-fn test_parse_test_state_fields_empty() {
-    let fields = parse_test_state_fields("{}");
-    assert!(fields.is_empty());
-}
-
-/// Identical states produce empty change set — no conflict possible.
-#[test]
-fn test_diff_test_state_fields_identical() {
-    let before = r#"{"field_a":100}"#.as_bytes();
-    let after = r#"{"field_a":100}"#.as_bytes();
-
-    let changed = diff_test_state_fields(before, after);
-    assert!(
-        changed.is_empty(),
-        "identical states should have no changes"
-    );
-}
-
-/// Single field change returns that field only.
-#[test]
-fn test_diff_test_state_fields_single_change() {
-    let before = r#"{"field_a":100,"field_b":200}"#.as_bytes();
-    let after = r#"{"field_a":100,"field_b":300}"#.as_bytes();
-
-    let changed = diff_test_state_fields(before, after);
-    assert_eq!(changed.len(), 1);
-    assert!(changed.contains("field_b"));
-    assert!(!changed.contains("field_a"));
-}
-
-/// Multiple field changes returns all changed fields.
-#[test]
-fn test_diff_test_state_fields_multiple_changes() {
-    let before = r#"{"field_a":100,"field_b":200}"#.as_bytes();
-    let after = r#"{"field_a":999,"field_b":888}"#.as_bytes();
-
-    let changed = diff_test_state_fields(before, after);
-    assert_eq!(changed.len(), 2);
-    assert!(changed.contains("field_a"));
-    assert!(changed.contains("field_b"));
-}
-
-/// Field addition detected as change.
-#[test]
-fn test_diff_test_state_fields_field_added() {
-    let before = r#"{"field_a":100}"#.as_bytes();
-    let after = r#"{"field_a":100,"field_b":200}"#.as_bytes();
-
-    let changed = diff_test_state_fields(before, after);
-    assert!(changed.contains("field_b"), "new field should be detected");
-}
-
-/// Field removal detected as change.
-#[test]
-fn test_diff_test_state_fields_field_removed() {
-    let before = r#"{"field_a":100,"field_b":200}"#.as_bytes();
-    let after = r#"{"field_a":100}"#.as_bytes();
-
-    let changed = diff_test_state_fields(before, after);
-    assert!(
-        changed.contains("field_b"),
-        "removed field should be detected"
-    );
-}
-
-// ============================================================================
-// Cascade / Two-Phase Commit Tests
-// ============================================================================
-
-fn make_cascade_event_page(
-    sequence: u32,
-    no_commit: bool,
-    cascade_id: Option<&str>,
-) -> crate::proto::EventPage {
-    crate::proto::EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(page_header::SequenceType::Sequence(sequence)),
-        }),
-        payload: Some(event_page::Payload::Event(Any {
-            type_url: "test.Event".to_string(),
-            value: vec![],
-        })),
-        created_at: None,
-        no_commit,
-        cascade_id: cascade_id.map(|s| s.to_string()),
+fn payload_page() -> EventPage {
+    EventPage {
+        payload: Some(any("/orders.v1.ItemAdded", b"x")),
+        ..Default::default()
     }
 }
 
-/// partition_by_commit_status separates committed from uncommitted events.
-///
-/// 2PC relies on this to identify which events are "locked" by in-flight
-/// cascades. Committed events are the stable base; uncommitted events
-/// are pending and may be confirmed or revoked.
-#[test]
-fn test_partition_all_committed() {
-    let root = Uuid::new_v4();
-    let mut book = make_event_book("test", root, None);
-    book.pages = vec![
-        make_cascade_event_page(1, false, None),
-        make_cascade_event_page(2, false, None),
+/// Business output that sets meta, a sequence or a foreign cover is a
+/// handler bug: INTERNAL, nothing persisted (BO-1).
+#[tokio::test]
+async fn test_contract_violating_output_is_internal_and_persists_nothing() {
+    let violations = [
+        raw(
+            vec![EventPage {
+                meta: Some(EventMeta::default()),
+                ..payload_page()
+            }],
+            None,
+        ),
+        raw(
+            vec![EventPage {
+                sequence: 4,
+                ..payload_page()
+            }],
+            None,
+        ),
+        raw(vec![payload_page()], Some(cover("inventory", root()))),
+        raw(vec![EventPage::default()], None),
     ];
-
-    let (committed, uncommitted) = partition_by_commit_status(&book);
-    assert_eq!(committed.pages.len(), 2);
-    assert!(uncommitted.is_empty());
-}
-
-/// Uncommitted events from a cascade are correctly partitioned.
-///
-/// When a cascade writes events with no_commit=true, they must be
-/// separated so the conflict detection can identify locked fields.
-#[test]
-fn test_partition_with_uncommitted_cascade() {
-    let root = Uuid::new_v4();
-    let mut book = make_event_book("test", root, None);
-    book.pages = vec![
-        make_cascade_event_page(1, false, None),
-        make_cascade_event_page(2, true, Some("cascade-A")),
-        make_cascade_event_page(3, true, Some("cascade-A")),
-    ];
-
-    let (committed, uncommitted) = partition_by_commit_status(&book);
-    assert_eq!(committed.pages.len(), 1);
-    assert_eq!(uncommitted.len(), 2);
-    assert_eq!(uncommitted[0].cascade_id.as_deref(), Some("cascade-A"));
-}
-
-/// Mixed committed and uncommitted from multiple cascades.
-///
-/// Multiple cascades can have uncommitted events against the same aggregate.
-/// Partition must correctly separate all of them regardless of ordering.
-#[test]
-fn test_partition_multiple_cascades() {
-    let root = Uuid::new_v4();
-    let mut book = make_event_book("test", root, None);
-    book.pages = vec![
-        make_cascade_event_page(1, false, None),
-        make_cascade_event_page(2, true, Some("cascade-A")),
-        make_cascade_event_page(3, true, Some("cascade-B")),
-        make_cascade_event_page(4, false, None),
-    ];
-
-    let (committed, uncommitted) = partition_by_commit_status(&book);
-    assert_eq!(committed.pages.len(), 2, "should have 2 committed events");
-    assert_eq!(uncommitted.len(), 2, "should have 2 uncommitted events");
-}
-
-/// No uncommitted events means no cascade conflicts possible.
-///
-/// This is the fast path — when all events are committed, cascade
-/// conflict detection is a no-op.
-#[test]
-fn test_partition_empty_book() {
-    let root = Uuid::new_v4();
-    let book = make_event_book("test", root, None);
-
-    let (committed, uncommitted) = partition_by_commit_status(&book);
-    assert!(committed.pages.is_empty());
-    assert!(uncommitted.is_empty());
-}
-
-/// cascade_id accessor returns None for non-cascade contexts.
-///
-/// The default implementation in AggregateContext trait returns None,
-/// which the pipeline uses to skip 2PC transformation entirely.
-#[test]
-fn test_cascade_id_trait_default() {
-    use super::traits::AggregateContext;
-
-    struct DefaultCtx;
-    #[async_trait::async_trait]
-    impl AggregateContext for DefaultCtx {
-        async fn load_prior_events_with_divergence(
-            &self,
-            _: &str,
-            _: &str,
-            _: Uuid,
-            _: &TemporalQuery,
-            _: Option<u32>,
-        ) -> Result<EventBook, tonic::Status> {
-            unimplemented!()
-        }
-        async fn persist_events(
-            &self,
-            _: &EventBook,
-            _: &EventBook,
-            _: &str,
-            _: &str,
-            _: Uuid,
-            _: &str,
-            _: Option<&str>,
-            _: Option<&crate::storage::SourceInfo>,
-        ) -> Result<super::traits::PersistOutcome, tonic::Status> {
-            unimplemented!()
-        }
-        async fn post_persist(
-            &self,
-            _: &EventBook,
-        ) -> Result<Vec<crate::proto::Projection>, tonic::Status> {
-            unimplemented!()
-        }
+    for violation in violations {
+        let h = registered();
+        h.business.then(violation);
+        let err = h
+            .pipeline()
+            .execute(
+                command(DOMAIN, root(), "/orders.v1.AddItem"),
+                Delivery::Client,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_status().code(), Code::Internal);
+        assert!(stored(&h).await.is_empty());
+        assert!(h.bus.published().await.is_empty());
     }
+}
 
-    let ctx = DefaultCtx;
-    assert!(
-        ctx.cascade_id().is_none(),
-        "default cascade_id should be None"
+/// An empty cover, or the command's own, is accepted on output.
+#[tokio::test]
+async fn test_output_with_the_commands_cover_is_accepted() {
+    let h = registered();
+    h.business
+        .then(raw(vec![payload_page()], Some(cover(DOMAIN, root()))));
+    h.pipeline()
+        .execute(
+            command(DOMAIN, root(), "/orders.v1.AddItem"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    assert_eq!(stored(&h).await.len(), 1);
+}
+
+/// A business rejection is returned unchanged and writes nothing.
+#[tokio::test]
+async fn test_business_rejection_is_returned_unchanged() {
+    let h = registered();
+    h.business
+        .then(Answer::Error(tonic::Status::failed_precondition(
+            "order is closed",
+        )));
+    let err = h
+        .pipeline()
+        .execute(
+            command(DOMAIN, root(), "/orders.v1.AddItem"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap_err();
+    let status = err.to_status();
+    assert_eq!(status.code(), Code::FailedPrecondition);
+    assert_eq!(status.message(), "order is closed");
+    assert!(stored(&h).await.is_empty());
+    assert!(h.dead_letters.received().is_empty());
+}
+
+/// A fact's command id and correlation derive from its external id; its
+/// events carry the fact origin.
+#[tokio::test]
+async fn test_fact_ids_derive_from_external_id() {
+    let h = registered();
+    let decided = h
+        .pipeline()
+        .execute(
+            fact(DOMAIN, root(), "/orders.v1.PaymentReceived", "pi_1234"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    let meta = decided.events.pages[0].meta.clone().unwrap();
+    let derived = angzarr_proto::ids::fact_command_id("pi_1234");
+    assert_eq!(meta.causation, Some(Causation::CommandId(derived.clone())));
+    assert_eq!(meta.correlation_id, Some(derived));
+    assert_eq!(meta.fact.unwrap().external_id, "pi_1234");
+}
+
+/// A failing fact handler is not a rejection: the fact is parked (OK,
+/// PARKED, no events), dead-lettered and alerted (types.proto, Fact).
+#[tokio::test]
+async fn test_failing_fact_ingest_is_parked() {
+    let h = registered();
+    h.business
+        .then(Answer::Error(tonic::Status::internal("ingest panicked")));
+    let decided = h
+        .pipeline()
+        .execute(
+            fact(DOMAIN, root(), "/orders.v1.PaymentReceived", "pi_1"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    assert_eq!(decided.delivery, DeliveryOutcome::Parked);
+    assert!(decided.events.pages.is_empty());
+    assert!(stored(&h).await.is_empty());
+    assert_eq!(h.dead_letters.received().len(), 1);
+    assert_eq!(h.alerts.raised().len(), 1);
+}
+
+/// A fact's delivered Handling is the stamped head; it never carries a
+/// conflict resolution.
+#[tokio::test]
+async fn test_fact_handling_is_stamped() {
+    let h = registered();
+    h.pipeline()
+        .execute(
+            fact(DOMAIN, root(), "/orders.v1.PaymentReceived", "pi_9"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    let handling = h.business.received()[0]
+        .command
+        .clone()
+        .unwrap()
+        .handling
+        .unwrap();
+    assert_eq!(handling.expected_sequence, Some(0));
+    assert_eq!(handling.conflict_resolution, 0);
+}
+
+/// A malformed client command is refused before business code runs.
+#[tokio::test]
+async fn test_malformed_command_never_reaches_business_code() {
+    let h = registered();
+    let mut book = command(DOMAIN, root(), "/orders.v1.AddItem");
+    book.page.as_mut().unwrap().command_id = Some(crate::proto::Uuid {
+        value: vec![1, 2, 3].into(),
+    });
+    let err = h
+        .pipeline()
+        .execute(book, Delivery::Client)
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_status().code(), Code::InvalidArgument);
+    assert!(h.business.received().is_empty());
+}
+
+/// Persisted events whose publish fails stay persisted (the command
+/// succeeds) and are dead-lettered for replay.
+#[tokio::test]
+async fn test_publish_failure_dead_letters_the_events() {
+    let h = registered();
+    h.bus.fail_publishes();
+    let decided = h
+        .pipeline()
+        .execute(
+            command(DOMAIN, root(), "/orders.v1.AddItem"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    assert_eq!(decided.delivery, DeliveryOutcome::Applied);
+    assert_eq!(stored(&h).await.len(), 1);
+    assert_eq!(h.dead_letters.received().len(), 1);
+}
+
+/// A snapshot returned with the answer is stored at the write's last event.
+#[tokio::test]
+async fn test_snapshot_is_stored_at_the_last_event() {
+    let h = registered();
+    h.business.then(Answer::Events {
+        types: vec!["/orders.v1.ItemAdded".into(), "/orders.v1.ItemAdded".into()],
+        snapshot: Some(any("/orders.v1.OrderState", b"state")),
+        rules_version: VERSION.into(),
+    });
+    h.pipeline()
+        .execute(
+            command(DOMAIN, root(), "/orders.v1.AddItem"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    let snapshot =
+        crate::storage::SnapshotStore::get(h.snapshots.as_ref(), StreamRef::main(DOMAIN, root()))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(snapshot.sequence, 1);
+}
+
+/// A conflict resolution named on Handling reaches business code as sent
+/// (it is resolved in place, never dropped).
+#[tokio::test]
+async fn test_named_resolution_is_delivered() {
+    let h = registered();
+    h.pipeline()
+        .execute(
+            with_handling(
+                command(DOMAIN, root(), "/orders.v1.AddItem"),
+                None,
+                ConflictResolution::Strict,
+            ),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    let handling = h.business.received()[0]
+        .command
+        .clone()
+        .unwrap()
+        .handling
+        .unwrap();
+    assert_eq!(
+        handling.conflict_resolution,
+        ConflictResolution::Strict as i32
     );
 }

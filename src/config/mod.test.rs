@@ -121,31 +121,6 @@ fn test_target_command_env_var_constant() {
     assert_eq!(DESCRIPTOR_PATH_ENV_VAR, "DESCRIPTOR_PATH");
 }
 
-// ============================================================================
-// Config Default Tests
-// ============================================================================
-
-/// Default config has no projectors.
-#[test]
-fn test_config_default_no_projectors() {
-    let config = Config::default();
-    assert!(config.projectors.is_none());
-}
-
-/// Default config has no sagas.
-#[test]
-fn test_config_default_no_sagas() {
-    let config = Config::default();
-    assert!(config.sagas.is_none());
-}
-
-/// Default config has no saga compensation config.
-#[test]
-fn test_config_default_no_saga_compensation() {
-    let config = Config::default();
-    assert!(config.saga_compensation.is_none());
-}
-
 // ---------------------------------------------------------------------------
 // R2-15: DLQ schema canonicalization
 // ---------------------------------------------------------------------------

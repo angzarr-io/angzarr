@@ -65,6 +65,54 @@ pub async fn connect_to_address(address: &str) -> Result<Channel, Box<dyn std::e
         .into())
 }
 
+/// A lazily-connected channel to `address` (UDS path or TCP `host:port`)
+/// that counts the connections it establishes.
+///
+/// The returned receiver's value increases each time the channel opens a
+/// new connection to the peer: its first connection, and every reconnect
+/// after the peer went away. The coordinator re-describes its business
+/// process on each one (component.proto, ComponentService: "every time its
+/// channel to the business process comes back up"). The channel connects on
+/// first use, so a coordinator starts whether or not its peer is up yet.
+pub fn connect_watched(
+    address: &str,
+) -> Result<(Channel, tokio::sync::watch::Receiver<u64>), Box<dyn std::error::Error>> {
+    let (tx, rx) = tokio::sync::watch::channel(0u64);
+    let tx = std::sync::Arc::new(tx);
+    let channel = if is_uds_address(address) {
+        let socket_path = PathBuf::from(address);
+        Endpoint::try_from("http://[::]:50051")?.connect_with_connector_lazy(service_fn(
+            move |_: Uri| {
+                let path = socket_path.clone();
+                let tx = tx.clone();
+                async move {
+                    let stream = UnixStream::connect(path).await?;
+                    tx.send_modify(|n| *n += 1);
+                    Ok::<_, std::io::Error>(TokioIo::new(stream))
+                }
+            },
+        ))
+    } else {
+        let uri = if address.starts_with("http://") || address.starts_with("https://") {
+            address.to_string()
+        } else {
+            format!("http://{}", address)
+        };
+        Endpoint::from_shared(uri)?.connect_with_connector_lazy(service_fn(move |uri: Uri| {
+            let tx = tx.clone();
+            async move {
+                let host = uri.host().unwrap_or("localhost").to_string();
+                let port = uri.port_u16().unwrap_or(80);
+                let stream = tokio::net::TcpStream::connect((host.as_str(), port)).await?;
+                stream.set_nodelay(true)?;
+                tx.send_modify(|n| *n += 1);
+                Ok::<_, std::io::Error>(TokioIo::new(stream))
+            }
+        }))
+    };
+    Ok((channel, rx))
+}
+
 /// Single connection attempt (internal helper).
 async fn connect_to_address_once(address: &str) -> Result<Channel, Box<dyn std::error::Error>> {
     if address.starts_with('/') || address.starts_with("./") {

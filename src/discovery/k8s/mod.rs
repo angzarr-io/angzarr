@@ -748,7 +748,13 @@ impl ServiceDiscovery for K8sServiceDiscovery {
 
     async fn get_all_projectors(
         &self,
-    ) -> Result<Vec<ProjectorCoordinatorServiceClient<Channel>>, DiscoveryError> {
+    ) -> Result<
+        Vec<(
+            DiscoveredService,
+            ProjectorCoordinatorServiceClient<Channel>,
+        )>,
+        DiscoveryError,
+    > {
         // Sync any unsynced services from local cache to inner
         let projectors = self.projectors.read().await;
         for service in projectors.values() {

@@ -40,11 +40,7 @@ pub struct LoggingDeadLetterPublisher;
 impl DeadLetterPublisher for LoggingDeadLetterPublisher {
     async fn publish(&self, dead_letter: AngzarrDeadLetter) -> Result<(), DlqError> {
         let domain = dead_letter.domain().unwrap_or("unknown");
-        let correlation_id = dead_letter
-            .cover
-            .as_ref()
-            .map(|c| c.correlation_id.as_str())
-            .unwrap_or("");
+        let correlation_id = dead_letter.correlation_id().unwrap_or_default();
 
         warn!(
             domain = %domain,
@@ -52,7 +48,7 @@ impl DeadLetterPublisher for LoggingDeadLetterPublisher {
             reason = %dead_letter.rejection_reason,
             reason_type = %dead_letter.reason_type(),
             source_component = %dead_letter.source_component,
-            source_component_type = %dead_letter.source_component_type,
+            source_component_kind = %dead_letter.source_component_kind.as_str_name(),
             "Dead letter published to logging DLQ"
         );
 

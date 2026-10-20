@@ -28,8 +28,6 @@ use tracing::{debug, info, instrument};
 use crate::config::{UPCASTER_ADDRESS_ENV_VAR, UPCASTER_ENABLED_ENV_VAR};
 use crate::proto::{upcaster_service_client::UpcasterServiceClient, EventPage, UpcastRequest};
 use crate::proto_ext::correlated_request;
-#[cfg(test)]
-use crate::proto_ext::EventPageExt;
 
 // ============================================================================
 // Configuration

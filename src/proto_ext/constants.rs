@@ -23,12 +23,6 @@ pub const WILDCARD_DOMAIN: &str = "*";
 /// The meta domain for angzarr infrastructure.
 pub const META_ANGZARR_DOMAIN: &str = "_angzarr";
 
-/// Default edition name for the main timeline.
-///
-/// The canonical timeline is named "angzarr". Empty edition names are treated
-/// as equivalent to this value.
-pub const DEFAULT_EDITION: &str = "angzarr";
-
 /// Type URL prefix for googleapis.com protobuf Any messages.
 ///
 /// Used by `decode_typed` to match type URLs in Event/Command payloads.

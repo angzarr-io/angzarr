@@ -1,155 +1,74 @@
-use std::collections::HashSet;
-use std::path::PathBuf;
+//! The io.angzarr.v1 wire types come from angzarr-project's angzarr-proto
+//! crate (types.proto, upcaster.proto, options.proto and sererr). That crate
+//! compiles no services, so this script generates only the gRPC stubs core
+//! serves or calls, and the few messages their files define
+//! (CommandHandlerResponse, CommandResponse, DescribeRequest). Every type
+//! angzarr-proto provides is extern-pathed to it, so no io.angzarr.v1 type
+//! exists twice
+//! (backlog TG-1). Same approach as angzarr-router's crates/router/build.rs.
 
-use prost::Message;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
+
+use heck::ToUpperCamelCase;
+
+/// The proto root of the angzarr-project submodule.
+const PROTO_ROOT: &str = "angzarr-project/proto";
+
+/// The protos angzarr-proto compiles: their types are its, never ours.
+const ANGZARR_PROTO_FILES: [&str; 3] = [
+    "io/angzarr/v1/types.proto",
+    "io/angzarr/v1/upcaster.proto",
+    "io/angzarr/v1/options.proto",
+];
+
+/// The service protos whose stubs (and service-file messages) core needs.
+const SERVICE_FILES: [&str; 5] = [
+    "io/angzarr/v1/command_handler.proto",
+    "io/angzarr/v1/component.proto",
+    "io/angzarr/v1/projector.proto",
+    "io/angzarr/v1/query.proto",
+    "io/angzarr/v1/upcaster.proto",
+];
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Rerun if proto files or migration files change.
-    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/types.proto");
+    let root = PathBuf::from(PROTO_ROOT);
     println!("cargo:rerun-if-changed=migrations");
-    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/command_handler.proto");
-    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/projector.proto");
-    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/saga.proto");
-    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/process_manager.proto");
-    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/query.proto");
-    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/stream.proto");
-    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/upcaster.proto");
-    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/meta.proto");
-    println!("cargo:rerun-if-changed=angzarr-project/proto/io/angzarr/v1/cloudevents.proto");
-    println!("cargo:rerun-if-changed=proto/io/cloudevents/v1/cloudevents.proto");
-    println!("cargo:rerun-if-changed=proto/io/angzarr/status/v1/dlq_admin.proto");
-    // Sererr proto schema lives in the `sererr/` submodule; rerun if it
-    // changes upstream.
-    println!("cargo:rerun-if-changed=sererr/proto/sererr/v1/sererr.proto");
+    println!("cargo:rerun-if-env-changed=PROTOC");
+    for file in ANGZARR_PROTO_FILES.iter().chain(SERVICE_FILES.iter()) {
+        println!("cargo:rerun-if-changed={}", root.join(file).display());
+    }
 
-    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let descriptor_path = out_dir.join("descriptor.bin");
+    let services: Vec<PathBuf> = SERVICE_FILES.iter().map(|f| root.join(f)).collect();
+    let mut config = prost_build::Config::new();
+    let fds = config.load_fds(&services, &[&root])?;
 
-    let mut prost_config = prost_build::Config::new();
-    prost_config.enable_type_names();
-    // Don't generate `sererr.v1.*` types here — angzarr-project's
-    // types.proto imports them, but the actual Rust types come from
-    // the `sererr-proto` crate to avoid duplication. extern_path tells
-    // prost to reference `::sererr_proto::sererr_v1::*` instead.
-    prost_config.extern_path(".sererr.v1", "::sererr_proto::sererr_v1");
-
-    tonic_prost_build::configure()
-        .file_descriptor_set_path(&descriptor_path)
+    config.enable_type_names();
+    let mut builder = tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
-        .type_attribute(
-            ".io.angzarr.v1.BusinessResponse.result",
-            "#[allow(clippy::large_enum_variant)]",
-        )
-        .compile_with_config(
-            prost_config,
-            &[
-                "angzarr-project/proto/io/angzarr/v1/types.proto",
-                "angzarr-project/proto/io/angzarr/v1/command_handler.proto",
-                "angzarr-project/proto/io/angzarr/v1/projector.proto",
-                "angzarr-project/proto/io/angzarr/v1/saga.proto",
-                "angzarr-project/proto/io/angzarr/v1/process_manager.proto",
-                "angzarr-project/proto/io/angzarr/v1/query.proto",
-                "angzarr-project/proto/io/angzarr/v1/stream.proto",
-                "angzarr-project/proto/io/angzarr/v1/upcaster.proto",
-                "angzarr-project/proto/io/angzarr/v1/meta.proto",
-                "angzarr-project/proto/io/angzarr/v1/cloudevents.proto",
-                "proto/io/cloudevents/v1/cloudevents.proto",
-                "proto/io/angzarr/status/v1/dlq_admin.proto",
-            ],
-            // Include paths: angzarr's own protos, our local protos,
-            // AND sererr's proto root so types.proto can resolve
-            // `import "sererr/sererr.proto"`.
-            &["angzarr-project/proto", "proto", "sererr/proto"],
-        )?;
-
-    // H-33: build a *public* descriptor subset for gRPC reflection.
-    //
-    // The full descriptor at `descriptor.bin` contains every framework
-    // proto (command-handler, saga, PM, projector, query, stream,
-    // upcaster, types) and exposes internal messages (Confirmation,
-    // Revocation, NoOp, AngzarrDeferredSequence, ...) to anyone who
-    // calls `grpcurl list`. For the reflection-exposed surface, we
-    // ship only `proto/io/angzarr/status/v1/dlq_admin.proto` and its
-    // transitive imports.
-    //
-    // The in-process pool keeps loading the full set via
-    // `EMBEDDED_DESCRIPTOR` so payload-rendering paths (DLQ admin
-    // payload_view, future GraphQL gateway) still decode framework
-    // messages.
-    emit_public_descriptor_subset(
-        &descriptor_path,
-        &out_dir.join("descriptor_public.bin"),
-        &["io/angzarr/status/v1/dlq_admin.proto"],
-    )?;
-
+        .extern_path(".sererr.v1", "::angzarr_proto::sererr::v1");
+    for name in angzarr_proto_types(&fds) {
+        builder = builder.extern_path(
+            format!(".io.angzarr.v1.{name}"),
+            format!("::angzarr_proto::v1::{}", name.to_upper_camel_case()),
+        );
+    }
+    builder.compile_fds_with_config(fds, config)?;
     Ok(())
 }
 
-/// Read the full `FileDescriptorSet`, filter to the files reachable
-/// (via `import`) from `public_roots`, and write the trimmed set to
-/// `out_path`.
-///
-/// File-name matching uses the protobuf file's own `name` field
-/// (relative path as seen by `protoc`'s include paths), which matches
-/// how prost-reflect's `DescriptorPool` indexes files.
-fn emit_public_descriptor_subset(
-    full_path: &PathBuf,
-    out_path: &PathBuf,
-    public_roots: &[&str],
-) -> Result<(), Box<dyn std::error::Error>> {
-    let bytes = std::fs::read(full_path)?;
-    let full = prost_types::FileDescriptorSet::decode(&*bytes)?;
-
-    let mut by_name: std::collections::HashMap<&str, &prost_types::FileDescriptorProto> =
-        std::collections::HashMap::new();
-    for f in &full.file {
-        if let Some(name) = f.name.as_deref() {
-            by_name.insert(name, f);
-        }
-    }
-
-    // BFS transitive imports starting from each requested root.
-    let mut keep: HashSet<String> = HashSet::new();
-    let mut frontier: Vec<String> = Vec::new();
-    for root in public_roots {
-        if by_name.contains_key(*root) {
-            keep.insert((*root).to_string());
-            frontier.push((*root).to_string());
-        } else {
-            // Fail loudly so a misspelled public root is caught at
-            // compile time rather than producing a silently-empty
-            // reflection surface.
-            return Err(format!(
-                "public root {root} not present in descriptor.bin (file list: {:?})",
-                by_name.keys().collect::<Vec<_>>()
-            )
-            .into());
-        }
-    }
-
-    while let Some(name) = frontier.pop() {
-        let Some(file) = by_name.get(name.as_str()) else {
-            continue;
-        };
-        for dep in &file.dependency {
-            if keep.insert(dep.clone()) {
-                frontier.push(dep.clone());
-            }
-        }
-    }
-
-    let public_set = prost_types::FileDescriptorSet {
-        file: full
-            .file
+/// The top-level message and enum names defined in angzarr-proto's files.
+fn angzarr_proto_types(fds: &prost_types::FileDescriptorSet) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for file in &fds.file {
+        let is_angzarr_proto = ANGZARR_PROTO_FILES
             .iter()
-            .filter(|f| f.name.as_deref().is_some_and(|n| keep.contains(n)))
-            .cloned()
-            .collect(),
-    };
-
-    let mut out_bytes = Vec::with_capacity(bytes.len() / 4);
-    public_set.encode(&mut out_bytes)?;
-    std::fs::write(out_path, out_bytes)?;
-    Ok(())
+            .any(|f| Path::new(file.name()) == Path::new(f));
+        if is_angzarr_proto {
+            names.extend(file.message_type.iter().map(|m| m.name().to_string()));
+            names.extend(file.enum_type.iter().map(|e| e.name().to_string()));
+        }
+    }
+    names
 }

@@ -332,27 +332,6 @@ fn test_log_fails_for_missing_config() {
 }
 
 // ============================================================================
-// angzarr-upcaster Tests
-// ============================================================================
-
-/// angzarr-upcaster fails when config file doesn't exist.
-#[test]
-#[ignore = "requires pre-built binaries"]
-fn test_upcaster_fails_for_missing_config() {
-    let output = run_binary("angzarr-upcaster", &["-c", "/nonexistent/config.yaml"]);
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("not found")
-            || stderr.contains("No such file")
-            || stderr.contains("Failed to load"),
-        "Should report config file not found, got: {}",
-        stderr
-    );
-}
-
-// ============================================================================
 // Invalid YAML Tests
 // ============================================================================
 

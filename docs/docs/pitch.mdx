@@ -584,15 +584,6 @@ bus:
 business_logic:
   - domain: inventory
     address: localhost:50051
-
-projectors:
-  - name: inventory-summary
-    address: localhost:50052
-    synchronous: true
-
-sagas:
-  - name: order-fulfillment
-    address: localhost:50053
 ```
 
 ```yaml

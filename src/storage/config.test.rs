@@ -1,7 +1,6 @@
 //! Tests for storage configuration types.
 //!
-//! Storage config is a discriminated union supporting multiple backends:
-//! PostgreSQL (default), SQLite, Redis, Bigtable, DynamoDB.
+//! Storage config is a named backend registry plus per-role references.
 //! Each backend has its own sub-configuration.
 //!
 //! Why this matters: Different deployments need different storage backends.
@@ -9,32 +8,10 @@
 //! (ACID guarantees). Config validation prevents runtime surprises.
 //!
 //! Key behaviors verified:
-//! - Default storage type is postgres (production-ready default)
 //! - SQLite URI handling (in-memory vs file paths)
 //! - Snapshot enable flags for debugging/troubleshooting
 
 use super::*;
-
-// ============================================================================
-// StorageConfig Tests
-// ============================================================================
-//
-// The storage config is a discriminated union with `storage_type` as the
-// discriminator. All backend configs are always present (for deserialization),
-// but only the one matching `storage_type` is actually used.
-
-/// Default storage config targets PostgreSQL with standard connection string.
-///
-/// PostgreSQL is the default because it's the most commonly deployed
-/// production database with full ACID guarantees.
-#[test]
-fn test_storage_config_default() {
-    let storage = StorageConfig::default();
-    assert_eq!(storage.storage_type, "postgres");
-    assert_eq!(storage.postgres.uri, "postgres://localhost:5432/angzarr");
-    assert!(storage.snapshots_enable.read);
-    assert!(storage.snapshots_enable.write);
-}
 
 // ============================================================================
 // Backend registry + role-reference Tests

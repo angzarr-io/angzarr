@@ -1,11 +1,15 @@
-//! Database schema definitions using sea-query.
+//! Database schema identifiers for sea-query.
 //!
-//! These define the table and column identifiers for type-safe query building.
-//! Schema creation is handled via sqlx migrations (see `migrations/`).
+//! Only the columns the current contract writes or reads are named here.
+//! The SQLite schema (`migrations/sqlite`) still carries columns of removed
+//! features (cascade, deferred sources, `Cover.ext`, the external-id fact
+//! key); they keep their defaults and nothing reads them. Dropping them, and
+//! adding a dedicated `command_id` index (backlog CI-1), is a schema change
+//! left for an owner decision.
 
 use sea_query::Iden;
 
-/// Events table schema.
+/// Events table.
 #[derive(Iden)]
 pub enum Events {
     Table,
@@ -17,41 +21,19 @@ pub enum Events {
     Root,
     #[iden = "sequence"]
     Sequence,
+    /// `EventMeta.recorded_at`, as fixed-width RFC 3339 text (nanoseconds,
+    /// `Z`), so text order is time order (see [`super::recorded_at_text`]).
     #[iden = "created_at"]
     CreatedAt,
+    /// The whole `EventPage`, protobuf-encoded, meta included.
     #[iden = "event_data"]
     EventData,
+    /// `EventMeta.correlation_id` as canonical UUID text.
     #[iden = "correlation_id"]
     CorrelationId,
-    #[iden = "external_id"]
-    ExternalId,
-    // Source tracking for saga-produced events (angzarr_deferred)
-    #[iden = "source_edition"]
-    SourceEdition,
-    #[iden = "source_domain"]
-    SourceDomain,
-    #[iden = "source_root"]
-    SourceRoot,
-    #[iden = "source_seq"]
-    SourceSeq,
-    #[iden = "source_component"]
-    SourceComponent,
-    #[iden = "source_command_index"]
-    SourceCommandIndex,
-    // Cascade tracking for 2PC (Phase 5)
-    #[iden = "committed"]
-    Committed,
-    #[iden = "cascade_id"]
-    CascadeId,
-    // Parent-aggregate routing cover (Cover.ext), serialized google.protobuf.Any.
-    #[iden = "ext"]
-    Ext,
 }
 
-/// Snapshots table schema.
-///
-/// Primary key is (domain, edition, root, sequence) to support multiple
-/// snapshots per aggregate with different retention policies.
+/// Snapshots table. One row per stream is kept (the newest).
 #[derive(Iden)]
 pub enum Snapshots {
     Table,
@@ -63,51 +45,9 @@ pub enum Snapshots {
     Root,
     #[iden = "sequence"]
     Sequence,
+    /// The whole `Snapshot`, protobuf-encoded (its state and rules_version).
     #[iden = "state_data"]
     StateData,
-    #[iden = "retention"]
-    Retention,
-    #[iden = "created_at"]
-    CreatedAt,
-}
-
-/// Positions table schema.
-///
-/// Tracks last-processed event sequence per handler/domain/edition/root.
-/// Used by projectors and sagas to resume from their last checkpoint.
-#[derive(Iden)]
-pub enum Positions {
-    Table,
-    #[iden = "handler"]
-    Handler,
-    #[iden = "domain"]
-    Domain,
-    #[iden = "edition"]
-    Edition,
-    #[iden = "root"]
-    Root,
-    #[iden = "sequence"]
-    Sequence,
-    #[iden = "updated_at"]
-    UpdatedAt,
-}
-
-/// Editions table schema.
-///
-/// Stores metadata for diverged timelines. Each edition forks the main
-/// timeline at a divergence point (sequence number or timestamp) and
-/// continues independently.
-#[derive(Iden)]
-pub enum Editions {
-    Table,
-    #[iden = "name"]
-    Name,
-    #[iden = "divergence_point_type"]
-    DivergencePointType,
-    #[iden = "divergence_point_value"]
-    DivergencePointValue,
-    #[iden = "description"]
-    Description,
     #[iden = "created_at"]
     CreatedAt,
 }

@@ -7,11 +7,9 @@
 use std::sync::Arc;
 
 use futures::future::BoxFuture;
-use tracing::info;
 
 use super::config::{EventBusMode, MessagingConfig};
 use super::error::{BusError, Result};
-use super::offloading::{OffloadingConfig, OffloadingEventBus};
 use super::traits::EventBus;
 
 /// Type alias for the async factory function signature.
@@ -49,30 +47,4 @@ pub async fn init_event_bus(
     }
 
     Err(BusError::UnknownType(config.messaging_type.clone()).into())
-}
-
-/// Wrap an event bus with payload offloading.
-///
-/// If a payload store is provided, wraps the bus with `OffloadingEventBus`
-/// for transparent large payload handling. If `None`, returns the bus unchanged.
-///
-/// # Arguments
-///
-/// * `bus` - The event bus to wrap.
-/// * `store` - Optional payload store for offloading. If `None`, no wrapping occurs.
-/// * `threshold` - Optional size threshold to trigger offloading.
-///   If `None`, uses the bus's `max_message_size()`.
-pub fn wrap_with_offloading<S: crate::payload_store::PayloadStore + 'static>(
-    bus: Arc<dyn EventBus>,
-    store: Option<Arc<S>>,
-    threshold: Option<usize>,
-) -> Arc<dyn EventBus> {
-    match store {
-        Some(store) => {
-            let config = OffloadingConfig { store, threshold };
-            info!("Wrapping event bus with payload offloading");
-            OffloadingEventBus::wrap(bus, config) as Arc<dyn EventBus>
-        }
-        None => bus,
-    }
 }

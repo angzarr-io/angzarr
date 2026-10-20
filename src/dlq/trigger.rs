@@ -4,24 +4,18 @@
 //! loop first?" Used by saga / PM / projector / aggregate handler runtimes
 //! (R2-15 in the round-2 review plan).
 //!
-//! Bucketing follows gRPC's canonical retryability guidance:
+//! Bucketing follows the one retryable set of the contract
+//! (command_handler.proto, "Status codes"; backlog ST-1), shared with every
+//! framework retry loop through [`crate::utils::retry::is_retryable_code`]:
 //!
-//! - 4xx-class (permanent) `Code` variants -> [`DlqTrigger::Immediate`].
-//!   Retrying a permanent error wastes the retry budget on a
-//!   guaranteed-failing operation and adds latency to the eventual DLQ
-//!   entry, so we skip retries and publish now.
-//! - 5xx-class (transient) `Code` variants -> [`DlqTrigger::RetryThenDlq`].
-//!   The framework's existing retry loop handles the recovery; on
-//!   exhaustion the caller publishes to the DLQ.
+//! - retryable codes (UNAVAILABLE, DEADLINE_EXCEEDED, RESOURCE_EXHAUSTED,
+//!   ABORTED) -> [`DlqTrigger::RetryThenDlq`]: retry, then dead-letter on
+//!   exhaustion;
+//! - every other code (terminal) -> [`DlqTrigger::Immediate`]: dead-letter now.
 //!
-//! Three `Code` variants are outside the standard retryability table and
-//! decided here explicitly: `Ok` -> RetryThenDlq (defensive -- Ok should
-//! not reach this helper, but if it does the retry loop's success check
-//! catches it without publishing a phantom dead letter); `Cancelled` ->
-//! RetryThenDlq (shutdown / upstream cancellation is recovered by the
-//! next event loop tick); `AlreadyExists` -> Immediate (in CQRS-ES this
-//! usually means an idempotency conflict, where retrying re-hits the
-//! same conflict).
+//! `Ok` is the one exception: it should never reach this helper, and if it
+//! does, the retry loop's success check handles it without publishing a
+//! phantom dead letter, so it is bucketed RetryThenDlq.
 
 use tonic::Code;
 
@@ -62,24 +56,10 @@ pub trait CodeDlqExt {
 
 impl CodeDlqExt for Code {
     fn classify_for_dlq(self) -> DlqTrigger {
-        match self {
-            Code::InvalidArgument
-            | Code::NotFound
-            | Code::FailedPrecondition
-            | Code::Aborted
-            | Code::Unimplemented
-            | Code::PermissionDenied
-            | Code::Unauthenticated
-            | Code::OutOfRange
-            | Code::AlreadyExists => DlqTrigger::Immediate(Immediate(self)),
-            Code::Unavailable
-            | Code::DeadlineExceeded
-            | Code::ResourceExhausted
-            | Code::Internal
-            | Code::Unknown
-            | Code::DataLoss
-            | Code::Cancelled
-            | Code::Ok => DlqTrigger::RetryThenDlq(RetryThenDlq(self)),
+        if self == Code::Ok || crate::utils::retry::is_retryable_code(self) {
+            DlqTrigger::RetryThenDlq(RetryThenDlq(self))
+        } else {
+            DlqTrigger::Immediate(Immediate(self))
         }
     }
 }

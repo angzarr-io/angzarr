@@ -1,386 +1,410 @@
-#![allow(dead_code)]
-//! Shared test fixture builders for angzarr unit tests.
-//!
-//! Provides reusable constructors for proto types that appear across many test modules.
+//! Test doubles for the coordinators: a scripted business binary, a
+//! recording bus, a fixed clock, and builders for commands and
+//! registrations. Used by unit tests and the coordinator-contract harness.
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use prost_types::{Any, Timestamp};
+use tokio::sync::Mutex as AsyncMutex;
+use tonic::Status;
+
+use crate::alerts::RecordingAlerts;
+use crate::bus::{BusError, EventBus, EventHandler, PublishResult};
+use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher, DlqError};
+use crate::orchestration::aggregate::{AggregatePipeline, BusinessLogic, Clock};
 use crate::proto::{
-    command_page, event_page, page_header::SequenceType, CommandBook, CommandPage, Cover,
-    EventBook, EventPage, MergeStrategy, PageHeader, Uuid as ProtoUuid,
+    command_page::Body, Command, CommandBook, CommandHandlerResponse, CommandPage,
+    ComponentDescriptor, ComponentKind, ConflictResolution, ContextualCommand, Cover, EventBook,
+    EventPage, Fact, FactOrigin, Handling, Snapshot, StateDescriptor, StateOptions,
 };
-use futures::future::BoxFuture;
-use prost_types::Any;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use uuid::Uuid;
+use crate::registry::ComponentRegistry;
+use crate::storage::{EventStore, MemoryEventStore, MemorySnapshotStore, SnapshotStore};
 
-use crate::bus::{BusError, EventHandler};
-
-/// Create a `ProtoUuid` from a random v4 UUID.
-pub fn random_proto_uuid() -> ProtoUuid {
-    proto_uuid(Uuid::new_v4())
-}
-
-/// Create a `ProtoUuid` from a specific `Uuid`.
-pub fn proto_uuid(u: Uuid) -> ProtoUuid {
-    ProtoUuid {
-        value: u.as_bytes().to_vec(),
+/// An `Any` with the given type URL and payload bytes.
+pub fn any(type_url: &str, value: &[u8]) -> Any {
+    Any {
+        type_url: type_url.to_string(),
+        value: value.to_vec(),
     }
 }
 
-/// Create a `Cover` with the given domain and a random root UUID.
-pub fn make_cover(domain: &str) -> Cover {
-    make_cover_with_root(domain, Uuid::new_v4())
-}
-
-/// Create a `Cover` with the given domain and specific root UUID.
-pub fn make_cover_with_root(domain: &str, root: Uuid) -> Cover {
+/// A main-timeline cover.
+pub fn cover(domain: &str, root: uuid::Uuid) -> Cover {
     Cover {
         domain: domain.to_string(),
-        root: Some(proto_uuid(root)),
-        correlation_id: String::new(),
+        root: Some(root.into()),
         edition: None,
-        ext: None,
     }
 }
 
-/// Create a `Cover` with domain, root, and correlation ID.
-pub fn make_cover_full(domain: &str, root: Uuid, correlation_id: &str) -> Cover {
-    Cover {
-        domain: domain.to_string(),
-        root: Some(proto_uuid(root)),
-        correlation_id: correlation_id.to_string(),
-        edition: None,
-        ext: None,
-    }
-}
-
-/// Create an `EventPage` with a sequence number and a test type_url.
-pub fn make_event_page(seq: u32) -> EventPage {
-    EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(SequenceType::Sequence(seq)),
-        }),
-        payload: Some(event_page::Payload::Event(Any {
-            type_url: format!("test.Event{}", seq),
-            value: vec![],
-        })),
-        created_at: None,
-        cascade_id: None,
-        ..Default::default()
-    }
-}
-
-/// Create an `EventPage` with a specific type_url.
-pub fn make_event_page_typed(seq: u32, type_url: &str) -> EventPage {
-    EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(SequenceType::Sequence(seq)),
-        }),
-        payload: Some(event_page::Payload::Event(Any {
-            type_url: type_url.to_string(),
-            value: vec![],
-        })),
-        created_at: None,
-        cascade_id: None,
-        ..Default::default()
-    }
-}
-
-/// Create an uncommitted `EventPage` for 2PC testing.
-pub fn make_uncommitted_event_page(seq: u32, cascade_id: &str) -> EventPage {
-    EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(SequenceType::Sequence(seq)),
-        }),
-        payload: Some(event_page::Payload::Event(Any {
-            type_url: format!("test.Event{}", seq),
-            value: vec![],
-        })),
-        created_at: None,
-        no_commit: true,
-        cascade_id: Some(cascade_id.to_string()),
-    }
-}
-
-/// Create an `EventBook` with domain, random root, and provided pages.
-pub fn make_event_book(domain: &str, pages: Vec<EventPage>) -> EventBook {
-    EventBook {
-        cover: Some(make_cover(domain)),
-        pages,
-        snapshot: None,
-        ..Default::default()
-    }
-}
-
-/// Create an `EventBook` with domain, specific root, and provided pages.
-pub fn make_event_book_with_root(domain: &str, root: Uuid, pages: Vec<EventPage>) -> EventBook {
-    EventBook {
-        cover: Some(make_cover_with_root(domain, root)),
-        pages,
-        snapshot: None,
-        ..Default::default()
-    }
-}
-
-/// Create an empty `EventBook` for the given domain.
-pub fn make_empty_event_book(domain: &str) -> EventBook {
-    make_event_book(domain, vec![])
-}
-
-/// Create an `EventBook` with domain, random root, correlation ID, and provided pages.
-pub fn make_event_book_with_correlation(
-    domain: &str,
-    correlation_id: &str,
-    pages: Vec<EventPage>,
-) -> EventBook {
-    EventBook {
-        cover: Some(make_cover_full(domain, Uuid::new_v4(), correlation_id)),
-        pages,
-        snapshot: None,
-        ..Default::default()
-    }
-}
-
-/// Create an `EventBook` with a single test event page and correlation ID.
-/// Convenience helper for subscription/streaming tests.
-pub fn make_test_event_book(correlation_id: &str) -> EventBook {
-    make_event_book_with_correlation(
-        "test",
-        correlation_id,
-        vec![make_event_page_typed(0, "test.Event")],
-    )
-}
-
-/// Create an `EventBook` with multiple pages and correlation ID.
-/// Convenience helper for multi-page event tests.
-pub fn make_multi_page_event_book(correlation_id: &str, page_count: usize) -> EventBook {
-    let pages = (0..page_count)
-        .map(|i| make_event_page_typed(i as u32, &format!("type.googleapis.com/test.Event{}", i)))
-        .collect();
-    make_event_book_with_correlation("test", correlation_id, pages)
-}
-
-/// Create a `CommandBook` with domain, specific root, and a test command.
-pub fn make_command_book(domain: &str, root: Uuid) -> CommandBook {
-    make_command_book_with_sequence(domain, root, 0)
-}
-
-/// Create a `CommandBook` with domain, root, and specific sequence.
-pub fn make_command_book_with_sequence(domain: &str, root: Uuid, sequence: u32) -> CommandBook {
+/// A client command with the given payload type.
+pub fn command(domain: &str, root: uuid::Uuid, type_url: &str) -> CommandBook {
     CommandBook {
-        cover: Some(make_cover_with_root(domain, root)),
-        pages: vec![CommandPage {
-            header: Some(PageHeader {
-                sync_mode: None,
-                sequence_type: Some(SequenceType::Sequence(sequence)),
-            }),
-            payload: Some(command_page::Payload::Command(Any {
-                type_url: "test.Command".to_string(),
-                value: vec![],
+        cover: Some(cover(domain, root)),
+        page: Some(CommandPage {
+            body: Some(Body::Command(Command {
+                payload: Some(any(type_url, b"cmd")),
             })),
-            merge_strategy: MergeStrategy::MergeCommutative as i32,
-        }],
-    }
-}
-
-/// Create a `CommandBook` with optional correlation ID.
-pub fn make_command_book_correlated(with_correlation: bool) -> CommandBook {
-    CommandBook {
-        cover: Some(Cover {
-            domain: "test".to_string(),
-            root: Some(random_proto_uuid()),
-            correlation_id: if with_correlation {
-                "test-correlation-id".to_string()
-            } else {
-                String::new()
-            },
-            edition: None,
-            ext: None,
+            command_id: None,
+            correlation_id: None,
+            causation_id: None,
+            fact_origin: None,
         }),
-        pages: vec![CommandPage {
-            header: Some(PageHeader {
-                sync_mode: None,
-                sequence_type: Some(SequenceType::Sequence(0)),
-            }),
-            payload: Some(command_page::Payload::Command(Any {
-                type_url: "test.Command".to_string(),
-                value: vec![],
-            })),
-            merge_strategy: MergeStrategy::MergeCommutative as i32,
-        }],
+        handling: None,
     }
 }
 
-// ============================================================================
-// Test Handlers
-// ============================================================================
-
-/// A test handler that counts how many times it was called.
-///
-/// Useful for verifying event delivery in bus tests.
-///
-/// # Example
-/// ```ignore
-/// let handler = CountingHandler::new();
-/// let count = handler.count();
-/// bus.subscribe(Box::new(handler)).await?;
-/// // ... publish events ...
-/// assert_eq!(count.load(Ordering::SeqCst), expected_count);
-/// ```
-pub struct CountingHandler {
-    count: Arc<AtomicUsize>,
+/// `book` with Handling set.
+pub fn with_handling(
+    mut book: CommandBook,
+    expected_sequence: Option<u64>,
+    resolution: ConflictResolution,
+) -> CommandBook {
+    book.handling = Some(Handling {
+        expected_sequence,
+        conflict_resolution: resolution as i32,
+    });
+    book
 }
 
-impl CountingHandler {
-    /// Create a new counting handler.
-    pub fn new() -> Self {
+/// A fact from `external_id`.
+pub fn fact(domain: &str, root: uuid::Uuid, type_url: &str, external_id: &str) -> CommandBook {
+    CommandBook {
+        cover: Some(cover(domain, root)),
+        page: Some(CommandPage {
+            body: Some(Body::Fact(Fact {
+                payload: Some(any(type_url, b"fact")),
+            })),
+            command_id: None,
+            correlation_id: None,
+            causation_id: None,
+            fact_origin: Some(FactOrigin {
+                external_id: external_id.to_string(),
+                description: "test".to_string(),
+            }),
+        }),
+        handling: None,
+    }
+}
+
+/// A registration hello for an aggregate.
+pub fn aggregate_descriptor(
+    name: &str,
+    state_type_url: &str,
+    rules_version: &str,
+    commutative: bool,
+) -> ComponentDescriptor {
+    let mut resolutions = vec![
+        ConflictResolution::Strict as i32,
+        ConflictResolution::AggregateHandles as i32,
+    ];
+    if commutative {
+        resolutions.insert(0, ConflictResolution::Commutative as i32);
+    }
+    ComponentDescriptor {
+        name: name.to_string(),
+        kind: ComponentKind::Aggregate as i32,
+        inputs: vec![],
+        rules_version: rules_version.to_string(),
+        state: Some(StateDescriptor {
+            type_url: state_type_url.to_string(),
+            options: Some(StateOptions {
+                conflict_resolutions: resolutions,
+            }),
+        }),
+    }
+}
+
+/// One scripted answer of [`ScriptedBusiness`].
+#[derive(Clone)]
+pub enum Answer {
+    /// Events with these payload type URLs, optional snapshot state, under
+    /// this version.
+    Events {
+        types: Vec<String>,
+        snapshot: Option<Any>,
+        rules_version: String,
+    },
+    /// A raw response, for contract violations.
+    Raw(CommandHandlerResponse),
+    /// A gRPC error.
+    Error(Status),
+}
+
+impl Answer {
+    /// Events of these types, no snapshot, under `rules_version`.
+    pub fn events(types: &[&str], rules_version: &str) -> Self {
+        Answer::Events {
+            types: types.iter().map(|t| t.to_string()).collect(),
+            snapshot: None,
+            rules_version: rules_version.to_string(),
+        }
+    }
+}
+
+/// A business binary that answers from a script (falling back to a
+/// default answer) and records every delivery.
+pub struct ScriptedBusiness {
+    script: Mutex<VecDeque<Answer>>,
+    default: Mutex<Answer>,
+    received: Mutex<Vec<ContextualCommand>>,
+}
+
+impl ScriptedBusiness {
+    /// Answers `default` to every delivery not scripted.
+    pub fn new(default: Answer) -> Arc<Self> {
+        Arc::new(Self {
+            script: Mutex::new(VecDeque::new()),
+            default: Mutex::new(default),
+            received: Mutex::new(Vec::new()),
+        })
+    }
+
+    /// Answer the next delivery with `answer`.
+    pub fn then(&self, answer: Answer) {
+        self.script.lock().unwrap().push_back(answer);
+    }
+
+    /// Replace the default answer.
+    pub fn set_default(&self, answer: Answer) {
+        *self.default.lock().unwrap() = answer;
+    }
+
+    /// Every delivery so far.
+    pub fn received(&self) -> Vec<ContextualCommand> {
+        self.received.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl BusinessLogic for ScriptedBusiness {
+    async fn handle(&self, command: ContextualCommand) -> Result<CommandHandlerResponse, Status> {
+        self.received.lock().unwrap().push(command);
+        let answer = self
+            .script
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or_else(|| self.default.lock().unwrap().clone());
+        match answer {
+            Answer::Events {
+                types,
+                snapshot,
+                rules_version,
+            } => Ok(CommandHandlerResponse {
+                events: Some(EventBook {
+                    pages: types
+                        .iter()
+                        .map(|t| EventPage {
+                            payload: Some(any(t, b"event")),
+                            ..Default::default()
+                        })
+                        .collect(),
+                    snapshot: snapshot.map(|state| Snapshot {
+                        state: Some(state),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                rules_version,
+            }),
+            Answer::Raw(response) => Ok(response),
+            Answer::Error(status) => Err(status),
+        }
+    }
+}
+
+/// An event bus that records what is published.
+#[derive(Default)]
+pub struct RecordingBus {
+    published: AsyncMutex<Vec<EventBook>>,
+    fail: Mutex<bool>,
+}
+
+impl RecordingBus {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Every book published so far.
+    pub async fn published(&self) -> Vec<EventBook> {
+        self.published.lock().await.clone()
+    }
+
+    /// Make every publish fail.
+    pub fn fail_publishes(&self) {
+        *self.fail.lock().unwrap() = true;
+    }
+}
+
+#[async_trait]
+impl EventBus for RecordingBus {
+    async fn publish(&self, book: Arc<EventBook>) -> crate::bus::Result<PublishResult> {
+        if *self.fail.lock().unwrap() {
+            return Err(BusError::Publish("bus down".into()));
+        }
+        self.published.lock().await.push((*book).clone());
+        Ok(PublishResult::default())
+    }
+
+    async fn subscribe(&self, _handler: Box<dyn EventHandler>) -> crate::bus::Result<()> {
+        Ok(())
+    }
+
+    async fn create_subscriber(
+        &self,
+        _name: &str,
+        _domain_filter: Option<&str>,
+    ) -> crate::bus::Result<Arc<dyn EventBus>> {
+        Ok(RecordingBus::new())
+    }
+}
+
+/// A dead-letter publisher that records what it receives.
+#[derive(Default)]
+pub struct RecordingDeadLetters {
+    received: Mutex<Vec<AngzarrDeadLetter>>,
+}
+
+impl RecordingDeadLetters {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    /// Every dead letter so far.
+    pub fn received(&self) -> Vec<AngzarrDeadLetter> {
+        self.received.lock().unwrap().clone()
+    }
+}
+
+#[async_trait]
+impl DeadLetterPublisher for RecordingDeadLetters {
+    async fn publish(&self, dead_letter: AngzarrDeadLetter) -> Result<(), DlqError> {
+        self.received.lock().unwrap().push(dead_letter);
+        Ok(())
+    }
+}
+
+/// A clock that returns a set time.
+pub struct FixedClock(Mutex<Timestamp>);
+
+impl FixedClock {
+    pub fn at(seconds: i64) -> Arc<Self> {
+        Arc::new(Self(Mutex::new(Timestamp { seconds, nanos: 0 })))
+    }
+
+    pub fn set(&self, seconds: i64) {
+        *self.0.lock().unwrap() = Timestamp { seconds, nanos: 0 };
+    }
+}
+
+impl Clock for FixedClock {
+    fn now(&self) -> Timestamp {
+        *self.0.lock().unwrap()
+    }
+}
+
+/// One aggregate coordinator wired to in-memory doubles.
+pub struct Harness {
+    pub domain: String,
+    pub registry: Arc<ComponentRegistry>,
+    pub events: Arc<MemoryEventStore>,
+    pub snapshots: Arc<MemorySnapshotStore>,
+    pub business: Arc<ScriptedBusiness>,
+    pub bus: Arc<RecordingBus>,
+    pub dead_letters: Arc<RecordingDeadLetters>,
+    pub alerts: Arc<RecordingAlerts>,
+    pub clock: Arc<FixedClock>,
+}
+
+impl Harness {
+    /// A harness for `domain` whose business answers `default`.
+    pub fn new(domain: &str, default: Answer) -> Self {
         Self {
-            count: Arc::new(AtomicUsize::new(0)),
+            domain: domain.to_string(),
+            registry: Arc::new(ComponentRegistry::new()),
+            events: Arc::new(MemoryEventStore::new()),
+            snapshots: Arc::new(MemorySnapshotStore::new()),
+            business: ScriptedBusiness::new(default),
+            bus: RecordingBus::new(),
+            dead_letters: RecordingDeadLetters::new(),
+            alerts: Arc::new(RecordingAlerts::new()),
+            clock: FixedClock::at(1_760_000_000),
         }
     }
 
-    /// Get a clone of the counter for checking the count.
-    pub fn count(&self) -> Arc<AtomicUsize> {
-        self.count.clone()
-    }
-}
-
-impl Default for CountingHandler {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl EventHandler for CountingHandler {
-    fn handle(
+    /// A pipeline over this harness, for the registration held under
+    /// `instance`, calling `business`.
+    pub fn pipeline_for(
         &self,
-        _book: Arc<EventBook>,
-    ) -> BoxFuture<'static, std::result::Result<(), BusError>> {
-        let count = self.count.clone();
-        Box::pin(async move {
-            count.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
+        instance: &str,
+        business: Arc<ScriptedBusiness>,
+    ) -> AggregatePipeline {
+        let events: Arc<dyn EventStore> = self.events.clone();
+        let snapshots: Arc<dyn SnapshotStore> = self.snapshots.clone();
+        AggregatePipeline::new(
+            self.domain.clone(),
+            instance,
+            self.registry.clone(),
+            events,
+            snapshots,
+            business,
+            self.bus.clone(),
+            self.dead_letters.clone(),
+            self.alerts.clone(),
+        )
+        .with_clock(self.clock.clone())
+    }
+
+    /// The pipeline of the harness's own business binary (instance
+    /// "local").
+    pub fn pipeline(&self) -> AggregatePipeline {
+        self.pipeline_for("local", self.business.clone())
     }
 }
 
-/// A test handler that captures received events and sends them to a channel.
-///
-/// Useful for verifying event content in bus tests. Supports:
-/// - Channel-based delivery for async waiting
-/// - Optional count tracking
-/// - Optional mutex-backed storage for later query
-///
-/// # Example
-/// ```ignore
-/// let (tx, mut rx) = tokio::sync::mpsc::channel(10);
-/// let handler = CapturingHandler::new(tx);
-/// bus.subscribe(Box::new(handler)).await?;
-/// // ... publish events ...
-/// let received = rx.recv().await.unwrap();
-/// assert_eq!(received.domain(), "orders");
-/// ```
+/// A bus handler that forwards every received book to a channel, for bus
+/// contract tests. Optionally counts deliveries.
 pub struct CapturingHandler {
     tx: tokio::sync::mpsc::Sender<EventBook>,
-    count: Option<Arc<AtomicUsize>>,
-    /// Optional storage for later query (used by BDD tests).
-    received: Option<Arc<Mutex<Vec<EventBook>>>>,
+    count: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 
 impl CapturingHandler {
-    /// Create a handler that sends events to the given channel.
+    /// Forward to `tx`.
     pub fn new(tx: tokio::sync::mpsc::Sender<EventBook>) -> Self {
-        Self {
-            tx,
-            count: None,
-            received: None,
-        }
+        Self { tx, count: None }
     }
 
-    /// Create a handler that sends events and tracks count.
-    pub fn with_count(tx: tokio::sync::mpsc::Sender<EventBook>, count: Arc<AtomicUsize>) -> Self {
-        Self {
-            tx,
-            count: Some(count),
-            received: None,
-        }
-    }
-
-    /// Create a handler with mutex-backed storage for later query.
-    /// Used by BDD/interface tests that need to inspect received events.
-    pub fn with_storage(
+    /// Forward to `tx` and count deliveries.
+    pub fn with_count(
         tx: tokio::sync::mpsc::Sender<EventBook>,
-        received: Arc<Mutex<Vec<EventBook>>>,
+        count: Arc<std::sync::atomic::AtomicUsize>,
     ) -> Self {
         Self {
             tx,
-            count: None,
-            received: Some(received),
+            count: Some(count),
         }
     }
 }
 
 impl EventHandler for CapturingHandler {
-    fn handle(&self, book: Arc<EventBook>) -> BoxFuture<'static, Result<(), BusError>> {
+    fn handle(
+        &self,
+        book: Arc<EventBook>,
+    ) -> futures::future::BoxFuture<'static, Result<(), BusError>> {
         let tx = self.tx.clone();
         let count = self.count.clone();
-        let received = self.received.clone();
         let book = (*book).clone();
         Box::pin(async move {
             if let Some(c) = count {
-                c.fetch_add(1, Ordering::SeqCst);
-            }
-            if let Some(r) = received {
-                r.lock().await.push(book.clone());
+                c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             }
             tx.send(book)
                 .await
-                .map_err(|e| BusError::Publish(e.to_string()))?;
-            Ok(())
-        })
-    }
-}
-
-/// A test handler that always fails with a configurable error.
-///
-/// Useful for testing error handling and DLQ scenarios.
-pub struct FailingHandler {
-    error_message: String,
-    /// Optional tracker for verifying error was reported (used by BDD tests).
-    error_reported: Option<Arc<Mutex<Option<String>>>>,
-}
-
-impl FailingHandler {
-    /// Create a handler that fails with the given message.
-    pub fn new(error_message: &str) -> Self {
-        Self {
-            error_message: error_message.to_string(),
-            error_reported: None,
-        }
-    }
-
-    /// Create a handler that fails and tracks the error for verification.
-    pub fn with_tracker(error_message: &str, error_reported: Arc<Mutex<Option<String>>>) -> Self {
-        Self {
-            error_message: error_message.to_string(),
-            error_reported: Some(error_reported),
-        }
-    }
-}
-
-impl EventHandler for FailingHandler {
-    fn handle(&self, _book: Arc<EventBook>) -> BoxFuture<'static, Result<(), BusError>> {
-        let error = self.error_message.clone();
-        let error_reported = self.error_reported.clone();
-        Box::pin(async move {
-            if let Some(tracker) = error_reported {
-                *tracker.lock().await = Some(error.clone());
-            }
-            Err(BusError::Publish(error))
+                .map_err(|e| BusError::Publish(e.to_string()))
         })
     }
 }

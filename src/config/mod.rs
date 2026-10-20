@@ -7,7 +7,7 @@ mod client;
 mod limits;
 mod server;
 
-pub use client::{SagaCompensationConfig, ServiceEndpoint, DEFAULT_SAGA_FALLBACK_DOMAIN};
+pub use client::ServiceEndpoint;
 pub use limits::ResourceLimits;
 pub use server::{
     ConfigError, ExternalServiceConfig, HealthCheckConfig, ServerConfig, ServiceConfig,
@@ -71,7 +71,6 @@ use serde::Deserialize;
 
 use crate::bus::MessagingConfig;
 use crate::dlq::DlqConfig;
-use crate::payload_store::PayloadOffloadConfig;
 use crate::services::UpcasterConfig;
 use crate::storage::StorageRegistryConfig;
 use crate::transport::TransportConfig;
@@ -90,20 +89,31 @@ pub struct Config {
     pub messaging: Option<MessagingConfig>,
     /// Target service for sidecar mode.
     pub target: Option<TargetConfig>,
-    /// Projector endpoints.
-    pub projectors: Option<Vec<ServiceEndpoint>>,
-    /// Saga endpoints.
-    pub sagas: Option<Vec<ServiceEndpoint>>,
-    /// Saga compensation configuration.
-    pub saga_compensation: Option<SagaCompensationConfig>,
     /// Upcaster configuration for event version transformation.
     pub upcaster: UpcasterConfig,
     /// Resource limits for message processing and queries.
     pub limits: ResourceLimits,
     /// Payload offloading configuration for oversized messages.
-    pub payload_offload: PayloadOffloadConfig,
     /// Dead letter queue configuration.
     pub dlq: DlqConfig,
+    pub registration: RegistrationConfig,
+}
+
+/// Component discovery settings (see [`crate::registration`]).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RegistrationConfig {
+    /// How long Describe calls may keep failing before an alert is raised
+    /// (every failure is logged). Seconds. Default 30.
+    pub describe_alert_grace_secs: u64,
+}
+
+impl Default for RegistrationConfig {
+    fn default() -> Self {
+        Self {
+            describe_alert_grace_secs: 30,
+        }
+    }
 }
 
 impl Config {

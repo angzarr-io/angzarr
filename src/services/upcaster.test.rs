@@ -19,7 +19,6 @@
 //! - Error propagation from upcaster service
 
 use super::*;
-use crate::proto::PageHeader;
 
 // ============================================================================
 // Configuration Tests
@@ -50,12 +49,7 @@ async fn test_upcaster_passthrough_when_disabled() {
     let upcaster = Upcaster::disabled();
 
     let events = vec![EventPage {
-        header: Some(PageHeader {
-            sync_mode: None,
-            sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(1)),
-        }),
-        created_at: None,
-        payload: None,
+        sequence: 1,
         ..Default::default()
     }];
 

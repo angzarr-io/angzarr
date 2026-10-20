@@ -298,6 +298,8 @@ pub const OP_EVENT_GET_BY_CORRELATION: &str = "event_get_by_correlation";
 pub const OP_EVENT_GET_UNTIL_TIMESTAMP: &str = "event_get_until_timestamp";
 /// Operation: delete edition events.
 pub const OP_EVENT_DELETE_EDITION: &str = "event_delete_edition";
+/// Deduplication lookup by command id.
+pub const OP_EVENT_FIND_BY_COMMAND_ID: &str = "event_find_by_command_id";
 /// Operation: get snapshot.
 pub const OP_SNAPSHOT_GET: &str = "snapshot_get";
 /// Operation: get snapshot at sequence.

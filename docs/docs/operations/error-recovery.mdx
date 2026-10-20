@@ -560,18 +560,6 @@ When an aggregate cannot handle a rejection, it returns flags:
 | `escalate` | Trigger webhook notification |
 | `abort` | Stop saga chain, propagate error to caller |
 
-### Configuration
-
-```yaml
-saga_compensation:
-  fallback_domain: "system"                    # Domain for SagaCompensationFailed events
-  fallback_emit_system_revocation: true        # Default when aggregate returns empty
-  fallback_send_to_dlq: true
-  fallback_escalate: false
-  dead_letter_queue_url: "amqp://..."          # Optional DLQ URL
-  escalation_webhook_url: "https://..."        # Optional webhook for alerts
-```
-
 ---
 
 ## MergeStrategy and Conflicts
@@ -610,11 +598,6 @@ The `MergeStrategy` enum controls how sequence conflicts are handled:
 ## Escalation
 
 For critical failures, angzarr can trigger alerts via webhooks:
-
-```yaml
-saga_compensation:
-  escalation_webhook_url: "https://ops.example.com/alerts"
-```
 
 Webhook payload:
 

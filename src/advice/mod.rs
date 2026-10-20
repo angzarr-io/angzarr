@@ -30,31 +30,7 @@
 
 mod instrumented;
 mod instrumented_bus;
-mod instrumented_handlers;
 pub mod metrics;
 
 pub use instrumented::Instrumented;
 pub use instrumented_bus::{InstrumentedBus, InstrumentedDynBus};
-pub use instrumented_handlers::{
-    InstrumentedPMHandler, InstrumentedProjectorHandler, InstrumentedSagaHandler,
-};
-
-// Re-export metric constants for external dashboards/alerting
-pub use metrics::{
-    // Special values
-    DOMAIN_CORRELATION_QUERY,
-    // Operation names
-    OP_EVENT_ADD,
-    OP_EVENT_GET,
-    OP_EVENT_GET_BY_CORRELATION,
-    OP_EVENT_GET_FROM,
-    OP_EVENT_GET_FROM_TO,
-    OP_EVENT_GET_NEXT_SEQUENCE,
-    OP_EVENT_LIST_DOMAINS,
-    OP_EVENT_LIST_ROOTS,
-    OP_POSITION_GET,
-    OP_POSITION_PUT,
-    OP_SNAPSHOT_DELETE,
-    OP_SNAPSHOT_GET,
-    OP_SNAPSHOT_PUT,
-};

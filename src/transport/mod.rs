@@ -59,7 +59,8 @@ pub use server::{serve_with_transport, serve_with_transport_and_shutdown};
 
 // Re-exports: client
 pub use client::{
-    connect_to_address, connect_with_transport, is_uds_address, ServiceEndpointConfig,
+    connect_to_address, connect_watched, connect_with_transport, is_uds_address,
+    ServiceEndpointConfig,
 };
 
 // Re-exports: trace

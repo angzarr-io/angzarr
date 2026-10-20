@@ -1,17 +1,16 @@
-//! Generated protobuf types and gRPC service definitions.
+//! The io.angzarr.v1 wire types and the gRPC stubs core serves or calls.
 //!
-//! All types are generated from `.proto` files in the `proto/` directory
-//! by `tonic_prost_build` during `cargo build`. The generated code includes
-//! both message types (Cover, EventBook, CommandBook, etc.) and gRPC
-//! service client/server stubs.
+//! Every message and enum is angzarr-project's `angzarr-proto` crate's
+//! (re-exported here); `build.rs` generates only the service stubs and the
+//! messages the service files themselves define (`CommandHandlerResponse`,
+//! `CommandResponse`), extern-pathed onto those types.
 
-tonic::include_proto!("io.angzarr.v1");
+pub use angzarr_proto::v1::*;
 
-/// Operations-console gRPC surface (DLQ admin, cluster health, etc.).
-/// Lives in the `io.angzarr.status.v1` proto package — nested module so
-/// consumers reach for `crate::proto::status::*`.
-///
-/// Plan reference: `plans/virtual-spinning-flute.md`.
-pub mod status {
-    tonic::include_proto!("io.angzarr.status.v1");
+// The spec's proto comments are prose, not rustdoc lists.
+#[allow(clippy::doc_overindented_list_items, clippy::doc_lazy_continuation)]
+mod services {
+    tonic::include_proto!("io.angzarr.v1");
 }
+
+pub use services::*;

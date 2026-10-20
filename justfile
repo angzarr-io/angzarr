@@ -529,36 +529,10 @@ mutants-purge-cache:
     @echo "Removed {{TOP}}/.mutants-cache"
 
 # === Storage Contract Tests ===
-# =============================================================================
-# Storage contract tests verify that storage implementations correctly fulfill
-# their trait contracts (EventStore, SnapshotStore, PositionStore).
-#
-# WHY: Each backend has different consistency models, failure modes, and APIs.
-# A passing contract test means the backend can be swapped transparently.
-#
-# Usage:
-#   just storage test              # All backends
-#   just storage sqlite test       # SQLite only (no containers)
-#   just storage postgres test     # PostgreSQL only (testcontainers)
-#   just storage redis test        # Redis only (testcontainers)
-#   just storage immudb test       # ImmuDB only (testcontainers)
-# =============================================================================
-
-# Storage contract tests - run all backends or a specific one
+# The storage contract runs as unit tests against every ported backend
+# (in-memory and SQLite; see src/storage/contract.rs). No containers needed.
 storage *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    args="{{ARGS}}"
-    if [[ "$args" == "test" ]] || [[ -z "$args" ]]; then
-        # All backends - needs dind for testcontainers
-        just _container-dind storage test
-    elif [[ "$args" == "sqlite test" ]]; then
-        # SQLite doesn't need containers
-        just _container storage sqlite test
-    else
-        # Other backends need testcontainers
-        just _container-dind storage $args
-    fi
+    just _container storage {{ARGS}}
 
 # === Bus Contract Tests ===
 # =============================================================================
@@ -572,9 +546,7 @@ storage *ARGS:
 # Usage:
 #   just bus test                  # All backends
 #   just bus amqp test             # RabbitMQ only (testcontainers)
-#   just bus kafka test            # Kafka only (testcontainers)
-#   just bus pubsub test           # GCP Pub/Sub only (testcontainers)
-#   just bus sns-sqs test          # AWS SNS/SQS only (testcontainers)
+# (Kafka, Pub/Sub and SNS/SQS are not yet ported to the latest proto.)
 # NOTE: the in-memory channel backend was removed (b1eb2416); every
 # remaining bus backend needs testcontainers.
 # =============================================================================
@@ -599,10 +571,16 @@ bus *ARGS:
 test-contract:
     just _container-dind test-contract
 
+# Run the coordinator-contract scenarios (angzarr-project
+# features/coordinator-contract, bound by scenario id; in process).
+test-coordinator-contract:
+    just _container test-coordinator-contract
+
 # Run all local tests (no running K8s cluster required)
 # =============================================================================
 # Fast validation suite using in-memory backends (no containers needed).
-# Includes: test-target compile gate, unit tests, storage (SQLite).
+# Includes: test-target compile gate, unit tests (with the storage
+# contract), the coordinator-contract scenarios.
 # (The in-memory channel bus was removed; all bus backends now need
 # testcontainers — run `just bus test` / `just test-contract` for those.)
 #
@@ -624,9 +602,9 @@ test-local:
     just test
     @echo ""
     @echo "═══════════════════════════════════════════════════════════════════"
-    @echo "=== Storage Contract Tests (SQLite) ==="
+    @echo "=== Coordinator-Contract Scenarios ==="
     @echo "═══════════════════════════════════════════════════════════════════"
-    just storage sqlite test
+    just test-coordinator-contract
     @echo ""
     @echo "═══════════════════════════════════════════════════════════════════"
     @echo "=== All Local Tests Complete ==="
@@ -639,8 +617,7 @@ test-local:
 # WHY: Pre-merge validation. Ensures changes haven't broken any backend.
 # Takes longer but provides confidence across all deployment targets.
 #
-# Storage: SQLite, PostgreSQL, Redis, ImmuDB, NATS
-# Bus: Channel, AMQP, Kafka, Pub/Sub, SNS/SQS, NATS
+# Storage: in-memory, SQLite (unit tests). Bus: AMQP.
 # =============================================================================
 test-full: test-local
     @echo ""
@@ -700,21 +677,9 @@ cov-lcov:
 
 # --- Contract Test Coverage (requires docker socket for testcontainers) ---
 
-# Run PostgreSQL contract tests with coverage
-cov-contract-postgres:
-    just _container-dind cov-contract-postgres
-
-# Run Redis contract tests with coverage
-cov-contract-redis:
-    just _container-dind cov-contract-redis
-
 # Run AMQP bus contract tests with coverage
 cov-contract-amqp:
     just _container-dind cov-contract-amqp
-
-# Run Kafka bus contract tests with coverage
-cov-contract-kafka:
-    just _container-dind cov-contract-kafka
 
 # Run all contract tests with combined coverage
 cov-contracts:

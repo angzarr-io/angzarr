@@ -37,7 +37,7 @@ check-features FEATURES:
 # deleted helper" rot (review finding T1) — `cargo test` alone never
 # compiles feature-gated test targets that no recipe invokes.
 check-tests:
-    cargo check --tests --features "test-utils amqp kafka pubsub sns-sqs postgres redis immudb"
+    cargo check --tests --features "test-utils amqp"
 
 # Check formatting (use fmt-fix to auto-format)
 fmt:
@@ -108,10 +108,6 @@ precommit: fmt lint test
 # === CI Integration Tests ===
 # These run in CI after unit tests pass
 
-# Run SQLite storage contract tests
-test-storage-sqlite:
-    cargo test --test storage_sqlite --features "test-utils"
-
 # Run config integration tests
 test-config:
     cargo test --test config_integration --features "test-utils"
@@ -120,62 +116,14 @@ test-config:
 test-grpc:
     cargo test --test grpc_connection --features "test-utils"
 
-# Run DLQ publish->read round-trip against tempfile-backed SQLite.
-# Mirrors test-storage-sqlite: no Docker needed, runs in CI. The
-# Postgres+AMQP testcontainer variants stay out of CI for the same
-# reason storage_postgres does.
-test-dlq-sqlite:
-    cargo test --test dlq_round_trip_sqlite --features "test-utils"
-
-# Run DLQ Gherkin acceptance harness (cucumber-rs against
-# features/client/dlq.feature). Drives saga/PM/projector/aggregate
-# orchestration through real SqliteDlqPublisher+Reader; no Docker
-# needed, runs in CI.
-test-dlq-features:
-    cargo test --test dlq_features --features "test-utils"
-
-# Run the aggregate pipeline -> SqliteEventStore integration suite.
-# Closes the Category B drift gap between MockEventStore-based unit
-# tests and storage_sqlite.rs's direct EventStore.add tests.
-test-aggregate-pipeline:
-    cargo test --test aggregate_pipeline_event_store --features "test-utils"
-
-# Run the PM persist -> SqliteEventStore integration suite. Exercises
-# persist_pm_event_book (extracted from GrpcPMContext::persist_pm_events
-# for testability) against a real event store + recording bus.
-test-pm-persist:
-    cargo test --test pm_persist_event_store --features "test-utils"
-
-# Run the status DLQ admin gRPC -> Reader -> DB integration suite.
-# Drives DlqAdminService trait methods against a populated SQLite-
-# backed reader.
-test-status-dlq-admin:
-    cargo test --test status_dlq_admin_grpc --features "test-utils"
-
-# Run the aggregate pipeline -> SnapshotRepository integration suite.
-# AggregateService.handle_command + real SqliteSnapshotStore.
-test-pipeline-snapshot:
-    cargo test --test aggregate_pipeline_snapshot --features "test-utils"
-
-# Run the projector publish -> EventBus shape-verification suite.
-# Inspects the projection EventBook (domain prefix, correlation_id,
-# edition, decoded projection payload, sequence).
-test-projector-publish:
-    cargo test --test projector_publish_event_bus --features "test-utils"
-
-# Run the deployed-cluster acceptance harness (T14). Opt-in: the binary
-# exits 0 with a notice unless ANGZARR_ACCEPTANCE=1 and a deployed
-# angzarr system is reachable, so this is safe in CI and `test-integration`.
-test-acceptance:
-    cargo test --test acceptance_features --features "test-utils"
-
-# Live variant: requires a deployed angzarr system (just kind up + skaffold)
-# reachable from the container (--network=host => localhost NodePort works).
-test-acceptance-live:
-    ANGZARR_ACCEPTANCE=1 cargo test --test acceptance_features --features "test-utils"
+# Run the coordinator-contract harness (cucumber-rs against
+# angzarr-project/features/coordinator-contract): the scenarios the
+# aggregate coordinator owns, bound by scenario id, in process.
+test-coordinator-contract:
+    cargo test --test coordinator_contract --features "test-utils"
 
 # Run all CI integration tests
-test-integration: test-storage-sqlite test-config test-grpc test-dlq-sqlite test-dlq-features test-aggregate-pipeline test-pm-persist test-status-dlq-admin test-pipeline-snapshot test-projector-publish test-acceptance
+test-integration: test-config test-grpc test-coordinator-contract
 
 # Run coverage for CI (unit + contract tests)
 cov-ci:
@@ -196,77 +144,12 @@ mutants-ci:
     fi
 
 # === Storage Contract Tests ===
-# =============================================================================
-# Storage contract tests verify that storage implementations correctly fulfill
-# their trait contracts (EventStore, SnapshotStore, PositionStore).
-#
-# WHY: Each backend has different consistency models, failure modes, and APIs.
-# Contract tests ensure all implementations provide identical semantics despite
-# underlying differences. A passing contract test means the backend can be
-# swapped transparently without behavior changes.
-#
-# Usage:
-#   just storage test              # All backends (default)
-#   just storage sqlite test       # SQLite only (no containers)
-#   just storage postgres test     # PostgreSQL only (testcontainers)
-#   just storage redis test        # Redis only (testcontainers)
-#   just storage immudb test       # ImmuDB only (testcontainers)
-# =============================================================================
-
-# Storage contract tests - run all backends or a specific one
-# Usage: just storage test | just storage postgres test
+# The storage contract (append, optimistic conflicts, half-open reads,
+# time-bounded prefixes, command-id lookup, newest-only snapshots) runs as
+# unit tests against every ported backend (in-memory and SQLite):
+# src/storage/contract.rs. The other backends are not yet ported.
 storage *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    args="{{ARGS}}"
-    if [[ "$args" == "test" ]] || [[ -z "$args" ]]; then
-        just _storage-all
-    else
-        backend="${args%% *}"
-        just "_storage-${backend}"
-    fi
-
-# Private: Run all storage backend tests
-_storage-all: _storage-sqlite _storage-postgres _storage-redis _storage-immudb
-    @echo "All storage contract tests passed"
-
-# Private: SQLite storage tests (in-memory, no containers)
-# WHY: Default local development backend. Fast, no setup. Validates all
-# storage contracts in under a minute via the macro contract suite.
-# NOTE: `sqlite` is NOT a cargo feature (always compiled) — see the
-# mutants section for the same trap.
-_storage-sqlite:
-    @echo "=== Storage: SQLite (macro contract tests) ==="
-    cargo test --test storage_sqlite --features test-utils -- --nocapture
-
-# Private: PostgreSQL storage tests (testcontainers)
-# WHY: Production-grade RDBMS. Tests verify SQL schema correctness,
-# transaction isolation, and ACID guarantees via the macro contract suite.
-# NOTE: --test-threads=1 — each test starts its own Postgres container;
-# running four in parallel under rootless docker port-forwarding starves
-# connections (PoolTimedOut). Same rationale as the bus suites.
-_storage-postgres:
-    @echo "=== Storage: PostgreSQL (macro contract tests) ==="
-    cargo test --test storage_postgres --features "postgres test-utils" -- --test-threads=1 --nocapture
-
-# DLQ round-trip against real Postgres (testcontainers). Companion to
-# test-dlq-sqlite; exercised by the CI contract job.
-test-dlq-postgres:
-    cargo test --test dlq_round_trip_postgres --features "postgres test-utils" -- --nocapture
-
-# Private: Redis storage tests (testcontainers)
-# WHY: High-performance snapshot caching. Tests verify snapshot serialization,
-# TTL handling, and Redis's eventual consistency model via direct macro tests.
-_storage-redis:
-    @echo "=== Storage: Redis (direct contract tests) ==="
-    cargo test --test storage_redis --features redis -- --nocapture
-
-# Private: ImmuDB storage tests (testcontainers)
-# WHY: Cryptographically verifiable event storage. Tests verify events persist
-# correctly via the PostgreSQL wire protocol adapter. Append-only by design.
-_storage-immudb:
-    @echo "=== Storage: ImmuDB (direct contract tests) ==="
-    cargo test --test storage_immudb --features immudb -- --nocapture
+    cargo test --lib --features test-utils storage::
 
 # === Bus Contract Tests ===
 # =============================================================================
@@ -283,9 +166,7 @@ _storage-immudb:
 # Usage:
 #   just bus test                  # All backends (default)
 #   just bus amqp test             # RabbitMQ only (testcontainers)
-#   just bus kafka test            # Kafka only (testcontainers)
-#   just bus pubsub test           # GCP Pub/Sub only (testcontainers)
-#   just bus sns-sqs test          # AWS SNS/SQS only (testcontainers)
+# (Kafka, Pub/Sub and SNS/SQS are not yet ported to the latest proto.)
 # =============================================================================
 
 # Bus contract tests - run all backends or a specific one
@@ -303,7 +184,7 @@ bus *ARGS:
 
 # Private: Run all bus backend tests (with container cleanup between runs)
 # WHY: Cleanup prevents port conflicts and resource exhaustion from accumulated containers.
-_bus-all: _bus-amqp clean-containers _bus-kafka clean-containers _bus-pubsub clean-containers _bus-sns-sqs
+_bus-all: _bus-amqp
     @echo "All bus contract tests passed"
 
 # NOTE: every bus test binary needs `test-utils` — tests/bus/event_bus_tests.rs
@@ -315,29 +196,6 @@ _bus-all: _bus-amqp clean-containers _bus-kafka clean-containers _bus-pubsub cle
 _bus-amqp:
     @echo "=== Bus: AMQP/RabbitMQ (direct contract tests) ==="
     cargo test --test bus_amqp --features "amqp test-utils" -- --test-threads=1
-    @echo "=== Bus: AMQP B1 interleave-publish e2e ==="
-    cargo test --test interleave_publish_amqp --features "amqp test-utils" -- --test-threads=1
-
-# Private: Kafka bus tests (testcontainers)
-# WHY: High-throughput partitioned streaming. Tests verify topic creation,
-# consumer group coordination, offset management, and at-least-once delivery.
-_bus-kafka:
-    @echo "=== Bus: Kafka (direct contract tests) ==="
-    cargo test --test bus_kafka --features "kafka test-utils" -- --test-threads=1
-
-# Private: GCP Pub/Sub bus tests (testcontainers emulator)
-# WHY: Event bus for GCP deployments. Tests verify topic/subscription management,
-# message ordering keys, and acknowledgment deadline extensions.
-_bus-pubsub:
-    @echo "=== Bus: GCP Pub/Sub (direct contract tests) ==="
-    cargo test --test bus_pubsub --features "pubsub test-utils" -- --test-threads=1
-
-# Private: AWS SNS/SQS bus tests (LocalStack testcontainer)
-# WHY: Event bus for AWS deployments. Tests verify SNS fan-out to SQS queues,
-# message attribute filtering, visibility timeout, and DLQ redrive policies.
-_bus-sns-sqs:
-    @echo "=== Bus: AWS SNS/SQS (direct contract tests) ==="
-    cargo test --test bus_sns_sqs --features "sns-sqs test-utils" -- --test-threads=1
 
 # Clean up zombie containers from failed test runs
 clean-containers:
@@ -348,7 +206,7 @@ clean-containers:
 # Run all contract tests (storage + bus)
 # WHY: Complete validation of all backend implementations. The "did we break
 # anything?" check before merging infrastructure changes.
-test-contract: _storage-all _bus-all
+test-contract: storage _bus-all
     @echo "All contract tests passed"
 
 # Basic clean - cargo target and generated proto code
@@ -392,18 +250,17 @@ COV_IGNORE := "--ignore-filename-regex '(proto/|build\\.rs|main\\.rs)'"
 # `sqlite` is NOT a cargo feature (always compiled) — see the mutants
 # section note. Only test-utils is needed for the local suites.
 COV_FEATURES := "--features test-utils"
-# Local (container-free) test targets: SQLite contract suite + the DLQ
-# Gherkin harness. `--test interfaces` no longer exists (replaced by the
-# per-backend storage_*/bus_* macro suites).
-COV_LOCAL_TESTS := "--test storage_sqlite --test dlq_features"
+# Local (container-free) test targets beyond the unit tests (which carry
+# the storage contract): the coordinator-contract Gherkin harness.
+COV_LOCAL_TESTS := "--test coordinator_contract"
 
 # Run unit tests with coverage
 cov-unit:
     cargo llvm-cov --lib {{COV_FEATURES}} {{COV_IGNORE}}
 
-# Run Gherkin acceptance harness with coverage (cucumber DLQ features)
+# Run the coordinator-contract Gherkin harness with coverage
 cov-gherkin:
-    cargo llvm-cov --test dlq_features {{COV_FEATURES}} {{COV_IGNORE}}
+    cargo llvm-cov --test coordinator_contract {{COV_FEATURES}} {{COV_IGNORE}}
 
 # Run all local tests with coverage (unit + sqlite contracts + gherkin)
 cov:
@@ -447,28 +304,15 @@ cov-lcov:
 
 # === Contract Test Coverage (requires testcontainers/docker socket) ===
 
-# Run PostgreSQL contract tests with coverage
-cov-contract-postgres:
-    cargo llvm-cov --test storage_postgres --features "postgres test-utils" {{COV_IGNORE}}
-
-# Run Redis contract tests with coverage
-cov-contract-redis:
-    cargo llvm-cov --test storage_redis --features "redis test-utils" {{COV_IGNORE}}
-
 # Run AMQP bus contract tests with coverage
 cov-contract-amqp:
     cargo llvm-cov --test bus_amqp --features "amqp test-utils" {{COV_IGNORE}} -- --test-threads=1
 
-# Run Kafka bus contract tests with coverage
-cov-contract-kafka:
-    cargo llvm-cov --test bus_kafka --features "kafka test-utils" {{COV_IGNORE}} -- --test-threads=1
-
 # Run all contract tests with combined coverage (requires docker socket)
 cov-contracts:
     cargo llvm-cov \
-        --test storage_postgres \
         --test bus_amqp \
-        --features "postgres amqp test-utils" \
+        --features "amqp test-utils" \
         {{COV_IGNORE}} \
         -- --test-threads=1
 
@@ -479,9 +323,8 @@ cov-full:
     cargo llvm-cov \
         --lib \
         {{COV_LOCAL_TESTS}} \
-        --test storage_postgres \
         --test bus_amqp \
-        --features "postgres amqp test-utils" \
+        --features "amqp test-utils" \
         {{COV_IGNORE}}
 
 # Full coverage with HTML report (requires docker socket)
@@ -489,9 +332,8 @@ cov-full-html:
     cargo llvm-cov \
         --lib \
         {{COV_LOCAL_TESTS}} \
-        --test storage_postgres \
         --test bus_amqp \
-        --features "postgres amqp test-utils" \
+        --features "amqp test-utils" \
         {{COV_IGNORE}} \
         --html
     @echo "Full coverage report generated at target/llvm-cov/html/index.html"
@@ -501,9 +343,8 @@ cov-full-summary:
     cargo llvm-cov \
         --lib \
         {{COV_LOCAL_TESTS}} \
-        --test storage_postgres \
         --test bus_amqp \
-        --features "postgres amqp test-utils" \
+        --features "amqp test-utils" \
         {{COV_IGNORE}} \
         --summary-only
 

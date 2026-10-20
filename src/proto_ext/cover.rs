@@ -1,83 +1,43 @@
-//! Cover extension trait and implementations.
-//!
-//! Provides convenient accessors for domain, correlation_id, and root_id
-//! from Cover-bearing types.
+//! Stream identity read from anything that carries a [`Cover`].
 
-use crate::proto::{CommandBook, Cover, EventBook, Query};
+use crate::proto::{CommandBook, Cover, EventBook, Projection};
 
 use super::constants::UNKNOWN_DOMAIN;
 
-/// Extension trait for types with an optional Cover.
-///
-/// Provides convenient accessors for domain, correlation_id, and root_id
-/// without verbose `.cover.as_ref().map(...)` chains.
+/// Read access to the stream a message addresses: (domain, edition, root).
 pub trait CoverExt {
-    /// Get the cover, if present.
+    /// The cover, when set.
     fn cover(&self) -> Option<&Cover>;
 
-    /// Get the domain from the cover, or [`UNKNOWN_DOMAIN`] if missing.
+    /// The domain, or [`UNKNOWN_DOMAIN`] when there is no cover.
     fn domain(&self) -> &str {
         self.cover()
             .map(|c| c.domain.as_str())
             .unwrap_or(UNKNOWN_DOMAIN)
     }
 
-    /// Get the correlation_id from the cover, or empty string if missing.
-    fn correlation_id(&self) -> &str {
-        self.cover()
-            .map(|c| c.correlation_id.as_str())
-            .unwrap_or("")
+    /// The edition name: `None` is the main timeline (types.proto,
+    /// `Cover.edition`: main is the unset edition).
+    fn edition_name(&self) -> Option<&str> {
+        self.cover().and_then(|c| c.edition.as_deref())
     }
 
-    /// Get the root UUID as a hex-encoded string, if present.
-    fn root_id_hex(&self) -> Option<String> {
-        self.cover()
-            .and_then(|c| c.root.as_ref())
-            .map(|u| hex::encode(&u.value))
-    }
-
-    /// Get the root UUID, if present.
+    /// The root as a UUID, when it is set and exactly 16 bytes.
     fn root_uuid(&self) -> Option<uuid::Uuid> {
         self.cover()
             .and_then(|c| c.root.as_ref())
-            .and_then(|u| uuid::Uuid::from_slice(&u.value).ok())
+            .and_then(|r| uuid::Uuid::try_from(r).ok())
     }
 
-    /// Check if correlation_id is present and non-empty.
-    fn has_correlation_id(&self) -> bool {
-        !self.correlation_id().is_empty()
+    /// The root as canonical text, or an empty string when unusable.
+    fn root_text(&self) -> String {
+        self.root_uuid().map(|u| u.to_string()).unwrap_or_default()
     }
+}
 
-    /// Get the edition name from the cover, or None if not set.
-    fn edition(&self) -> Option<&str> {
-        self.cover()
-            .and_then(|c| c.edition.as_ref())
-            .map(|e| e.name.as_str())
-            .filter(|e| !e.is_empty())
-    }
-
-    /// Get the Edition struct from the cover, if present.
-    fn edition_struct(&self) -> Option<&crate::proto::Edition> {
-        self.cover().and_then(|c| c.edition.as_ref())
-    }
-
-    /// Compute the bus routing key: `"{domain}"`.
-    ///
-    /// The routing key is a transport concern used for bus subscription matching.
-    /// Edition filtering is handled at the handler level, not the bus level.
-    fn routing_key(&self) -> String {
-        self.domain().to_string()
-    }
-
-    /// Generate a cache key for this entity based on edition + domain + root.
-    ///
-    /// Used for caching aggregate state during saga retry to avoid redundant fetches.
-    /// Includes edition to prevent collision between aggregates in different timelines.
-    fn cache_key(&self) -> String {
-        let edition = self.edition().unwrap_or_default();
-        let domain = self.domain();
-        let root = self.root_id_hex().unwrap_or_default();
-        format!("{edition}:{domain}:{root}")
+impl CoverExt for Cover {
+    fn cover(&self) -> Option<&Cover> {
+        Some(self)
     }
 }
 
@@ -93,34 +53,12 @@ impl CoverExt for CommandBook {
     }
 }
 
-impl CoverExt for Query {
+impl CoverExt for Projection {
     fn cover(&self) -> Option<&Cover> {
         self.cover.as_ref()
     }
 }
 
-impl CoverExt for Cover {
-    fn cover(&self) -> Option<&Cover> {
-        Some(self)
-    }
-}
-
-impl Cover {
-    /// Copy the `source` cover's edition (full struct, including
-    /// divergences) onto this cover, overwriting whatever was here.
-    ///
-    /// **Always-override semantics** — the coordinator guarantees
-    /// timeline consistency on saga / PM cross-domain emissions;
-    /// handlers cannot escape into a different edition by setting
-    /// their own outgoing cover. See
-    /// `coordinator-contract/edition_propagation.feature` (audit
-    /// #86 / C-0140 / C-0145) for the contract.
-    ///
-    /// If `source` has no edition, this clears the outgoing edition
-    /// — required by the contract: a main-timeline source produces
-    /// a main-timeline outgoing cover regardless of what the handler
-    /// set.
-    pub fn propagate_edition_from(&mut self, source: &Cover) {
-        self.edition = source.edition.clone();
-    }
-}
+#[cfg(test)]
+#[path = "cover.test.rs"]
+mod tests;

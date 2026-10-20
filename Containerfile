@@ -34,7 +34,7 @@ COPY xtask/ ./xtask/
 RUN mkdir -p src/bin tests/integration tests/interfaces migrations && \
     echo "fn main() {}" > src/main.rs && \
     echo "pub fn stub() {}" > src/lib.rs && \
-    for bin in aggregate projector saga process_manager log stream upcaster event_projector; do \
+    for bin in aggregate projector saga process_manager log stream event_projector; do \
       echo "fn main() {}" > src/bin/angzarr_$bin.rs; \
     done && \
     for f in acceptance container_integration mongodb_debug \
@@ -77,7 +77,7 @@ COPY --from=proto-gen /proto-out/ /proto-cache/
 RUN mkdir -p src/bin tests/integration tests/interfaces migrations && \
     echo "fn main() {}" > src/main.rs && \
     echo "pub fn stub() {}" > src/lib.rs && \
-    for bin in aggregate projector saga process_manager log stream upcaster event_projector; do \
+    for bin in aggregate projector saga process_manager log stream event_projector; do \
       echo "fn main() {}" > src/bin/angzarr_$bin.rs; \
     done && \
     for f in acceptance container_integration mongodb_debug \
@@ -154,7 +154,7 @@ COPY --from=proto-gen /proto-out/ /proto-cache/
 RUN mkdir -p src/bin tests/integration tests/interfaces migrations && \
     echo "fn main() {}" > src/main.rs && \
     echo "pub fn stub() {}" > src/lib.rs && \
-    for bin in aggregate projector saga process_manager log stream upcaster event_projector; do \
+    for bin in aggregate projector saga process_manager log stream event_projector; do \
       echo "fn main() {}" > src/bin/angzarr_$bin.rs; \
     done && \
     for f in acceptance container_integration mongodb_debug \

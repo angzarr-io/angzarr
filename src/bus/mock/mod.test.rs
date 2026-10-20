@@ -12,7 +12,7 @@
 //! deterministic test double that captures published events for assertion.
 
 use super::*;
-use crate::proto::{Cover, PageHeader, Uuid as ProtoUuid};
+use crate::proto::Cover;
 use uuid::Uuid;
 
 fn make_event_book(domain: &str, root: Uuid, event_count: usize) -> EventBook {
@@ -21,27 +21,17 @@ fn make_event_book(domain: &str, root: Uuid, event_count: usize) -> EventBook {
     EventBook {
         cover: Some(Cover {
             domain: domain.to_string(),
-            root: Some(ProtoUuid {
-                value: root.as_bytes().to_vec(),
-            }),
-            correlation_id: String::new(),
+            root: Some(root.into()),
             edition: None,
-            ext: None,
         }),
         pages: (0..event_count)
             .map(|i| EventPage {
-                header: Some(PageHeader {
-                    sync_mode: None,
-                    sequence_type: Some(crate::proto::page_header::SequenceType::Sequence(
-                        i as u32,
-                    )),
-                }),
-                payload: Some(crate::proto::event_page::Payload::Event(prost_types::Any {
+                payload: Some(prost_types::Any {
                     type_url: format!("test.Event{}", i),
                     value: vec![],
-                })),
-                created_at: None,
-                ..Default::default()
+                }),
+                sequence: i as u64,
+                meta: None,
             })
             .collect(),
         snapshot: None,

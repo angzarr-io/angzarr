@@ -163,8 +163,16 @@ impl StaticServiceDiscovery {
         // Parse projectors: ANGZARR_PROJECTORS='[{"name":"...","domain":"...","url":"..."}]'
         parse_projectors_env_var(&discovery);
 
-        let agg_count = discovery.aggregates.blocking_read().len();
-        let proj_count = discovery.projectors.blocking_read().len();
+        let agg_count = discovery
+            .aggregates
+            .try_read()
+            .expect("static discovery is uncontended while it is built")
+            .len();
+        let proj_count = discovery
+            .projectors
+            .try_read()
+            .expect("static discovery is uncontended while it is built")
+            .len();
         info!(
             aggregates = agg_count,
             projectors = proj_count,
@@ -189,7 +197,8 @@ impl StaticServiceDiscovery {
             "Registered static aggregate"
         );
         self.aggregates
-            .blocking_write()
+            .try_write()
+            .expect("static discovery is uncontended while it is built")
             .insert(service.name.clone(), service);
     }
 
@@ -209,7 +218,8 @@ impl StaticServiceDiscovery {
             "Registered static projector"
         );
         self.projectors
-            .blocking_write()
+            .try_write()
+            .expect("static discovery is uncontended while it is built")
             .insert(service.name.clone(), service);
     }
 
@@ -233,7 +243,8 @@ impl StaticServiceDiscovery {
             "Registered static saga"
         );
         self.sagas
-            .blocking_write()
+            .try_write()
+            .expect("static discovery is uncontended while it is built")
             .insert(name.to_string(), saga_service);
     }
 
@@ -257,7 +268,8 @@ impl StaticServiceDiscovery {
             "Registered static PM"
         );
         self.pms
-            .blocking_write()
+            .try_write()
+            .expect("static discovery is uncontended while it is built")
             .insert(name.to_string(), pm_service);
     }
 
@@ -453,7 +465,13 @@ impl super::ServiceDiscovery for StaticServiceDiscovery {
 
     async fn get_all_projectors(
         &self,
-    ) -> Result<Vec<ProjectorCoordinatorServiceClient<Channel>>, DiscoveryError> {
+    ) -> Result<
+        Vec<(
+            DiscoveredService,
+            ProjectorCoordinatorServiceClient<Channel>,
+        )>,
+        DiscoveryError,
+    > {
         let projectors = self.projectors.read().await;
 
         if projectors.is_empty() {
@@ -466,7 +484,7 @@ impl super::ServiceDiscovery for StaticServiceDiscovery {
         let mut clients = Vec::with_capacity(services.len());
         for service in services {
             match self.get_or_create_projector_client(&service).await {
-                Ok(client) => clients.push(client),
+                Ok(client) => clients.push((service, client)),
                 Err(e) => {
                     warn!(service = %service.name, error = %e, "Failed to get projector client")
                 }

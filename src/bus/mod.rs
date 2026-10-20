@@ -4,7 +4,9 @@
 //! - `EventBus` trait: Event delivery to projectors/sagas
 //! - `EventHandler` trait: For processing events
 //! - Bus configuration types
-//! - Implementations: AMQP (RabbitMQ), Kafka, Channel, Pub/Sub, SNS/SQS
+//! - Implementations: AMQP (RabbitMQ) and an in-memory mock. Kafka, Pub/Sub
+//!   and SNS/SQS are not yet ported to the latest proto: their configuration
+//!   still parses, and selecting one is refused at boot as an unknown type.
 
 use std::sync::Arc;
 
@@ -22,14 +24,7 @@ pub mod traits;
 #[cfg(feature = "amqp")]
 pub mod amqp;
 pub mod dispatch;
-#[cfg(feature = "kafka")]
-pub mod kafka;
 pub mod mock;
-pub mod offloading;
-#[cfg(feature = "pubsub")]
-pub mod pubsub;
-#[cfg(feature = "sns-sqs")]
-pub mod sns_sqs;
 
 // Re-export core types from submodules
 pub use config::{
@@ -38,7 +33,7 @@ pub use config::{
 
 pub use error::{errmsg, BusError, Result};
 
-pub use factory::{init_event_bus, wrap_with_offloading, BusBackend};
+pub use factory::{init_event_bus, BusBackend};
 
 pub use traits::{
     any_target_matches, domain_matches_any, target_matches, CommandBus, CommandHandler, EventBus,
@@ -48,14 +43,7 @@ pub use traits::{
 // Re-export implementation types
 #[cfg(feature = "amqp")]
 pub use amqp::{AmqpConfig, AmqpEventBus};
-#[cfg(feature = "kafka")]
-pub use kafka::{KafkaEventBus, KafkaEventBusConfig};
 pub use mock::MockEventBus;
-pub use offloading::{OffloadingConfig, OffloadingEventBus};
-#[cfg(feature = "pubsub")]
-pub use pubsub::{PubSubConfig, PubSubEventBus};
-#[cfg(feature = "sns-sqs")]
-pub use sns_sqs::{SnsSqsConfig, SnsSqsEventBus};
 
 // ============================================================================
 // Instrumented Bus Wrappers

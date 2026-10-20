@@ -1,54 +1,37 @@
 //! Metrics instrumentation advice.
 //!
-//! Wraps storage traits to emit OpenTelemetry metrics without modifying
+//! Wraps the storage traits to emit OpenTelemetry metrics without modifying
 //! core implementations. When the `otel` feature is disabled, the wrapper
-//! passes through calls without any overhead.
-//!
-//! # Example
+//! passes calls through with no overhead.
 //!
 //! ```ignore
-//! let store = SqliteEventStore::new(pool);
-//! let store = Instrumented::new(store, "sqlite");
-//! // All operations now emit metrics automatically
+//! let store = Instrumented::new(SqliteEventStore::new(pool), "sqlite");
 //! ```
 
 use async_trait::async_trait;
+use prost_types::Timestamp;
 use uuid::Uuid;
 
-use crate::proto::{EventBook, EventPage, Snapshot};
-use crate::storage::{
-    AddOutcome, CascadeParticipant, EventStore, PositionStore, Result, SnapshotStore, SourceInfo,
-};
+use crate::proto::{Cover, EventBook, EventPage, Snapshot};
+use crate::storage::{EventStore, Result, SnapshotStore, StreamHead, StreamRef};
 
-// OTel metric instruments and helpers (only when otel feature enabled)
 #[cfg(feature = "otel")]
 use super::metrics::{
-    domain_attr, handler_attr, operation_attr, storage_type_attr, DOMAIN_CORRELATION_QUERY,
-    EVENTS_LOADED_TOTAL, EVENTS_STORED_TOTAL, OP_EVENT_ADD, OP_EVENT_DELETE_EDITION, OP_EVENT_GET,
-    OP_EVENT_GET_BY_CORRELATION, OP_EVENT_GET_FROM, OP_EVENT_GET_FROM_TO,
-    OP_EVENT_GET_NEXT_SEQUENCE, OP_EVENT_GET_UNTIL_TIMESTAMP, OP_EVENT_LIST_DOMAINS,
-    OP_EVENT_LIST_ROOTS, OP_POSITION_GET, OP_POSITION_PUT, OP_SNAPSHOT_DELETE, OP_SNAPSHOT_GET,
-    OP_SNAPSHOT_GET_AT_SEQ, OP_SNAPSHOT_PUT, POSITIONS_UPDATED_TOTAL, SNAPSHOTS_LOADED_TOTAL,
-    SNAPSHOTS_STORED_TOTAL, STORAGE_DURATION,
+    domain_attr, operation_attr, storage_type_attr, EVENTS_LOADED_TOTAL, EVENTS_STORED_TOTAL,
+    OP_EVENT_ADD, OP_EVENT_FIND_BY_COMMAND_ID, OP_EVENT_GET_BY_CORRELATION, OP_EVENT_GET_FROM_TO,
+    OP_EVENT_GET_NEXT_SEQUENCE, OP_EVENT_GET_UNTIL_TIMESTAMP, OP_EVENT_LIST_ROOTS, OP_SNAPSHOT_GET,
+    OP_SNAPSHOT_PUT, SNAPSHOTS_LOADED_TOTAL, SNAPSHOTS_STORED_TOTAL, STORAGE_DURATION,
 };
 
-/// Wrapper that adds metrics instrumentation to any storage implementation.
-///
-/// When the `otel` feature is enabled, emits histograms and counters for all
-/// operations. When disabled, passes through to the inner implementation
-/// with no overhead.
+/// Wrapper that adds metrics instrumentation to a storage implementation.
 pub struct Instrumented<T> {
     inner: T,
-    #[allow(dead_code)] // Used when otel feature enabled
+    #[allow(dead_code)] // Read only with the otel feature.
     storage_type: &'static str,
 }
 
 impl<T> Instrumented<T> {
-    /// Wrap a storage implementation with metrics instrumentation.
-    ///
-    /// # Arguments
-    /// * `inner` - The storage implementation to wrap
-    /// * `storage_type` - Label for metrics (e.g., "sqlite", "postgres", "redis")
+    /// Wrap `inner`, labelling its metrics with `storage_type`.
     pub fn new(inner: T, storage_type: &'static str) -> Self {
         Self {
             inner,
@@ -56,516 +39,174 @@ impl<T> Instrumented<T> {
         }
     }
 
-    /// Get a reference to the inner storage.
+    /// The wrapped storage.
     pub fn inner(&self) -> &T {
         &self.inner
     }
 
-    /// Consume the wrapper and return the inner storage.
+    /// Unwrap.
     pub fn into_inner(self) -> T {
         self.inner
     }
+
+    /// Run `op`, recording its duration under `operation`.
+    async fn timed<R, F>(&self, operation: &'static str, op: F) -> R
+    where
+        F: std::future::Future<Output = R>,
+    {
+        #[cfg(feature = "otel")]
+        let start = std::time::Instant::now();
+        let result = op.await;
+        #[cfg(feature = "otel")]
+        STORAGE_DURATION.record(
+            start.elapsed().as_secs_f64(),
+            &[
+                operation_attr(operation),
+                storage_type_attr(self.storage_type),
+            ],
+        );
+        #[cfg(not(feature = "otel"))]
+        let _ = operation;
+        result
+    }
+
+    #[allow(unused_variables)]
+    fn count(&self, counter: Counter, domain: &str, n: usize) {
+        #[cfg(feature = "otel")]
+        {
+            let attrs = [domain_attr(domain), storage_type_attr(self.storage_type)];
+            match counter {
+                Counter::EventsStored => EVENTS_STORED_TOTAL.add(n as u64, &attrs),
+                Counter::EventsLoaded => EVENTS_LOADED_TOTAL.add(n as u64, &attrs),
+                Counter::SnapshotsStored => SNAPSHOTS_STORED_TOTAL.add(n as u64, &attrs),
+                Counter::SnapshotsLoaded => SNAPSHOTS_LOADED_TOTAL.add(n as u64, &attrs),
+            }
+        }
+    }
 }
+
+/// The counters a storage operation feeds.
+#[derive(Clone, Copy)]
+#[allow(dead_code)] // Matched only with the otel feature.
+enum Counter {
+    EventsStored,
+    EventsLoaded,
+    SnapshotsStored,
+    SnapshotsLoaded,
+}
+
+#[cfg(not(feature = "otel"))]
+const OP_EVENT_ADD: &str = "";
+#[cfg(not(feature = "otel"))]
+const OP_EVENT_GET_FROM_TO: &str = "";
+#[cfg(not(feature = "otel"))]
+const OP_EVENT_GET_UNTIL_TIMESTAMP: &str = "";
+#[cfg(not(feature = "otel"))]
+const OP_EVENT_GET_NEXT_SEQUENCE: &str = "";
+#[cfg(not(feature = "otel"))]
+const OP_EVENT_FIND_BY_COMMAND_ID: &str = "";
+#[cfg(not(feature = "otel"))]
+const OP_EVENT_LIST_ROOTS: &str = "";
+#[cfg(not(feature = "otel"))]
+const OP_EVENT_GET_BY_CORRELATION: &str = "";
+#[cfg(not(feature = "otel"))]
+const OP_SNAPSHOT_GET: &str = "";
+#[cfg(not(feature = "otel"))]
+const OP_SNAPSHOT_PUT: &str = "";
 
 #[async_trait]
 impl<T: EventStore> EventStore for Instrumented<T> {
-    async fn add(
-        &self,
-        domain: &str,
-        edition: &str,
-        root: Uuid,
-        events: Vec<EventPage>,
-        meta: &crate::storage::AddMeta<'_>,
-    ) -> Result<AddOutcome> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-        #[cfg(feature = "otel")]
-        let count = events.len();
-
-        let result = self.inner.add(domain, edition, root, events, meta).await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_EVENT_ADD),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-
-            if let Ok(ref outcome) = result {
-                if outcome.is_added() {
-                    EVENTS_STORED_TOTAL.add(
-                        count as u64,
-                        &[domain_attr(domain), storage_type_attr(self.storage_type)],
-                    );
-                }
-            }
-        }
-
-        result
-    }
-
-    async fn get(&self, domain: &str, edition: &str, root: Uuid) -> Result<Vec<EventPage>> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
-        let result = self.inner.get(domain, edition, root).await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_EVENT_GET),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-
-            if let Ok(ref events) = result {
-                EVENTS_LOADED_TOTAL.add(
-                    events.len() as u64,
-                    &[domain_attr(domain), storage_type_attr(self.storage_type)],
-                );
-            }
-        }
-
-        result
-    }
-
-    async fn get_from(
-        &self,
-        domain: &str,
-        edition: &str,
-        root: Uuid,
-        from: u32,
-    ) -> Result<Vec<EventPage>> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
-        let result = self.inner.get_from(domain, edition, root, from).await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_EVENT_GET_FROM),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-
-            if let Ok(ref events) = result {
-                EVENTS_LOADED_TOTAL.add(
-                    events.len() as u64,
-                    &[domain_attr(domain), storage_type_attr(self.storage_type)],
-                );
-            }
-        }
-
-        result
-    }
-
-    async fn get_from_to(
-        &self,
-        domain: &str,
-        edition: &str,
-        root: Uuid,
-        from: u32,
-        to: u32,
-    ) -> Result<Vec<EventPage>> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
+    async fn append(&self, stream: StreamRef<'_>, pages: &[EventPage]) -> Result<()> {
         let result = self
-            .inner
-            .get_from_to(domain, edition, root, from, to)
+            .timed(OP_EVENT_ADD, self.inner.append(stream, pages))
             .await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_EVENT_GET_FROM_TO),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-
-            if let Ok(ref events) = result {
-                EVENTS_LOADED_TOTAL.add(
-                    events.len() as u64,
-                    &[domain_attr(domain), storage_type_attr(self.storage_type)],
-                );
-            }
+        if result.is_ok() {
+            self.count(Counter::EventsStored, stream.domain, pages.len());
         }
-
         result
     }
 
-    async fn list_roots(&self, domain: &str, edition: &str) -> Result<Vec<Uuid>> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
-        let result = self.inner.list_roots(domain, edition).await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_EVENT_LIST_ROOTS),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-        }
-
-        result
-    }
-
-    async fn list_domains(&self) -> Result<Vec<String>> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
-        let result = self.inner.list_domains().await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_EVENT_LIST_DOMAINS),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-        }
-
-        result
-    }
-
-    async fn get_next_sequence(&self, domain: &str, edition: &str, root: Uuid) -> Result<u32> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
-        let result = self.inner.get_next_sequence(domain, edition, root).await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_EVENT_GET_NEXT_SEQUENCE),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-        }
-
-        result
-    }
-
-    async fn get_by_correlation(&self, correlation_id: &str) -> Result<Vec<EventBook>> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
-        let result = self.inner.get_by_correlation(correlation_id).await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_EVENT_GET_BY_CORRELATION),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-
-            if let Ok(ref books) = result {
-                let total_events: usize = books.iter().map(|b| b.pages.len()).sum();
-                EVENTS_LOADED_TOTAL.add(
-                    total_events as u64,
-                    &[
-                        domain_attr(DOMAIN_CORRELATION_QUERY),
-                        storage_type_attr(self.storage_type),
-                    ],
-                );
-            }
-        }
-
-        result
-    }
-
-    async fn get_until_timestamp(
+    async fn read(
         &self,
-        domain: &str,
-        edition: &str,
-        root: Uuid,
-        until: &str,
+        stream: StreamRef<'_>,
+        from: u64,
+        to: Option<u64>,
     ) -> Result<Vec<EventPage>> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
         let result = self
-            .inner
-            .get_until_timestamp(domain, edition, root, until)
+            .timed(OP_EVENT_GET_FROM_TO, self.inner.read(stream, from, to))
             .await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_EVENT_GET_UNTIL_TIMESTAMP),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-
-            if let Ok(ref events) = result {
-                EVENTS_LOADED_TOTAL.add(
-                    events.len() as u64,
-                    &[domain_attr(domain), storage_type_attr(self.storage_type)],
-                );
-            }
+        if let Ok(pages) = &result {
+            self.count(Counter::EventsLoaded, stream.domain, pages.len());
         }
-
         result
     }
 
-    async fn delete_edition_events(&self, domain: &str, edition: &str) -> Result<u32> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
-        let result = self.inner.delete_edition_events(domain, edition).await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_EVENT_DELETE_EDITION),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-        }
-
-        result
-    }
-
-    async fn find_by_source(
+    async fn read_until_time(
         &self,
-        domain: &str,
-        edition: &str,
-        root: Uuid,
-        source_info: &SourceInfo,
-    ) -> Result<Option<Vec<EventPage>>> {
-        // Delegate to inner - no separate metrics for now
-        self.inner
-            .find_by_source(domain, edition, root, source_info)
+        stream: StreamRef<'_>,
+        until: &Timestamp,
+    ) -> Result<Vec<EventPage>> {
+        self.timed(
+            OP_EVENT_GET_UNTIL_TIMESTAMP,
+            self.inner.read_until_time(stream, until),
+        )
+        .await
+    }
+
+    async fn head(&self, stream: StreamRef<'_>) -> Result<StreamHead> {
+        self.timed(OP_EVENT_GET_NEXT_SEQUENCE, self.inner.head(stream))
             .await
     }
 
-    async fn find_by_external_id(
+    async fn find_by_command_id(
         &self,
-        domain: &str,
-        edition: &str,
-        root: Uuid,
-        external_id: &str,
-    ) -> Result<Option<Vec<EventPage>>> {
-        self.inner
-            .find_by_external_id(domain, edition, root, external_id)
+        stream: StreamRef<'_>,
+        command_id: &Uuid,
+    ) -> Result<Vec<EventPage>> {
+        self.timed(
+            OP_EVENT_FIND_BY_COMMAND_ID,
+            self.inner.find_by_command_id(stream, command_id),
+        )
+        .await
+    }
+
+    async fn list_streams(&self) -> Result<Vec<Cover>> {
+        self.timed(OP_EVENT_LIST_ROOTS, self.inner.list_streams())
             .await
     }
 
-    async fn query_stale_cascades(&self, threshold: &str) -> Result<Vec<String>> {
-        // Delegate to inner - no separate metrics for cascade queries
-        self.inner.query_stale_cascades(threshold).await
-    }
-
-    async fn query_cascade_participants(
+    async fn read_by_correlation(
         &self,
-        cascade_id: &str,
-    ) -> Result<Vec<CascadeParticipant>> {
-        // Delegate to inner - no separate metrics for cascade queries
-        self.inner.query_cascade_participants(cascade_id).await
+        domain: Option<&str>,
+        edition: Option<&str>,
+        correlation_id: &Uuid,
+    ) -> Result<Vec<EventBook>> {
+        self.timed(
+            OP_EVENT_GET_BY_CORRELATION,
+            self.inner
+                .read_by_correlation(domain, edition, correlation_id),
+        )
+        .await
     }
 }
 
 #[async_trait]
 impl<T: SnapshotStore> SnapshotStore for Instrumented<T> {
-    async fn get(&self, domain: &str, edition: &str, root: Uuid) -> Result<Option<Snapshot>> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
-        let result = self.inner.get(domain, edition, root).await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_SNAPSHOT_GET),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-
-            if let Ok(Some(_)) = &result {
-                SNAPSHOTS_LOADED_TOTAL.add(
-                    1,
-                    &[domain_attr(domain), storage_type_attr(self.storage_type)],
-                );
-            }
+    async fn get(&self, stream: StreamRef<'_>) -> Result<Option<Snapshot>> {
+        let result = self.timed(OP_SNAPSHOT_GET, self.inner.get(stream)).await;
+        if let Ok(Some(_)) = &result {
+            self.count(Counter::SnapshotsLoaded, stream.domain, 1);
         }
-
         result
     }
 
-    async fn get_at_seq(
-        &self,
-        domain: &str,
-        edition: &str,
-        root: Uuid,
-        seq: u32,
-    ) -> Result<Option<Snapshot>> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
-        let result = self.inner.get_at_seq(domain, edition, root, seq).await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_SNAPSHOT_GET_AT_SEQ),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-
-            if let Ok(Some(_)) = &result {
-                SNAPSHOTS_LOADED_TOTAL.add(
-                    1,
-                    &[domain_attr(domain), storage_type_attr(self.storage_type)],
-                );
-            }
-        }
-
-        result
-    }
-
-    async fn put(&self, domain: &str, edition: &str, root: Uuid, snapshot: Snapshot) -> Result<()> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
-        let result = self.inner.put(domain, edition, root, snapshot).await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_SNAPSHOT_PUT),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-
-            if result.is_ok() {
-                SNAPSHOTS_STORED_TOTAL.add(
-                    1,
-                    &[domain_attr(domain), storage_type_attr(self.storage_type)],
-                );
-            }
-        }
-
-        result
-    }
-
-    async fn delete(&self, domain: &str, edition: &str, root: Uuid) -> Result<()> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
-        let result = self.inner.delete(domain, edition, root).await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_SNAPSHOT_DELETE),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-        }
-
-        result
-    }
-}
-
-#[async_trait]
-impl<T: PositionStore> PositionStore for Instrumented<T> {
-    async fn get(
-        &self,
-        handler: &str,
-        domain: &str,
-        edition: &str,
-        root: &[u8],
-    ) -> Result<Option<u32>> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
-        let result = self.inner.get(handler, domain, edition, root).await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_POSITION_GET),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-        }
-
-        result
-    }
-
-    async fn put(
-        &self,
-        handler: &str,
-        domain: &str,
-        edition: &str,
-        root: &[u8],
-        sequence: u32,
-    ) -> Result<()> {
-        #[cfg(feature = "otel")]
-        let start = std::time::Instant::now();
-
+    async fn put(&self, stream: StreamRef<'_>, snapshot: &Snapshot) -> Result<()> {
         let result = self
-            .inner
-            .put(handler, domain, edition, root, sequence)
+            .timed(OP_SNAPSHOT_PUT, self.inner.put(stream, snapshot))
             .await;
-
-        #[cfg(feature = "otel")]
-        {
-            STORAGE_DURATION.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    operation_attr(OP_POSITION_PUT),
-                    storage_type_attr(self.storage_type),
-                ],
-            );
-
-            if result.is_ok() {
-                POSITIONS_UPDATED_TOTAL.add(
-                    1,
-                    &[
-                        handler_attr(handler),
-                        domain_attr(domain),
-                        storage_type_attr(self.storage_type),
-                    ],
-                );
-            }
+        if result.is_ok() {
+            self.count(Counter::SnapshotsStored, stream.domain, 1);
         }
-
         result
     }
 }

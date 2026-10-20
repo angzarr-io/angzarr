@@ -9,65 +9,19 @@
 //! correlation ID for easy filtering with grep/find.
 //!
 //! Key behaviors:
-//! - Filename generation (domain, timestamp, sanitized correlation ID)
+//! - Filename generation (domain, timestamp, correlation ID)
 //! - Format-specific output (JSON vs protobuf)
-//! - Character sanitization in filenames (prevents path traversal)
 //!
 //! Basic publish and is_configured() tests are covered by Gherkin contract
 //! tests in tests/interfaces/features/dlq_publishers.feature.
 
 use super::*;
-use crate::dlq::{AngzarrDeadLetter, DeadLetterPayload};
-use crate::proto::{
-    command_page, CommandBook, CommandPage, Cover, MergeStrategy, Uuid as ProtoUuid,
-};
-use crate::proto::{page_header, PageHeader};
-use std::collections::HashMap;
+use crate::dlq::test_support::dead_letter;
+use crate::dlq::AngzarrDeadLetter;
 use tempfile::TempDir;
-use uuid::Uuid;
 
-// ============================================================================
-// Test Helpers
-// ============================================================================
-
-fn make_test_command(domain: &str, correlation_id: &str) -> CommandBook {
-    let root = Uuid::new_v4();
-    CommandBook {
-        cover: Some(Cover {
-            domain: domain.to_string(),
-            root: Some(ProtoUuid {
-                value: root.as_bytes().to_vec(),
-            }),
-            correlation_id: correlation_id.to_string(),
-            edition: None,
-            ext: None,
-        }),
-        pages: vec![CommandPage {
-            header: Some(PageHeader {
-                sync_mode: None,
-                sequence_type: Some(page_header::SequenceType::Sequence(0)),
-            }),
-            payload: Some(command_page::Payload::Command(prost_types::Any {
-                type_url: "test.Command".to_string(),
-                value: vec![1, 2, 3],
-            })),
-            merge_strategy: MergeStrategy::MergeManual as i32,
-        }],
-    }
-}
-
-fn make_dead_letter(domain: &str, correlation_id: &str, reason: &str) -> AngzarrDeadLetter {
-    let cmd = make_test_command(domain, correlation_id);
-    AngzarrDeadLetter {
-        cover: cmd.cover.clone(),
-        payload: DeadLetterPayload::Command(cmd),
-        rejection_reason: reason.to_string(),
-        rejection_details: None,
-        occurred_at: Some(prost_types::Timestamp::from(std::time::SystemTime::now())),
-        metadata: HashMap::new(),
-        source_component: "test-component".to_string(),
-        source_component_type: "aggregate".to_string(),
-    }
+fn make_dead_letter(domain: &str, reason: &str) -> AngzarrDeadLetter {
+    dead_letter(domain, None, reason)
 }
 
 // ============================================================================
@@ -88,7 +42,7 @@ async fn test_filesystem_publisher_filename_includes_domain() {
         .await
         .expect("Failed to create publisher");
 
-    let dead_letter = make_dead_letter("inventory", "corr-abc", "Test");
+    let dead_letter = make_dead_letter("inventory", "Test");
     publisher
         .publish(dead_letter)
         .await
@@ -130,7 +84,7 @@ async fn test_filesystem_publisher_json_format_contains_fields() {
         .await
         .expect("Failed to create publisher");
 
-    let dead_letter = make_dead_letter("orders", "test-corr", "Sequence mismatch");
+    let dead_letter = make_dead_letter("orders", "Sequence mismatch");
     publisher
         .publish(dead_letter)
         .await
@@ -172,7 +126,7 @@ async fn test_filesystem_publisher_protobuf_format_writes_binary() {
         .await
         .expect("Failed to create publisher");
 
-    let dead_letter = make_dead_letter("orders", "test-corr", "Test");
+    let dead_letter = make_dead_letter("orders", "Test");
     publisher
         .publish(dead_letter)
         .await
@@ -199,75 +153,36 @@ async fn test_filesystem_publisher_protobuf_format_writes_binary() {
 }
 
 // ============================================================================
-// Filename Sanitization Tests
+// Filename Tests
 // ============================================================================
 
-/// Special characters in correlation ID replaced with underscore.
-///
-/// Prevents path traversal and invalid filenames. Correlation IDs from
-/// external systems may contain arbitrary characters.
+/// The correlation's canonical UUID text names the file, so dead letters of
+/// one workflow can be found with a glob.
 #[test]
-fn test_generate_filename_sanitizes_correlation_id() {
+fn test_generate_filename_includes_correlation_text() {
     let publisher = FilesystemDeadLetterPublisher {
         path: PathBuf::from("/tmp"),
         format: "json".to_string(),
     };
-
-    // Create dead letter with special chars in correlation ID
-    let mut dead_letter = make_dead_letter("orders", "test/corr:123?bad", "Test");
-    dead_letter.cover.as_mut().unwrap().correlation_id = "test/corr:123?bad".to_string();
-
-    let filename = publisher.generate_filename(&dead_letter);
-
-    // Should not contain special chars
-    assert!(!filename.contains('/'), "Filename should not contain /");
-    assert!(!filename.contains(':'), "Filename should not contain :");
-    assert!(!filename.contains('?'), "Filename should not contain ?");
-    assert!(filename.contains(".json"), "Should have .json extension");
-}
-
-/// Hyphens preserved — common in UUIDs and readable IDs.
-#[test]
-fn test_generate_filename_preserves_hyphens() {
-    let publisher = FilesystemDeadLetterPublisher {
-        path: PathBuf::from("/tmp"),
-        format: "json".to_string(),
-    };
-
-    // Correlation ID with hyphens should be preserved
-    let mut dead_letter = make_dead_letter("orders", "test-corr-123", "Test");
-    dead_letter.cover.as_mut().unwrap().correlation_id = "test-corr-123".to_string();
-
-    let filename = publisher.generate_filename(&dead_letter);
-
-    // Verify hyphen is preserved (not replaced with _)
+    let correlation = uuid::Uuid::from_u128(0x0192_0c8e_7b3a_7cc2_9f4e_5a1b_2c3d_4e5f);
+    let filename = publisher.generate_filename(&dead_letter("orders", Some(correlation), "Test"));
     assert!(
-        filename.contains("test-corr-123"),
-        "Filename should preserve hyphens: {}",
+        filename.contains(&correlation.to_string()),
+        "Filename should carry the correlation: {}",
         filename
     );
+    assert!(filename.ends_with(".json"));
 }
 
-/// Underscores preserved — common in snake_case IDs.
+/// Without a correlation the filename says so.
 #[test]
-fn test_generate_filename_preserves_underscores() {
+fn test_generate_filename_without_correlation() {
     let publisher = FilesystemDeadLetterPublisher {
         path: PathBuf::from("/tmp"),
         format: "json".to_string(),
     };
-
-    // Correlation ID with underscores should be preserved
-    let mut dead_letter = make_dead_letter("orders", "test_corr_123", "Test");
-    dead_letter.cover.as_mut().unwrap().correlation_id = "test_corr_123".to_string();
-
-    let filename = publisher.generate_filename(&dead_letter);
-
-    // Verify underscore is preserved
-    assert!(
-        filename.contains("test_corr_123"),
-        "Filename should preserve underscores: {}",
-        filename
-    );
+    let filename = publisher.generate_filename(&make_dead_letter("orders", "Test"));
+    assert!(filename.contains("no-correlation"), "{filename}");
 }
 
 // ============================================================================
@@ -282,7 +197,7 @@ fn test_generate_filename_protobuf_extension() {
         format: "protobuf".to_string(),
     };
 
-    let dead_letter = make_dead_letter("orders", "test-corr", "Test");
+    let dead_letter = make_dead_letter("orders", "Test");
     let filename = publisher.generate_filename(&dead_letter);
 
     assert!(
@@ -300,7 +215,7 @@ fn test_generate_filename_proto_extension() {
         format: "proto".to_string(),
     };
 
-    let dead_letter = make_dead_letter("orders", "test-corr", "Test");
+    let dead_letter = make_dead_letter("orders", "Test");
     let filename = publisher.generate_filename(&dead_letter);
 
     assert!(
