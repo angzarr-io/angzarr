@@ -29,3 +29,7 @@ pub use pipeline::{AggregatePipeline, Clock, Decided, Delivery, SystemClock};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "resolve.test.rs"]
+mod resolve_tests;

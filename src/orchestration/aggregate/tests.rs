@@ -528,3 +528,15 @@ async fn test_stale_retry_of_applied_command_is_duplicate() {
     let retry = pipeline.execute(book, Delivery::Client).await.unwrap();
     assert_eq!(retry.delivery, DeliveryOutcome::Duplicate);
 }
+
+/// The production clock reports the current time (events are stamped with
+/// when they were recorded, not the epoch).
+#[test]
+fn test_system_clock_is_now() {
+    let now = SystemClock.now();
+    let wall = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    assert!((now.seconds - wall).abs() <= 5, "{now:?}");
+}
