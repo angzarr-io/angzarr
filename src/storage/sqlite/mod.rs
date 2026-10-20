@@ -27,3 +27,7 @@ pub(crate) fn edition_value(edition: Option<&str>) -> SimpleExpr {
         edition.map(|e| Box::new(e.to_string())),
     ))
 }
+
+#[cfg(test)]
+#[path = "schema.test.rs"]
+mod schema_tests;

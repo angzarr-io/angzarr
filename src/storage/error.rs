@@ -11,6 +11,7 @@ pub mod errmsg {
     pub const PROTOBUF_DECODE_ERROR: &str = "Protobuf decode error: ";
     pub const NOT_IMPLEMENTED: &str = "Not implemented: ";
     pub const UNKNOWN_TYPE: &str = "Unknown storage type: ";
+    pub const OLD_SCHEMA: &str = "Old storage schema: ";
 }
 
 /// Errors from storage operations.
@@ -38,4 +39,8 @@ pub enum StorageError {
 
     #[error("{}{}", errmsg::UNKNOWN_TYPE, .0)]
     UnknownType(String),
+
+    /// The database was created by a schema this build cannot read.
+    #[error("{}{}", errmsg::OLD_SCHEMA, .0)]
+    OldSchema(String),
 }

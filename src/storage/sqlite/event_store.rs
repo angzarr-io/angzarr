@@ -31,7 +31,7 @@ impl SqliteEventStore {
             .from(Events::Table)
             .and_where(Expr::col(Events::Domain).eq(stream.domain))
             .and_where(edition_predicate(Events::Edition, stream.edition))
-            .and_where(Expr::col(Events::Root).eq(stream.root.to_string()))
+            .and_where(Expr::col(Events::Root).eq(stream.root.as_bytes().to_vec()))
             .to_owned()
     }
 
@@ -75,8 +75,8 @@ impl SqliteEventStore {
                 .correlation_id
                 .as_ref()
                 .and_then(|c| Uuid::try_from(c).ok())
-                .map(|u| u.to_string())
                 .unwrap_or_default();
+            let command_id: Option<Vec<u8>> = page_command_id(page).map(|u| u.as_bytes().to_vec());
             let sql = Query::insert()
                 .into_table(Events::Table)
                 .columns([
@@ -84,18 +84,20 @@ impl SqliteEventStore {
                     Events::Edition,
                     Events::Root,
                     Events::Sequence,
-                    Events::CreatedAt,
-                    Events::EventData,
+                    Events::RecordedAt,
+                    Events::CommandId,
                     Events::CorrelationId,
+                    Events::EventData,
                 ])
                 .values_panic([
                     stream.domain.into(),
                     edition_value(stream.edition),
-                    stream.root.to_string().into(),
+                    stream.root.as_bytes().to_vec().into(),
                     (page.sequence as i64).into(),
                     recorded_at.into(),
+                    command_id.into(),
+                    correlation.as_bytes().to_vec().into(),
                     page.encode_to_vec().into(),
-                    correlation.into(),
                 ])
                 .to_string(SqliteQueryBuilder);
             sqlx::query(&sql).execute(&mut *conn).await?;
@@ -161,7 +163,7 @@ impl EventStore for SqliteEventStore {
     ) -> Result<Vec<EventPage>> {
         let query = Self::stream_select(stream)
             .column(Events::EventData)
-            .and_where(Expr::col(Events::CreatedAt).lte(recorded_at_text(until)?))
+            .and_where(Expr::col(Events::RecordedAt).lte(recorded_at_text(until)?))
             .order_by(Events::Sequence, Order::Asc)
             .to_owned();
         self.fetch_pages(query).await
@@ -188,15 +190,13 @@ impl EventStore for SqliteEventStore {
         stream: StreamRef<'_>,
         command_id: &Uuid,
     ) -> Result<Vec<EventPage>> {
-        // No dedicated (stream, command_id) index exists in the current
-        // schema (backlog CI-1 is a schema change awaiting a decision), so
-        // the lookup scans the stream's pages. Correct, but linear in the
-        // stream's length.
-        let pages = self.read(stream, 0, None).await?;
-        Ok(pages
-            .into_iter()
-            .filter(|p| page_command_id(p) == Some(*command_id))
-            .collect())
+        // An index lookup on (stream, command_id): idx_events_command.
+        let query = Self::stream_select(stream)
+            .column(Events::EventData)
+            .and_where(Expr::col(Events::CommandId).eq(command_id.as_bytes().to_vec()))
+            .order_by(Events::Sequence, Order::Asc)
+            .to_owned();
+        self.fetch_pages(query).await
     }
 
     async fn list_streams(&self) -> Result<Vec<Cover>> {
@@ -210,11 +210,11 @@ impl EventStore for SqliteEventStore {
         let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
         rows.iter()
             .map(|row| {
-                let root: String = row.get("root");
+                let root: Vec<u8> = row.get("root");
                 Ok(Cover {
                     domain: row.get("domain"),
                     edition: row.get("edition"),
-                    root: Some(Uuid::parse_str(&root)?.into()),
+                    root: Some(Uuid::from_slice(&root)?.into()),
                 })
             })
             .collect()
@@ -234,7 +234,7 @@ impl EventStore for SqliteEventStore {
                 Events::EventData,
             ])
             .from(Events::Table)
-            .and_where(Expr::col(Events::CorrelationId).eq(correlation_id.to_string()))
+            .and_where(Expr::col(Events::CorrelationId).eq(correlation_id.as_bytes().to_vec()))
             .and_where(edition_predicate(Events::Edition, edition))
             .order_by(Events::Domain, Order::Asc)
             .order_by(Events::Root, Order::Asc)
@@ -245,10 +245,10 @@ impl EventStore for SqliteEventStore {
         }
         let sql = query.to_string(SqliteQueryBuilder);
         let rows = sqlx::query(&sql).fetch_all(&self.pool).await?;
-        let mut books: BTreeMap<(String, String), EventBook> = BTreeMap::new();
+        let mut books: BTreeMap<(String, Vec<u8>), EventBook> = BTreeMap::new();
         for row in &rows {
             let domain: String = row.get("domain");
-            let root: String = row.get("root");
+            let root: Vec<u8> = row.get("root");
             let data: Vec<u8> = row.get("event_data");
             let book = books
                 .entry((domain.clone(), root.clone()))
@@ -256,7 +256,7 @@ impl EventStore for SqliteEventStore {
                     cover: Some(Cover {
                         domain,
                         edition: edition.map(str::to_string),
-                        root: Uuid::parse_str(&root).ok().map(Into::into),
+                        root: Uuid::from_slice(&root).ok().map(Into::into),
                     }),
                     ..Default::default()
                 });

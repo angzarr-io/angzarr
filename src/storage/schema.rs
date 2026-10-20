@@ -1,15 +1,9 @@
-//! Database schema identifiers for sea-query.
-//!
-//! Only the columns the current contract writes or reads are named here.
-//! The SQLite schema (`migrations/sqlite`) still carries columns of removed
-//! features (cascade, deferred sources, `Cover.ext`, the external-id fact
-//! key); they keep their defaults and nothing reads them. Dropping them, and
-//! adding a dedicated `command_id` index (backlog CI-1), is a schema change
-//! left for an owner decision.
+//! Database schema identifiers for sea-query: the SQLite baseline schema
+//! (`migrations/sqlite/0001_baseline.sql`).
 
 use sea_query::Iden;
 
-/// Events table.
+/// Events table: one row per event, the page stored whole.
 #[derive(Iden)]
 pub enum Events {
     Table,
@@ -17,23 +11,27 @@ pub enum Events {
     Domain,
     #[iden = "edition"]
     Edition,
+    /// The stream's root, 16 bytes.
     #[iden = "root"]
     Root,
     #[iden = "sequence"]
     Sequence,
     /// `EventMeta.recorded_at`, as fixed-width RFC 3339 text (nanoseconds,
     /// `Z`), so text order is time order (see [`super::recorded_at_text`]).
-    #[iden = "created_at"]
-    CreatedAt,
+    #[iden = "recorded_at"]
+    RecordedAt,
+    /// `EventMeta.causation.command_id`, 16 bytes (NULL for process events).
+    #[iden = "command_id"]
+    CommandId,
+    /// `EventMeta.correlation_id`, 16 bytes.
+    #[iden = "correlation_id"]
+    CorrelationId,
     /// The whole `EventPage`, protobuf-encoded, meta included.
     #[iden = "event_data"]
     EventData,
-    /// `EventMeta.correlation_id` as canonical UUID text.
-    #[iden = "correlation_id"]
-    CorrelationId,
 }
 
-/// Snapshots table. One row per stream is kept (the newest).
+/// Snapshots table: the newest snapshot per stream.
 #[derive(Iden)]
 pub enum Snapshots {
     Table,
@@ -45,9 +43,10 @@ pub enum Snapshots {
     Root,
     #[iden = "sequence"]
     Sequence,
-    /// The whole `Snapshot`, protobuf-encoded (its state and rules_version).
-    #[iden = "state_data"]
-    StateData,
-    #[iden = "created_at"]
-    CreatedAt,
+    #[iden = "state_type_url"]
+    StateTypeUrl,
+    #[iden = "state_value"]
+    StateValue,
+    #[iden = "rules_version"]
+    RulesVersion,
 }

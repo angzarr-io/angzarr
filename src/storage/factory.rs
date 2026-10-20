@@ -73,11 +73,50 @@ pub async fn sqlite_pool(uri: &str) -> Result<sqlx::SqlitePool, StorageError> {
         .max_connections(max_connections)
         .connect_with(opts)
         .await?;
+    refuse_old_schema(&pool, uri).await?;
     sqlx::migrate!("migrations/sqlite")
         .run(&pool)
         .await
         .map_err(|e| StorageError::Database(e.into()))?;
     Ok(pool)
+}
+
+/// Refuse a database created by the schema from before the latest proto: its
+/// events cannot be decoded by this build, and migrating over it would mix
+/// two schemas. The file is left untouched; the operator deletes it
+/// (pre-production: old data is wiped, not migrated).
+async fn refuse_old_schema(pool: &sqlx::SqlitePool, uri: &str) -> Result<(), StorageError> {
+    use sqlx::Row;
+    // Old databases have an events table with the old created_at column, or
+    // applied migrations past the single baseline.
+    let old_events: i64 = sqlx::query(
+        "SELECT count(*) AS n FROM pragma_table_info('events') WHERE name = 'created_at'",
+    )
+    .fetch_one(pool)
+    .await?
+    .get("n");
+    let has_ledger: i64 = sqlx::query(
+        "SELECT count(*) AS n FROM sqlite_master WHERE type = 'table' AND name = '_sqlx_migrations'",
+    )
+    .fetch_one(pool)
+    .await?
+    .get("n");
+    let old_migrations: i64 = if has_ledger > 0 {
+        sqlx::query("SELECT count(*) AS n FROM _sqlx_migrations WHERE version > 1")
+            .fetch_one(pool)
+            .await?
+            .get("n")
+    } else {
+        0
+    };
+    if old_events > 0 || old_migrations > 0 {
+        return Err(StorageError::OldSchema(format!(
+            "the SQLite database {uri} uses the schema from before the latest angzarr proto; \
+             its events cannot be read by this build. Stop every coordinator using it, delete \
+             the database file, and start again (it will be created with the baseline schema)"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
