@@ -32,7 +32,12 @@ async fn service() -> EventQueryService {
         .append(StreamRef::main("other", root(3)), &[page(0, c, k1, 10)])
         .await
         .unwrap();
-    EventQueryService::new(store)
+    EventQueryService::new(
+        store,
+        Arc::new(crate::storage::MemorySnapshotStore::new()),
+        Arc::new(ComponentRegistry::new()),
+        Arc::new(SnapshotRules::default()),
+    )
 }
 
 fn query(root_id: Option<u128>, selection: Option<Selection>) -> Query {

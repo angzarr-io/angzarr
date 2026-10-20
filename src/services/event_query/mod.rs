@@ -1,7 +1,9 @@
 //! The event query service (`EventQueryService`, query.proto).
 //!
-//! Serves a domain's stored events. A returned book carries every page from
-//! sequence 0 (no snapshot).
+//! Serves a domain's stored events. A returned book may start from a
+//! snapshot only when every registration of the domain accepts it under the
+//! coordinator's snapshot rule ([`crate::rules_version`]); otherwise, and
+//! while no component is registered, it carries every page from 0.
 
 use std::sync::Arc;
 
@@ -12,11 +14,13 @@ use uuid::Uuid;
 
 use crate::proto::{
     event_query_service_server::EventQueryService as EventQueryTrait, query::Selection,
-    temporal_query::PointInTime, CorrelationQuery, Cover, EventBook, EventPage, Query,
-    Uuid as ProtoUuid,
+    temporal_query::PointInTime, CorrelationQuery, Cover, EventBook, EventPage, Query, Snapshot,
+    TemporalQuery, Uuid as ProtoUuid,
 };
 use crate::proto_ext::EventBookExt;
-use crate::storage::{EventStore, StreamRef};
+use crate::registry::ComponentRegistry;
+use crate::rules_version::SnapshotRules;
+use crate::storage::{EventStore, SnapshotStore, StreamRef};
 
 /// Refusal messages.
 pub mod errmsg {
@@ -31,15 +35,55 @@ pub mod errmsg {
     pub const MISSING_CORRELATION: &str = "CorrelationQuery.correlation_id is required";
 }
 
-/// `EventQueryService` over the coordinator's event store.
+/// `EventQueryService` over the coordinator's stores.
 pub struct EventQueryService {
     event_store: Arc<dyn EventStore>,
+    snapshot_store: Arc<dyn SnapshotStore>,
+    registry: Arc<ComponentRegistry>,
+    rules: Arc<SnapshotRules>,
 }
 
 impl EventQueryService {
-    /// A query service over `event_store`.
-    pub fn new(event_store: Arc<dyn EventStore>) -> Self {
-        Self { event_store }
+    /// A query service; `registry` holds the registrations whose versions
+    /// decide, under `rules`, which snapshots a result may carry.
+    pub fn new(
+        event_store: Arc<dyn EventStore>,
+        snapshot_store: Arc<dyn SnapshotStore>,
+        registry: Arc<ComponentRegistry>,
+        rules: Arc<SnapshotRules>,
+    ) -> Self {
+        Self {
+            event_store,
+            snapshot_store,
+            registry,
+            rules,
+        }
+    }
+
+    /// The newest stored snapshot with sequence <= `limit` that EVERY
+    /// registration of the domain accepts; none while no component is
+    /// registered (decisions 14.4, 14.9).
+    async fn offerable_snapshot(
+        &self,
+        stream: StreamRef<'_>,
+        limit: Option<u64>,
+    ) -> Result<Option<Snapshot>, Status> {
+        let registrations = self.registry.all(stream.domain);
+        if registrations.is_empty() {
+            return Ok(None);
+        }
+        let snapshot = self
+            .snapshot_store
+            .get(stream)
+            .await
+            .map_err(storage_status)?;
+        Ok(snapshot
+            .filter(|s| limit.is_none_or(|l| s.sequence <= l))
+            .filter(|s| {
+                registrations
+                    .iter()
+                    .all(|r| self.rules.offerable(stream.domain, s, r))
+            }))
     }
 
     /// The books a Query selects: one for a stream query, one per matching
@@ -81,8 +125,16 @@ impl EventQueryService {
         stream: StreamRef<'_>,
         selection: Option<&Selection>,
     ) -> Result<EventBook, Status> {
+        let snapshot = match selection {
+            None => self.offerable_snapshot(stream, None).await?,
+            Some(Selection::Temporal(TemporalQuery {
+                point_in_time: Some(PointInTime::AsOfSequence(n)),
+            })) => self.offerable_snapshot(stream, Some(*n)).await?,
+            _ => None,
+        };
+        let from = snapshot.as_ref().map(|s| s.sequence + 1).unwrap_or(0);
         let pages = match selection {
-            None => self.event_store.read(stream, 0, None).await,
+            None => self.event_store.read(stream, from, None).await,
             Some(Selection::Range(range)) => {
                 // SequenceRange.upper is inclusive; reads are half-open.
                 let to = range.upper.map(|u| u.saturating_add(1));
@@ -99,7 +151,7 @@ impl EventQueryService {
             Some(Selection::Temporal(temporal)) => match &temporal.point_in_time {
                 Some(PointInTime::AsOfSequence(n)) => {
                     self.event_store
-                        .read(stream, 0, Some(n.saturating_add(1)))
+                        .read(stream, from, Some(n.saturating_add(1)))
                         .await
                 }
                 Some(PointInTime::AsOfTime(t)) => self.event_store.read_until_time(stream, t).await,
@@ -107,7 +159,10 @@ impl EventQueryService {
             },
         }
         .map_err(storage_status)?;
-        Ok(book(stream.to_cover(), pages))
+        let mut book = book(stream.to_cover(), pages);
+        book.snapshot = snapshot;
+        book.next_sequence = book.computed_next_sequence();
+        Ok(book)
     }
 }
 

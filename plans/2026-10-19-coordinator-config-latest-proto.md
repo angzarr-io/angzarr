@@ -82,14 +82,16 @@ consumer, so an aggregate coordinator's HandleSync can reach it.
 
 The coordinator pulls descriptors with `ComponentService.Describe` on its
 first connection to the business process and on every reconnect (the
-channel counts the connections it opens). One new value:
+channel counts the connections it opens). One new value, the spec's
+`describe_alert_grace_period` (decision 14.11), named with core's existing
+`_secs` convention for durations:
 
 ```yaml
 registration:
-  describe_alert_grace_secs: 30   # default 30
+  describe_alert_grace_period_secs: 120   # default 120 (2 minutes)
 ```
 
-Env: `ANGZARR_REGISTRATION__DESCRIBE_ALERT_GRACE_SECS`. Every failed Describe
+Env: `ANGZARR_REGISTRATION__DESCRIBE_ALERT_GRACE_PERIOD_SECS`. Every failed Describe
 call is logged; an alert is raised once failures have lasted this long
 (once per failing stretch). A refused answer (a descriptor without a rules
 version) is alerted at once and not retried until the channel comes back up.

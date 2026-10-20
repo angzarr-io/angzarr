@@ -229,6 +229,15 @@ name = "bus_amqp"
 # message routing, acknowledgment, and dead-letter queue handling work correctly.
 required-features = ["amqp", "test-utils"]
 
+# --- Coordinator-contract scenarios ---
+# Cucumber-rs harness against angzarr-project/features/coordinator-contract:
+# the scenarios the aggregate coordinator owns, bound by scenario id and run
+# in process (tests/coordinator_contract.rs).
+[[test]]
+name = "coordinator_contract"
+harness = false
+required-features = ["test-utils"]
+
 # === Build Profiles ===
 
 # Dev profile - optimized for size to keep disk usage sane

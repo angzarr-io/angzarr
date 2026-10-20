@@ -22,6 +22,7 @@ pub mod proto;
 pub mod proto_ext;
 pub mod registration;
 pub mod registry;
+pub mod rules_version;
 pub mod services;
 pub mod storage;
 pub mod transport;

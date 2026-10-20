@@ -20,12 +20,48 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// A time source for the alert grace period (tests replace it).
+pub type Now = Arc<dyn Fn() -> Instant + Send + Sync>;
+
+/// Tracks one stretch of failing Describe calls: every failure is logged;
+/// one alert is due once the stretch has lasted past the grace period
+/// (decision 14.11).
+#[derive(Debug, Default)]
+pub struct FailureTracker {
+    since: Option<Instant>,
+    alerted: bool,
+}
+
+impl FailureTracker {
+    /// Record a failure at `now`; true when the alert is due now.
+    pub fn failed(&mut self, now: Instant, grace: Duration) -> bool {
+        let since = *self.since.get_or_insert(now);
+        if !self.alerted && now.duration_since(since) >= grace {
+            self.alerted = true;
+            return true;
+        }
+        false
+    }
+
+    /// The stretch ended (an answer arrived).
+    pub fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    /// How long the current stretch has lasted.
+    pub fn failing_for(&self, now: Instant) -> Duration {
+        self.since
+            .map(|s| now.duration_since(s))
+            .unwrap_or_default()
+    }
+}
+
 use async_trait::async_trait;
 use backon::{BackoffBuilder, ExponentialBuilder};
 use tokio::sync::watch;
 use tonic::transport::Channel;
 use tonic::Status;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::alerts::{Alert, Alerts};
 use crate::proto::component_service_client::ComponentServiceClient;
@@ -128,6 +164,7 @@ pub struct Registrar {
     process: String,
     alerts: Arc<dyn Alerts>,
     alert_grace: Duration,
+    now: Now,
     ready: watch::Sender<bool>,
 }
 
@@ -154,8 +191,15 @@ impl Registrar {
             process: process.into(),
             alerts,
             alert_grace,
+            now: Arc::new(Instant::now),
             ready,
         }
+    }
+
+    /// Replace the time source (tests).
+    pub fn with_now(mut self, now: Now) -> Self {
+        self.now = now;
+        self
     }
 
     /// Readiness: true while a descriptor is held.
@@ -230,36 +274,46 @@ impl Registrar {
         }
     }
 
+    /// One Describe within a failing stretch: a failure is logged, and
+    /// alerted once the stretch has outlasted the grace period.
+    pub async fn describe_tracking(&self, tracker: &mut FailureTracker) -> DescribeOutcome {
+        let outcome = self.describe_once().await;
+        match &outcome {
+            DescribeOutcome::Failed(status) => {
+                let now = (self.now)();
+                error!(
+                    process = %self.process,
+                    %status,
+                    failing_for = ?tracker.failing_for(now),
+                    "describe failed; not serving"
+                );
+                if tracker.failed(now, self.alert_grace) {
+                    self.alerts.raise(Alert {
+                        component: self.domain.clone(),
+                        reason: format!(
+                            "business process {} has not answered Describe for {:?}: {}",
+                            self.process,
+                            tracker.failing_for(now),
+                            status.message()
+                        ),
+                    });
+                }
+            }
+            _ => tracker.reset(),
+        }
+        outcome
+    }
+
     async fn describe_until_answered(&self) {
         let mut delays = ExponentialBuilder::default()
             .with_min_delay(Duration::from_millis(200))
             .with_max_delay(Duration::from_secs(30))
             .without_max_times()
             .build();
-        let mut failing_since: Option<Instant> = None;
-        let mut alerted = false;
-        loop {
-            match self.describe_once().await {
-                DescribeOutcome::Failed(status) => {
-                    let since = *failing_since.get_or_insert_with(Instant::now);
-                    warn!(process = %self.process, %status, "describe failed; not serving");
-                    if !alerted && since.elapsed() >= self.alert_grace {
-                        alerted = true;
-                        self.alerts.raise(Alert {
-                            component: self.domain.clone(),
-                            reason: format!(
-                                "business process {} has not answered Describe for {:?}: {}",
-                                self.process,
-                                since.elapsed(),
-                                status.message()
-                            ),
-                        });
-                    }
-                    let delay = delays.next().unwrap_or(Duration::from_secs(30));
-                    tokio::time::sleep(delay).await;
-                }
-                DescribeOutcome::Registered | DescribeOutcome::Refused(_) => return,
-            }
+        let mut tracker = FailureTracker::default();
+        while let DescribeOutcome::Failed(_) = self.describe_tracking(&mut tracker).await {
+            let delay = delays.next().unwrap_or(Duration::from_secs(30));
+            tokio::time::sleep(delay).await;
         }
     }
 }

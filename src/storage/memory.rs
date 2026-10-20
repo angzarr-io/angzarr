@@ -184,6 +184,12 @@ impl MemorySnapshotStore {
     pub fn new() -> Self {
         Self::default()
     }
+
+    /// How many snapshots are kept for `stream` (the policy keeps the
+    /// newest only, so 0 or 1).
+    pub async fn count(&self, stream: StreamRef<'_>) -> usize {
+        usize::from(self.snapshots.read().await.contains_key(&key(stream)))
+    }
 }
 
 #[async_trait]

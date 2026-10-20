@@ -97,21 +97,24 @@ pub struct Config {
     /// Dead letter queue configuration.
     pub dlq: DlqConfig,
     pub registration: RegistrationConfig,
+    /// Per-domain snapshot rule overrides (see [`crate::rules_version`]).
+    pub snapshot_compatibility: crate::rules_version::SnapshotCompatibilityConfig,
 }
 
 /// Component discovery settings (see [`crate::registration`]).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct RegistrationConfig {
-    /// How long Describe calls may keep failing before an alert is raised
-    /// (every failure is logged). Seconds. Default 30.
-    pub describe_alert_grace_secs: u64,
+    /// The spec's `describe_alert_grace_period` (decision 14.11): how long
+    /// Describe calls may keep failing before an alert is raised (every
+    /// failure is logged). Seconds. Default 120 (2 minutes).
+    pub describe_alert_grace_period_secs: u64,
 }
 
 impl Default for RegistrationConfig {
     fn default() -> Self {
         Self {
-            describe_alert_grace_secs: 30,
+            describe_alert_grace_period_secs: 120,
         }
     }
 }

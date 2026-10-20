@@ -441,3 +441,24 @@ async fn test_named_resolution_is_delivered() {
         ConflictResolution::Strict as i32
     );
 }
+
+/// A response reporting a version other than the registered one is a
+/// handler bug (decision 14.5): INTERNAL to a waiting caller, dead-lettered
+/// and alerted when nobody waits; nothing is persisted either way.
+#[tokio::test]
+async fn test_version_skew_is_refused() {
+    for (delivery, dead_lettered) in [(Delivery::Client, false), (Delivery::Async, true)] {
+        let h = registered();
+        h.business
+            .then(Answer::events(&["/orders.v1.ItemAdded"], "1.5.0+build.9"));
+        let err = h
+            .pipeline()
+            .execute(command(DOMAIN, root(), "/orders.v1.AddItem"), delivery)
+            .await
+            .unwrap_err();
+        assert_eq!(err.to_status().code(), Code::Internal);
+        assert!(stored(&h).await.is_empty());
+        assert_eq!(h.dead_letters.received().len(), usize::from(dead_lettered));
+        assert_eq!(h.alerts.raised().len(), usize::from(dead_lettered));
+    }
+}

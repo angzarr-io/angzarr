@@ -17,6 +17,7 @@ use crate::proto::{
 };
 use crate::proto_ext::CoverExt;
 use crate::registry::{ComponentRegistry, Registration};
+use crate::rules_version::SnapshotRules;
 use crate::services::upcaster::Upcaster;
 use crate::storage::{
     EventStore, SnapshotStore, SnapshotsEnableConfig, StorageError, StreamHead, StreamRef,
@@ -103,6 +104,7 @@ pub struct AggregatePipeline {
     event_store: Arc<dyn EventStore>,
     snapshot_store: Arc<dyn SnapshotStore>,
     snapshots: SnapshotsEnableConfig,
+    snapshot_rules: Arc<SnapshotRules>,
     business: Arc<dyn BusinessLogic>,
     upcaster: Option<Arc<Upcaster>>,
     bus: Arc<dyn EventBus>,
@@ -133,6 +135,7 @@ impl AggregatePipeline {
             event_store,
             snapshot_store,
             snapshots: SnapshotsEnableConfig::default(),
+            snapshot_rules: Arc::new(SnapshotRules::default()),
             business,
             upcaster: None,
             bus,
@@ -145,6 +148,12 @@ impl AggregatePipeline {
     /// Snapshot read/write switches (storage configuration).
     pub fn with_snapshots(mut self, snapshots: SnapshotsEnableConfig) -> Self {
         self.snapshots = snapshots;
+        self
+    }
+
+    /// The snapshot rules (configuration `snapshot_compatibility`).
+    pub fn with_snapshot_rules(mut self, rules: Arc<SnapshotRules>) -> Self {
+        self.snapshot_rules = rules;
         self
     }
 
@@ -254,18 +263,29 @@ impl AggregatePipeline {
             .await
     }
 
-    /// Step 3a: the stream's head, the snapshot to offer, and the pages
-    /// after it.
+    /// Step 3a: the stream's head, the snapshot to offer (only one the
+    /// snapshot rule accepts for this registration), and the pages after
+    /// it; without one, every page from 0.
     async fn load(
         &self,
         stream: StreamRef<'_>,
-        _registration: &Registration,
+        registration: &Registration,
     ) -> Result<Loaded, PipelineError> {
         let head = self.event_store.head(stream).await?;
-        let pages = self.event_store.read(stream, 0, None).await?;
+        let snapshot = if self.snapshots.read {
+            self.snapshot_store
+                .get(stream)
+                .await?
+                .filter(|s| s.sequence < head.next_sequence)
+                .filter(|s| self.snapshot_rules.offerable(&self.domain, s, registration))
+        } else {
+            None
+        };
+        let from = snapshot.as_ref().map(|s| s.sequence + 1).unwrap_or(0);
+        let pages = self.event_store.read(stream, from, None).await?;
         Ok(Loaded {
             head,
-            snapshot: None,
+            snapshot,
             pages,
         })
     }
@@ -312,14 +332,22 @@ impl AggregatePipeline {
         }
     }
 
-    /// The business response must be payloads (and optional snapshot state)
-    /// only (command_handler.proto, `Handle`).
+    /// The business response must report the registered build version and
+    /// carry payloads (and the post-command state) only
+    /// (command_handler.proto, `Handle`; decision 14.5).
     fn check_response(
         &self,
         response: &CommandHandlerResponse,
         stream: StreamRef<'_>,
-        _registration: &Registration,
+        registration: &Registration,
     ) -> Result<(), PipelineError> {
+        if response.rules_version != registration.rules_version() {
+            return Err(PipelineError::HandlerBug(format!(
+                "response reports rules_version {:?}, but the component is registered at {:?}",
+                response.rules_version,
+                registration.rules_version()
+            )));
+        }
         let Some(events) = &response.events else {
             return Ok(());
         };
