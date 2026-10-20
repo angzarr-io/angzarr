@@ -462,3 +462,30 @@ async fn test_version_skew_is_refused() {
         assert_eq!(h.alerts.raised().len(), usize::from(dead_lettered));
     }
 }
+
+/// A compatible stored snapshot is delivered with the pages after it.
+#[tokio::test]
+async fn test_compatible_snapshot_is_delivered() {
+    let h = registered();
+    let pipeline = h.pipeline();
+    for _ in 0..3 {
+        h.business.then(Answer::Events {
+            types: vec!["/orders.v1.ItemAdded".into()],
+            snapshot: Some(any("/orders.v1.OrderState", b"s")),
+            rules_version: VERSION.into(),
+        });
+        pipeline
+            .execute(
+                command(DOMAIN, root(), "/orders.v1.AddItem"),
+                Delivery::Client,
+            )
+            .await
+            .unwrap();
+    }
+    let last = h.business.received().pop().unwrap().events.unwrap();
+    assert_eq!(last.snapshot.map(|s| s.sequence), Some(1));
+    assert_eq!(
+        last.pages.iter().map(|p| p.sequence).collect::<Vec<_>>(),
+        Vec::<u64>::new()
+    );
+}

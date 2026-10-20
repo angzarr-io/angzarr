@@ -40,8 +40,9 @@ use angzarr::test_utils::*;
 /// process managers) or to behaviour not yet implemented.
 const BOUND: &[&str] = &[
     "C-0518", "C-0519", "C-0520", "C-0523", "C-0524", "C-0526", "C-0556", "C-0558", "C-0569",
-    "C-0160", "C-0532", "C-0165", "C-0166", "C-0458", "C-0459", "C-0174", "C-0175", "C-0561",
-    "C-0563", "C-0564", "C-0566", "C-0567",
+    "C-0160", "C-0165", "C-0166", "C-0458", "C-0459", "C-0174", "C-0175", "C-0561", "C-0563",
+    "C-0564", "C-0566", "C-0567", "C-0522", "C-0525", "C-0553", "C-0527", "C-0528", "C-0529",
+    "C-0530", "C-0554", "C-0555", "C-0560", "C-0568",
 ];
 
 const DOMAIN: &str = "order";
@@ -1321,6 +1322,42 @@ async fn third_answer_state(w: &mut Contract) {
     assert_eq!(stored.sequence, 2);
 }
 
+/// cucumber-rs substitutes only Scenario Outline placeholders without
+/// spaces (`<name>`), while the spec writes `<snapshot version>`. Rewrite
+/// each such placeholder, and the matching Examples header cell, with
+/// underscores, into a copy of the feature; the scenarios are unchanged.
+fn normalize_placeholders(text: &str) -> String {
+    let names: std::collections::BTreeSet<String> = text
+        .split('<')
+        .skip(1)
+        .filter_map(|rest| rest.split_once('>').map(|(name, _)| name))
+        .filter(|name| name.contains(' ') && !name.contains('|'))
+        .map(str::to_string)
+        .collect();
+    let mut out = String::with_capacity(text.len());
+    let mut header_next = false;
+    for line in text.lines() {
+        let mut line = line.to_string();
+        for name in &names {
+            let underscored = name.replace(' ', "_");
+            line = line.replace(&format!("<{name}>"), &format!("<{underscored}>"));
+            if header_next {
+                line = line.replace(&format!("| {name} "), &format!("| {underscored} "));
+            }
+        }
+        let trimmed = line.trim_start();
+        if trimmed.starts_with('|') {
+            header_next = false;
+        }
+        if trimmed.starts_with("Examples:") {
+            header_next = true;
+        }
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
 #[tokio::main]
 async fn main() {
     let dir = concat!(
@@ -1332,11 +1369,17 @@ async fn main() {
         "conflict_resolution.feature",
         "component_discovery.feature",
     ];
+    let normalized =
+        std::env::temp_dir().join(format!("coordinator-contract-{}", std::process::id()));
+    std::fs::create_dir_all(&normalized).unwrap();
     let mut failed = false;
     for feature in features {
+        let text = std::fs::read_to_string(format!("{dir}/{feature}")).unwrap();
+        let path = normalized.join(feature);
+        std::fs::write(&path, normalize_placeholders(&text)).unwrap();
         let summary = Contract::cucumber()
             .fail_on_skipped()
-            .filter_run(format!("{dir}/{feature}"), |_, _, scenario| {
+            .filter_run(path, |_, _, scenario| {
                 scenario
                     .tags
                     .iter()
