@@ -309,8 +309,8 @@ async fn test_dlq_publisher_retains_dead_letter_in_catchall_queue() {
     let (_container, url) = start_rabbitmq().await;
 
     // Exercise the same factory + publish path production uses. The shared
-    // helper publishes one dead letter with reason "Handler threw an
-    // exception" to domain "orders".
+    // helper publishes one projector dead letter for domain "orders" whose
+    // handler failed with "Connection refused" after 3 attempts.
     let dlq_config = angzarr::dlq::DlqConfig::amqp(url.clone());
     bus::event_bus_tests::test_dlq_publish(&dlq_config).await;
 
@@ -348,7 +348,7 @@ async fn test_dlq_publisher_retains_dead_letter_in_catchall_queue() {
     let decoded = angzarr::proto::AngzarrDeadLetter::decode(payload.as_slice())
         .expect("retained dead letter must decode as proto AngzarrDeadLetter");
     assert_eq!(
-        decoded.rejection_reason, "Handler threw an exception",
+        decoded.rejection_reason, "Event processing failed after 3 attempts: Connection refused",
         "decoded dead letter must round-trip the rejection reason"
     );
 
