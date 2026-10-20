@@ -261,14 +261,12 @@ Enable upcasting via config or environment:
 
 ```yaml title="illustrative - upcaster configuration"
 upcaster:
-  enabled: true
-  # Optional: separate address (defaults to client logic address)
-  address: "localhost:50053"
+  enabled: true   # call the component's own business process (target.address)
 ```
 
-Or via environment variables:
-- `ANGZARR_UPCASTER_ENABLED=true`
-- `ANGZARR_UPCASTER_ADDRESS=localhost:50053` (optional)
+Or via environment: `ANGZARR_UPCASTER_ENABLED=true`. The upcaster is part of
+the component, served by its own business process; there is no separate
+upcaster address.
 
 ### Key Points
 
