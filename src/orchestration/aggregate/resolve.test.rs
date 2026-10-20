@@ -375,3 +375,21 @@ async fn test_unreachable_business_is_unavailable() {
         assert!(h.dead_letters.received().is_empty());
     }
 }
+
+/// Handling with an expected sequence but no named resolution is valid: the
+/// resolution is filled from the registered state.
+#[tokio::test]
+async fn test_unspecified_resolution_with_expected_sequence_is_valid() {
+    let h = harness(false);
+    h.pipeline()
+        .execute(
+            targeting(0, ConflictResolution::Unspecified),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved(&last_delivered(&h)),
+        (Some(0), ConflictResolution::Strict as i32)
+    );
+}
