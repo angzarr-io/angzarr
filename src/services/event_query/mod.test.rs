@@ -237,3 +237,30 @@ async fn test_aggregate_roots_lists_every_stream() {
         .await;
     assert_eq!(covers.len(), 3);
 }
+
+/// Query responses are upcast: readers see only current shapes.
+#[tokio::test]
+async fn test_query_results_are_upcast() {
+    let upcaster =
+        crate::test_utils::RenamingUpcaster::new("/orders.v1.ItemAdded", "/orders.v2.ItemAdded");
+    let svc = service().await.with_upcaster(upcaster.clone());
+    let book = one(&svc, query(Some(1), None)).await;
+    assert!(book
+        .pages
+        .iter()
+        .all(|p| p.payload.as_ref().unwrap().type_url == "/orders.v2.ItemAdded"));
+    let mut q = query(None, None);
+    q.correlation_id = Some(root(200).into());
+    let books: Vec<_> = svc
+        .get_events(Request::new(q))
+        .await
+        .unwrap()
+        .into_inner()
+        .collect()
+        .await;
+    assert!(books
+        .iter()
+        .flat_map(|b| b.as_ref().unwrap().pages.iter())
+        .all(|p| p.payload.as_ref().unwrap().type_url == "/orders.v2.ItemAdded"));
+    assert!(upcaster.calls() >= 3);
+}

@@ -110,7 +110,6 @@ fn test_k8s_env_var_constants() {
 #[test]
 fn test_feature_env_var_constants() {
     assert_eq!(UPCASTER_ENABLED_ENV_VAR, "ANGZARR_UPCASTER_ENABLED");
-    assert_eq!(UPCASTER_ADDRESS_ENV_VAR, "ANGZARR_UPCASTER_ADDRESS");
     assert_eq!(OTEL_SERVICE_NAME_ENV_VAR, "OTEL_SERVICE_NAME");
 }
 

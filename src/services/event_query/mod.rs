@@ -21,6 +21,7 @@ use crate::proto_ext::EventBookExt;
 use crate::registry::ComponentRegistry;
 use crate::rules_version::SnapshotRules;
 use crate::storage::{EventStore, SnapshotStore, StreamRef};
+use crate::upcast::EventUpcaster;
 
 /// Refusal messages.
 pub mod errmsg {
@@ -41,6 +42,7 @@ pub struct EventQueryService {
     snapshot_store: Arc<dyn SnapshotStore>,
     registry: Arc<ComponentRegistry>,
     rules: Arc<SnapshotRules>,
+    upcaster: Option<Arc<dyn EventUpcaster>>,
 }
 
 impl EventQueryService {
@@ -58,7 +60,34 @@ impl EventQueryService {
             snapshot_store,
             registry,
             rules,
+            upcaster: None,
         }
+    }
+
+    /// Upcast every returned page (readers see only current shapes).
+    pub fn with_upcaster(mut self, upcaster: Arc<dyn EventUpcaster>) -> Self {
+        self.upcaster = Some(upcaster);
+        self
+    }
+
+    async fn upcast(&self, mut books: Vec<EventBook>) -> Result<Vec<EventBook>, Status> {
+        let Some(upcaster) = &self.upcaster else {
+            return Ok(books);
+        };
+        for book in &mut books {
+            if book.pages.is_empty() {
+                continue;
+            }
+            let domain = book
+                .cover
+                .as_ref()
+                .map(|c| c.domain.clone())
+                .unwrap_or_default();
+            book.pages = upcaster
+                .upcast(&domain, std::mem::take(&mut book.pages))
+                .await?;
+        }
+        Ok(books)
     }
 
     /// The newest stored snapshot with sequence <= `limit` that this
@@ -224,7 +253,9 @@ impl EventQueryTrait for EventQueryService {
     type GetAggregateRootsStream = ReceiverStream<Result<Cover, Status>>;
 
     async fn get_event_book(&self, request: Request<Query>) -> Result<Response<EventBook>, Status> {
-        let books = self.select(&request.into_inner()).await?;
+        let books = self
+            .upcast(self.select(&request.into_inner()).await?)
+            .await?;
         Ok(Response::new(books.into_iter().next().unwrap_or_default()))
     }
 
@@ -232,7 +263,9 @@ impl EventQueryTrait for EventQueryService {
         &self,
         request: Request<Query>,
     ) -> Result<Response<Self::GetEventsStream>, Status> {
-        let books = self.select(&request.into_inner()).await?;
+        let books = self
+            .upcast(self.select(&request.into_inner()).await?)
+            .await?;
         Ok(Response::new(stream_of(books)))
     }
 
@@ -252,6 +285,7 @@ impl EventQueryTrait for EventQueryService {
             .read_by_correlation(None, None, &correlation)
             .await
             .map_err(storage_status)?;
+        let books = self.upcast(books).await?;
         Ok(Response::new(stream_of(books)))
     }
 

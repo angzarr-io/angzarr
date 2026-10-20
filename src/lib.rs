@@ -26,6 +26,7 @@ pub mod rules_version;
 pub mod services;
 pub mod storage;
 pub mod transport;
+pub mod upcast;
 pub mod utils;
 
 /// Test doubles for the coordinators (unit tests and the contract harness).

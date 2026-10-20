@@ -61,9 +61,6 @@ pub const EVENT_QUERY_ADDRESS_ENV_VAR: &str = "EVENT_QUERY_ADDRESS";
 
 /// Environment variable for upcaster enablement.
 pub const UPCASTER_ENABLED_ENV_VAR: &str = "ANGZARR_UPCASTER_ENABLED";
-/// Environment variable for upcaster address.
-pub const UPCASTER_ADDRESS_ENV_VAR: &str = "ANGZARR_UPCASTER_ADDRESS";
-
 /// Environment variable for OpenTelemetry service name.
 pub const OTEL_SERVICE_NAME_ENV_VAR: &str = "OTEL_SERVICE_NAME";
 

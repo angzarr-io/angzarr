@@ -18,10 +18,10 @@ use crate::proto::{
 use crate::proto_ext::CoverExt;
 use crate::registry::{ComponentRegistry, Registration};
 use crate::rules_version::SnapshotRules;
-use crate::services::upcaster::Upcaster;
 use crate::storage::{
     EventStore, SnapshotStore, SnapshotsEnableConfig, StorageError, StreamHead, StreamRef,
 };
+use crate::upcast::EventUpcaster;
 
 use super::business::BusinessLogic;
 use super::error::PipelineError;
@@ -105,7 +105,7 @@ pub struct AggregatePipeline {
     snapshots: SnapshotsEnableConfig,
     snapshot_rules: Arc<SnapshotRules>,
     business: Arc<dyn BusinessLogic>,
-    upcaster: Option<Arc<Upcaster>>,
+    upcaster: Option<Arc<dyn EventUpcaster>>,
     bus: Arc<dyn EventBus>,
     dead_letters: Arc<dyn DeadLetterPublisher>,
     alerts: Arc<dyn Alerts>,
@@ -154,8 +154,9 @@ impl AggregatePipeline {
         self
     }
 
-    /// Upcast loaded events through the business binary's upcaster.
-    pub fn with_upcaster(mut self, upcaster: Arc<Upcaster>) -> Self {
+    /// Upcast on every read and publish path through the business
+    /// process's upcaster.
+    pub fn with_upcaster(mut self, upcaster: Arc<dyn EventUpcaster>) -> Self {
         self.upcaster = Some(upcaster);
         self
     }
@@ -296,6 +297,7 @@ impl AggregatePipeline {
             return Ok(None);
         }
         let next_sequence = pages.last().map(|p| p.sequence + 1).unwrap_or(0);
+        let pages = self.upcast(pages).await?;
         Ok(Some(Decided {
             events: EventBook {
                 cover: Some(stream.to_cover()),
@@ -511,20 +513,41 @@ impl AggregatePipeline {
         if book.pages.is_empty() {
             return;
         }
-        if let Err(e) = self.bus.publish(Arc::new(book.clone())).await {
-            error!(domain = %self.domain, error = %e, "persisted events could not be published");
-            let dead_letter = AngzarrDeadLetter::from_event_processing_failure(
-                book,
-                &format!("publish failed: {e}"),
-                0,
-                true,
-                Vec::new(),
-                &self.domain,
-                ComponentKind::Aggregate,
-            );
-            if let Err(e) = self.dead_letters.publish(dead_letter).await {
-                error!(domain = %self.domain, error = %e, "failed to dead-letter unpublished events");
+        let published = match self.upcast(book.pages.clone()).await {
+            Ok(pages) => EventBook {
+                pages,
+                ..book.clone()
+            },
+            Err(e) => {
+                self.dead_letter_unpublished(
+                    book,
+                    &format!("upcast before publish failed: {}", e.to_status()),
+                )
+                .await;
+                return;
             }
+        };
+        if let Err(e) = self.bus.publish(Arc::new(published)).await {
+            self.dead_letter_unpublished(book, &format!("publish failed: {e}"))
+                .await;
+        }
+    }
+
+    /// Dead-letter persisted events that could not be published, for
+    /// replay.
+    async fn dead_letter_unpublished(&self, book: &EventBook, reason: &str) {
+        error!(domain = %self.domain, %reason, "persisted events could not be published");
+        let dead_letter = AngzarrDeadLetter::from_event_processing_failure(
+            book,
+            reason,
+            0,
+            true,
+            Vec::new(),
+            &self.domain,
+            ComponentKind::Aggregate,
+        );
+        if let Err(e) = self.dead_letters.publish(dead_letter).await {
+            error!(domain = %self.domain, error = %e, "failed to dead-letter unpublished events");
         }
     }
 

@@ -1,21 +1,19 @@
 //! Upcaster client for event version transformation.
 //!
-//! Transforms old event versions to current versions by calling the client's
-//! UpcasterService implementation. The client binary implements both
-//! AggregateService and UpcasterService on the same gRPC server.
+//! Transforms old event versions to current versions by calling the
+//! component's own business process's UpcasterService (decision 14.22: the
+//! upcaster is part of the component; the coordinator dials the same
+//! process, `target.address`, for both). There is no separate upcaster
+//! address.
 //!
 //! # Configuration
 //!
 //! ```yaml
 //! upcaster:
 //!   enabled: true
-//!   # Optional: override address (defaults to client logic address)
-//!   address: "localhost:50053"
 //! ```
 //!
-//! Or via environment:
-//! - `ANGZARR_UPCASTER_ENABLED=true`
-//! - `ANGZARR_UPCASTER_ADDRESS=localhost:50053` (optional override)
+//! Or via environment: `ANGZARR_UPCASTER_ENABLED=true`.
 
 use std::sync::Arc;
 
@@ -25,7 +23,7 @@ use tonic::transport::Channel;
 use tonic::Status;
 use tracing::{debug, info, instrument};
 
-use crate::config::{UPCASTER_ADDRESS_ENV_VAR, UPCASTER_ENABLED_ENV_VAR};
+use crate::config::UPCASTER_ENABLED_ENV_VAR;
 use crate::proto::{upcaster_service_client::UpcasterServiceClient, EventPage, UpcastRequest};
 use crate::proto_ext::correlated_request;
 
@@ -40,10 +38,6 @@ pub struct UpcasterConfig {
     /// Enable upcaster. Default: false.
     /// Can be overridden via ANGZARR_UPCASTER_ENABLED env var.
     pub enabled: bool,
-    /// Optional address override. If not set, uses the same address as client logic.
-    /// Can be overridden via ANGZARR_UPCASTER_ADDRESS env var.
-    #[serde(default)]
-    pub address: Option<String>,
 }
 
 impl Default for UpcasterConfig {
@@ -52,7 +46,6 @@ impl Default for UpcasterConfig {
             enabled: std::env::var(UPCASTER_ENABLED_ENV_VAR)
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false),
-            address: std::env::var(UPCASTER_ADDRESS_ENV_VAR).ok(),
         }
     }
 }
@@ -64,13 +57,6 @@ impl UpcasterConfig {
             || std::env::var(UPCASTER_ENABLED_ENV_VAR)
                 .map(|v| v == "true" || v == "1")
                 .unwrap_or(false)
-    }
-
-    /// Get optional address override (config or env var).
-    pub fn get_address_override(&self) -> Option<String> {
-        std::env::var(UPCASTER_ADDRESS_ENV_VAR)
-            .ok()
-            .or_else(|| self.address.clone())
     }
 }
 
@@ -155,6 +141,13 @@ impl Upcaster {
         let response = client.upcast(request).await?;
 
         Ok(response.into_inner().events)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::upcast::EventUpcaster for Upcaster {
+    async fn upcast(&self, domain: &str, pages: Vec<EventPage>) -> Result<Vec<EventPage>, Status> {
+        Upcaster::upcast(self, domain, pages).await
     }
 }
 

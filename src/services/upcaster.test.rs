@@ -29,7 +29,6 @@ use super::*;
 fn test_upcaster_config_default() {
     let config = UpcasterConfig::default();
     assert!(!config.enabled);
-    assert!(config.address.is_none());
 }
 
 /// Disabled upcaster reports is_enabled() false.

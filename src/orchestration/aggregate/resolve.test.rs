@@ -388,3 +388,50 @@ async fn test_unspecified_resolution_with_expected_sequence_is_valid() {
         (Some(0), ConflictResolution::Strict as i32)
     );
 }
+
+/// The coordinator upcasts on every read and publish path of its stream:
+/// the history delivered to business code, the events published to the
+/// bus, and the stored events a duplicate is answered with. Consumers see
+/// only current shapes.
+#[tokio::test]
+async fn test_upcast_on_load_publish_and_duplicate() {
+    let h = harness(false);
+    let upcaster = RenamingUpcaster::new("/orders.v1.ItemAdded", "/orders.v2.ItemAdded");
+    let pipeline = h.pipeline().with_upcaster(upcaster.clone());
+    let mut book = command(DOMAIN, root(), "/orders.v1.AddItem");
+    book.page.as_mut().unwrap().command_id = Some(Uuid::from_u128(77).into());
+    pipeline
+        .execute(book.clone(), Delivery::Client)
+        .await
+        .unwrap();
+    pipeline
+        .execute(
+            command(DOMAIN, root(), "/orders.v1.AddItem"),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+
+    let delivered = last_delivered(&h).events.unwrap();
+    assert_eq!(
+        delivered.pages[0].payload.as_ref().unwrap().type_url,
+        "/orders.v2.ItemAdded"
+    );
+    let published = h.bus.published().await;
+    assert!(published
+        .iter()
+        .flat_map(|b| &b.pages)
+        .all(|p| p.payload.as_ref().unwrap().type_url == "/orders.v2.ItemAdded"));
+    let dup = pipeline.execute(book, Delivery::Client).await.unwrap();
+    assert_eq!(dup.delivery, DeliveryOutcome::Duplicate);
+    assert_eq!(
+        dup.events.pages[0].payload.as_ref().unwrap().type_url,
+        "/orders.v2.ItemAdded"
+    );
+    // Stored events keep the shape they were recorded in.
+    let stored = h.events.read(stream(), 0, None).await.unwrap();
+    assert_eq!(
+        stored[0].payload.as_ref().unwrap().type_url,
+        "/orders.v1.ItemAdded"
+    );
+}

@@ -21,6 +21,9 @@
 //!   messaging, events are persisted but not published.
 //! - `snapshot_compatibility.<domain>.{accept,reject}`: a domain's snapshot
 //!   rule override (RE2 patterns, whole match; refused at load if invalid).
+//! - `upcaster.enabled`: upcast every load, query answer and published book
+//!   through the business process's UpcasterService (default off: events
+//!   pass through as stored).
 //! - `dlq.targets`: where dead letters go.
 //! - Static discovery of synchronous projectors (HandleSync):
 //!   `ANGZARR_PROJECTORS='[{"name":"...","domain":"...","url":"..."}]'`.
@@ -64,6 +67,7 @@ use angzarr::storage::{init_event_store, init_snapshot_store};
 use angzarr::transport::{
     connect_watched, grpc_trace_layer, max_grpc_message_size, serve_with_transport,
 };
+use angzarr::upcast::EventUpcaster;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -153,12 +157,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .with_snapshots(config.storage.snapshots_enable.clone())
     .with_snapshot_rules(snapshot_rules.clone());
-    if config.upcaster.is_enabled() {
-        let upcaster = match config.upcaster.get_address_override() {
-            Some(addr) => Upcaster::from_address(&addr).await?,
-            None => Upcaster::from_channel(channel),
-        };
-        pipeline = pipeline.with_upcaster(Arc::new(upcaster));
+    // The upcaster is part of the component: its own business process.
+    let upcaster: Option<Arc<dyn EventUpcaster>> = config
+        .upcaster
+        .is_enabled()
+        .then(|| Arc::new(Upcaster::from_channel(channel)) as Arc<dyn EventUpcaster>);
+    if let Some(upcaster) = &upcaster {
+        pipeline = pipeline.with_upcaster(upcaster.clone());
     }
     let pipeline = Arc::new(pipeline);
 
@@ -166,7 +171,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let aggregate_service =
         AggregateService::new(pipeline, Arc::new(DiscoveredSyncProjectors::new(discovery)))
             .with_limits(config.limits.clone());
-    let event_query = EventQueryService::new(event_store, snapshot_store, registry, snapshot_rules);
+    let mut event_query =
+        EventQueryService::new(event_store, snapshot_store, registry, snapshot_rules);
+    if let Some(upcaster) = upcaster {
+        event_query = event_query.with_upcaster(upcaster);
+    }
 
     let (health_reporter, health_service) = health_reporter();
     health_reporter

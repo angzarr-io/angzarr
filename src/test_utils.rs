@@ -408,3 +408,44 @@ impl EventHandler for CapturingHandler {
         })
     }
 }
+
+/// An upcaster that rewrites one event type URL to another and counts its
+/// calls.
+pub struct RenamingUpcaster {
+    from: String,
+    to: String,
+    calls: Mutex<usize>,
+}
+
+impl RenamingUpcaster {
+    pub fn new(from: &str, to: &str) -> Arc<Self> {
+        Arc::new(Self {
+            from: from.to_string(),
+            to: to.to_string(),
+            calls: Mutex::new(0),
+        })
+    }
+
+    /// How many times it was asked to upcast.
+    pub fn calls(&self) -> usize {
+        *self.calls.lock().unwrap()
+    }
+}
+
+#[async_trait]
+impl crate::upcast::EventUpcaster for RenamingUpcaster {
+    async fn upcast(&self, _domain: &str, pages: Vec<EventPage>) -> Result<Vec<EventPage>, Status> {
+        *self.calls.lock().unwrap() += 1;
+        Ok(pages
+            .into_iter()
+            .map(|mut page| {
+                if let Some(payload) = page.payload.as_mut() {
+                    if payload.type_url == self.from {
+                        payload.type_url = self.to.clone();
+                    }
+                }
+                page
+            })
+            .collect())
+    }
+}

@@ -42,7 +42,8 @@ const BOUND: &[&str] = &[
     "C-0160", "C-0165", "C-0166", "C-0458", "C-0459", "C-0174", "C-0175", "C-0561", "C-0563",
     "C-0564", "C-0566", "C-0567", "C-0522", "C-0525", "C-0553", "C-0527", "C-0528", "C-0529",
     "C-0530", "C-0554", "C-0555", "C-0560", "C-0568", "C-0155", "C-0531", "C-0161", "C-0162",
-    "C-0164", "C-0532", "C-0551", "C-0149", "C-0172", "C-0552", "C-0460",
+    "C-0164", "C-0532", "C-0551", "C-0149", "C-0172", "C-0552", "C-0460", "C-0584", "C-0585",
+    "C-0586", "C-0587",
 ];
 
 const DOMAIN: &str = "order";
@@ -100,6 +101,7 @@ struct Contract {
     tracker: FailureTracker,
     failed_calls: usize,
     config: Option<angzarr::config::Config>,
+    upcaster: Option<Arc<RenamingUpcaster>>,
 }
 
 impl std::fmt::Debug for Contract {
@@ -159,6 +161,7 @@ impl Contract {
             tracker: FailureTracker::default(),
             failed_calls: 0,
             config: None,
+            upcaster: None,
         };
         world.register_local("1.0.0", false);
         world
@@ -186,9 +189,14 @@ impl Contract {
         registry: Arc<ComponentRegistry>,
         business: Arc<ScriptedBusiness>,
     ) -> angzarr::orchestration::aggregate::AggregatePipeline {
-        self.h
+        let pipeline = self
+            .h
             .pipeline_for(registry, business)
-            .with_snapshot_rules(self.rules())
+            .with_snapshot_rules(self.rules());
+        match &self.upcaster {
+            Some(upcaster) => pipeline.with_upcaster(upcaster.clone()),
+            None => pipeline,
+        }
     }
 
     /// This scenario's own coordinator.
@@ -383,7 +391,7 @@ async fn query_by_instance(w: &mut Contract, order: String, version: String) {
     run_query_with(w, registry, None).await;
 }
 
-#[given(regex = r#"^the answering coordinator holds no registration for the "order" aggregate$"#)]
+#[given(regex = r#"^the answering query server holds no registration for the "order" aggregate$"#)]
 async fn none_registered(w: &mut Contract) {
     w.h.registry.deregister();
 }
@@ -658,12 +666,15 @@ async fn run_query_with(
     registry: Arc<ComponentRegistry>,
     selection: Option<Selection>,
 ) {
-    let service = EventQueryService::new(
+    let mut service = EventQueryService::new(
         w.h.events.clone(),
         w.h.snapshots.clone(),
         registry,
         w.rules(),
     );
+    if let Some(upcaster) = &w.upcaster {
+        service = service.with_upcaster(upcaster.clone());
+    }
     let book = service
         .get_event_book(Request::new(Query {
             cover: Some(cover(DOMAIN, w.root)),
@@ -1372,6 +1383,98 @@ fn normalize_placeholders(text: &str) -> String {
     out
 }
 
+// ===========================================================================
+// Upcasting
+// ===========================================================================
+
+#[given(regex = r#"^an "order" aggregate whose business process upcasts (\w+) to (\w+)$"#)]
+async fn upcasts(w: &mut Contract, from: String, to: String) {
+    w.upcaster = Some(RenamingUpcaster::new(&type_url(&from), &type_url(&to)));
+}
+
+#[given(regex = r#"^order "([^"]*)" has a stored (\w+) event at sequence (\d+)$"#)]
+async fn stored_event(w: &mut Contract, order: String, event: String, seq: u64) {
+    w.root = root_of(&order);
+    w.seed_until(seq, &BTreeMap::from([(seq, event)])).await;
+}
+
+#[then(regex = r"^business code receives an? (\w+) event at sequence (\d+)$")]
+async fn receives_event(w: &mut Contract, event: String, seq: u64) {
+    let pages = w.last_delivery().events.unwrap().pages;
+    let page = pages
+        .iter()
+        .find(|p| p.sequence == seq)
+        .expect("no such page delivered");
+    assert_eq!(page.payload.as_ref().unwrap().type_url, type_url(&event));
+}
+
+#[when(
+    regex = r#"^a client queries the events of order "([^"]*)" through the "order" coordinator$"#
+)]
+async fn query_through_coordinator(w: &mut Contract, order: String) {
+    query_events(w, order).await;
+}
+
+#[then(regex = r"^the result carries an? (\w+) event at sequence (\d+)$")]
+async fn result_carries_event(w: &mut Contract, event: String, seq: u64) {
+    let book = w.query.as_ref().unwrap();
+    let page = book
+        .pages
+        .iter()
+        .find(|p| p.sequence == seq)
+        .expect("no such page");
+    assert_eq!(page.payload.as_ref().unwrap().type_url, type_url(&event));
+}
+
+#[given(regex = r#"^a saga "([^"]*)" subscribed to "order"$"#)]
+async fn saga_subscribed(_w: &mut Contract, _saga: String) {
+    // The harness's recording bus stands in for the saga's subscription.
+}
+
+#[when(regex = r#"^the "order" coordinator publishes order "([^"]*)"'s event at sequence (\d+)$"#)]
+async fn coordinator_publishes(w: &mut Contract, _order: String, seq: u64) {
+    // The coordinator publishes what it appends. An event written in the old
+    // shape (here: answered by a business process that still emits it) is
+    // published through the same upcasting path as any stored event.
+    assert_eq!(seq, 0);
+    w.root = Uuid::new_v4();
+    w.h.business
+        .then(Answer::events(&[&type_url("OrderPlacedV1")], &w.version));
+    w.run(command_for(DOMAIN, w.root, "PlaceOrder"), Delivery::Client)
+        .await;
+    succeeds(w).await;
+}
+
+#[then(regex = r"^the saga receives an? (\w+) event$")]
+async fn saga_receives(w: &mut Contract, event: String) {
+    let published = w.h.bus.published().await;
+    assert!(published
+        .iter()
+        .flat_map(|b| &b.pages)
+        .any(|p| p.payload.as_ref().unwrap().type_url == type_url(&event)));
+}
+
+#[then(regex = r"^the saga is never given an? (\w+) event$")]
+async fn saga_never_given(w: &mut Contract, event: String) {
+    let published = w.h.bus.published().await;
+    assert!(!published
+        .iter()
+        .flat_map(|b| &b.pages)
+        .any(|p| p.payload.as_ref().unwrap().type_url == type_url(&event)));
+}
+
+#[then(regex = r#"^order "([^"]*)"'s stored event at sequence (\d+) is still an? (\w+)$"#)]
+async fn stored_unchanged(w: &mut Contract, order: String, seq: u64, event: String) {
+    w.root = root_of(&order);
+    let page = w
+        .stored()
+        .await
+        .into_iter()
+        .find(|p| p.sequence == seq)
+        .expect("nothing stored there");
+    assert_eq!(page.payload.unwrap().type_url, type_url(&event));
+}
+
 #[tokio::main]
 async fn main() {
     let dir = concat!(
@@ -1382,6 +1485,7 @@ async fn main() {
         "rules_version.feature",
         "conflict_resolution.feature",
         "component_discovery.feature",
+        "upcasting.feature",
     ];
     let normalized =
         std::env::temp_dir().join(format!("coordinator-contract-{}", std::process::id()));
