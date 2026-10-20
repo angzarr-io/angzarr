@@ -21,7 +21,7 @@
 //!
 //! ## Registration
 //! The projector's descriptor is pulled from the projection process, which
-//! must describe exactly one projector, through `ComponentService.Describe`
+//! must describe exactly one projector named `target.domain`, through `ComponentService.Describe`
 //! on the first connection and again each time the channel comes back up. Until one is
 //! held nothing is delivered: bus deliveries are held unacknowledged (they
 //! stay queued), HandleSync/HandleAsync answer UNAVAILABLE and health
@@ -85,15 +85,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(%address, projector = %name, "Projection binary");
 
     let (channel, connections) = connect_watched(&address)?;
-    let registrar = Arc::new(Registrar::new(
-        Arc::new(GrpcDescriptorSource::new(channel.clone())),
-        ComponentKind::Projector,
-        Arc::new(ComponentRegistry::new()),
-        name.clone(),
-        address.clone(),
-        Arc::new(LogAlerts),
-        Duration::from_secs(config.registration.describe_alert_grace_period_secs),
-    ));
+    let registrar = Arc::new(
+        Registrar::new(
+            Arc::new(GrpcDescriptorSource::new(channel.clone())),
+            ComponentKind::Projector,
+            Arc::new(ComponentRegistry::new()),
+            name.clone(),
+            address.clone(),
+            Arc::new(LogAlerts),
+            Duration::from_secs(config.registration.describe_alert_grace_period_secs),
+        )
+        .with_expected_name(name.clone()),
+    );
     let readiness = registrar.readiness();
     tokio::spawn(registrar.run(connections));
 

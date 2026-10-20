@@ -181,15 +181,18 @@ async fn create_table_reaches_the_projection_over_rabbitmq() {
     // The projector coordinator: AMQP consumer -> projection process.
     let (projection_channel, projection_connections) =
         connect_watched(&projection_addr.to_string()).unwrap();
-    let projector_registrar = Arc::new(Registrar::new(
-        Arc::new(GrpcDescriptorSource::new(projection_channel.clone())),
-        ComponentKind::Projector,
-        Arc::new(ComponentRegistry::new()),
-        "projector-table-view",
-        projection_addr.to_string(),
-        Arc::new(LogAlerts),
-        Duration::from_secs(120),
-    ));
+    let projector_registrar = Arc::new(
+        Registrar::new(
+            Arc::new(GrpcDescriptorSource::new(projection_channel.clone())),
+            ComponentKind::Projector,
+            Arc::new(ComponentRegistry::new()),
+            "projector-table-view",
+            projection_addr.to_string(),
+            Arc::new(LogAlerts),
+            Duration::from_secs(120),
+        )
+        .with_expected_name("projector-table-view"),
+    );
     let projector_ready = projector_registrar.readiness();
     tokio::spawn(projector_registrar.run(projection_connections));
     let subscriber = AmqpEventBus::new(AmqpConfig::subscriber_all(

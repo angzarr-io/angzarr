@@ -173,3 +173,38 @@ async fn test_reconnect_redescribes() {
     }
     panic!("not re-described after reconnect");
 }
+
+/// A coordinator configured with a component name refuses a descriptor of
+/// another name, like a kind mismatch: nothing held, not ready, alerted.
+#[tokio::test]
+async fn test_descriptor_of_another_name_is_refused_and_alerted() {
+    let registry = Arc::new(ComponentRegistry::new());
+    let alerts = Arc::new(RecordingAlerts::new());
+    let r = Registrar::new(
+        Arc::new(Scripted(Mutex::new(vec![
+            Ok(projector("projector-other")),
+            Ok(projector("projector-table-view")),
+        ]))),
+        ComponentKind::Projector,
+        registry.clone(),
+        "projector-table-view",
+        "view-process:50201",
+        alerts.clone(),
+        Duration::from_millis(0),
+    )
+    .with_expected_name("projector-table-view");
+    let DescribeOutcome::Refused(reason) = r.describe_once().await else {
+        panic!("expected a refusal");
+    };
+    assert!(
+        reason.contains("'projector-other'") && reason.contains("'projector-table-view'"),
+        "{reason}"
+    );
+    assert!(registry.get().is_none());
+    assert!(!*r.readiness().borrow());
+    assert_eq!(alerts.raised().len(), 1);
+    assert!(matches!(
+        r.describe_once().await,
+        DescribeOutcome::Registered
+    ));
+}

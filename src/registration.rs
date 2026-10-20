@@ -10,8 +10,9 @@
 //!   UNAVAILABLE and queued work stays queued.
 //! - **One component**: a coordinator serves exactly one component of one
 //!   business process, of the coordinator's own kind.
-//! - **A refused answer** (a descriptor with an empty `rules_version`, or of
-//!   another kind than the coordinator's): nothing is held, readiness stays
+//! - **A refused answer** (a descriptor with an empty `rules_version`, of
+//!   another kind than the coordinator's, or, where the coordinator is
+//!   configured with a component name, of another name): nothing is held, readiness stays
 //!   false, an error naming the business process and the component is
 //!   logged and an alert raised. It is not asked again until the channel
 //!   comes back up.
@@ -106,7 +107,7 @@ pub enum DescribeOutcome {
     /// The descriptor is held; the coordinator is ready.
     Registered,
     /// The answer was refused (a descriptor without a rules version, or of
-    /// another kind than the coordinator's): nothing is held. Not asked again until the channel comes back up.
+    /// another kind or name than the coordinator's): nothing is held. Not asked again until the channel comes back up.
     Refused(String),
     /// The call failed (unreachable, or an error status): retried.
     Failed(Status),
@@ -116,6 +117,9 @@ pub enum DescribeOutcome {
 pub struct Registrar {
     source: Arc<dyn DescriptorSource>,
     kind: ComponentKind,
+    /// The component name the coordinator is configured to serve, when it
+    /// checks one.
+    expected_name: Option<String>,
     registry: Arc<ComponentRegistry>,
     /// What the coordinator serves (its domain or projector name), for
     /// logs and alerts.
@@ -144,6 +148,7 @@ impl Registrar {
         Self {
             source,
             kind,
+            expected_name: None,
             registry,
             serves: serves.into(),
             process: process.into(),
@@ -152,6 +157,13 @@ impl Registrar {
             now: Arc::new(Instant::now),
             ready,
         }
+    }
+
+    /// Refuse a descriptor whose name is not `name` (the coordinator's
+    /// configured component name).
+    pub fn with_expected_name(mut self, name: impl Into<String>) -> Self {
+        self.expected_name = Some(name.into());
+        self
     }
 
     /// Replace the time source (tests).
@@ -197,6 +209,15 @@ impl Registrar {
                 descriptor.name,
                 self.kind.as_str_name()
             ));
+        }
+        if let Some(expected) = &self.expected_name {
+            if &descriptor.name != expected {
+                return self.refuse(format!(
+                    "business process {} describes component '{}', \
+                     but this coordinator serves '{expected}'",
+                    self.process, descriptor.name
+                ));
+            }
         }
         match self.registry.register(descriptor) {
             Ok(()) => {
