@@ -196,6 +196,8 @@ _bus-all: _bus-amqp
 _bus-amqp:
     @echo "=== Bus: AMQP/RabbitMQ (direct contract tests) ==="
     cargo test --test bus_amqp --features "amqp test-utils" -- --test-threads=1
+    @echo "=== Bus: AMQP stage-1 round trip (gRPC -> SQLite -> RabbitMQ -> projector) ==="
+    cargo test --test mvp_round_trip --features "amqp test-utils" -- --test-threads=1
 
 # Clean up zombie containers from failed test runs
 clean-containers:
