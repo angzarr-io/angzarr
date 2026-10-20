@@ -8,8 +8,7 @@
 //! the dead letter is captured somewhere (log aggregators like Splunk/Datadog
 //! can alert on these).
 //!
-//! Basic publish/is_configured tests are covered by Gherkin contract tests.
-//! Only edge cases remain here.
+//! Covers publishing, is_configured and a dead letter without a correlation.
 
 use super::*;
 use crate::dlq::test_support::dead_letter;

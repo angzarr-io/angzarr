@@ -12,8 +12,7 @@
 //! - Filename generation (domain, timestamp, correlation ID)
 //! - Format-specific output (JSON vs protobuf)
 //!
-//! Basic publish and is_configured() tests are covered by Gherkin contract
-//! tests in tests/interfaces/features/dlq_publishers.feature.
+//! Publishing is exercised end to end by the format tests below.
 
 use super::*;
 use crate::dlq::test_support::dead_letter;

@@ -4,7 +4,7 @@
 //! The routing key is the domain name.
 //!
 //! These tests cover the pure functions and constants that don't require RabbitMQ.
-//! Full integration tests are in the Gherkin contract test suite (tests/interfaces/).
+//! Broker round trips are in tests/bus_amqp.rs (testcontainers RabbitMQ).
 //!
 //! Key behaviors verified:
 //! - Exchange name constant
