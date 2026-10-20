@@ -38,11 +38,10 @@ use angzarr::proto::component_service_server::{ComponentService, ComponentServic
 use angzarr::proto::projector_service_client::ProjectorServiceClient;
 use angzarr::proto::projector_service_server::{ProjectorService, ProjectorServiceServer};
 use angzarr::proto::{
-    CommandHandlerResponse, ComponentDescriptor, ComponentDescriptors, ComponentKind,
-    ContextualCommand, DeliveryOutcome, DescribeRequest, EventBook, EventPage, Projection,
-    Snapshot,
+    CommandHandlerResponse, ComponentDescriptor, ComponentKind, ContextualCommand, DeliveryOutcome,
+    DescribeRequest, EventBook, EventPage, Projection, Snapshot,
 };
-use angzarr::registration::{ComponentSelector, GrpcDescriptorSource, Registrar};
+use angzarr::registration::{GrpcDescriptorSource, Registrar};
 use angzarr::registry::ComponentRegistry;
 use angzarr::services::aggregate::{AggregateService, DiscoveredSyncProjectors};
 use angzarr::storage::factory::sqlite_pool;
@@ -95,10 +94,10 @@ impl ComponentService for TableBusiness {
     async fn describe(
         &self,
         _request: Request<DescribeRequest>,
-    ) -> Result<Response<ComponentDescriptors>, Status> {
-        Ok(Response::new(ComponentDescriptors {
-            components: vec![aggregate_descriptor("table", STATE, VERSION, false)],
-        }))
+    ) -> Result<Response<ComponentDescriptor>, Status> {
+        Ok(Response::new(aggregate_descriptor(
+            "table", STATE, VERSION, false,
+        )))
     }
 }
 
@@ -124,15 +123,13 @@ impl ComponentService for TableProjection {
     async fn describe(
         &self,
         _request: Request<DescribeRequest>,
-    ) -> Result<Response<ComponentDescriptors>, Status> {
-        Ok(Response::new(ComponentDescriptors {
-            components: vec![ComponentDescriptor {
-                name: "projector-table-view".into(),
-                kind: ComponentKind::Projector as i32,
-                inputs: vec![],
-                rules_version: VERSION.into(),
-                state: None,
-            }],
+    ) -> Result<Response<ComponentDescriptor>, Status> {
+        Ok(Response::new(ComponentDescriptor {
+            name: "projector-table-view".into(),
+            kind: ComponentKind::Projector as i32,
+            inputs: vec![],
+            rules_version: VERSION.into(),
+            state: None,
         }))
     }
 }
@@ -186,13 +183,9 @@ async fn create_table_reaches_the_projection_over_rabbitmq() {
         connect_watched(&projection_addr.to_string()).unwrap();
     let projector_registrar = Arc::new(Registrar::new(
         Arc::new(GrpcDescriptorSource::new(projection_channel.clone())),
-        ComponentSelector {
-            kind: ComponentKind::Projector,
-            name: Some("projector-table-view".into()),
-        },
+        ComponentKind::Projector,
         Arc::new(ComponentRegistry::new()),
         "projector-table-view",
-        "local",
         projection_addr.to_string(),
         Arc::new(LogAlerts),
         Duration::from_secs(120),
@@ -231,13 +224,9 @@ async fn create_table_reaches_the_projection_over_rabbitmq() {
     let registry = Arc::new(ComponentRegistry::new());
     let registrar = Arc::new(Registrar::new(
         Arc::new(GrpcDescriptorSource::new(business_channel.clone())),
-        ComponentSelector {
-            kind: ComponentKind::Aggregate,
-            name: None,
-        },
+        ComponentKind::Aggregate,
         registry.clone(),
         "table",
-        "local",
         business_addr.to_string(),
         Arc::new(LogAlerts),
         Duration::from_secs(120),
@@ -251,7 +240,6 @@ async fn create_table_reaches_the_projection_over_rabbitmq() {
     );
     let pipeline = AggregatePipeline::new(
         "table",
-        "local",
         registry,
         Arc::new(SqliteEventStore::new(pool.clone())),
         Arc::new(SqliteSnapshotStore::new(pool)),

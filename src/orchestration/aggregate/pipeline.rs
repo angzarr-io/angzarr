@@ -96,10 +96,9 @@ struct Loaded {
 }
 
 /// The aggregate coordinator's pipeline for one domain, bound to the
-/// registration of the business binary it calls.
+/// registration of the one business process it calls.
 pub struct AggregatePipeline {
     domain: String,
-    instance: String,
     registry: Arc<ComponentRegistry>,
     event_store: Arc<dyn EventStore>,
     snapshot_store: Arc<dyn SnapshotStore>,
@@ -115,11 +114,10 @@ pub struct AggregatePipeline {
 
 impl AggregatePipeline {
     /// A pipeline for `domain`, calling `business`, whose registration is
-    /// held in `registry` under `instance`.
+    /// held in `registry`.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         domain: impl Into<String>,
-        instance: impl Into<String>,
         registry: Arc<ComponentRegistry>,
         event_store: Arc<dyn EventStore>,
         snapshot_store: Arc<dyn SnapshotStore>,
@@ -130,7 +128,6 @@ impl AggregatePipeline {
     ) -> Self {
         Self {
             domain: domain.into(),
-            instance: instance.into(),
             registry,
             event_store,
             snapshot_store,
@@ -179,11 +176,6 @@ impl AggregatePipeline {
         &self.registry
     }
 
-    /// The instance name its registration is held under.
-    pub fn instance(&self) -> &str {
-        &self.instance
-    }
-
     /// Run the pipeline for one delivery of `book`.
     ///
     /// A failure is returned as a [`PipelineError`]; when the delivery has
@@ -204,10 +196,7 @@ impl AggregatePipeline {
     /// Pipeline steps 1 and 2, then the step 3..5 loop.
     async fn run(&self, book: &CommandBook, delivery: Delivery) -> Result<Decided, PipelineError> {
         validate(book, &self.domain, delivery).map_err(PipelineError::Refused)?;
-        let registration = self
-            .registry
-            .get(&self.domain, &self.instance)
-            .ok_or(PipelineError::NotRegistered)?;
+        let registration = self.registry.get().ok_or(PipelineError::NotRegistered)?;
         validate_handling(book, &registration, delivery).map_err(PipelineError::Refused)?;
         let ids = assign_ids(book);
         let mut book = book.clone();

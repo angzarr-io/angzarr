@@ -40,7 +40,8 @@ Environment overrides follow the existing `ANGZARR_` + `__` convention:
 - An entry without `accept` is refused at load (an override must say what it
   accepts).
 - The same rule governs the query service (`EventQueryService`, a
-  TemporalQuery included), checked against every registered version.
+  TemporalQuery included), checked against the answering coordinator's own
+  registration (decision 14.21).
 
 ### Defaults
 
@@ -98,9 +99,11 @@ version) is alerted at once and not retried until the channel comes back up.
 Failed calls are retried with backoff (200 ms doubling to 30 s), which is how
 an unreachable process is reconnected; that backoff is not configurable.
 
-`target.name` (existing key) selects the component when the business process
-hosts several of the coordinator's kind; otherwise exactly one must be
-described.
+One coordinator serves one component of one business process (decision
+14.19): Describe answers a single descriptor, which must be of the
+coordinator's kind, so nothing selects among components. `target.name` no
+longer has a selection role; it remains only in naming UDS sockets
+(`{service_type}-{name}-{domain}.sock`), as before.
 
 ## 4. Not proposed here (open, owner decision)
 

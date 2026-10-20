@@ -30,11 +30,7 @@ fn stream() -> StreamRef<'static> {
 fn harness(commutative: bool) -> Harness {
     let h = Harness::new(DOMAIN, Answer::events(&["/orders.v1.ItemAdded"], VERSION));
     h.registry
-        .register(
-            DOMAIN,
-            "local",
-            aggregate_descriptor("order", STATE, VERSION, commutative),
-        )
+        .register(aggregate_descriptor("order", STATE, VERSION, commutative))
         .unwrap();
     h
 }
@@ -84,7 +80,6 @@ fn test_accessors() {
     let h = harness(false);
     let p = h.pipeline();
     assert_eq!(p.domain(), DOMAIN);
-    assert_eq!(p.instance(), "local");
     assert!(Arc::ptr_eq(p.registry(), &h.registry));
 }
 

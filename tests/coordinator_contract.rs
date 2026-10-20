@@ -26,9 +26,8 @@ use angzarr::proto::{
     EventBook, EventMeta, EventPage, EventRef, Projection, ProjectorFailure, Query, Snapshot,
     TemporalQuery,
 };
-use angzarr::registration::{
-    ComponentSelector, DescribeOutcome, DescriptorSource, FailureTracker, Registrar,
-};
+use angzarr::registration::{DescribeOutcome, DescriptorSource, FailureTracker, Registrar};
+use angzarr::registry::ComponentRegistry;
 use angzarr::rules_version::{SnapshotCompatibilityConfig, SnapshotRuleConfig, SnapshotRules};
 use angzarr::services::aggregate::{AggregateService, SyncProjectors};
 use angzarr::services::EventQueryService;
@@ -48,18 +47,17 @@ const BOUND: &[&str] = &[
 
 const DOMAIN: &str = "order";
 const STATE: &str = "/orders.v1.OrderState";
-const LOCAL: &str = "local";
 
 /// A business process whose Describe answers are scripted.
 struct FakeProcess {
-    answer: Mutex<Vec<ComponentDescriptor>>,
+    answer: Mutex<ComponentDescriptor>,
     calls: Mutex<usize>,
     answered: Mutex<bool>,
 }
 
 #[async_trait]
 impl DescriptorSource for FakeProcess {
-    async fn describe(&self) -> Result<Vec<ComponentDescriptor>, Status> {
+    async fn describe(&self) -> Result<ComponentDescriptor, Status> {
         *self.calls.lock().unwrap() += 1;
         if !*self.answered.lock().unwrap() {
             return Err(Status::unavailable("not answering yet"));
@@ -85,7 +83,8 @@ struct Contract {
     root: Uuid,
     version: String,
     commutative: bool,
-    instances: BTreeMap<String, Arc<ScriptedBusiness>>,
+    /// Other coordinators of the domain (one per build), by version.
+    instances: BTreeMap<String, (Arc<ComponentRegistry>, Arc<ScriptedBusiness>)>,
     overrides: SnapshotCompatibilityConfig,
     pending: Vec<(angzarr::proto::CommandBook, Delivery)>,
     results: Vec<Result<Decided, Status>>,
@@ -147,7 +146,7 @@ impl Contract {
             query: None,
             config_error: None,
             process: Arc::new(FakeProcess {
-                answer: Mutex::new(Vec::new()),
+                answer: Mutex::new(ComponentDescriptor::default()),
                 calls: Mutex::new(0),
                 answered: Mutex::new(true),
             }),
@@ -170,11 +169,7 @@ impl Contract {
         self.commutative = commutative;
         self.h
             .registry
-            .register(
-                DOMAIN,
-                LOCAL,
-                aggregate_descriptor("order", STATE, version, commutative),
-            )
+            .register(aggregate_descriptor("order", STATE, version, commutative))
             .unwrap();
     }
 
@@ -188,12 +183,17 @@ impl Contract {
 
     fn pipeline(
         &self,
-        instance: &str,
+        registry: Arc<ComponentRegistry>,
         business: Arc<ScriptedBusiness>,
     ) -> angzarr::orchestration::aggregate::AggregatePipeline {
         self.h
-            .pipeline_for(instance, business)
+            .pipeline_for(registry, business)
             .with_snapshot_rules(self.rules())
+    }
+
+    /// This scenario's own coordinator.
+    fn own(&self) -> angzarr::orchestration::aggregate::AggregatePipeline {
+        self.pipeline(self.h.registry.clone(), self.h.business.clone())
     }
 
     async fn stored(&self) -> Vec<EventPage> {
@@ -260,7 +260,7 @@ impl Contract {
 
     async fn run(&mut self, book: angzarr::proto::CommandBook, delivery: Delivery) {
         let result = self
-            .pipeline(LOCAL, self.h.business.clone())
+            .own()
             .execute(book, delivery)
             .await
             .map_err(|e| e.to_status());
@@ -337,45 +337,63 @@ async fn registered_state(w: &mut Contract, support: String) {
     regex = r#"^two instances of the "order" business binary, at rules versions "([^"]*)" and "([^"]*)"$"#
 )]
 async fn two_instances(w: &mut Contract, a: String, b: String) {
+    // One coordinator per business binary, over the same stores.
     for version in [a, b] {
-        w.h.registry
-            .register(
-                DOMAIN,
-                &version,
-                aggregate_descriptor("order", STATE, &version, false),
-            )
+        let registry = Arc::new(ComponentRegistry::new());
+        registry
+            .register(aggregate_descriptor("order", STATE, &version, false))
             .unwrap();
         w.instances.insert(
             version.clone(),
-            ScriptedBusiness::new(Answer::events(&["/orders.v1.ItemAdded"], &version)),
+            (
+                registry,
+                ScriptedBusiness::new(Answer::events(&["/orders.v1.ItemAdded"], &version)),
+            ),
         );
     }
 }
 
 #[given(
-    regex = r#"^another instance of the "order" business binary is registered with rules version "([^"]*)"$"#
+    regex = r#"^a second "order" instance at rules version "([^"]*)" behind its own coordinator$"#
 )]
-async fn another_instance(w: &mut Contract, version: String) {
-    w.h.registry
-        .register(
-            DOMAIN,
-            "other",
-            aggregate_descriptor("order", STATE, &version, false),
-        )
+async fn second_instance(w: &mut Contract, version: String) {
+    let registry = Arc::new(ComponentRegistry::new());
+    registry
+        .register(aggregate_descriptor("order", STATE, &version, false))
         .unwrap();
+    w.instances.insert(
+        version.clone(),
+        (
+            registry,
+            ScriptedBusiness::new(Answer::events(&["/orders.v1.ItemAdded"], &version)),
+        ),
+    );
 }
 
-#[given(regex = r#"^no component is registered for the "order" domain$"#)]
+#[when(
+    regex = r#"^a client's query for the events of order "([^"]*)" is answered by the coordinator of the instance at "([^"]*)"$"#
+)]
+async fn query_by_instance(w: &mut Contract, order: String, version: String) {
+    w.root = root_of(&order);
+    let registry = if version == w.version {
+        w.h.registry.clone()
+    } else {
+        w.instances[&version].0.clone()
+    };
+    run_query_with(w, registry, None).await;
+}
+
+#[given(regex = r#"^the answering coordinator holds no registration for the "order" aggregate$"#)]
 async fn none_registered(w: &mut Contract) {
-    w.h.registry.deregister(DOMAIN, LOCAL);
+    w.h.registry.deregister();
 }
 
 #[when(regex = r#"^the instance at "([^"]*)" decides an AddItem command for order "([^"]*)"$"#)]
 async fn instance_decides(w: &mut Contract, version: String, order: String) {
     w.root = root_of(&order);
-    let business = w.instances[&version].clone();
+    let (registry, business) = w.instances[&version].clone();
     let result = w
-        .pipeline(&version, business)
+        .pipeline(registry, business)
         .execute(command_for(DOMAIN, w.root, "AddItem"), Delivery::Client)
         .await
         .map_err(|e| e.to_status());
@@ -416,10 +434,7 @@ async fn answers_skewed(w: &mut Contract, how: String, version: String) {
     let book = command_for(DOMAIN, w.root, "AddItem");
     match how.as_str() {
         "awaiting the decision" | "awaiting the projections" => {
-            let service = AggregateService::new(
-                Arc::new(w.pipeline(LOCAL, w.h.business.clone())),
-                Arc::new(NoProjectors),
-            );
+            let service = AggregateService::new(Arc::new(w.own()), Arc::new(NoProjectors));
             let result = if how == "awaiting the decision" {
                 service.handle(Request::new(book)).await
             } else {
@@ -634,10 +649,19 @@ async fn query_as_of(w: &mut Contract, order: String, seq: u64) {
 }
 
 async fn run_query(w: &mut Contract, selection: Option<Selection>) {
+    let registry = w.h.registry.clone();
+    run_query_with(w, registry, selection).await;
+}
+
+async fn run_query_with(
+    w: &mut Contract,
+    registry: Arc<ComponentRegistry>,
+    selection: Option<Selection>,
+) {
     let service = EventQueryService::new(
         w.h.events.clone(),
         w.h.snapshots.clone(),
-        w.h.registry.clone(),
+        registry,
         w.rules(),
     );
     let book = service
@@ -970,22 +994,17 @@ async fn second_returns_first(w: &mut Contract) {
 
 impl Contract {
     fn describe_as(&self, version: &str) {
-        *self.process.answer.lock().unwrap() =
-            vec![aggregate_descriptor("order", STATE, version, false)];
+        *self.process.answer.lock().unwrap() = aggregate_descriptor("order", STATE, version, false);
     }
 
     fn start_registrar(&mut self) {
-        self.h.registry.deregister(DOMAIN, LOCAL);
+        self.h.registry.deregister();
         let registrar = Arc::new(
             Registrar::new(
                 self.process.clone(),
-                ComponentSelector {
-                    kind: angzarr::proto::ComponentKind::Aggregate,
-                    name: None,
-                },
+                angzarr::proto::ComponentKind::Aggregate,
                 self.h.registry.clone(),
                 DOMAIN,
-                LOCAL,
                 "order-business:50101",
                 self.h.alerts.clone(),
                 self.grace,
@@ -1052,7 +1071,7 @@ async fn reports_ready(w: &mut Contract) {
     assert!(w.ready());
 }
 
-#[then(regex = r"^the coordinator asks it to describe its components( again)?$")]
+#[then(regex = r"^the coordinator asks it to describe its component( again)?$")]
 async fn asks_to_describe(w: &mut Contract, again: String) {
     let calls = *w.process.calls.lock().unwrap();
     assert!(
@@ -1064,21 +1083,18 @@ async fn asks_to_describe(w: &mut Contract, again: String) {
 #[given(regex = r#"^the "order" aggregate is registered at rules version "([^"]*)"$"#)]
 #[then(regex = r#"^the "order" aggregate is registered at rules version "([^"]*)"$"#)]
 async fn registered_at(w: &mut Contract, version: String) {
-    if w.h.registry.get(DOMAIN, LOCAL).is_none() {
+    if w.h.registry.get().is_none() {
         connects(w).await;
     }
     assert_eq!(
-        w.h.registry
-            .get(DOMAIN, LOCAL)
-            .expect("not registered")
-            .rules_version(),
+        w.h.registry.get().expect("not registered").rules_version(),
         version
     );
 }
 
 #[then(regex = r#"^the "order" aggregate is not registered$"#)]
 async fn not_registered(w: &mut Contract) {
-    assert!(w.h.registry.get(DOMAIN, LOCAL).is_none());
+    assert!(w.h.registry.get().is_none());
 }
 
 #[given(regex = r#"^the "order" business binary restarts as version "([^"]*)"$"#)]
@@ -1114,10 +1130,7 @@ async fn work_arrives(w: &mut Contract, work: String) {
         "a command from a caller who waits" => command_for(DOMAIN, w.root, "AddItem"),
         "a fact from a caller who waits" => fact(DOMAIN, w.root, "/orders.v1.Paid", "pi_1"),
         "a command sent without waiting" => {
-            let service = AggregateService::new(
-                Arc::new(w.pipeline(LOCAL, w.h.business.clone())),
-                Arc::new(NoProjectors),
-            );
+            let service = AggregateService::new(Arc::new(w.own()), Arc::new(NoProjectors));
             let result = service
                 .handle_async(Request::new(command_for(DOMAIN, w.root, "AddItem")))
                 .await;
@@ -1184,7 +1197,7 @@ async fn grace_is(w: &mut Contract, minutes: u64) {
 }
 
 #[given(
-    regex = r#"^the "order" business binary does not answer requests to describe its components$"#
+    regex = r#"^the "order" business binary does not answer requests to describe its component$"#
 )]
 async fn does_not_answer(w: &mut Contract) {
     *w.process.answered.lock().unwrap() = false;

@@ -25,11 +25,12 @@ fn root() -> Uuid {
 fn registered() -> Harness {
     let h = Harness::new(DOMAIN, Answer::events(&["/orders.v1.ItemAdded"], VERSION));
     h.registry
-        .register(
-            DOMAIN,
-            "local",
-            aggregate_descriptor("order", "/orders.v1.OrderState", VERSION, false),
-        )
+        .register(aggregate_descriptor(
+            "order",
+            "/orders.v1.OrderState",
+            VERSION,
+            false,
+        ))
         .unwrap();
     h
 }

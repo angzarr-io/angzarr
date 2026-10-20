@@ -335,19 +335,20 @@ impl Harness {
         }
     }
 
-    /// A pipeline over this harness, for the registration held under
-    /// `instance`, calling `business`.
+    /// A pipeline of another coordinator over this harness's stores, with
+    /// its own registration (`registry`) and business process (`business`):
+    /// one coordinator serves one component, so two builds of a domain run
+    /// behind two coordinators.
     pub fn pipeline_for(
         &self,
-        instance: &str,
+        registry: Arc<ComponentRegistry>,
         business: Arc<ScriptedBusiness>,
     ) -> AggregatePipeline {
         let events: Arc<dyn EventStore> = self.events.clone();
         let snapshots: Arc<dyn SnapshotStore> = self.snapshots.clone();
         AggregatePipeline::new(
             self.domain.clone(),
-            instance,
-            self.registry.clone(),
+            registry,
             events,
             snapshots,
             business,
@@ -358,10 +359,9 @@ impl Harness {
         .with_clock(self.clock.clone())
     }
 
-    /// The pipeline of the harness's own business binary (instance
-    /// "local").
+    /// The pipeline of the harness's own coordinator.
     pub fn pipeline(&self) -> AggregatePipeline {
-        self.pipeline_for("local", self.business.clone())
+        self.pipeline_for(self.registry.clone(), self.business.clone())
     }
 }
 

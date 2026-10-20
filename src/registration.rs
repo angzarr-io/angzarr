@@ -8,10 +8,13 @@
 //! - **No descriptor, no delivery**: the [`Registrar`] publishes readiness;
 //!   until it holds a descriptor, synchronous callers are answered
 //!   UNAVAILABLE and queued work stays queued.
-//! - **A refused answer** (any descriptor with an empty `rules_version`):
-//!   the whole answer is refused, nothing is held, readiness stays false, an
-//!   error naming the business process and the component is logged and an
-//!   alert raised. It is not asked again until the channel comes back up.
+//! - **One component**: a coordinator serves exactly one component of one
+//!   business process, of the coordinator's own kind.
+//! - **A refused answer** (a descriptor with an empty `rules_version`, or of
+//!   another kind than the coordinator's): nothing is held, readiness stays
+//!   false, an error naming the business process and the component is
+//!   logged and an alert raised. It is not asked again until the channel
+//!   comes back up.
 //! - **A failed call** (unreachable, or an error status): every failure is
 //!   logged, and the call is retried with backoff (each retry is a
 //!   reconnect attempt); an alert is raised once failures have lasted past
@@ -68,11 +71,11 @@ use crate::proto::component_service_client::ComponentServiceClient;
 use crate::proto::{ComponentDescriptor, ComponentKind, DescribeRequest};
 use crate::registry::ComponentRegistry;
 
-/// Where descriptors come from: the business process.
+/// Where the descriptor comes from: the business process.
 #[async_trait]
 pub trait DescriptorSource: Send + Sync {
-    /// Every component the business process hosts.
-    async fn describe(&self) -> Result<Vec<ComponentDescriptor>, Status>;
+    /// The one component the business process is.
+    async fn describe(&self) -> Result<ComponentDescriptor, Status>;
 }
 
 /// [`DescriptorSource`] over gRPC: `ComponentService.Describe`.
@@ -91,52 +94,9 @@ impl GrpcDescriptorSource {
 
 #[async_trait]
 impl DescriptorSource for GrpcDescriptorSource {
-    async fn describe(&self) -> Result<Vec<ComponentDescriptor>, Status> {
+    async fn describe(&self) -> Result<ComponentDescriptor, Status> {
         let mut client = self.client.clone();
-        Ok(client
-            .describe(DescribeRequest {})
-            .await?
-            .into_inner()
-            .components)
-    }
-}
-
-/// Which hosted component this coordinator serves.
-#[derive(Debug, Clone)]
-pub struct ComponentSelector {
-    /// The component's kind.
-    pub kind: ComponentKind,
-    /// Its registered name, when the coordinator knows it. When `None`, the
-    /// process must host exactly one component of `kind`.
-    pub name: Option<String>,
-}
-
-impl ComponentSelector {
-    /// The one descriptor this coordinator serves, or why there is none.
-    pub fn select(
-        &self,
-        descriptors: &[ComponentDescriptor],
-    ) -> Result<ComponentDescriptor, Status> {
-        let chosen: Vec<_> = descriptors
-            .iter()
-            .filter(|d| d.kind == self.kind as i32)
-            .filter(|d| self.name.as_ref().is_none_or(|n| &d.name == n))
-            .collect();
-        match chosen.as_slice() {
-            [one] => Ok((*one).clone()),
-            [] => Err(Status::not_found(format!(
-                "the business process describes no {} component{}",
-                self.kind.as_str_name(),
-                self.name
-                    .as_ref()
-                    .map(|n| format!(" named '{n}'"))
-                    .unwrap_or_default()
-            ))),
-            _ => Err(Status::failed_precondition(format!(
-                "the business process describes several {} components; name the one to serve",
-                self.kind.as_str_name()
-            ))),
-        }
+        Ok(client.describe(DescribeRequest {}).await?.into_inner())
     }
 }
 
@@ -145,21 +105,21 @@ impl ComponentSelector {
 pub enum DescribeOutcome {
     /// The descriptor is held; the coordinator is ready.
     Registered,
-    /// The answer was refused (a descriptor without a rules version, or no
-    /// component this coordinator serves): nothing is held. Not retried
-    /// until the channel comes back up.
+    /// The answer was refused (a descriptor without a rules version, or of
+    /// another kind than the coordinator's): nothing is held. Not asked again until the channel comes back up.
     Refused(String),
     /// The call failed (unreachable, or an error status): retried.
     Failed(Status),
 }
 
-/// Keeps one instance's registration current and publishes readiness.
+/// Keeps the coordinator's registration current and publishes readiness.
 pub struct Registrar {
     source: Arc<dyn DescriptorSource>,
-    selector: ComponentSelector,
+    kind: ComponentKind,
     registry: Arc<ComponentRegistry>,
-    domain: String,
-    instance: String,
+    /// What the coordinator serves (its domain or projector name), for
+    /// logs and alerts.
+    serves: String,
     /// The business process, for logs (its address).
     process: String,
     alerts: Arc<dyn Alerts>,
@@ -169,14 +129,13 @@ pub struct Registrar {
 }
 
 impl Registrar {
-    /// A registrar for `instance` of `domain`; readiness starts false.
-    #[allow(clippy::too_many_arguments)]
+    /// A registrar for a coordinator of components of `kind`; readiness
+    /// starts false.
     pub fn new(
         source: Arc<dyn DescriptorSource>,
-        selector: ComponentSelector,
+        kind: ComponentKind,
         registry: Arc<ComponentRegistry>,
-        domain: impl Into<String>,
-        instance: impl Into<String>,
+        serves: impl Into<String>,
         process: impl Into<String>,
         alerts: Arc<dyn Alerts>,
         alert_grace: Duration,
@@ -184,10 +143,9 @@ impl Registrar {
         let (ready, _) = watch::channel(false);
         Self {
             source,
-            selector,
+            kind,
             registry,
-            domain: domain.into(),
-            instance: instance.into(),
+            serves: serves.into(),
             process: process.into(),
             alerts,
             alert_grace,
@@ -208,54 +166,61 @@ impl Registrar {
     }
 
     fn forget(&self) {
-        self.registry.deregister(&self.domain, &self.instance);
+        self.registry.deregister();
         self.ready.send_replace(false);
     }
 
-    /// One Describe: hold the selected descriptor, or hold nothing.
+    /// One Describe: hold the descriptor, or hold nothing.
     pub async fn describe_once(&self) -> DescribeOutcome {
-        let descriptors = match self.source.describe().await {
-            Ok(descriptors) => descriptors,
+        let descriptor = match self.source.describe().await {
+            Ok(descriptor) => descriptor,
             Err(status) => {
                 self.forget();
                 return DescribeOutcome::Failed(status);
             }
         };
-        if let Some(unversioned) = descriptors.iter().find(|d| d.rules_version.is_empty()) {
-            self.forget();
-            let reason = format!(
+        if descriptor.rules_version.is_empty() {
+            return self.refuse(format!(
                 "business process {} describes component '{}' without a rules version; \
-                 its answer is refused and nothing is delivered to it",
-                self.process, unversioned.name
-            );
-            error!(process = %self.process, component = %unversioned.name, "{reason}");
-            self.alerts.raise(Alert {
-                component: unversioned.name.clone(),
-                reason: reason.clone(),
-            });
-            return DescribeOutcome::Refused(reason);
+                 nothing is delivered to it",
+                self.process, descriptor.name
+            ));
         }
-        let held = self.selector.select(&descriptors).and_then(|descriptor| {
-            self.registry
-                .register(&self.domain, &self.instance, descriptor)
-        });
-        match held {
+        if descriptor.kind != self.kind as i32 {
+            let described = ComponentKind::try_from(descriptor.kind)
+                .map(|k| k.as_str_name().to_string())
+                .unwrap_or_else(|_| descriptor.kind.to_string());
+            return self.refuse(format!(
+                "business process {} describes component '{}' as {described}, \
+                 but this coordinator serves {}",
+                self.process,
+                descriptor.name,
+                self.kind.as_str_name()
+            ));
+        }
+        match self.registry.register(descriptor) {
             Ok(()) => {
-                info!(process = %self.process, domain = %self.domain, "component registered");
+                info!(process = %self.process, serves = %self.serves, "component registered");
                 self.ready.send_replace(true);
                 DescribeOutcome::Registered
             }
-            Err(status) => {
-                self.forget();
-                let reason = format!("business process {}: {}", self.process, status.message());
-                error!(process = %self.process, "{reason}");
-                self.alerts.raise(Alert {
-                    component: self.domain.clone(),
-                    reason: reason.clone(),
-                });
-                DescribeOutcome::Refused(reason)
-            }
+            Err(status) => self.refuse(format!(
+                "business process {}: {}",
+                self.process,
+                status.message()
+            )),
         }
+    }
+
+    /// Hold nothing, log the refusal and alert.
+    fn refuse(&self, reason: String) -> DescribeOutcome {
+        self.forget();
+        error!(process = %self.process, serves = %self.serves, "{reason}");
+        self.alerts.raise(Alert {
+            component: self.serves.clone(),
+            reason: reason.clone(),
+        });
+        DescribeOutcome::Refused(reason)
     }
 
     /// Describe until an answer arrives (retrying failed calls), then again
@@ -289,7 +254,7 @@ impl Registrar {
                 );
                 if tracker.failed(now, self.alert_grace) {
                     self.alerts.raise(Alert {
-                        component: self.domain.clone(),
+                        component: self.serves.clone(),
                         reason: format!(
                             "business process {} has not answered Describe for {:?}: {}",
                             self.process,

@@ -1,9 +1,9 @@
 //! The event query service (`EventQueryService`, query.proto).
 //!
 //! Serves a domain's stored events. A returned book may start from a
-//! snapshot only when every registration of the domain accepts it under the
-//! coordinator's snapshot rule ([`crate::rules_version`]); otherwise, and
-//! while no component is registered, it carries every page from 0.
+//! snapshot only when the coordinator's own registration accepts it under
+//! the snapshot rule ([`crate::rules_version`]); otherwise, and while no
+//! component is registered, it carries every page from 0.
 
 use std::sync::Arc;
 
@@ -44,8 +44,9 @@ pub struct EventQueryService {
 }
 
 impl EventQueryService {
-    /// A query service; `registry` holds the registrations whose versions
-    /// decide, under `rules`, which snapshots a result may carry.
+    /// A query service; `registry` holds this coordinator's registration,
+    /// whose version decides, under `rules`, which snapshots a result may
+    /// carry.
     pub fn new(
         event_store: Arc<dyn EventStore>,
         snapshot_store: Arc<dyn SnapshotStore>,
@@ -60,18 +61,17 @@ impl EventQueryService {
         }
     }
 
-    /// The newest stored snapshot with sequence <= `limit` that EVERY
-    /// registration of the domain accepts; none while no component is
-    /// registered (decisions 14.4, 14.9).
+    /// The newest stored snapshot with sequence <= `limit` that this
+    /// coordinator's own registration accepts; none while it holds no
+    /// registration (decisions 14.4, 14.21).
     async fn offerable_snapshot(
         &self,
         stream: StreamRef<'_>,
         limit: Option<u64>,
     ) -> Result<Option<Snapshot>, Status> {
-        let registrations = self.registry.all(stream.domain);
-        if registrations.is_empty() {
+        let Some(registration) = self.registry.get() else {
             return Ok(None);
-        }
+        };
         let snapshot = self
             .snapshot_store
             .get(stream)
@@ -79,11 +79,7 @@ impl EventQueryService {
             .map_err(storage_status)?;
         Ok(snapshot
             .filter(|s| limit.is_none_or(|l| s.sequence <= l))
-            .filter(|s| {
-                registrations
-                    .iter()
-                    .all(|r| self.rules.offerable(stream.domain, s, r))
-            }))
+            .filter(|s| self.rules.offerable(stream.domain, s, &registration)))
     }
 
     /// The books a Query selects: one for a stream query, one per matching

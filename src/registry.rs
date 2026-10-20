@@ -1,5 +1,6 @@
-//! Component registrations: the descriptors a coordinator holds from its
+//! The component registration: the descriptor a coordinator holds from its
 //! business process (types.proto, `ComponentDescriptor`; component.proto).
+//! One coordinator serves one component, so it holds at most one.
 //!
 //! A registration records the binary's full build version
 //! (`rules_version`) and, for aggregates and process managers, its state
@@ -8,16 +9,9 @@
 //! response reporting another version, and to resolve a command's conflict
 //! resolution.
 //!
-//! Registrations are kept per domain and per instance: during a rolling
-//! deployment several instances of one domain's component may be
-//! registered, with different versions (decision 14.9). An aggregate's
-//! descriptor names no domain, so the coordinator registers it under the
-//! domain it serves.
-//!
 //! The coordinator fills it from its business process's
 //! `ComponentService.Describe` answers ([`crate::registration`]).
 
-use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
 
 use tonic::Status;
@@ -74,10 +68,11 @@ impl Registration {
     }
 }
 
-/// The registrations a coordinator holds, by domain and instance.
+/// The registration a coordinator holds: one coordinator serves one
+/// component of one business process, so there is at most one.
 #[derive(Debug, Default)]
 pub struct ComponentRegistry {
-    by_domain: RwLock<HashMap<String, BTreeMap<String, Registration>>>,
+    current: RwLock<Option<Registration>>,
 }
 
 impl ComponentRegistry {
@@ -85,53 +80,22 @@ impl ComponentRegistry {
         Self::default()
     }
 
-    /// Register `instance` of `domain`'s component with `descriptor`,
-    /// replacing any earlier registration of that instance.
-    pub fn register(
-        &self,
-        domain: &str,
-        instance: &str,
-        descriptor: ComponentDescriptor,
-    ) -> Result<(), Status> {
+    /// Hold `descriptor`, replacing any earlier one. A versionless
+    /// descriptor is refused and the earlier one kept.
+    pub fn register(&self, descriptor: ComponentDescriptor) -> Result<(), Status> {
         let registration = Registration::new(descriptor)?;
-        self.by_domain
-            .write()
-            .expect("registry lock poisoned")
-            .entry(domain.to_string())
-            .or_default()
-            .insert(instance.to_string(), registration);
+        *self.current.write().expect("registry lock poisoned") = Some(registration);
         Ok(())
     }
 
-    /// Forget `instance` of `domain`'s component.
-    pub fn deregister(&self, domain: &str, instance: &str) {
-        let mut by_domain = self.by_domain.write().expect("registry lock poisoned");
-        if let Some(instances) = by_domain.get_mut(domain) {
-            instances.remove(instance);
-            if instances.is_empty() {
-                by_domain.remove(domain);
-            }
-        }
+    /// Hold nothing.
+    pub fn deregister(&self) {
+        *self.current.write().expect("registry lock poisoned") = None;
     }
 
-    /// The registration of `instance` of `domain`'s component.
-    pub fn get(&self, domain: &str, instance: &str) -> Option<Registration> {
-        self.by_domain
-            .read()
-            .expect("registry lock poisoned")
-            .get(domain)
-            .and_then(|instances| instances.get(instance))
-            .cloned()
-    }
-
-    /// Every registration of `domain`'s component (empty when none).
-    pub fn all(&self, domain: &str) -> Vec<Registration> {
-        self.by_domain
-            .read()
-            .expect("registry lock poisoned")
-            .get(domain)
-            .map(|instances| instances.values().cloned().collect())
-            .unwrap_or_default()
+    /// The registration held, if any.
+    pub fn get(&self) -> Option<Registration> {
+        self.current.read().expect("registry lock poisoned").clone()
     }
 }
 
