@@ -12,8 +12,8 @@ use crate::bus::EventBus;
 use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher, RejectionDetails};
 use crate::proto::{
     command_page::Body, event_meta::Causation, CommandBook, CommandHandlerResponse, ComponentKind,
-    ContextualCommand, Cover, DeliveryOutcome, EventBook, EventMeta, EventPage, FactOrigin,
-    Handling, Snapshot,
+    ConflictResolution, ContextualCommand, Cover, DeliveryOutcome, EventBook, EventMeta, EventPage,
+    FactOrigin, Handling, Snapshot,
 };
 use crate::proto_ext::CoverExt;
 use crate::registry::{ComponentRegistry, Registration};
@@ -208,6 +208,7 @@ impl AggregatePipeline {
             .registry
             .get(&self.domain, &self.instance)
             .ok_or(PipelineError::NotRegistered)?;
+        validate_handling(book, &registration, delivery).map_err(PipelineError::Refused)?;
         let ids = assign_ids(book);
         let mut book = book.clone();
         stamp_ids(&mut book, &ids);
@@ -237,7 +238,7 @@ impl AggregatePipeline {
         if let Some(duplicate) = self.find_duplicate(stream, ids).await? {
             return Ok(Attempt::Done(duplicate));
         }
-        let (command, loaded, nonce) = self.resolve(book, loaded)?;
+        let (command, loaded, nonce) = self.resolve(book, loaded, stream, registration).await?;
         let contextual = ContextualCommand {
             events: Some(EventBook {
                 cover: Some(stream.to_cover()),
@@ -290,35 +291,89 @@ impl AggregatePipeline {
         })
     }
 
-    /// Step 3b: the deduplication lookup.
+    /// Step 3b: the deduplication lookup: a stream already holding events
+    /// of this command id answers DUPLICATE with them, and business code
+    /// does not run (types.proto, command_identity).
     async fn find_duplicate(
         &self,
-        _stream: StreamRef<'_>,
-        _ids: &Ids,
+        stream: StreamRef<'_>,
+        ids: &Ids,
     ) -> Result<Option<Decided>, PipelineError> {
-        Ok(None)
+        let pages = self
+            .event_store
+            .find_by_command_id(stream, &ids.command_id)
+            .await?;
+        if pages.is_empty() {
+            return Ok(None);
+        }
+        let next_sequence = pages.last().map(|p| p.sequence + 1).unwrap_or(0);
+        Ok(Some(Decided {
+            events: EventBook {
+                cover: Some(stream.to_cover()),
+                snapshot: None,
+                pages,
+                next_sequence,
+            },
+            delivery: DeliveryOutcome::Duplicate,
+        }))
     }
 
-    /// Step 4: resolve Handling in place: stamp an absent
-    /// expected_sequence with the head.
-    fn resolve(
+    /// Step 4: resolve Handling in place. An absent expected_sequence is
+    /// stamped with the head; the conflict resolution is the one named, or
+    /// the registered state's default (COMMUTATIVE where supported, else
+    /// STRICT). A stale STRICT command is ABORTED here, before business
+    /// code. Under AGGREGATE_HANDLES and COMMUTATIVE the window (pages from
+    /// the expected sequence) is delivered as pages, so a snapshot at or
+    /// past the expected sequence is not used, and a fresh nonce is minted
+    /// for the delivery.
+    async fn resolve(
         &self,
         book: &CommandBook,
-        loaded: Loaded,
+        mut loaded: Loaded,
+        stream: StreamRef<'_>,
+        registration: &Registration,
     ) -> Result<(CommandBook, Loaded, bytes::Bytes), PipelineError> {
         let mut command = book.clone();
+        let head = loaded.head.next_sequence;
         if is_fact(&command) {
             command.handling = Some(Handling {
-                expected_sequence: Some(loaded.head.next_sequence),
+                expected_sequence: Some(head),
                 conflict_resolution: 0,
             });
             return Ok((command, loaded, bytes::Bytes::new()));
         }
         let handling = command.handling.get_or_insert_with(Handling::default);
-        if handling.expected_sequence.is_none() {
-            handling.expected_sequence = Some(loaded.head.next_sequence);
+        let resolution = match ConflictResolution::try_from(handling.conflict_resolution) {
+            Ok(ConflictResolution::Unspecified) | Err(_) => {
+                if registration.supports(ConflictResolution::Commutative) {
+                    ConflictResolution::Commutative
+                } else {
+                    ConflictResolution::Strict
+                }
+            }
+            Ok(named) => named,
+        };
+        handling.conflict_resolution = resolution as i32;
+        let expected = *handling.expected_sequence.get_or_insert(head);
+        if expected > head || (resolution == ConflictResolution::Strict && expected != head) {
+            return Err(PipelineError::Stale {
+                expected,
+                actual: head,
+            });
         }
-        Ok((command, loaded, bytes::Bytes::new()))
+        if resolution == ConflictResolution::Strict {
+            return Ok((command, loaded, bytes::Bytes::new()));
+        }
+        if loaded
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| expected == 0 || s.sequence > expected - 1)
+        {
+            loaded.snapshot = None;
+            loaded.pages = self.event_store.read(stream, 0, None).await?;
+        }
+        let nonce = bytes::Bytes::copy_from_slice(Uuid::new_v4().as_bytes());
+        Ok((command, loaded, nonce))
     }
 
     /// Upcast loaded pages through the configured upcaster.
@@ -533,6 +588,33 @@ impl AggregatePipeline {
         if let Err(e) = self.dead_letters.publish(dead_letter).await {
             error!(domain = %self.domain, error = %e, "failed to publish dead letter");
         }
+    }
+}
+
+/// The step-1 checks that need the registration: a reaction command
+/// carries no Handling, and a named conflict resolution must be one the
+/// registered state supports (types.proto, Handling).
+fn validate_handling(
+    book: &CommandBook,
+    registration: &Registration,
+    delivery: Delivery,
+) -> Result<(), Status> {
+    let Some(handling) = book.handling.as_ref() else {
+        return Ok(());
+    };
+    if delivery == Delivery::Reaction && super::validate::handling_is_set(handling) {
+        return Err(Status::invalid_argument(
+            "a reaction command must not carry Handling (expected_sequence or conflict_resolution)",
+        ));
+    }
+    match ConflictResolution::try_from(handling.conflict_resolution) {
+        Ok(ConflictResolution::Unspecified) => Ok(()),
+        Ok(named) if registration.supports(named) => Ok(()),
+        _ => Err(Status::invalid_argument(format!(
+            "conflict resolution {} is not supported by the registered state of component '{}'",
+            handling.conflict_resolution,
+            registration.name()
+        ))),
     }
 }
 

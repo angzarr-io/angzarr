@@ -489,3 +489,42 @@ async fn test_compatible_snapshot_is_delivered() {
         Vec::<u64>::new()
     );
 }
+
+/// A fact redelivered with the same external id is answered DUPLICATE with
+/// the first delivery's events; ingest does not run again.
+#[tokio::test]
+async fn test_redelivered_fact_is_duplicate() {
+    let h = registered();
+    let pipeline = h.pipeline();
+    let book = fact(DOMAIN, root(), "/orders.v1.PaymentReceived", "pi_42");
+    let first = pipeline
+        .execute(book.clone(), Delivery::Client)
+        .await
+        .unwrap();
+    let second = pipeline.execute(book, Delivery::Client).await.unwrap();
+    assert_eq!(second.delivery, DeliveryOutcome::Duplicate);
+    assert_eq!(second.events.pages, first.events.pages);
+    assert_eq!(h.business.received().len(), 1);
+    assert_eq!(stored(&h).await.len(), 1);
+}
+
+/// Deduplication comes before the sequence check: a retry of an applied
+/// STRICT command whose expected sequence is now stale is DUPLICATE, never
+/// ABORTED (types.proto, Handling, the pipeline order).
+#[tokio::test]
+async fn test_stale_retry_of_applied_command_is_duplicate() {
+    let h = registered();
+    let pipeline = h.pipeline();
+    let mut book = with_handling(
+        command(DOMAIN, root(), "/orders.v1.AddItem"),
+        Some(0),
+        ConflictResolution::Strict,
+    );
+    book.page.as_mut().unwrap().command_id = Some(Uuid::from_u128(99).into());
+    pipeline
+        .execute(book.clone(), Delivery::Client)
+        .await
+        .unwrap();
+    let retry = pipeline.execute(book, Delivery::Client).await.unwrap();
+    assert_eq!(retry.delivery, DeliveryOutcome::Duplicate);
+}
