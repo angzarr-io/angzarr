@@ -24,6 +24,9 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+/// A configuration check on an arriving descriptor.
+pub type DescriptorCheck = Arc<dyn Fn(&ComponentDescriptor) -> Result<(), String> + Send + Sync>;
+
 /// A time source for the alert grace period (tests replace it).
 pub type Now = Arc<dyn Fn() -> Instant + Send + Sync>;
 
@@ -120,6 +123,9 @@ pub struct Registrar {
     /// The component name the coordinator is configured to serve, when it
     /// checks one.
     expected_name: Option<String>,
+    /// A further check on the descriptor (e.g. that the state supports the
+    /// configured conflict resolutions).
+    descriptor_check: Option<DescriptorCheck>,
     registry: Arc<ComponentRegistry>,
     /// What the coordinator serves (its domain or projector name), for
     /// logs and alerts.
@@ -149,6 +155,7 @@ impl Registrar {
             source,
             kind,
             expected_name: None,
+            descriptor_check: None,
             registry,
             serves: serves.into(),
             process: process.into(),
@@ -163,6 +170,13 @@ impl Registrar {
     /// configured component name).
     pub fn with_expected_name(mut self, name: impl Into<String>) -> Self {
         self.expected_name = Some(name.into());
+        self
+    }
+
+    /// Refuse a descriptor that `check` refuses (its message becomes the
+    /// refusal's).
+    pub fn with_descriptor_check(mut self, check: DescriptorCheck) -> Self {
+        self.descriptor_check = Some(check);
         self
     }
 
@@ -217,6 +231,11 @@ impl Registrar {
                      but this coordinator serves '{expected}'",
                     self.process, descriptor.name
                 ));
+            }
+        }
+        if let Some(check) = &self.descriptor_check {
+            if let Err(why) = check(&descriptor) {
+                return self.refuse(format!("business process {}: {why}", self.process));
             }
         }
         match self.registry.register(descriptor) {

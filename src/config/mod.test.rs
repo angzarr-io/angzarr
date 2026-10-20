@@ -184,3 +184,24 @@ dlq:
         .expect("audit should round-trip when set in YAML");
     assert_eq!(audit.storage_type, "sqlite");
 }
+
+/// The conflict_resolution section loads from YAML, command types (with
+/// their dots) included, as a list.
+#[test]
+fn test_conflict_resolution_section_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("c.yaml");
+    std::fs::write(
+        &path,
+        "conflict_resolution:\n  default: STRICT\n  allow_override: false\n  commands:\n    - type: orders.v1.AddItem\n      resolution: COMMUTATIVE\n      allow_override: true\n",
+    )
+    .unwrap();
+    let config = Config::load(Some(path.to_str().unwrap())).unwrap();
+    let c = &config.conflict_resolution;
+    assert_eq!(c.default.as_deref(), Some("STRICT"));
+    assert_eq!(c.allow_override, Some(false));
+    assert_eq!(c.commands.len(), 1);
+    assert_eq!(c.commands[0].type_url, "orders.v1.AddItem");
+    assert_eq!(c.commands[0].resolution.as_deref(), Some("COMMUTATIVE"));
+    assert_eq!(c.commands[0].allow_override, Some(true));
+}

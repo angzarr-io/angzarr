@@ -105,10 +105,39 @@ coordinator's kind, so nothing selects among components. `target.name` no
 longer has a selection role; it remains only in naming UDS sockets
 (`{service_type}-{name}-{domain}.sock`), as before.
 
-## 4. Not proposed here (open, owner decision)
+## 4. Conflict-resolution configuration (backlog HD-2)
 
-- Conflict-resolution configuration per command type and per component
-  (backlog HD-2): only the Handling field and the built-in default
-  (COMMUTATIVE where the registered state lists it, else STRICT) are
-  implemented.
+Proposed 2026-10-20 before implementation; implemented as proposed. types.proto (`Handling`): the
+resolution is, highest first, (1) the command's Handling when set and
+configuration allows the override, (2) configuration for the command type
+(its payload's type URL), (3) configuration for the component, (4) the
+built-in default (COMMUTATIVE where the registered state lists it, else
+STRICT). One coordinator serves one component, so there is no domain level.
+
+```yaml
+conflict_resolution:
+  default: STRICT            # optional: the component's resolution
+  allow_override: true       # optional, default true: may Handling name one?
+  commands:                  # optional, per command type
+    - type: orders.v1.AddItem    # a type URL; compared by full name
+      resolution: COMMUTATIVE    # optional
+      allow_override: false      # optional; default: the component's
+```
+
+- Values are the enum names without their prefix: `STRICT`,
+  `AGGREGATE_HANDLES`, `COMMUTATIVE`.
+- `commands` is a list, not a map keyed by type URL, because the
+  configuration loader splits keys on `.`.
+- Checked when the configuration loads: unknown resolution names and a type
+  listed twice are refused, naming the key.
+- Checked when the descriptor arrives (the state is known only then): a
+  configured resolution the registered state does not support is a refused
+  registration (not ready, logged, alerted), like a versionless descriptor.
+- A command whose Handling names a resolution where the override is not
+  allowed is malformed: INVALID_ARGUMENT before deduplication. Only
+  `conflict_resolution` is covered; whether forbid-override also applies to
+  `expected_sequence` is left open.
+
+## 5. Not proposed here (open, owner decision)
+
 - The durable command queue behind HandleAsync.

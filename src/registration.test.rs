@@ -208,3 +208,24 @@ async fn test_descriptor_of_another_name_is_refused_and_alerted() {
         DescribeOutcome::Registered
     ));
 }
+
+/// A descriptor whose state does not support a configured conflict
+/// resolution is a refused registration (types.proto: configuration naming
+/// an unsupported resolution is refused when the descriptor arrives).
+#[tokio::test]
+async fn test_descriptor_failing_the_configuration_check_is_refused() {
+    let registry = Arc::new(ComponentRegistry::new());
+    let alerts = Arc::new(RecordingAlerts::new());
+    let policy = crate::conflict_resolution::ConflictPolicy::from_config(
+        &serde_yaml::from_str("default: COMMUTATIVE\n").unwrap(),
+    )
+    .unwrap();
+    let r = registrar(vec![Ok(order("1.4.2"))], alerts.clone(), registry.clone())
+        .with_descriptor_check(Arc::new(move |d| policy.check_supported(d)));
+    let DescribeOutcome::Refused(reason) = r.describe_once().await else {
+        panic!("expected a refusal");
+    };
+    assert!(reason.contains("COMMUTATIVE"), "{reason}");
+    assert!(registry.get().is_none());
+    assert_eq!(alerts.raised().len(), 1);
+}

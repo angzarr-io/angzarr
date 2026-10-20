@@ -11,6 +11,7 @@ pub mod advice;
 pub mod alerts;
 pub mod bus;
 pub mod config;
+pub mod conflict_resolution;
 pub mod descriptor;
 pub mod discovery;
 pub mod dlq;

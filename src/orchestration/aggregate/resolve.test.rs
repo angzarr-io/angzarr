@@ -435,3 +435,72 @@ async fn test_upcast_on_load_publish_and_duplicate() {
         "/orders.v1.ItemAdded"
     );
 }
+
+fn policy(yaml: &str) -> Arc<crate::conflict_resolution::ConflictPolicy> {
+    Arc::new(
+        crate::conflict_resolution::ConflictPolicy::from_config(
+            &serde_yaml::from_str(yaml).unwrap(),
+        )
+        .unwrap(),
+    )
+}
+
+/// Configuration for the command type outranks the component's and the
+/// built-in default; the registered state supports COMMUTATIVE, yet the
+/// configured STRICT applies, so a stale command is ABORTED.
+#[tokio::test]
+async fn test_configured_command_type_resolution_applies() {
+    let h = harness(true);
+    seed(&h, 2).await;
+    let pipeline = h.pipeline().with_conflict_policy(policy(
+        "default: AGGREGATE_HANDLES\ncommands:\n  - type: orders.v1.AddItem\n    resolution: STRICT\n",
+    ));
+    let err = pipeline
+        .execute(
+            targeting(0, ConflictResolution::Unspecified),
+            Delivery::Client,
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_status().code(), Code::Aborted);
+    pipeline
+        .execute(
+            with_handling(
+                command(DOMAIN, root(), "/orders.v1.Close"),
+                Some(0),
+                ConflictResolution::Unspecified,
+            ),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resolved(&last_delivered(&h)).1,
+        ConflictResolution::AggregateHandles as i32,
+        "the component's configured resolution applies to other types"
+    );
+}
+
+/// Where configuration forbids the override, a Handling that names a
+/// resolution is malformed (INVALID_ARGUMENT) and never reaches business
+/// code; leaving it unnamed is fine.
+#[tokio::test]
+async fn test_forbidden_override_is_refused() {
+    let h = harness(false);
+    let pipeline = h
+        .pipeline()
+        .with_conflict_policy(policy("allow_override: false\n"));
+    let err = pipeline
+        .execute(targeting(0, ConflictResolution::Strict), Delivery::Client)
+        .await
+        .unwrap_err();
+    assert_eq!(err.to_status().code(), Code::InvalidArgument);
+    assert!(h.business.received().is_empty());
+    pipeline
+        .execute(
+            targeting(0, ConflictResolution::Unspecified),
+            Delivery::Client,
+        )
+        .await
+        .unwrap();
+}

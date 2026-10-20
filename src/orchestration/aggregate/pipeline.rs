@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 use crate::alerts::{Alert, Alerts};
 use crate::bus::EventBus;
+use crate::conflict_resolution::ConflictPolicy;
 use crate::dlq::{AngzarrDeadLetter, DeadLetterPublisher, RejectionDetails};
 use crate::proto::{
     command_page::Body, event_meta::Causation, CommandBook, CommandHandlerResponse, ComponentKind,
@@ -104,6 +105,7 @@ pub struct AggregatePipeline {
     snapshot_store: Arc<dyn SnapshotStore>,
     snapshots: SnapshotsEnableConfig,
     snapshot_rules: Arc<SnapshotRules>,
+    conflict_policy: Arc<ConflictPolicy>,
     business: Arc<dyn BusinessLogic>,
     upcaster: Option<Arc<dyn EventUpcaster>>,
     bus: Arc<dyn EventBus>,
@@ -133,6 +135,7 @@ impl AggregatePipeline {
             snapshot_store,
             snapshots: SnapshotsEnableConfig::default(),
             snapshot_rules: Arc::new(SnapshotRules::default()),
+            conflict_policy: Arc::new(ConflictPolicy::default()),
             business,
             upcaster: None,
             bus,
@@ -151,6 +154,12 @@ impl AggregatePipeline {
     /// The snapshot rules (configuration `snapshot_compatibility`).
     pub fn with_snapshot_rules(mut self, rules: Arc<SnapshotRules>) -> Self {
         self.snapshot_rules = rules;
+        self
+    }
+
+    /// The conflict-resolution configuration (`conflict_resolution`).
+    pub fn with_conflict_policy(mut self, policy: Arc<ConflictPolicy>) -> Self {
+        self.conflict_policy = policy;
         self
     }
 
@@ -198,7 +207,8 @@ impl AggregatePipeline {
     async fn run(&self, book: &CommandBook, delivery: Delivery) -> Result<Decided, PipelineError> {
         validate(book, &self.domain, delivery).map_err(PipelineError::Refused)?;
         let registration = self.registry.get().ok_or(PipelineError::NotRegistered)?;
-        validate_handling(book, &registration, delivery).map_err(PipelineError::Refused)?;
+        validate_handling(book, &registration, &self.conflict_policy, delivery)
+            .map_err(PipelineError::Refused)?;
         let ids = assign_ids(book);
         let mut book = book.clone();
         stamp_ids(&mut book, &ids);
@@ -334,16 +344,11 @@ impl AggregatePipeline {
             return Ok((command, loaded, bytes::Bytes::new()));
         }
         let handling = command.handling.get_or_insert_with(Handling::default);
-        let resolution = match ConflictResolution::try_from(handling.conflict_resolution) {
-            Ok(ConflictResolution::Unspecified) | Err(_) => {
-                if registration.supports(ConflictResolution::Commutative) {
-                    ConflictResolution::Commutative
-                } else {
-                    ConflictResolution::Strict
-                }
-            }
-            Ok(named) => named,
-        };
+        let named = ConflictResolution::try_from(handling.conflict_resolution)
+            .unwrap_or(ConflictResolution::Unspecified);
+        let resolution = self
+            .conflict_policy
+            .resolve(named, &payload_type_url(book), registration);
         handling.conflict_resolution = resolution as i32;
         let expected = *handling.expected_sequence.get_or_insert(head);
         if expected > head || (resolution == ConflictResolution::Strict && expected != head) {
@@ -609,6 +614,7 @@ impl AggregatePipeline {
 fn validate_handling(
     book: &CommandBook,
     registration: &Registration,
+    policy: &ConflictPolicy,
     delivery: Delivery,
 ) -> Result<(), Status> {
     let Some(handling) = book.handling.as_ref() else {
@@ -618,6 +624,13 @@ fn validate_handling(
         return Err(Status::invalid_argument(
             "a reaction command must not carry Handling (expected_sequence or conflict_resolution)",
         ));
+    }
+    let named = handling.conflict_resolution != ConflictResolution::Unspecified as i32;
+    if named && !policy.allows_override(&payload_type_url(book)) {
+        return Err(Status::invalid_argument(format!(
+            "configuration forbids naming a conflict resolution for {}",
+            payload_type_url(book)
+        )));
     }
     match ConflictResolution::try_from(handling.conflict_resolution) {
         Ok(ConflictResolution::Unspecified) => Ok(()),
@@ -655,6 +668,16 @@ fn stamp_ids(book: &mut CommandBook, ids: &Ids) {
         page.command_id = Some(ids.command_id.into());
         page.correlation_id = Some(ids.correlation_id.into());
     }
+}
+
+/// The command's payload type URL (empty when absent).
+fn payload_type_url(book: &CommandBook) -> String {
+    match book.page.as_ref().and_then(|p| p.body.as_ref()) {
+        Some(Body::Command(c)) => c.payload.as_ref().map(|p| p.type_url.clone()),
+        Some(Body::Fact(f)) => f.payload.as_ref().map(|p| p.type_url.clone()),
+        None => None,
+    }
+    .unwrap_or_default()
 }
 
 fn is_fact(book: &CommandBook) -> bool {

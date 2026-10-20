@@ -19,6 +19,10 @@
 //! - `storage`: the backend registry (only `sqlite` is ported).
 //! - `messaging.type: amqp`, `messaging.amqp.url`: the event bus. Without
 //!   messaging, events are persisted but not published.
+//! - `conflict_resolution.{default, allow_override, commands[]}`: the
+//!   conflict resolution per component and per command type (refused at
+//!   load for unknown names, and at registration when the state does not
+//!   support one).
 //! - `snapshot_compatibility.<domain>.{accept,reject}`: a domain's snapshot
 //!   rule override (RE2 patterns, whole match; refused at load if invalid).
 //! - `upcaster.enabled`: upcast every load, query answer and published book
@@ -49,6 +53,7 @@ use angzarr::alerts::LogAlerts;
 use angzarr::bus::AmqpEventBus;
 use angzarr::bus::{EventBus, MockEventBus};
 use angzarr::config::Config;
+use angzarr::conflict_resolution::ConflictPolicy;
 use angzarr::discovery::{ServiceDiscovery, StaticServiceDiscovery};
 use angzarr::dlq::init_dlq_publisher;
 use angzarr::orchestration::aggregate::{AggregatePipeline, GrpcBusinessLogic};
@@ -133,16 +138,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         SnapshotRules::from_config(&config.snapshot_compatibility)
             .map_err(|e| format!("invalid configuration: {e}"))?,
     );
+    let conflict_policy = Arc::new(
+        ConflictPolicy::from_config(&config.conflict_resolution)
+            .map_err(|e| format!("invalid configuration: {e}"))?,
+    );
     let registry = Arc::new(ComponentRegistry::new());
-    let registrar = Arc::new(Registrar::new(
-        Arc::new(GrpcDescriptorSource::new(channel.clone())),
-        ComponentKind::Aggregate,
-        registry.clone(),
-        domain.clone(),
-        address.clone(),
-        Arc::new(LogAlerts),
-        std::time::Duration::from_secs(config.registration.describe_alert_grace_period_secs),
-    ));
+    let registrar = Arc::new(
+        Registrar::new(
+            Arc::new(GrpcDescriptorSource::new(channel.clone())),
+            ComponentKind::Aggregate,
+            registry.clone(),
+            domain.clone(),
+            address.clone(),
+            Arc::new(LogAlerts),
+            std::time::Duration::from_secs(config.registration.describe_alert_grace_period_secs),
+        )
+        .with_descriptor_check({
+            let policy = conflict_policy.clone();
+            Arc::new(move |descriptor| policy.check_supported(descriptor))
+        }),
+    );
     let mut readiness = registrar.readiness();
     tokio::spawn(registrar.run(connections));
 
@@ -157,7 +172,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Arc::new(LogAlerts),
     )
     .with_snapshots(config.storage.snapshots_enable.clone())
-    .with_snapshot_rules(snapshot_rules.clone());
+    .with_snapshot_rules(snapshot_rules.clone())
+    .with_conflict_policy(conflict_policy);
     // The upcaster is part of the component: its own business process.
     let upcaster: Option<Arc<dyn EventUpcaster>> = config
         .upcaster

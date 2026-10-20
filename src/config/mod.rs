@@ -96,6 +96,8 @@ pub struct Config {
     pub registration: RegistrationConfig,
     /// Per-domain snapshot rule overrides (see [`crate::rules_version`]).
     pub snapshot_compatibility: crate::rules_version::SnapshotCompatibilityConfig,
+    /// Conflict-resolution configuration (see [`crate::conflict_resolution`]).
+    pub conflict_resolution: crate::conflict_resolution::ConflictConfig,
 }
 
 /// Component discovery settings (see [`crate::registration`]).
