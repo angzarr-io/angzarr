@@ -224,7 +224,6 @@ fn test_static_metrics_initialize() {
     let _ = &*COMMAND_TOTAL;
     let _ = &*SAGA_DURATION;
     let _ = &*SAGA_RETRY_TOTAL;
-    let _ = &*SAGA_COMPENSATION_TOTAL;
     let _ = &*PM_DURATION;
     let _ = &*PROJECTOR_DURATION;
     let _ = &*DLQ_PUBLISH_TOTAL;

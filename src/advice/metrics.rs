@@ -144,15 +144,6 @@ pub static SAGA_RETRY_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
         .build()
 });
 
-/// Total saga compensations triggered.
-#[cfg(feature = "otel")]
-pub static SAGA_COMPENSATION_TOTAL: LazyLock<Counter<u64>> = LazyLock::new(|| {
-    METER
-        .u64_counter("angzarr.saga.compensation.total")
-        .with_description("Total saga compensations triggered")
-        .build()
-});
-
 // ============================================================================
 // Process Manager Metrics
 // ============================================================================
