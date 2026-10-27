@@ -123,21 +123,6 @@ pub trait EventBus: Send + Sync {
         name: &str,
         domain_filter: Option<&str>,
     ) -> Result<Arc<dyn EventBus>>;
-
-    /// Maximum message size in bytes for this bus.
-    ///
-    /// Returns the hard limit imposed by the underlying transport.
-    /// Implementations should return well-known constants for their transport:
-    /// - SNS/SQS: 256 KB
-    /// - Pub/Sub: 10 MB
-    /// - Kafka: broker-configurable, typically 1 MB default
-    /// - AMQP: broker-configurable, typically 128 MB default
-    /// - Channel/IPC: None (memory-bound only)
-    ///
-    /// Returns `None` if the bus has no practical limit.
-    fn max_message_size(&self) -> Option<usize> {
-        None // Default: no limit
-    }
 }
 
 // ============================================================================

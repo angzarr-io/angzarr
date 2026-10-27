@@ -106,10 +106,6 @@ impl<T: EventBus> EventBus for InstrumentedBus<T> {
         let subscriber = self.inner.create_subscriber(name, domain_filter).await?;
         Ok(InstrumentedDynBus::wrap(subscriber, self.bus_type))
     }
-
-    fn max_message_size(&self) -> Option<usize> {
-        self.inner.max_message_size()
-    }
 }
 
 /// Wrapper for `Arc<dyn EventBus>` to allow instrumentation of trait objects.
@@ -178,10 +174,6 @@ impl EventBus for InstrumentedDynBus {
     ) -> Result<Arc<dyn EventBus>> {
         let subscriber = self.inner.create_subscriber(name, domain_filter).await?;
         Ok(Self::wrap(subscriber, self.bus_type))
-    }
-
-    fn max_message_size(&self) -> Option<usize> {
-        self.inner.max_message_size()
     }
 }
 

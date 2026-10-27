@@ -78,10 +78,6 @@ impl EventBus for InstrumentedDynBus {
     ) -> Result<Arc<dyn EventBus>> {
         self.inner().create_subscriber(name, domain_filter).await
     }
-
-    fn max_message_size(&self) -> Option<usize> {
-        self.inner().max_message_size()
-    }
 }
 
 #[async_trait]
@@ -104,10 +100,6 @@ impl<T: EventBus> EventBus for Instrumented<T> {
         domain_filter: Option<&str>,
     ) -> Result<Arc<dyn EventBus>> {
         self.inner().create_subscriber(name, domain_filter).await
-    }
-
-    fn max_message_size(&self) -> Option<usize> {
-        self.inner().max_message_size()
     }
 }
 
