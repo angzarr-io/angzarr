@@ -19,14 +19,13 @@ These handlers receive events from the AMQP message bus and forward them to clie
 
 - **projector.rs** - `ProjectorEventHandler`: Receives events from AMQP, forwards to ProjectorCoordinator services. Handles EventBook repair (fetching missing history) and publishes projector output back to AMQP for streaming.
 
-- **saga.rs** - `SagaEventHandler`: Receives events from AMQP, forwards to SagaCoordinator services. Executes saga-produced commands via CommandHandlerCoordinator and handles compensation when commands are rejected.
-
 ## Used By
 
 - `angzarr-projector` sidecar binary
-- `angzarr-saga` sidecar binary
+
+The saga handler and the `angzarr-saga` binary are not yet ported to the
+latest proto; restore them from 16db7169 as they are ported.
 
 ## See Also
 
-- `handlers/projectors/` - Actual projector implementations (log, stream)
 - `services/command_handler.rs` - Command handler coordinator (receives commands, not events)

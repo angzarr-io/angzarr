@@ -90,7 +90,6 @@ pub struct Config {
     pub upcaster: UpcasterConfig,
     /// Resource limits for message processing and queries.
     pub limits: ResourceLimits,
-    /// Payload offloading configuration for oversized messages.
     /// Dead letter queue configuration.
     pub dlq: DlqConfig,
     pub registration: RegistrationConfig,

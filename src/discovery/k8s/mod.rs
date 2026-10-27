@@ -29,10 +29,9 @@
 //! ```
 //!
 //! Saga services that are missing the source-domain label are skipped with
-//! a warning — same for PM services missing subscriptions. The aggregate
-//! sidecar's `call_sync_sagas`/`call_sync_pms` paths can only route by
-//! source domain, so an unlabeled component can't be reached synchronously
-//! and would silently degrade CASCADE mode if registered without the data.
+//! a warning — same for PM services missing subscriptions: lookups by
+//! source domain (`get_saga_endpoints_for_domain`,
+//! `get_pm_endpoints_for_domain`) can't match an unlabeled component.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

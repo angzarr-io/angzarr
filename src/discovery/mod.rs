@@ -128,12 +128,14 @@ pub trait ServiceDiscovery: Send + Sync {
 
     /// Get saga coordinator endpoints for a source domain.
     ///
-    /// Used by CASCADE mode to call saga coordinators synchronously.
+    /// Its only caller was CASCADE mode (synchronous saga calls), which the
+    /// spec deleted; nothing on this line calls it.
     async fn get_saga_endpoints_for_domain(&self, source_domain: &str) -> Vec<DiscoveredService>;
 
     /// Get PM coordinator endpoints subscribed to a domain.
     ///
-    /// Used by CASCADE mode to call PM coordinators synchronously.
+    /// Its only caller was CASCADE mode (synchronous PM calls), which the
+    /// spec deleted; nothing on this line calls it.
     async fn get_pm_endpoints_for_domain(&self, domain: &str) -> Vec<DiscoveredService>;
 
     /// Get all aggregate domains.

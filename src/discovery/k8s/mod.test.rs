@@ -190,7 +190,7 @@ fn test_extract_saga_with_source_domain() {
 }
 
 /// A saga service without the source-domain label is unroutable —
-/// `call_sync_sagas` filters by source domain. We skip rather than
+/// lookups filter by source domain. We skip rather than
 /// silently register a saga that would never be matched.
 #[test]
 fn test_extract_saga_missing_source_domain_skipped() {
@@ -199,8 +199,7 @@ fn test_extract_saga_missing_source_domain_skipped() {
 }
 
 /// PM extraction parses the comma-separated subscription list — every
-/// listed domain is what the aggregate sidecar's `call_sync_pms` matches
-/// against `domain` to decide whether to fan out.
+/// listed domain is what `get_pm_endpoints_for_domain` matches against.
 #[test]
 fn test_extract_pm_with_subscriptions() {
     let svc = make_test_pm_service(

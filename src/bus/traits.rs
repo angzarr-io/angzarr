@@ -20,14 +20,15 @@ pub trait EventHandler: Send + Sync {
 
 /// Handler for processing commands from the command bus.
 ///
-/// Used by aggregate coordinators to receive commands in async mode.
-/// Commands are published by sagas when `SyncMode::Async` is used.
+/// For aggregate coordinators receiving commands off a bus. Nothing on this
+/// line implements or uses it yet (the saga and PM coordinators that would
+/// publish commands are not yet ported to the latest proto).
 pub trait CommandHandler: Send + Sync {
     /// Process a command book.
     ///
-    /// The handler should execute the command and return. Results
-    /// (success or rejection) flow back via the event bus as
-    /// `RejectionNotification` for failures.
+    /// The handler should execute the command and return. A business
+    /// refusal is recorded by the target as a domain event (the spec has
+    /// no compensation or rejection-notification channel).
     fn handle(
         &self,
         command: Arc<CommandBook>,
@@ -36,10 +37,10 @@ pub trait CommandHandler: Send + Sync {
 
 /// Command bus for async command delivery.
 ///
-/// Sagas publish commands to this bus when `SyncMode::Async` is used.
-/// Aggregate coordinators subscribe to receive commands for their domain.
-/// This enables true fire-and-forget command execution with rejections
-/// flowing back via `RejectionNotification` on the event bus.
+/// Aggregate coordinators subscribe to receive commands for their domain,
+/// for fire-and-forget command execution. A target that refuses a command
+/// records the refusal as a domain event. Nothing on this line implements
+/// or uses it yet (see [`CommandHandler`]).
 #[async_trait]
 pub trait CommandBus: Send + Sync {
     /// Publish a command to be executed asynchronously.

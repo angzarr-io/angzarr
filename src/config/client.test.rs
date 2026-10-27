@@ -1,11 +1,10 @@
 //! Tests for client and service configuration types.
 //!
 //! These configs define how angzarr connects to client logic services
-//! (aggregates, sagas, projectors) and handles saga compensation.
+//! (aggregates, sagas, projectors).
 //!
 //! Why this matters: Misconfigured endpoints cause silent failures (commands
-//! routed to wrong service). Saga compensation defaults affect error recovery
-//! behavior.
+//! routed to wrong service).
 //!
 //! Defaults are verified to be safe and explicit configuration required
 //! for optional features.
