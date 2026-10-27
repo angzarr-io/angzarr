@@ -44,12 +44,13 @@ wanted. They weren't ported to the latest proto yet, and they come back from
 ## Parked: not yet ported to the latest proto (restore from 16db7169)
 
 These were removed on the port line (9193c819) because they were not yet
-ported. They are not deletions; each comes back from **16db7169** as it is
+ported. They are not deletions (owner, 2026-10-27: nothing here is deleted for
+good; the parked adapters "will likely come back, but not now"); each comes back from **16db7169** as it is
 ported.
 
 | Item | Paths at 16db7169 |
 |---|---|
-| Saga and PM coordinators and bins | `src/bin/angzarr_saga.rs`, `src/bin/angzarr_process_manager.rs`, `src/services/{saga,pm}_coord.rs`, `src/orchestration/{saga,process_manager,command,destination,fact}/`, `src/handlers/core/saga.rs` |
+| Saga and PM coordinators and bins. **KEPT, to be restored next** (owner, 2026-10-27: "without those we don't have a system"). Restoring them to the 541cadc spec needs the transient outbox and a source checkpoint, which core has never had; see the migration report's D5. | `src/bin/angzarr_saga.rs`, `src/bin/angzarr_process_manager.rs`, `src/services/{saga,pm}_coord.rs`, `src/orchestration/{saga,process_manager,command,destination,fact}/`, `src/handlers/core/saga.rs` |
 | Redis and immudb storage | `src/storage/redis/`, `src/storage/immudb/` |
 | Kafka, Pub/Sub and SNS/SQS buses | `src/bus/{kafka,pubsub,sns_sqs}/` |
 | The status console (`angzarr_status`) and DLQ admin, replay and audit | `src/bin/angzarr_status.rs`, `src/status/`, `src/dlq/{audit,filter,reader,replay}.rs`, `proto/io/angzarr/status/v1/dlq_admin.proto`, `migrations/status/` |
