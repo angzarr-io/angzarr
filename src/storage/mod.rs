@@ -3,14 +3,16 @@
 //! - [`EventStore`]: one append-only log per stream (domain, edition, root),
 //!   pages stored whole with their `EventMeta`.
 //! - [`SnapshotStore`]: the newest snapshot per stream.
-//! - Backends: SQLite (always compiled) and an in-memory store for tests and
-//!   in-process use. The other backends are not yet ported to the latest
-//!   proto (see `factory`).
+//! - Backends: SQLite (always compiled), Postgres (feature `postgres`) and
+//!   an in-memory store for tests and in-process use. The other backends are
+//!   not yet ported to the latest proto (see `factory`).
 
 pub mod config;
 pub mod error;
 pub mod factory;
 pub mod memory;
+#[cfg(feature = "postgres")]
+pub mod postgres;
 pub mod schema;
 pub mod sqlite;
 
@@ -22,6 +24,8 @@ pub use error::{errmsg, Result, StorageError};
 pub use event_store::{EventStore, StreamHead, StreamRef};
 pub use factory::{init_event_store, init_snapshot_store};
 pub use memory::{MemoryEventStore, MemorySnapshotStore};
+#[cfg(feature = "postgres")]
+pub use postgres::{postgres_pool, PostgresEventStore, PostgresSnapshotStore};
 pub use snapshot_store::SnapshotStore;
 pub use sqlite::{SqliteEventStore, SqliteSnapshotStore};
 

@@ -50,16 +50,23 @@ ported.
 | Item | Paths at 16db7169 |
 |---|---|
 | Saga and PM coordinators and bins | `src/bin/angzarr_saga.rs`, `src/bin/angzarr_process_manager.rs`, `src/services/{saga,pm}_coord.rs`, `src/orchestration/{saga,process_manager,command,destination,fact}/`, `src/handlers/core/saga.rs` |
-| Postgres storage (the backend full-sail deploys) | `src/storage/postgres/`, `src/storage/sql/`, `migrations/postgres/` |
 | Redis and immudb storage | `src/storage/redis/`, `src/storage/immudb/` |
 | Kafka, Pub/Sub and SNS/SQS buses | `src/bus/{kafka,pubsub,sns_sqs}/` |
 | The status console (`angzarr_status`) and DLQ admin, replay and audit | `src/bin/angzarr_status.rs`, `src/status/`, `src/dlq/{audit,filter,reader,replay}.rs`, `proto/io/angzarr/status/v1/dlq_admin.proto`, `migrations/status/` |
 | DLQ publishers other than AMQP, channel, filesystem, logging and noop (database, kafka, pubsub, sns-sqs, the offload stores) | `src/dlq/publishers/` |
 | Gap fill, event query and the position store | `src/services/gap_fill/`, `src/services/event_query/`, `src/storage/position_store.rs` |
 | Mock storage and the shared storage test suites | `src/storage/mock/`, `tests/storage/` |
+| The Postgres position store (`src/storage/sql/position_store.rs`) | `src/storage/sql/` (the Postgres event and snapshot stores are restored; positions are not) |
 | The SQLite migration history (replaced by one baseline, 9eb9f360) | `migrations/sqlite/0001..0010` (last at 0a4cc813) |
 
 The `DlqConfig` still accepts the offload DLQ types
 (`offload_filesystem`, `offload_gcs`, `offload_s3`), although nothing on this
 line builds them. They belong to the parked DLQ publishers, not to payload
 offloading.
+
+## Restored
+
+| Item | How | Where |
+|---|---|---|
+| Postgres event and snapshot stores (the backend full-sail deploys) | Rewritten for the latest proto, against the same `EventStore` / `SnapshotStore` ports and schema as SQLite, not restored from the old code. The old `src/storage/postgres/` and `src/storage/sql/` stores are at 16db7169. | `src/storage/postgres/`, feature `postgres` (in `k8s`, `full`) |
+| The Postgres schema | One baseline, `migrations/postgres/0001_baseline.sql`, mirroring SQLite's. It replaces the twelve old migrations (`migrations/postgres/0001..0012`, last at 16db7169). A database on the old schema is refused at startup, not migrated. | `migrations/postgres/` |

@@ -25,6 +25,14 @@ pub async fn init_event_store(
                 "sqlite",
             )))
         }
+        #[cfg(feature = "postgres")]
+        BackendConfig::Postgres(c) => {
+            let pool = super::postgres_pool(&c.uri).await?;
+            Ok(Arc::new(Instrumented::new(
+                super::PostgresEventStore::new(pool),
+                "postgres",
+            )))
+        }
         other => Err(Box::new(not_ported(other))),
     }
 }
@@ -44,13 +52,28 @@ pub async fn init_snapshot_store(
                 "sqlite",
             )))
         }
+        #[cfg(feature = "postgres")]
+        BackendConfig::Postgres(c) => {
+            let pool = super::postgres_pool(&c.uri).await?;
+            Ok(Arc::new(Instrumented::new(
+                super::PostgresSnapshotStore::new(pool),
+                "postgres",
+            )))
+        }
         other => Err(Box::new(not_ported(other))),
     }
 }
 
 /// The refusal for a backend type that still parses but is not yet ported
-/// to the latest proto.
+/// to the latest proto, or (Postgres) is ported but not compiled in.
 pub fn not_ported(backend: &BackendConfig) -> StorageError {
+    if matches!(backend, BackendConfig::Postgres(_)) {
+        return StorageError::NotImplemented(
+            "storage backend type 'postgres' needs a build with the 'postgres' feature; \
+             this build has SQLite only"
+                .to_string(),
+        );
+    }
     StorageError::NotImplemented(format!(
         "storage backend type '{}' is not yet ported to the latest angzarr proto; \
          use type 'sqlite'",

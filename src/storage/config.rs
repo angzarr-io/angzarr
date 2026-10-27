@@ -20,7 +20,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum BackendConfig {
-    /// PostgreSQL (event / snapshot / position). Not yet ported.
+    /// PostgreSQL (event / snapshot; feature `postgres`). Positions are not
+    /// yet ported.
     Postgres(PostgresConfig),
     /// SQLite (event / snapshot / position).
     Sqlite(SqliteConfig),

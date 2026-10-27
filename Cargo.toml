@@ -56,10 +56,16 @@ default = ["otel"]
 # Deployment Profiles (opinionated stacks)
 # =============================================================================
 # Note: sqlite is always compiled (no feature gate) for local orchestration support.
-# k8s: Generic Kubernetes with RabbitMQ. (The Postgres backend and the GCP and
-# AWS profiles are not yet ported to the latest proto; restore them from
+# k8s: Generic Kubernetes with Postgres and RabbitMQ. (The GCP and AWS
+# profiles are not yet ported to the latest proto; restore them from
 # 16db7169 as they are ported.)
-k8s = ["amqp", "otel", "dep:kube", "dep:k8s-openapi"]
+k8s = ["postgres", "amqp", "otel", "dep:kube", "dep:k8s-openapi"]
+
+# =============================================================================
+# Storage Backends
+# =============================================================================
+# SQLite is always compiled; Postgres adds sqlx's Postgres driver.
+postgres = ["sqlx/postgres"]
 
 # =============================================================================
 # Messaging Backends

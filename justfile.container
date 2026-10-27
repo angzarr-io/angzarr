@@ -37,7 +37,7 @@ check-features FEATURES:
 # deleted helper" rot (review finding T1) — `cargo test` alone never
 # compiles feature-gated test targets that no recipe invokes.
 check-tests:
-    cargo check --tests --features "test-utils amqp"
+    cargo check --tests --features "test-utils amqp postgres"
 
 # Check formatting (use fmt-fix to auto-format)
 fmt:
@@ -47,13 +47,37 @@ fmt:
 fmt-fix:
     cargo fmt
 
-# Run clippy linter
+# Run clippy linter (the Postgres backend included: it is feature-gated, and
+# an ungated lint would never see it)
 lint:
-    cargo clippy --all-targets --features "test-utils" -- -D warnings
+    cargo clippy --all-targets --features "test-utils postgres" -- -D warnings
 
 # Run unit tests
 test:
     cargo test --lib --features "test-utils"
+
+# Unit tests with the Postgres backend: the storage contract, the baseline
+# schema and the factory against a real server. Uses ANGZARR_TEST_POSTGRES_URL
+# when set; otherwise starts a throwaway postgres:16 container on a loopback
+# port and stops it on exit (each test creates its own database).
+test-postgres:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -z "${ANGZARR_TEST_POSTGRES_URL:-}" ]; then
+        name="angzarr-core-test-pg-$$"
+        docker run -d --rm --name "$name" -e POSTGRES_PASSWORD=test \
+            -p 127.0.0.1::5432 postgres:16 >/dev/null
+        trap 'docker stop "$name" >/dev/null 2>&1 || true' EXIT
+        port="$(docker port "$name" 5432/tcp | head -1 | sed 's/.*://')"
+        # TCP on 127.0.0.1 answers only once the real server is up (the
+        # image's init server listens on the socket alone).
+        for _ in $(seq 1 60); do
+            docker exec "$name" pg_isready -q -U postgres -h 127.0.0.1 && break
+            sleep 1
+        done
+        export ANGZARR_TEST_POSTGRES_URL="postgres://postgres:test@127.0.0.1:${port}/postgres"
+    fi
+    cargo test --lib --features "test-utils postgres"
 
 # Run all checks (build + test + lint + fmt)
 check-all: build test lint fmt
