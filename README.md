@@ -46,5 +46,6 @@ See [Getting Started](https://angzarr.io/getting-started) for full setup includi
 
 AGPL-3.0 (GNU Affero General Public License v3)
 
-The shared crates `angzarr-proto` and `angzarr-ports` are BSD-3-Clause
-(each crate's `LICENSE`).
+The shared crates `angzarr-proto` and `angzarr-ports`: Licensed under either
+of Apache License 2.0 or BSD 3-Clause, at your option (each crate's
+`LICENSE-APACHE` and `LICENSE-BSD`).
