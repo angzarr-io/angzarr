@@ -213,6 +213,9 @@ dependencies = [
  "prost",
  "prost-build",
  "prost-types",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
  "uuid",
 ]
 

@@ -1,33 +1,43 @@
-//! Generates the domain-neutral `io.angzarr.v1` types from the canonical
-//! protos: angzarr-project's `proto/`, which this repository carries as the
-//! `angzarr-project` submodule (lifted from angzarr-router's
-//! `crates/router/build.rs`; the crate moved here from angzarr-project's
+//! Generates every `io.angzarr.v1` message from the canonical protos:
+//! angzarr-project's `proto/`, which this repository carries as the
+//! `angzarr-project` submodule (the crate moved here from angzarr-project's
 //! `rust/`).
 //!
-//! Only `types.proto` (with `sererr/v1/sererr.proto`, which it imports),
-//! `upcaster.proto`, `options.proto`, `meta.proto`, `reasons.proto` (the
-//! framework's reason-key enums) and the meta-events'
-//! `meta/events.proto` (package `io.angzarr.v1.meta`) are compiled. prost generates the
-//! option messages (`ConflictUnit`, `ComponentOptions`, ...) but not the
-//! `extend` declarations, which it ignores; their values are read from
-//! descriptors (see `tests/conflict_units.rs`). prost-build emits messages only: the
-//! `UpcasterService` in upcaster.proto and the `EditionAdminService` in
-//! meta.proto are skipped because no service generator is configured, so
-//! meta.proto contributes its messages only (`ForkStreamRequest`,
-//! `ListEditionsRequest`/`Response`, `EditionSummary`,
-//! `DeleteEditionRequest`). meta.proto imports
-//! `google/api/annotations.proto` for its HTTP bindings: protoc resolves it
-//! from angzarr-project's vendored `proto/google/api/`, and nothing generated
-//! here references `google.api` (its code is emitted to `$OUT_DIR` but not
-//! included by the library).
+//! Every `.proto` under `io/angzarr/v1/` is compiled, found by walking the
+//! directory, so a file the spec adds is generated with no edit here: the
+//! books and pages of `types.proto`, the options, the reason keys, the
+//! edition messages and meta-events (`meta/events.proto`, package
+//! `io.angzarr.v1.meta`), and the request and response messages of every
+//! service proto (`command_handler.proto`, `component.proto`,
+//! `policy.proto`, `projector.proto`, `query.proto`, `stream.proto`,
+//! `upcaster.proto`, `meta.proto`, ...), with `sererr/v1/sererr.proto`,
+//! which `types.proto` imports. prost generates the option messages
+//! (`ConflictUnit`, `ComponentOptions`, ...) but not the `extend`
+//! declarations, which it ignores; their values are read from descriptors
+//! (see `tests/conflict_units.rs`). The service protos import
+//! `google/api/annotations.proto` for their HTTP bindings: protoc resolves
+//! it from angzarr-project's vendored `proto/google/api/`, and nothing
+//! generated here references `google.api` (its code is emitted to
+//! `$OUT_DIR` but not included by the library).
 //!
-//! The same `.proto` files, with the vendored `google/api` files meta.proto
-//! imports, are also copied to `$OUT_DIR/proto/`, keeping
-//! their import paths, so the crate can embed them ([`protos`] in the
-//! library): a dependent's own protos import angzarr's (`options.proto` for
-//! the `state` and `conflict` options) through
-//! `angzarr_proto::protos::write_include_dir`, with no vendored copy and no
-//! path into this repository.
+//! The message pass writes the encoded `FileDescriptorSet` of those files,
+//! with their imports, to `$OUT_DIR/file_descriptor_set.bin`, which the
+//! library exposes as `FILE_DESCRIPTOR_SET` (for a gRPC reflection server).
+//!
+//! With the `grpc` feature, a second pass runs tonic-prost-build over the
+//! same files with every message extern-pathed onto the first pass's
+//! (`crate::v1`, `crate::sererr::v1`), so it writes only the services'
+//! client and server modules, to `$OUT_DIR/grpc/`, which the library
+//! includes in `v1`. No message is generated twice, and the messages are
+//! the same with the feature on or off.
+//!
+//! The same `.proto` files, with the vendored `google/api` files they
+//! import, are also copied to `$OUT_DIR/proto/`, keeping their import
+//! paths, and listed in `$OUT_DIR/proto_files.rs`, so the crate can embed
+//! them ([`protos`] in the library): a dependent's own protos import
+//! angzarr's (`options.proto` for the `state` and `conflict` options)
+//! through `angzarr_proto::protos::write_include_dir`, with no vendored
+//! copy and no path into this repository.
 //!
 //! The proto root is exported to the crate's own tests as
 //! `ANGZARR_PROTO_ROOT` (`env!("ANGZARR_PROTO_ROOT")`), so they compile the
@@ -36,7 +46,8 @@
 //! Requires `protoc` on PATH (or `PROTOC` set): prost-build 0.14 does not
 //! bundle it.
 
-use std::path::PathBuf;
+use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
 /// Resolves the proto root: the `ANGZARR_PROJECT_PROTO` override first,
 /// then the angzarr-project submodule's `proto/` at the repository root.
@@ -58,19 +69,30 @@ fn proto_root() -> PathBuf {
     );
 }
 
+/// Every `.proto` under `dir`, recursively, in a stable order.
+fn protos_under(dir: &Path, found: &mut Vec<PathBuf>) {
+    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|entry| entry.expect("a directory entry").path())
+        .collect();
+    entries.sort();
+    for path in entries {
+        if path.is_dir() {
+            protos_under(&path, found);
+        } else if path.extension().is_some_and(|ext| ext == "proto") {
+            found.push(path);
+        }
+    }
+}
+
 fn main() {
     let root = proto_root();
-    let files = [
-        root.join("io/angzarr/v1/types.proto"),
-        root.join("io/angzarr/v1/upcaster.proto"),
-        root.join("io/angzarr/v1/options.proto"),
-        root.join("io/angzarr/v1/meta.proto"),
-        root.join("io/angzarr/v1/reasons.proto"),
-        root.join("io/angzarr/v1/meta/events.proto"),
-        root.join("sererr/v1/sererr.proto"),
-    ];
-    // Embedded but not generated: meta.proto's HTTP-binding imports, so a
-    // dependent's protoc can import meta.proto from the include directory.
+    let mut files = Vec::new();
+    protos_under(&root.join("io/angzarr/v1"), &mut files);
+    files.push(root.join("sererr/v1/sererr.proto"));
+    // Embedded but not generated: the service protos' HTTP-binding
+    // imports, so a dependent's protoc can import them from the include
+    // directory.
     let imports_only = [
         root.join("google/api/annotations.proto"),
         root.join("google/api/http.proto"),
@@ -79,15 +101,23 @@ fn main() {
     // The tests read the root the library was generated from.
     println!("cargo:rustc-env=ANGZARR_PROTO_ROOT={}", root.display());
     println!("cargo:rerun-if-env-changed=PROTOC");
+    // A file added to the directory reruns the walk.
+    println!(
+        "cargo:rerun-if-changed={}",
+        root.join("io/angzarr/v1").display()
+    );
     for f in files.iter().chain(&imports_only) {
         println!("cargo:rerun-if-changed={}", f.display());
     }
 
-    export_protos(&root, files.iter().chain(&imports_only));
+    let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
+    export_protos(&root, &out, files.iter().chain(&imports_only));
 
     let mut config = prost_build::Config::new();
     config
         .enable_type_names()
+        // For a reflection server: the files and their imports, encoded.
+        .file_descriptor_set_path(out.join("file_descriptor_set.bin"))
         // Every proto `bytes` field is a `bytes::Bytes`: cheap to clone, and
         // `Hash`/`Eq`, so `Uuid` can key a map. Pure Rust, wasm32-safe.
         .bytes(["."]);
@@ -97,18 +127,52 @@ fn main() {
     // `StateDescriptor`, ...). `tests/roundtrip.rs` pins that at compile
     // time, so a float added to one of them fails the build.
     config
-        .compile_protos(&files, &[root])
-        .expect("prost: compile angzarr domain-neutral protos");
+        .compile_protos(&files, std::slice::from_ref(&root))
+        .expect("prost: compile angzarr's io.angzarr.v1 protos");
+
+    #[cfg(feature = "grpc")]
+    grpc(&root, &out, &files);
 }
 
-/// Copies each compiled proto to `$OUT_DIR/proto/<its path under root>`,
-/// for `src/protos.rs` to embed with `include_str!`.
-fn export_protos<'a>(root: &std::path::Path, files: impl Iterator<Item = &'a PathBuf>) {
-    let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR")).join("proto");
+/// The `grpc` feature's pass: tonic client and server modules for every
+/// service, on the message pass's types, to `$OUT_DIR/grpc/`.
+#[cfg(feature = "grpc")]
+fn grpc(root: &Path, out: &Path, files: &[PathBuf]) {
+    let dir = out.join("grpc");
+    std::fs::create_dir_all(&dir).expect("create the grpc out dir");
+    tonic_prost_build::configure()
+        .build_client(true)
+        .build_server(true)
+        // No `connect`: the caller picks the transport and hands a client
+        // its channel (`XClient::new`), so tonic's transport stays out.
+        .build_transport(false)
+        .extern_path(".io.angzarr.v1", "crate::v1")
+        .extern_path(".sererr.v1", "crate::sererr::v1")
+        .out_dir(&dir)
+        .compile_protos(files, &[root.to_path_buf()])
+        .expect("tonic: compile angzarr's io.angzarr.v1 services");
+}
+
+/// Copies each proto to `$OUT_DIR/proto/<its path under root>` and lists
+/// them in `$OUT_DIR/proto_files.rs`, for `src/protos.rs` to embed with
+/// `include_str!`.
+fn export_protos<'a>(root: &Path, out: &Path, files: impl Iterator<Item = &'a PathBuf>) {
+    let mut listing = String::from("&[\n");
     for file in files {
         let relative = file.strip_prefix(root).expect("a proto under the root");
-        let target = out.join(relative);
+        let target = out.join("proto").join(relative);
         std::fs::create_dir_all(target.parent().expect("a parent")).expect("create proto dir");
         std::fs::copy(file, &target).expect("copy proto");
+        let path = relative
+            .to_str()
+            .expect("a UTF-8 proto path")
+            .replace('\\', "/");
+        writeln!(
+            listing,
+            "    ProtoFile {{ path: {path:?}, contents: include_str!(concat!(env!(\"OUT_DIR\"), \"/proto/\", {path:?})) }},"
+        )
+        .expect("write to a String");
     }
+    listing.push(']');
+    std::fs::write(out.join("proto_files.rs"), listing).expect("write proto_files.rs");
 }

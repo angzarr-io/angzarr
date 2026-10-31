@@ -5,8 +5,9 @@
 # --locked means the workspace's Cargo.lock. Runs on the host, not in core's
 # toolchain container (`just -f crates/angzarr-proto/justfile check`).
 
-# Format check, build, lint and test natively, then the wasm32 build
-check: fmt-check build lint test wasm
+# Format check, build, lint and test natively (without the grpc feature,
+# then with it), then the wasm32 build (without it)
+check: fmt-check build lint test build-grpc lint-grpc test-grpc wasm
 
 fmt:
     cargo fmt -p angzarr-proto
@@ -23,6 +24,17 @@ lint:
 test:
     cargo test --locked -p angzarr-proto
 
-# The crate must stay a dependency leaf that builds for the browser
+# The grpc feature: tonic client and server stubs for every service
+build-grpc:
+    cargo build --locked -p angzarr-proto --features grpc
+
+lint-grpc:
+    cargo clippy --locked -p angzarr-proto --features grpc --all-targets -- -D warnings
+
+test-grpc:
+    cargo test --locked -p angzarr-proto --features grpc
+
+# The messages must stay a dependency leaf that builds for the browser:
+# no grpc feature here
 wasm:
     cargo build --locked -p angzarr-proto --target wasm32-unknown-unknown
