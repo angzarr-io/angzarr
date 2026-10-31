@@ -386,3 +386,69 @@ fn the_stream_is_read_without_the_box() {
     );
     assert_eq!(StoreError::EditionNameRequired.stream(), None);
 }
+
+/// The error is an `angzarr_diagnostic::Diagnostic`, with the same code and
+/// args as its own methods give, a cause nested whole as a diagnostic of its
+/// own: what a runtime forwards, and what a catalog renders.
+#[test]
+fn every_error_is_a_diagnostic_with_its_own_code_and_args() {
+    use angzarr_ports::angzarr_diagnostic::{self as diagnostic, Diagnostic};
+    fn same(theirs: &diagnostic::Arg, ours: &Arg) -> bool {
+        match (theirs, ours) {
+            (diagnostic::Arg::Uint(a), Arg::Uint(b)) => a == b,
+            (diagnostic::Arg::Str(a), Arg::Str(b)) => a == b,
+            (diagnostic::Arg::Nested(d), Arg::Cause(c)) => {
+                d.code() == c.code
+                    && d.args().len() == c.args.len()
+                    && d.args()
+                        .iter()
+                        .zip(&c.args)
+                        .all(|((dn, da), (cn, ca))| dn == cn && same(da, ca))
+            }
+            _ => false,
+        }
+    }
+    for (error, code, _) in every() {
+        let d: &dyn Diagnostic = &error;
+        assert_eq!(d.code(), code);
+        let (theirs, ours) = (d.args(), error.args());
+        assert_eq!(theirs.len(), ours.len(), "{error:?}");
+        for ((tn, ta), (on, oa)) in theirs.iter().zip(&ours) {
+            assert_eq!(tn, on, "{error:?}");
+            assert!(same(ta, oa), "{error:?}: {tn} is {ta:?}, not {oa:?}");
+        }
+        // Its display is the one every diagnostic has.
+        struct Shown<'a>(&'a dyn Diagnostic);
+        impl std::fmt::Display for Shown<'_> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                diagnostic::display(self.0, f)
+            }
+        }
+        assert_eq!(error.to_string(), Shown(d).to_string());
+    }
+    let cause: &dyn Diagnostic = &io();
+    assert_eq!(cause.to_string(), "annals-store-sql-io errno=10");
+}
+
+/// The crate ships its own en-US catalog, exported as `EN_US`: a message for
+/// every code, using exactly its args, and no message without an error. The
+/// samples are one of every variant.
+#[test]
+fn the_catalog_has_a_message_for_every_code_with_exactly_its_args() {
+    let (name, text) = angzarr_ports::EN_US;
+    assert_eq!(name, "angzarr-ports");
+    let file = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/locales/en-US/angzarr-ports.ftl"
+    ))
+    .unwrap();
+    assert_eq!(text, file);
+    let samples = angzarr_ports::diagnostic_samples();
+    let sampled: BTreeSet<String> = samples.iter().map(|d| d.code().to_string()).collect();
+    let every: BTreeSet<String> = every().iter().map(|(_, c, _)| c.to_string()).collect();
+    assert_eq!(sampled, every);
+    assert_eq!(
+        angzarr_ports::angzarr_diagnostic::catalog::check(name, text, &samples),
+        []
+    );
+}

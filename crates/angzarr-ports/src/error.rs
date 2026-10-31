@@ -1,19 +1,22 @@
 //! One error for every port, with stable codes.
 //!
-//! In annals_diagnostic's style without depending on it (annals_diagnostic
-//! lives in the annals repository, and the ports must not depend on annals):
-//! every error has a stable kebab-case [`code`](StoreError::code) starting
-//! with this crate's name and named [`args`](StoreError::args) that carry
-//! data. An error is a KEY and an ARGUMENT MAP, never rendered English
-//! (decision 14.37): text is rendered only where it is displayed, from a
-//! Fluent catalog keyed by the code, and the `Display` (what a log shows)
-//! is the code followed by its args, ` name=value` each, a nested
-//! [`Cause`] as ` name=<its code>` then ` name.<arg>=value` for each of its
-//! args. annals' `Diagnostic` impl for its own errors forwards a wrapped
-//! `StoreError`'s code and args unchanged (the orphan rule keeps the impl
-//! on annals' side, on the type that wraps it); core maps the codes to
-//! gRPC statuses, the code as the reason and the args, flattened the same
-//! way, as the `ErrorInfo` metadata.
+//! Every error is an [`angzarr_diagnostic::Diagnostic`]: a stable kebab-case
+//! [`code`](StoreError::code) starting with this crate's name and named
+//! [`args`](StoreError::args) that carry data. An error is a KEY and an
+//! ARGUMENT MAP, never rendered English (decision 14.37): text is rendered
+//! only where it is displayed, from a Fluent catalog keyed by the code (this
+//! crate's en-US one is [`EN_US`](crate::EN_US)), and the `Display` (what a
+//! log shows) is [`angzarr_diagnostic::display`]'s: the code followed by its
+//! args, ` name=value` each, a nested [`Cause`] as ` name=<its code>` then
+//! ` name.<arg>=value` for each of its args. A runtime forwards a wrapped
+//! `StoreError` as a nested diagnostic, its code and args unchanged; core
+//! maps the codes to gRPC statuses, the code as the reason and the args,
+//! flattened the same way, as the `ErrorInfo` metadata.
+//!
+//! [`Arg`] and [`Cause`] are this crate's own, `Clone` and `Eq` so the error
+//! is: the inherent [`StoreError::args`] gives them, and the `Diagnostic`
+//! impls convert ([`Arg`] into `angzarr_diagnostic::Arg`, a [`Cause`] into a
+//! nested diagnostic).
 
 use std::fmt;
 
@@ -413,60 +416,97 @@ impl StoreError {
     }
 }
 
-/// `value` as a display writes it (decision 14.37): bare, unless it would
-/// not parse back (empty, or holding whitespace, `=`, `"` or `\`), then
-/// double-quoted with its `"` and `\` backslash-escaped.
-fn write_value(f: &mut fmt::Formatter<'_>, value: &str) -> fmt::Result {
-    let ambiguous = value.is_empty()
-        || value
-            .chars()
-            .any(|c| c.is_whitespace() || matches!(c, '=' | '"' | '\\'));
-    if !ambiguous {
-        return f.write_str(value);
-    }
-    f.write_str("\"")?;
-    for c in value.chars() {
-        if matches!(c, '"' | '\\') {
-            f.write_str("\\")?;
-        }
-        write!(f, "{c}")?;
-    }
-    f.write_str("\"")
-}
-
-/// Writes `args` as ` name=value` each, a nested [`Cause`] as
-/// ` name=<its code>` then its own args under `name.` (decision 14.37's
-/// flattening), a text value quoted where it would not parse back
-/// ([`write_value`]).
-fn write_args(
-    f: &mut fmt::Formatter<'_>,
-    prefix: &str,
-    args: &[(&'static str, Arg)],
-) -> fmt::Result {
-    for (name, arg) in args {
-        match arg {
-            Arg::Uint(n) => write!(f, " {prefix}{name}={n}")?,
-            Arg::Str(s) => {
-                write!(f, " {prefix}{name}=")?;
-                write_value(f, s)?;
-            }
-            Arg::Cause(cause) => {
-                write!(f, " {prefix}{name}={}", cause.code)?;
-                write_args(f, &format!("{prefix}{name}."), &cause.args)?;
-            }
-        }
-    }
-    Ok(())
-}
-
 /// The code, then its args (decision 14.37): the key and the map, never
 /// English. Text is rendered only where it is displayed, from a Fluent
-/// catalog keyed by the code; this crate has none.
+/// catalog keyed by the code ([`EN_US`](crate::EN_US)).
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.code())?;
-        write_args(f, "", &self.args())
+        angzarr_diagnostic::display(self, f)
+    }
+}
+
+impl From<Arg> for angzarr_diagnostic::Arg {
+    fn from(arg: Arg) -> angzarr_diagnostic::Arg {
+        match arg {
+            Arg::Uint(n) => angzarr_diagnostic::Arg::Uint(n),
+            Arg::Str(s) => angzarr_diagnostic::Arg::Str(s),
+            Arg::Cause(cause) => angzarr_diagnostic::Arg::Nested(Box::new(cause)),
+        }
+    }
+}
+
+fn diagnostic_args(args: Vec<(&'static str, Arg)>) -> Vec<(&'static str, angzarr_diagnostic::Arg)> {
+    args.into_iter()
+        .map(|(name, arg)| (name, arg.into()))
+        .collect()
+}
+
+impl angzarr_diagnostic::Diagnostic for StoreError {
+    fn code(&self) -> &str {
+        StoreError::code(self)
+    }
+
+    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+        diagnostic_args(StoreError::args(self))
+    }
+}
+
+/// The adapter's code, then its args: never English.
+impl fmt::Display for Cause {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        angzarr_diagnostic::display(self, f)
+    }
+}
+
+/// An adapter's cause is a diagnostic of the adapter's own: its code, its
+/// args.
+impl angzarr_diagnostic::Diagnostic for Cause {
+    fn code(&self) -> &str {
+        self.code
+    }
+
+    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+        diagnostic_args(self.args.clone())
     }
 }
 
 impl std::error::Error for StoreError {}
+
+/// One of every variant, each once: [`crate::diagnostic_samples`].
+pub(crate) fn samples() -> Vec<StoreError> {
+    let stream = || Cover {
+        domain: "account".to_string(),
+        root: Some(angzarr_proto::v1::Uuid::from_bytes([7; 16])),
+        edition: None,
+    };
+    let io = || Cause::new("angzarr-store-sqlite-io", [("errno", Arg::Uint(5))]);
+    vec![
+        StoreError::conflict(stream(), 1, 2),
+        StoreError::discontinuous(stream(), 2, 3),
+        StoreError::malformed_stream(stream()),
+        StoreError::malformed_creation(stream(), 3, 5),
+        StoreError::Unavailable(io()),
+        StoreError::unreadable(stream(), 4, io()),
+        StoreError::unknown_edition(stream()),
+        StoreError::EditionNameRequired,
+        StoreError::EditionNotFound {
+            name: "what-if".to_string(),
+        },
+        StoreError::edition_not_forked(stream()),
+        StoreError::edition_already_forked(stream()),
+        StoreError::edition_not_deleted(stream()),
+        StoreError::edition_not_propagated(stream()),
+        StoreError::NewerThanBuild {
+            applied: 6,
+            build: 5,
+        },
+        StoreError::MigrationFailed { version: 3 },
+        StoreError::MigrationChanged { version: 2 },
+        StoreError::MigrationMissing { version: 2 },
+        StoreError::MigrationUnknown { version: 7 },
+        StoreError::MigrationIrreversible { version: 4 },
+        StoreError::BackupExists {
+            target: "state.db.pre-3-20261031T000000Z".to_string(),
+        },
+    ]
+}

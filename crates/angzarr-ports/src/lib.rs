@@ -80,6 +80,27 @@ pub use store::{
 };
 pub use stream::{Head, PositionKey, Slice, StreamRef};
 
+/// The diagnostic crate every error here implements, as the ports use it.
+pub use angzarr_diagnostic;
+
+/// This crate's en-US Fluent catalog, its name first: what a runtime that
+/// shows these errors embeds to render them. The text of
+/// `crates/angzarr-ports/locales/en-US/angzarr-ports.ftl`.
+pub const EN_US: (&str, &str) = (
+    "angzarr-ports",
+    include_str!("../locales/en-US/angzarr-ports.ftl"),
+);
+
+/// One value of every [`StoreError`] variant, each once, for the catalog
+/// parity test: each one's code must have a message in every locale, using
+/// exactly its args ([`angzarr_diagnostic::catalog::check`]).
+pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
+    error::samples()
+        .into_iter()
+        .map(|e| Box::new(e) as Box<dyn angzarr_diagnostic::Diagnostic>)
+        .collect()
+}
+
 /// The wire types and `uuid`, as the ports use them.
 pub use angzarr_proto;
 pub use angzarr_proto::uuid::Uuid;

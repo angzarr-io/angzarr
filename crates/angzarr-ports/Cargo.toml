@@ -19,6 +19,9 @@ contract = []
 memory = []
 
 [dependencies]
+# Every error is an angzarr_diagnostic::Diagnostic (zero dependencies;
+# re-exported as `angzarr_ports::angzarr_diagnostic`).
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
 # The wire types the ports speak (Cover, EventPage, EventRef, Snapshot),
 # and `uuid` through its re-export. (The withdrawn Edition and
 # CreateEditionRequest live in src/pending_editions.rs until the editions
