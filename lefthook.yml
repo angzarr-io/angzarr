@@ -41,7 +41,17 @@ pre-commit:
     # one cargo lifecycle, no race.
     rust-precommit:
       glob: "**/*.rs"
+      # The shared crates are gated by their own checks (below), not by the
+      # root package's container precommit: a change confined to them must
+      # not be judged by an unrelated package.
+      exclude:
+        - "crates/angzarr-proto/**"
+        - "crates/angzarr-ports/**"
       run: just precommit
+
+    shared-crates-precommit:
+      glob: "crates/angzarr-{proto,ports}/**/*.rs"
+      run: just check-shared-crates
 
     # Python - runs in container via just (scripts only, client/examples extracted)
     python-fmt:
