@@ -2,7 +2,7 @@
 name = "angzarr-proto"
 version = "0.1.0"
 edition = "2021"
-license = "BSD-3-Clause"
+license = "Apache-2.0 OR BSD-3-Clause"
 description = "prost types for angzarr's domain-neutral wire contract (io.angzarr.v1 types, options, upcaster and edition-admin messages, reason keys); no services, no tonic"
 repository = "https://github.com/angzarr-io/angzarr"
 publish = false
