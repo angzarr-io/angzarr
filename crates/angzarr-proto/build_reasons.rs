@@ -35,8 +35,10 @@ struct Value {
     args: Option<Vec<String>>,
 }
 
-/// One wire field's number and, for a length-delimited field, its bytes
-/// (`None` for a varint; descriptors hold no fixed-width field we read).
+/// Each wire field: its number, its bytes if length-delimited, and its
+/// value if a varint. A compiled descriptor holds no fixed-width field (an
+/// uninterpreted option's double never survives compilation), so one is
+/// refused rather than skipped unread.
 fn fields(mut buf: &[u8]) -> Vec<(u64, Option<&[u8]>, u64)> {
     let mut out = Vec::new();
     while !buf.is_empty() {
@@ -46,15 +48,13 @@ fn fields(mut buf: &[u8]) -> Vec<(u64, Option<&[u8]>, u64)> {
                 let v = varint(&mut buf);
                 out.push((key >> 3, None, v));
             }
-            1 => buf = &buf[8..],
             2 => {
                 let len = usize::try_from(varint(&mut buf)).expect("a length");
                 let (body, rest) = buf.split_at(len);
                 out.push((key >> 3, Some(body), 0));
                 buf = rest;
             }
-            5 => buf = &buf[4..],
-            wire => panic!("descriptor wire type {wire} is not one a descriptor uses"),
+            wire => panic!("descriptor wire type {wire}: not a varint or length-delimited field"),
         }
     }
     out
@@ -93,7 +93,7 @@ fn text(buf: &[u8], number: u64) -> String {
 fn value(buf: &[u8]) -> Value {
     let number = fields(buf)
         .into_iter()
-        .find(|(n, body, _)| *n == 2 && body.is_none())
+        .find(|(n, _, _)| *n == 2)
         .map_or(0, |(_, _, v)| v);
     let args = messages(buf, 3)
         .flat_map(|options| messages(options, REASON_OPTION).collect::<Vec<_>>())
