@@ -51,7 +51,8 @@ fn refuses_what_it_does_not_support() {
         ("a: &x 1\n", 1, ParseProblem::Anchor),
         ("a: *x\n", 1, ParseProblem::Alias),
         ("- !tag x\n", 1, ParseProblem::Tag),
-        ("a: |\n  text\n", 1, ParseProblem::BlockScalar),
+        ("a: |2\n  text\n", 1, ParseProblem::BlockScalar),
+        ("|\n  text\n", 1, ParseProblem::BlockScalar),
         ("a:\n\t- x\n", 2, ParseProblem::TabIndent),
         (
             "---\na: 1\n",

@@ -29,7 +29,8 @@ pub enum ParseProblem {
     Alias,
     /// `!`: a tag.
     Tag,
-    /// `|` or `>`: a block scalar.
+    /// `|` or `>` where a block scalar is not read: with an indentation
+    /// indicator (`|2`), another character after it, or alone on its line.
     BlockScalar,
     /// A line indented deeper than its block.
     UnexpectedIndent,

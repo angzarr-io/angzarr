@@ -558,7 +558,7 @@ fn comment_only(text: &str) -> Option<usize> {
 /// The lines that carry content (not blank, not comment-only): where each is
 /// in the text, its indent, and its text without the comment.
 struct Meaningful {
-    lines: Vec<(usize, usize, String)>,
+    lines: Vec<(usize, usize, String, usize)>,
 }
 
 /// Where the sequence an edit works on is.
@@ -588,13 +588,19 @@ impl Meaningful {
         Meaningful {
             lines: lines
                 .into_iter()
-                .map(|l| (l.no - 1, l.indent, l.text.to_string()))
+                .map(|l| (l.no - 1, l.indent, l.text.to_string(), l.last - 1))
                 .collect(),
         }
     }
 
     fn raw(&self, m: usize) -> usize {
         self.lines[m].0
+    }
+
+    /// The raw line meaningful line `m` ends on: its own, or a block
+    /// scalar's last.
+    fn end(&self, m: usize) -> usize {
+        self.lines[m].3
     }
 
     fn indent(&self, m: usize) -> usize {
@@ -652,7 +658,7 @@ impl Meaningful {
                 None if push && depth + 1 == path.len() => {
                     return Ok(Place::Missing {
                         key: k.to_string(),
-                        after: self.raw(hi - 1),
+                        after: self.end(hi - 1),
                         indent: self.indent(lo),
                     })
                 }
@@ -702,7 +708,7 @@ fn item_span(
     while start > 0 && comment_only(&lines[start - 1].text).is_some_and(|i| i <= indent) {
         start -= 1;
     }
-    let mut end = m.raw(last);
+    let mut end = m.end(last);
     while end + 1 < lines.len() && comment_only(&lines[end + 1].text).is_some_and(|i| i > indent) {
         end += 1;
     }
@@ -907,7 +913,7 @@ fn entry_lines(key: &str, value: &Value, indent: usize, flow_depth: usize) -> Ve
 /// item's first line is seen without its dash, at its content's indent;
 /// `dash_first` says the first line is such a line.
 struct View {
-    lines: Vec<(usize, usize, String)>,
+    lines: Vec<(usize, usize, String, usize)>,
     dash_first: bool,
     /// The indent new keys go at.
     indent: usize,
@@ -921,7 +927,7 @@ impl View {
             lines: m.lines.clone(),
             dash_first: false,
             indent: m.lines.first().map_or(0, |l| l.1),
-            after: m.lines.last().map_or(0, |l| l.0),
+            after: m.lines.last().map_or(0, |l| l.3),
         };
         for seg in path {
             view = match seg {
@@ -939,7 +945,7 @@ impl View {
     fn is_mapping(&self) -> bool {
         self.lines
             .first()
-            .is_some_and(|(_, _, t)| !is_item(t) && split_key(t).is_some())
+            .is_some_and(|(_, _, t, _)| !is_item(t) && split_key(t).is_some())
     }
 
     /// `key`'s line in this mapping and the last raw line of its entry (its
@@ -951,7 +957,7 @@ impl View {
         }
         let indent = self.lines[0].1;
         let Some(at) = (0..self.lines.len()).find(|&i| {
-            let (_, ind, text) = &self.lines[i];
+            let (_, ind, text, _) = &self.lines[i];
             *ind == indent
                 && !is_item(text)
                 && split_key(text).is_some_and(|(k, _)| {
@@ -961,7 +967,7 @@ impl View {
             return Ok(None);
         };
         // The key's line is the last when its value has none of its own.
-        Ok(Some((at, self.raw(self.value_end(at) - 1))))
+        Ok(Some((at, self.lines[self.value_end(at) - 1].3)))
     }
 
     /// One past the last line of the value of the key at `at`: `at + 1` when
@@ -999,20 +1005,23 @@ impl View {
     }
 
     /// A view of `lines`, which must hold something to edit.
-    fn of(lines: Vec<(usize, usize, String)>, dash_first: bool) -> Result<View, EditProblem> {
+    fn of(
+        lines: Vec<(usize, usize, String, usize)>,
+        dash_first: bool,
+    ) -> Result<View, EditProblem> {
         let (Some(first), Some(last)) = (lines.first(), lines.last()) else {
             return Err(EditProblem::NotAMapping);
         };
         Ok(View {
             indent: first.1,
-            after: last.0,
+            after: last.3,
             dash_first,
             lines,
         })
     }
 
     fn item(&self, index: usize) -> Result<View, EditProblem> {
-        if !self.lines.first().is_some_and(|(_, _, t)| is_item(t)) {
+        if !self.lines.first().is_some_and(|(_, _, t, _)| is_item(t)) {
             return Err(EditProblem::NotASequence);
         }
         let indent = self.lines[0].1;
@@ -1026,12 +1035,17 @@ impl View {
             });
         };
         let end = starts.get(index + 1).copied().unwrap_or(self.lines.len());
-        let (raw, _, text) = &self.lines[start];
+        let (raw, _, text, last) = &self.lines[start];
         let rest = text[1..].trim_start_matches(' ');
         let mut lines = Vec::new();
         let dash_first = !rest.is_empty();
         if dash_first {
-            lines.push((*raw, indent + (text.len() - rest.len()), rest.to_string()));
+            lines.push((
+                *raw,
+                indent + (text.len() - rest.len()),
+                rest.to_string(),
+                *last,
+            ));
         }
         lines.extend(self.lines[start + 1..end].iter().cloned());
         View::of(lines, dash_first)

@@ -4,9 +4,16 @@
 //! Supported: block mappings (`key: value`, `key:` then an indented block),
 //! block sequences (`- item`, including `- key: value` starting a mapping),
 //! flow sequences `[a, b]` and flow mappings `{a: 1, b: 2}`, plain and quoted
-//! scalars, `#` comments, and an empty value as null. Not supported, and
-//! refused rather than misread: anchors and aliases, tags, multi-line
-//! strings, multiple documents, tabs for indentation.
+//! scalars, block scalars as a key's or an item's value (literal `|`,
+//! folded `>`, each with `-` to strip the final line break or `+` to keep
+//! the empty lines after it), `#` comments, and an empty value as null. Not
+//! supported, and refused rather than misread: anchors and aliases, tags,
+//! a block scalar's indentation indicator (`|2`) or one standing alone on
+//! its line, multiple documents, tabs for indentation.
+//!
+//! A block scalar's content is the lines under its header indented deeper
+//! than its key (or dash), at the first one's indent or deeper, and the
+//! empty lines among them; inside it `#` and quotes are text.
 //!
 //! Text: whitespace in the grammar is ASCII space and tab, as YAML defines
 //! it. Indentation is spaces; a `#` starts a comment at the start of a line
@@ -26,8 +33,11 @@
 //!
 //! The writer writes a scalar plain only when the reader reads it back
 //! unchanged, and otherwise double-quotes it, escaping the control characters
-//! (C0, DEL, C1), U+2028, U+2029 and U+FEFF. Every written document parses
-//! back to the value written.
+//! (C0, DEL, C1), U+2028, U+2029 and U+FEFF. A multi-line string in block
+//! style is written as a literal block scalar (`|`, `|-` or `|+`) when that
+//! reads back the same: nothing escaped but its line breaks, and a first
+//! line of text that does not start with a space. Every written document
+//! parses back to the value written.
 //!
 //! Every scalar is kept as its text: there is no type coercion, so `no`
 //! stays `"no"` and `1.10` stays `"1.10"`. The reader of a value decides what
@@ -168,11 +178,107 @@ impl Value {
 // ---------------------------------------------------------------- reading
 
 /// One meaningful line: its number, indentation, and text without the
-/// comment or trailing space.
+/// comment or trailing space. A line ending in a block scalar's header
+/// (`key: |`, `- >-`) holds the scalar's value, read from the lines under
+/// it, and `last` is the last of them that carries the value (text, or an
+/// empty line a `+` keeps); otherwise `last` is `no`.
 struct Line<'a> {
     no: usize,
+    last: usize,
     indent: usize,
     text: &'a str,
+    block: Option<String>,
+}
+
+/// A block scalar's header: literal (`|`) or folded (`>`), and its chomping.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Header {
+    folded: bool,
+    chomp: Chomp,
+}
+
+/// What a block scalar does with its final line break and the empty lines
+/// after its last content: clip keeps one break, strip none, keep all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Chomp {
+    Clip,
+    Strip,
+    Keep,
+}
+
+/// `s` as a supported block scalar header: `|` or `>`, then `-`, `+` or
+/// nothing. An indentation indicator (`|2`) is not supported.
+fn header(s: &str) -> Option<Header> {
+    let mut chars = s.chars();
+    let folded = match chars.next()? {
+        '|' => false,
+        '>' => true,
+        _ => return None,
+    };
+    let chomp = match chars.next() {
+        None => Chomp::Clip,
+        Some('-') => Chomp::Strip,
+        Some('+') => Chomp::Keep,
+        Some(_) => return None,
+    };
+    chars.next().is_none().then_some(Header { folded, chomp })
+}
+
+/// The header a line at `indent` ends in, if it is a block scalar's value,
+/// and the indent its content must be deeper than: the key's column for
+/// `key: |`, the dash's for `- |`.
+fn block_header(text: &str, indent: usize) -> Option<(Header, usize)> {
+    let (mut col, mut t, mut dash) = (indent, text, None);
+    while is_item(t) {
+        let rest = t[1..].trim_start_matches(SPACE);
+        dash = Some(col);
+        col += t.len() - rest.len();
+        t = rest;
+    }
+    if let (Some(h), Some(dash)) = (header(t), dash) {
+        return Some((h, dash));
+    }
+    let (_, rest) = split_key(t)?;
+    header(rest).map(|h| (h, col))
+}
+
+/// A block scalar's value: its content lines, with the content indent taken
+/// off, read as `h` says. Trailing empty lines are the chomping's.
+fn block_value(content: &[&str], h: Header) -> String {
+    let last = content.iter().rposition(|l| !l.is_empty());
+    let (body, trailing) = match last {
+        Some(i) => (&content[..=i], content.len() - i - 1),
+        None => (&content[..0], content.len()),
+    };
+    let mut out = String::new();
+    if h.folded {
+        // A line break between two lines of text is a space, one before an
+        // empty line is dropped, and around a more-indented line it stays.
+        let (mut prev, mut empties): (Option<&str>, usize) = (None, 0);
+        for &line in body {
+            if line.is_empty() {
+                empties += 1;
+                continue;
+            }
+            let indented = |l: &str| l.starts_with([' ', '\t']);
+            match prev {
+                Some(p) if indented(p) || indented(line) => out.push_str(&"\n".repeat(empties + 1)),
+                Some(_) if empties == 0 => out.push(' '),
+                _ => out.push_str(&"\n".repeat(empties)),
+            }
+            out.push_str(line);
+            (prev, empties) = (Some(line), 0);
+        }
+    } else {
+        out = body.join("\n");
+    }
+    match (h.chomp, last.is_some()) {
+        (Chomp::Strip, _) | (Chomp::Clip, false) => {}
+        (Chomp::Clip, true) => out.push('\n'),
+        (Chomp::Keep, true) => out.push_str(&"\n".repeat(trailing + 1)),
+        (Chomp::Keep, false) => out.push_str(&"\n".repeat(trailing)),
+    }
+    out
 }
 
 /// Whitespace as the grammar means it: ASCII space and tab, as in YAML. Any
@@ -244,10 +350,17 @@ fn raw_lines(src: &str) -> impl Iterator<Item = Result<(usize, &str), Error>> {
 }
 
 fn lines(src: &str) -> Result<Vec<Line<'_>>, Error> {
+    let mut raw: Vec<Result<(usize, &str), Error>> = raw_lines(src).collect();
+    // The empty piece after a final line break is no line.
+    if matches!(raw.last(), Some(Ok((_, "")))) {
+        raw.pop();
+    }
     let mut out = Vec::new();
-    for raw in raw_lines(src) {
-        let (no, raw) = raw?;
-        let body = strip_comment(raw).trim_end_matches(SPACE);
+    let mut at = 0;
+    while at < raw.len() {
+        let (no, raw_line) = raw[at].clone()?;
+        at += 1;
+        let body = strip_comment(raw_line).trim_end_matches(SPACE);
         if trim(body).is_empty() {
             continue;
         }
@@ -270,7 +383,43 @@ fn lines(src: &str) -> Result<Vec<Line<'_>>, Error> {
         if let Some(problem) = unsupported(text) {
             return err(no, problem);
         }
-        out.push(Line { no, indent, text });
+        let mut line = Line {
+            no,
+            last: no,
+            indent,
+            text,
+            block: None,
+        };
+        if let Some((h, parent)) = block_header(text, indent) {
+            // The content: the lines deeper than `parent`, at the first
+            // one's indent or deeper, and the empty lines among them, as
+            // written: comments and quotes are text there.
+            let mut content: Vec<&str> = Vec::new();
+            let mut deep: Option<usize> = None;
+            while let Some(next) = raw.get(at) {
+                let (next_no, l) = next.clone()?;
+                let spaces = l.len() - l.trim_start_matches(' ').len();
+                let blank = spaces == l.len();
+                match deep {
+                    None if blank => content.push(""),
+                    None if spaces > parent => {
+                        deep = Some(spaces);
+                        content.push(&l[spaces..]);
+                    }
+                    Some(m) if blank => content.push(l.get(m..).unwrap_or("")),
+                    Some(m) if spaces >= m => content.push(&l[m..]),
+                    _ => break,
+                }
+                // Empty lines after the text are the line's only when they
+                // are the value's (kept); otherwise they are layout.
+                if h.chomp == Chomp::Keep || content.last().is_some_and(|c| !c.is_empty()) {
+                    line.last = next_no;
+                }
+                at += 1;
+            }
+            line.block = Some(block_value(&content, h));
+        }
+        out.push(line);
     }
     Ok(out)
 }
@@ -357,9 +506,12 @@ impl<'a> Parser<'a> {
             }
             let (no, rest) = (l.no, l.text[1..].trim_start_matches(SPACE));
             let inner = indent + (l.text.len() - rest.len());
+            let (last, block) = (l.last, l.block.clone());
             self.at += 1;
             if rest.is_empty() {
                 items.push(self.nested(indent, no)?);
+            } else if let (Some(value), Some(_)) = (&block, header(rest)) {
+                items.push(Value::Scalar(value.clone()));
             } else {
                 // The rest of the dash line is a block at the item's own
                 // indent: `- key: value` starts a mapping (or `- - x` a
@@ -369,8 +521,10 @@ impl<'a> Parser<'a> {
                     self.at,
                     Line {
                         no,
+                        last,
                         indent: inner,
                         text: rest,
+                        block,
                     },
                 );
                 items.push(self.block(inner)?);
@@ -391,7 +545,7 @@ impl<'a> Parser<'a> {
             if is_item(l.text) {
                 break;
             }
-            let no = l.no;
+            let (no, block) = (l.no, l.block.clone());
             let Some((key, rest)) = split_key(l.text) else {
                 return err(
                     no,
@@ -414,6 +568,8 @@ impl<'a> Parser<'a> {
                     Some(n) if n.indent == indent && is_item(n.text) => self.seq(indent)?,
                     _ => self.nested(indent, no)?,
                 }
+            } else if let Some(value) = block {
+                Value::Scalar(value)
             } else {
                 inline(rest, no)?
             };
@@ -700,6 +856,44 @@ fn scalar_text(s: &str, at: At) -> String {
     out
 }
 
+/// `s` as a literal block scalar, if it is one the reader reads back: its
+/// header (`|`, `|-` or `|+`, by how many line breaks end it) and its lines.
+/// A multi-line string with nothing escaped but its line breaks, some text,
+/// and a first line of text that does not start with a space (which would
+/// read as indentation).
+fn literal(s: &str) -> Option<(&'static str, Vec<&str>)> {
+    if !s.contains('\n') || s.chars().any(|c| c != '\n' && escaped(c)) {
+        return None;
+    }
+    let body = s.trim_end_matches('\n');
+    let trailing = s.len() - body.len();
+    let mut lines: Vec<&str> = body.split('\n').collect();
+    let first = lines.iter().find(|l| !l.is_empty())?;
+    if first.starts_with(' ') {
+        return None;
+    }
+    let header = match trailing {
+        0 => "|-",
+        1 => "|",
+        _ => "|+",
+    };
+    lines.extend(std::iter::repeat("").take(trailing.saturating_sub(1)));
+    Some((header, lines))
+}
+
+/// Write `lines` under a block scalar's header, at `indent`; an empty line
+/// is written empty.
+fn literal_lines(lines: &[&str], indent: usize, out: &mut String) {
+    let pad = " ".repeat(indent);
+    for l in lines {
+        if l.is_empty() {
+            out.push('\n');
+        } else {
+            out.push_str(&format!("{pad}{l}\n"));
+        }
+    }
+}
+
 /// A value on one line, if it is small enough: scalars, and collections of
 /// scalars.
 fn flow(v: &Value) -> Option<String> {
@@ -767,6 +961,11 @@ fn block(v: &Value, indent: usize, depth: usize, flow_depth: usize, out: &mut St
             for (k, val) in entries {
                 let key = scalar_text(k, At::Key);
                 match val {
+                    Value::Scalar(text) if literal(text).is_some() => {
+                        let (header, lines) = literal(text).expect("just checked");
+                        out.push_str(&format!("{pad}{key}: {header}\n"));
+                        literal_lines(&lines, indent + 2, out);
+                    }
                     _ if as_block(val, depth, flow_depth) => {
                         out.push_str(&format!("{pad}{key}:\n"));
                         block(val, indent + 2, depth + 1, flow_depth, out);
@@ -785,6 +984,11 @@ fn block(v: &Value, indent: usize, depth: usize, flow_depth: usize, out: &mut St
         Value::Seq(items) => {
             for item in items {
                 match item {
+                    Value::Scalar(text) if literal(text).is_some() => {
+                        let (header, lines) = literal(text).expect("just checked");
+                        out.push_str(&format!("{pad}- {header}\n"));
+                        literal_lines(&lines, indent + 2, out);
+                    }
                     Value::Map(_) if as_block(item, depth, flow_depth) => {
                         let mut inner = String::new();
                         block(item, indent + 2, depth + 1, flow_depth, &mut inner);
@@ -865,6 +1069,10 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
 #[cfg(test)]
 #[path = "lib.test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "block.test.rs"]
+mod block_tests;
 
 // The property tests' seeded random stream.
 #[cfg(test)]
