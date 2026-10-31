@@ -436,6 +436,60 @@ check-shared-crates: check-proto-submodule
     just -f '{{TOP}}/crates/angzarr-proto/justfile' check
     just -f '{{TOP}}/crates/angzarr-ports/justfile' check
 
+# Mutation-test a shared crate, judged by MIN, its kill-rate threshold in
+# percent over viable mutants (caught or timed out = killed; unviable count
+# neither way), each mutant's tests given TIMEOUT seconds: the whole crate, or with PATCH only the lines that diff
+# changes (paths relative to the workspace root, a/ and b/ prefixes; this
+# tree's lines on the b side). OUT is relative to the crate's directory.
+# Each shared crate's justfile calls this (`mutation-test`, `mutation-diff`).
+# cargo-mutants copies the workspace to a scratch directory under TMPDIR and
+# mutates the copy (never --in-place), so no mutated source reaches this
+# tree; no git hook runs it. Exits 4 when the tests fail unmutated.
+# --no-config: .cargo/mutants.toml is the root package's (its examine_globs
+# name only src/, so a shared crate would have no mutants at all).
+[positional-arguments]
+shared-mutation crate min timeout out patch="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    crate=$1 min=$2 timeout=$3 out=$4 patch=${5:-}
+    cd '{{TOP}}/crates/'"$crate"
+    if ! cargo mutants --version >/dev/null 2>&1; then
+        echo "FAIL mutation: cargo-mutants is not installed; the gate cannot pass by not running." >&2
+        echo "Install it: cargo install cargo-mutants --locked" >&2
+        exit 1
+    fi
+    scope=()
+    [ -n "$patch" ] && scope=(--in-diff "$(realpath "$patch")")
+    rm -rf "$out"
+    mkdir -p "$out"
+    rc=0
+    cargo mutants --no-config --package "$crate" "${scope[@]}" --all-features --timeout "$timeout" --output "$out" --colors never \
+        > "$out/cargo-mutants.log" 2>&1 || rc=$?
+    case "$rc" in
+        0|2|3) ;;
+        4) echo "FAIL mutation: the tests fail unmutated (cargo-mutants baseline; log: $out/cargo-mutants.log)" >&2; exit 4 ;;
+        *) echo "FAIL mutation: cargo mutants failed before a verdict (exit $rc; log: $out/cargo-mutants.log)" >&2; exit 1 ;;
+    esac
+    outcomes="$out/mutants.out/outcomes.json"
+    counts=$(jq -r '[.outcomes[] | select(.scenario | type == "object") | .summary]
+        | "\(map(select(. == "CaughtMutant" or . == "Timeout")) | length) \(map(select(. == "MissedMutant")) | length) \(map(select(. == "Unviable")) | length)"' \
+        "$outcomes" 2>/dev/null || echo "0 0 0")
+    read -r killed missed unviable <<< "$counts"
+    viable=$((killed + missed))
+    if [ "$viable" -eq 0 ]; then
+        echo "ok   mutation (no viable mutants in scope; $unviable unviable)"
+        exit 0
+    fi
+    rate=$((killed * 100 / viable))
+    if [ $((killed * 100)) -ge $((min * viable)) ]; then
+        echo "ok   mutation: $crate $killed/$viable killed ($rate%), threshold $min%; $unviable unviable, not counted"
+        exit 0
+    fi
+    echo "FAIL mutation: $crate $killed/$viable killed ($rate%), below the $min% threshold (log: $out/cargo-mutants.log); surviving mutants:" >&2
+    sed 's/^/  /' "$out/mutants.out/missed.txt" >&2
+    echo "Add or sharpen the test that would kill each survivor, commit it, and push again." >&2
+    exit 1
+
 # The angzarr-project submodule is checked out at the commit this tree pins,
 # and that commit carries no Rust package named angzarr-proto or
 # angzarr-ports (its old rust/). Cargo resolves a git dependency on this

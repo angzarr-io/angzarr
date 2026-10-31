@@ -9,7 +9,8 @@
 //! which each crate with codes exports, embedded, as `EN_US`: the crate's
 //! name and the catalog's text (`angzarr_ports::EN_US`,
 //! `angzarr_yaml::EN_US`, ...). A dependent adds those to its own catalog to
-//! render their diagnostics. An error's `Display` is its code then its args, never English
+//! render their diagnostics; [`catalog::check`] is each crate's test that its
+//! catalog and its errors agree. An error's `Display` is its code then its args, never English
 //! (angzarr decision 14.37): [`display`] writes it, for logs; English is
 //! rendered only where the error is shown, from a catalog keyed by the code.
 //!
@@ -41,6 +42,8 @@
 
 use std::borrow::Cow;
 use std::fmt;
+
+pub mod catalog;
 
 /// An error a person may read: a stable code and its named data. `Display`
 /// is the code then the args ([`display`]), never English.
