@@ -78,6 +78,13 @@ angzarr-yaml-decode-unknown-variant = `{ $key_path }`: unknown variant "{ $found
 angzarr-yaml-decode-length = `{ $key_path }`: expected { $expected } items, found { $found }
 angzarr-yaml-decode-invalid = `{ $key_path }`: "{ $found }" is not a valid { $expected }: { $ext_err_txt }
 
+## Writing upgrades back (--write-upgrades). $path is the file; $cause is
+## the file system's own error, rendered by its own message.
+
+angzarr-yaml-write-back-read = { $path } could not be read, so it was not upgraded: { $cause }
+angzarr-yaml-write-back-backup = { $path } could not be written, so the file it backs up was not upgraded: { $cause }
+angzarr-yaml-write-back-write = { $path } could not be replaced with its upgrade: { $cause }
+
 ## Editing a document in place. $path is the key path, written dotted, or
 ## "the root".
 

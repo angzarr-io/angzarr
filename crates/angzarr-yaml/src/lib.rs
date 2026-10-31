@@ -55,7 +55,8 @@
 //!
 //! [`decode`] turns a [`Value`] into any serde type, strictly: scalars parsed
 //! only as the type asks, unknown keys refused, every failure a key path and a
-//! code. [`versioned`] loads documents stamped with a root `schema_version` (or a
+//! code. [`write_back`] is the family's one `--write-upgrades` helper.
+//! [`versioned`] loads documents stamped with a root `schema_version` (or a
 //! key the kind names), running registered migrations up to the version the
 //! code reads. [`edit`] changes
 //! one sequence item of a document in place and leaves every other byte,
@@ -65,6 +66,7 @@ pub mod decode;
 pub mod edit;
 mod error;
 pub mod versioned;
+pub mod write_back;
 
 pub use decode::{from_value, DecodeError};
 pub use error::{Error, ParseProblem};
@@ -1063,6 +1065,7 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
     samples.extend(versioned::diagnostic_samples());
     samples.extend(edit::diagnostic_samples());
     samples.extend(decode::diagnostic_samples());
+    samples.extend(write_back::diagnostic_samples());
     samples
 }
 
