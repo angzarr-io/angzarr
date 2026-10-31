@@ -6,7 +6,8 @@
 //!   ([`Migrations::key`]), whose value is a non-negative integer (decimal
 //!   digits) that only ever increases: a format generation, never semver. A
 //!   mapping with no stamp is version 0, so files written before versioning
-//!   load through the whole chain. A stamp that is not such an integer is
+//!   load through the whole chain. An empty, comment-only or null document
+//!   is that case, an empty mapping at version 0, not a corrupt file. A stamp that is not such an integer is
 //!   refused ([`LoadProblem::BadVersion`]).
 //! - **A legacy key.** A kind whose files were stamped under another key
 //!   declares it ([`Migrations::legacy_key`]): before the stamp is read, a
@@ -486,14 +487,17 @@ impl Diagnostic for LoadError {
 }
 
 /// A document's stamp under [`DEFAULT_KEY`]; a mapping without one is
-/// version 0. [`Loader::version_of`] reads a kind's own key.
+/// version 0, and so is an empty, comment-only or null document (the
+/// config-versioning rule: such a file is the oldest generation, not a
+/// corrupt one). [`Loader::version_of`] reads a kind's own key.
 pub fn version_of(doc: &Value) -> Result<u32, LoadProblem> {
     version_at(doc, DEFAULT_KEY)
 }
 
-/// A document's stamp under `key`; a mapping without one is version 0.
+/// A document's stamp under `key`; a mapping without one is version 0, and
+/// so is an empty, comment-only or null document.
 pub fn version_at(doc: &Value, key: &str) -> Result<u32, LoadProblem> {
-    if doc.as_map().is_none() {
+    if !is_mapping_or_empty(doc) {
         return Err(LoadProblem::NotAMapping);
     }
     let bad = |problem| {
@@ -519,6 +523,12 @@ pub fn version_at(doc: &Value, key: &str) -> Result<u32, LoadProblem> {
             text: found.clone(),
         })
     })
+}
+
+/// A mapping, or the null an empty or comment-only document parses to: a
+/// mapping with nothing in it yet.
+fn is_mapping_or_empty(doc: &Value) -> bool {
+    matches!(doc, Value::Map(_) | Value::Null)
 }
 
 impl Loader {
@@ -566,9 +576,9 @@ impl Loader {
 
     /// `doc`'s stamp, read as this kind reads it: under its key, or under
     /// its legacy key when only that is set. A mapping with neither is
-    /// version 0.
+    /// version 0, and so is an empty, comment-only or null document.
     pub fn version_of(&self, doc: &Value) -> Result<u32, LoadProblem> {
-        if doc.as_map().is_none() {
+        if !is_mapping_or_empty(doc) {
             return Err(LoadProblem::NotAMapping);
         }
         let key = self.legacy_stamp(doc)?.unwrap_or(&self.key);
@@ -599,12 +609,17 @@ impl Loader {
     }
 
     /// Migrate an already-parsed document to the current version. A
-    /// current-version document comes back untouched.
+    /// current-version document comes back untouched. An empty,
+    /// comment-only or null document is an empty mapping at version 0: every
+    /// step runs on it, or, for a kind with no older version, it is current.
     pub fn migrate(&self, source: Option<&str>, mut doc: Value) -> Result<Value, LoadError> {
         let found = match self.version_of(&doc) {
             Ok(v) => v,
             Err(problem) => return self.fail(source, problem),
         };
+        if doc == Value::Null {
+            doc = Value::Map(Vec::new());
+        }
         if found > self.current {
             return self.fail(
                 source,
@@ -727,6 +742,19 @@ impl Loader {
         if let Ok(Some(legacy)) = self.legacy_stamp(doc.value()) {
             let renamed = doc.rename_key(&[], legacy, &self.key);
             debug_assert!(renamed.is_ok(), "{renamed:?}");
+        }
+        // An empty or comment-only file has no entries to edit: its
+        // comments, all it holds, go above the migrated tree.
+        if *doc.value() == Value::Null {
+            let mut text = doc.into_string();
+            if !text.is_empty() && !text.ends_with('\n') {
+                text.push('\n');
+            }
+            text.push_str(&write(&migrated, flow_depth));
+            return Ok(Some(Upgraded {
+                text,
+                comments_kept: true,
+            }));
         }
         Ok(Some(match doc.update_to(&migrated, flow_depth) {
             Ok(()) => Upgraded {

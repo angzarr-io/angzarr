@@ -7,8 +7,8 @@
 //! - Go passes a document that is not a well-formed mapping through to the
 //!   kind's own decode, which refuses it; here the loader refuses it itself,
 //!   as the parse or root error it is (never a version error).
-//! - Go reads an empty or comment-only document as generation 0; here it is
-//!   no mapping, and refused.
+//! - Go's `---` bare document is refused here by the parser (below), so it
+//!   is not among the generation-0 inputs.
 //! - Multi-document streams are refused here by the parser (`---`), where Go
 //!   calls them unreadable.
 
@@ -280,6 +280,86 @@ fn a_document_that_is_no_well_formed_mapping_is_its_parse_failure() {
         for text in ["- a\n- b\n", "hello\n"] {
             assert_eq!(problem(&l, text), LoadProblem::NotAMapping, "{text:?}");
         }
+    }
+}
+
+/// TestUpgrade_EmptyAndCommentOnlyAreGenerationZero. The config-versioning
+/// rule: a missing stamp is the oldest generation, every migration applies,
+/// and "an empty or comment-only file is this case, not a corrupt one".
+#[test]
+fn empty_and_comment_only_are_version_zero() {
+    let gen0 = Migrations::new("fresh", 1)
+        .step(0, added_a)
+        .build()
+        .unwrap();
+    for text in ["", "\n\n", "# just a comment\n", "~\n", "null\n"] {
+        // No step from 0: too old, never a parse or root error.
+        assert_eq!(
+            problem(&zero_steps(), text),
+            LoadProblem::TooOld {
+                found: 0,
+                oldest: 2
+            },
+            "{text:?}"
+        );
+        // A step from 0: it runs, and the result is stamped.
+        assert_eq!(
+            gen0.load(None, text).unwrap(),
+            parse("schema_version: 1\nadded_a: yes\n").unwrap(),
+            "{text:?}"
+        );
+        assert_eq!(version_of(&parse(text).unwrap()), Ok(0), "{text:?}");
+        assert_eq!(gen0.version_of(&parse(text).unwrap()), Ok(0), "{text:?}");
+    }
+}
+
+/// A kind with no older generation (current 0): an empty file is current,
+/// and decodes as an empty mapping.
+#[test]
+fn an_empty_file_of_a_version_zero_kind_is_current() {
+    #[derive(Debug, PartialEq, serde::Deserialize)]
+    struct Settings {
+        name: Option<String>,
+    }
+    let l = Migrations::new("settings", 0).build().unwrap();
+    for text in ["", "# nothing set yet\n", "~\n"] {
+        assert_eq!(l.load(None, text).unwrap(), Value::Map(vec![]), "{text:?}");
+        assert_eq!(
+            l.load_into::<Settings>(None, text).unwrap(),
+            Settings { name: None },
+            "{text:?}"
+        );
+        assert_eq!(l.upgrade(None, text, 2).unwrap(), None, "{text:?}");
+        assert_eq!(l.upgrade_keeping(None, text, 2).unwrap(), None, "{text:?}");
+    }
+}
+
+/// TestUpgrade_CommentOnlyKeepsItsComments: a comment-only file's comments
+/// are its whole content; an upgrade does not throw them away.
+#[test]
+fn a_comment_only_file_keeps_its_comments_when_upgraded() {
+    let l = Migrations::new("fresh", 1)
+        .step(0, added_a)
+        .build()
+        .unwrap();
+    let up = l.upgrade_keeping(None, "# keep me\n", 2).unwrap().unwrap();
+    assert!(up.text.contains("# keep me"), "{:?}", up.text);
+    assert!(up.comments_kept);
+    assert_eq!(
+        parse(&up.text).unwrap(),
+        parse("schema_version: 1\nadded_a: yes\n").unwrap()
+    );
+    // The comments come first, on lines of their own; an empty file gets
+    // no blank line.
+    let migrated = "schema_version: 1\nadded_a: yes\n";
+    for (text, want) in [
+        ("# keep me\n", format!("# keep me\n{migrated}")),
+        ("# no newline", format!("# no newline\n{migrated}")),
+        ("", migrated.to_string()),
+    ] {
+        let up = l.upgrade_keeping(None, text, 2).unwrap().unwrap();
+        assert_eq!(up.text, want, "{text:?}");
+        assert!(up.comments_kept, "{text:?}");
     }
 }
 

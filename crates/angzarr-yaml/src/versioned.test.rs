@@ -175,7 +175,12 @@ fn every_failure_is_a_typed_error() {
         LoadProblem::Yaml(_)
     ));
     assert_eq!(problem("- schema_version: 3\n"), LoadProblem::NotAMapping);
-    assert_eq!(problem(""), LoadProblem::NotAMapping);
+    // An empty file is version 0, not a corrupt one (the config-versioning
+    // rule): it is no failure, and every step runs on it.
+    assert_eq!(
+        toy().load(None, "").unwrap(),
+        parse("schema_version: 3\nspeed: 1\n").unwrap()
+    );
     assert_eq!(
         problem("schema_version: two\n"),
         LoadProblem::BadVersion {
