@@ -11,7 +11,8 @@
 //! (no blank line between) indented no deeper than its dash, and comment lines
 //! directly below it indented deeper than its dash. Removing an item also
 //! removes one blank line where two would otherwise meet, or where one would
-//! be left between a key and its first item.
+//! be left between a key and its first item; emptying a sequence leaves
+//! the blank lines after it as they are.
 //!
 //! A mapping entry is edited the same way: [`Document::set`],
 //! [`Document::remove_key`] and [`Document::rename_key`] find the mapping by
@@ -793,7 +794,10 @@ fn splice(lines: &mut Vec<Raw>, m: &Meaningful, place: &Place, op: &Op, items: &
                 }
                 let before_blank = start > 0 && blank(&lines[start - 1].text);
                 let after_blank = start < lines.len() && blank(&lines[start].text);
-                if after_blank && (before_blank || index == 0) {
+                // A blank left under the key goes only if an item follows
+                // it; emptied, the sequence is `[]` on the key's line.
+                let first_left = index == 0 && !items.is_empty();
+                if after_blank && (before_blank || first_left) {
                     lines.remove(start);
                 } else if before_blank && index + 1 == spans.len() {
                     lines.remove(start - 1);

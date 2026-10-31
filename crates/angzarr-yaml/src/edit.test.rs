@@ -555,3 +555,49 @@ fn a_flow_sequence_split_across_lines_is_edited_whole() {
     d.push(&["ns", "more"], &s("x"), 2).unwrap();
     assert_eq!(d.text(), format!("{src}  more:\n    - x\n"));
 }
+
+/// Emptying a sequence leaves `[]` on its key's line and every byte after
+/// the item as written: no blank line meets another, and none is left
+/// between a key and an item, so none goes.
+#[test]
+fn emptying_a_sequence_keeps_the_blank_lines_after_it() {
+    for (src, path, want) in [
+        (
+            "packages:\n  - a\n\n\nafter: x\n",
+            &["packages"][..],
+            "packages: []\n\n\nafter: x\n",
+        ),
+        (
+            "packages:\n  - a\n  - b\n\n\nafter: x\n",
+            &["packages"][..],
+            "packages: []\n\n\nafter: x\n",
+        ),
+        (
+            "a:\n  b:\n    - x\n\n\n  c: y\n",
+            &["a", "b"][..],
+            "a:\n  b: []\n\n\n  c: y\n",
+        ),
+        (
+            "packages:\n  - a\n\nafter: x\n",
+            &["packages"][..],
+            "packages: []\n\nafter: x\n",
+        ),
+        // A blank between the key and the item meets those after it: one
+        // goes, as anywhere two meet.
+        (
+            "packages:\n\n  - a\n\n\nafter: x\n",
+            &["packages"][..],
+            "packages: []\n\n\nafter: x\n",
+        ),
+    ] {
+        let mut d = doc(src);
+        let mut v = d.value().clone();
+        for k in path {
+            v = v.get(k).unwrap().clone();
+        }
+        for _ in 0..v.as_seq().unwrap().len() {
+            d.remove(path, 0).unwrap();
+        }
+        assert_eq!(d.text(), want, "{src:?}");
+    }
+}
