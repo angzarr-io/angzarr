@@ -221,6 +221,7 @@ name = "angzarr-yaml"
 version = "0.1.0"
 dependencies = [
  "angzarr-diagnostic",
+ "serde",
 ]
 
 [[package]]

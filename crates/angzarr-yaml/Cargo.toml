@@ -12,10 +12,16 @@ publish = false
 # the workspace's [workspace.package] is sererr's (see the root Cargo.toml),
 # not this crate's, so nothing is inherited.
 
-# Zero dependencies beyond angzarr-diagnostic, and nothing from any program
-# that uses it.
+# No dependencies beyond angzarr-diagnostic and serde's traits (no derive),
+# and nothing from any program that uses it.
 [dependencies]
 angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+# The strict decode (src/decode.rs) is a serde Deserializer over Value.
+serde = { version = "1.0.228", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# The decode's tests derive their types.
+serde = { version = "1.0.228", features = ["derive"] }
 
 [lints.clippy]
 # Zero-width and other invisible characters in source: never intended.

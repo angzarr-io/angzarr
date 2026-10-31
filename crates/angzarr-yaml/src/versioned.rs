@@ -669,6 +669,19 @@ impl Loader {
         decode(&doc).or_else(|e| self.fail(source, LoadProblem::Decode(Report::of(&e))))
     }
 
+    /// Load `text` and decode the current-version tree into `T` with the
+    /// strict serde decode ([`crate::decode`]): an unknown key, a missing
+    /// one or a scalar `T` does not take is reported as
+    /// [`LoadProblem::Decode`], its [`crate::DecodeError`]'s code and args
+    /// kept.
+    pub fn load_into<T: serde::de::DeserializeOwned>(
+        &self,
+        source: Option<&str>,
+        text: &str,
+    ) -> Result<T, LoadError> {
+        self.load_as(source, text, |doc| crate::from_value::<T>(doc))
+    }
+
     /// The text of `text` migrated to the current version, written with
     /// [`crate::write`] at `flow_depth`, or None if it is already current.
     /// For tools that upgrade files on purpose: the written text has no

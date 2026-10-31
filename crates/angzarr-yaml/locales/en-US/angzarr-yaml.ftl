@@ -63,6 +63,21 @@ angzarr-yaml-chain-duplicate = { $kind } migrations: two steps from version { $f
 angzarr-yaml-chain-beyond-current = { $kind } migrations: a step from version { $from }, but the current version is { $current }
 angzarr-yaml-chain-gap = { $kind } migrations: no step from version { $from } to { $to }
 
+## Decoding a document into a type. $key_path is where, keys dotted and
+## items bracketed (empty for the root); $expected and $found are tokens
+## (string, u16, mapping, null, ...) or the text that was read.
+
+angzarr-yaml-decode-type = `{ $key_path }`: expected a { $expected }, found a { $found }
+angzarr-yaml-decode-scalar = `{ $key_path }`: "{ $found }" is not a { $expected }
+angzarr-yaml-decode-unknown-key = `{ $key_path }`: unknown key "{ $found }" (the keys are: { $expected })
+angzarr-yaml-decode-missing-key = `{ $key_path }`: the key "{ $expected }" is { $found ->
+    [absent] missing
+   *[other] { $found }
+}
+angzarr-yaml-decode-unknown-variant = `{ $key_path }`: unknown variant "{ $found }" (the variants are: { $expected })
+angzarr-yaml-decode-length = `{ $key_path }`: expected { $expected } items, found { $found }
+angzarr-yaml-decode-invalid = `{ $key_path }`: "{ $found }" is not a valid { $expected }: { $ext_err_txt }
+
 ## Editing a document in place. $path is the key path, written dotted, or
 ## "the root".
 

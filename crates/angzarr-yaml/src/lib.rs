@@ -43,16 +43,20 @@
 //! [`ParseProblem`]. Every error here is an [`angzarr_diagnostic::Diagnostic`],
 //! with its en-US messages in `locales/en-US/angzarr-yaml.ftl`.
 //!
-//! [`versioned`] loads documents stamped with a root `schema_version` (or a
+//! [`decode`] turns a [`Value`] into any serde type, strictly: scalars parsed
+//! only as the type asks, unknown keys refused, every failure a key path and a
+//! code. [`versioned`] loads documents stamped with a root `schema_version` (or a
 //! key the kind names), running registered migrations up to the version the
 //! code reads. [`edit`] changes
 //! one sequence item of a document in place and leaves every other byte,
 //! comments included, as written.
 
+pub mod decode;
 pub mod edit;
 mod error;
 pub mod versioned;
 
+pub use decode::{from_value, DecodeError};
 pub use error::{Error, ParseProblem};
 
 /// A YAML value.
@@ -854,6 +858,7 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
     );
     samples.extend(versioned::diagnostic_samples());
     samples.extend(edit::diagnostic_samples());
+    samples.extend(decode::diagnostic_samples());
     samples
 }
 
