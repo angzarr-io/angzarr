@@ -1,0 +1,24 @@
+# angzarr-proto: prost types for the domain-neutral io.angzarr.v1 protos.
+# Needs protoc on PATH (or PROTOC set) and the wasm32-unknown-unknown target.
+
+# Format check, build, lint and test natively, then the wasm32 build
+check: fmt-check build lint test wasm
+
+fmt:
+    cargo fmt
+
+fmt-check:
+    cargo fmt --check
+
+build:
+    cargo build --locked
+
+lint:
+    cargo clippy --locked --all-targets -- -D warnings
+
+test:
+    cargo test --locked
+
+# The crate must stay a dependency leaf that builds for the browser
+wasm:
+    cargo build --locked --target wasm32-unknown-unknown

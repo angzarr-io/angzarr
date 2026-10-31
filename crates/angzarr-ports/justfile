@@ -1,0 +1,114 @@
+# angzarr-ports: the shared storage contract and its conformance suite.
+# Needs protoc on PATH (or PROTOC set, for angzarr-proto) and the
+# wasm32-unknown-unknown target.
+
+# Format check, build, lint and test natively, then the wasm32 builds and
+# the wasm32 run of the suite on a store that is not Send
+check: fmt-check build lint test wasm wasm-test
+
+# The wasm test runner, pinned to the wasm-bindgen in Cargo.lock (the CLI
+# and the library must match exactly). Installs into ~/.cargo/bin.
+WASM_BINDGEN := "0.2.129"
+
+# Install the tools `check` needs beyond rustup's: wasm-bindgen-test-runner
+tools:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    have="$(wasm-bindgen-test-runner --version 2>/dev/null | awk '{print $2}' || true)"
+    if [ "$have" != "{{WASM_BINDGEN}}" ]; then
+        cargo install --locked wasm-bindgen-cli --version {{WASM_BINDGEN}}
+    fi
+    locked="$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')"
+    [ "$locked" = "{{WASM_BINDGEN}}" ] || { echo "Cargo.lock has wasm-bindgen $locked; WASM_BINDGEN is {{WASM_BINDGEN}}: bump them together" >&2; exit 1; }
+
+fmt:
+    cargo fmt
+
+fmt-check:
+    cargo fmt --check
+
+build:
+    cargo build --locked --all-features
+
+lint:
+    cargo clippy --locked --all-targets --all-features -- -D warnings
+
+# The tests are the suite run against the reference backend: they need it
+test:
+    cargo test --locked --all-features
+
+# The contract must build for the browser, suite and memory store included,
+# and so must the suite's run on a store that is not Send (tests/wasm.rs).
+# Running the wasm tests needs wasm-bindgen-test-runner: `just wasm-test`.
+wasm:
+    cargo build --locked --target wasm32-unknown-unknown
+    cargo build --locked --target wasm32-unknown-unknown --all-features
+    cargo test --locked --target wasm32-unknown-unknown --all-features --no-run
+
+# Run the wasm tests: the suite on a store that is not Send (`just tools`
+# installs the runner). Needs node on PATH.
+wasm-test:
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test --locked --target wasm32-unknown-unknown --all-features --test wasm
+
+# Mutation kill-rate threshold, percent, over viable mutants (caught or timed
+# out = killed; unviable mutants count neither way). The full pass killed
+# 271/284 (95%) on 2026-10-29; 90 is the org's bar.
+MUTATION_THRESHOLD := "90"
+
+# Mutation-test the whole crate, judged by MUTATION_THRESHOLD: the full pass.
+# mutants.out is target/mutants/mutants.out.
+mutation-test:
+    @just --justfile '{{justfile_directory()}}/justfile' _mutation target/mutants
+
+# Mutation-test only the lines the diff PATCH changes (paths relative to this
+# crate, a/ and b/ prefixes; this tree's lines on the b side), judged the same
+# way, in place: `mutation-push` (the repository's justfile, by hand) runs it
+# in a throwaway tree of the pushed commit. Exits 4 when the tests
+# fail unmutated (cargo-mutants' baseline), so no mutant can be judged.
+mutation-diff PATCH:
+    @just --justfile '{{justfile_directory()}}/justfile' _mutation target/mutants-push '{{PATCH}}' --in-place
+
+[positional-arguments]
+_mutation out patch="" *flags:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{justfile_directory()}}'
+    out=$1 patch=${2:-}
+    shift 2 || shift $#
+    if ! cargo mutants --version >/dev/null 2>&1; then
+        echo "FAIL mutation: cargo-mutants is not installed; the gate cannot pass by not running." >&2
+        echo "Install it: cargo install cargo-mutants --locked" >&2
+        exit 1
+    fi
+    scope=()
+    [ -n "$patch" ] && scope=(--in-diff "$patch")
+    rm -rf "$out"
+    mkdir -p "$out"
+    rc=0
+    cargo mutants "${scope[@]}" "$@" --all-features --timeout 120 --output "$out" --colors never \
+        > "$out/cargo-mutants.log" 2>&1 || rc=$?
+    case "$rc" in
+        0|2|3) ;;
+        4) echo "FAIL mutation: the tests fail unmutated (cargo-mutants baseline; log: $out/cargo-mutants.log)" >&2; exit 4 ;;
+        *) echo "FAIL mutation: cargo mutants failed before a verdict (exit $rc; log: $out/cargo-mutants.log)" >&2; exit 1 ;;
+    esac
+    outcomes="$out/mutants.out/outcomes.json"
+    counts=$(jq -r '[.outcomes[] | select(.scenario | type == "object") | .summary]
+        | "\(map(select(. == "CaughtMutant" or . == "Timeout")) | length) \(map(select(. == "MissedMutant")) | length) \(map(select(. == "Unviable")) | length)"' \
+        "$outcomes" 2>/dev/null || echo "0 0 0")
+    read -r killed missed unviable <<< "$counts"
+    viable=$((killed + missed))
+    if [ "$viable" -eq 0 ]; then
+        echo "ok   mutation (no viable mutants in scope; $unviable unviable)"
+        exit 0
+    fi
+    min={{MUTATION_THRESHOLD}}
+    rate=$((killed * 100 / viable))
+    if [ $((killed * 100)) -ge $((min * viable)) ]; then
+        echo "ok   mutation: angzarr-ports $killed/$viable killed ($rate%), threshold $min%; $unviable unviable, not counted"
+        exit 0
+    fi
+    echo "FAIL mutation: angzarr-ports $killed/$viable killed ($rate%), below the $min% threshold (log: $out/cargo-mutants.log); surviving mutants:" >&2
+    sed 's/^/  /' "$out/mutants.out/missed.txt" >&2
+    echo "Add or sharpen the test that would kill each survivor, commit it, and push again." >&2
+    exit 1

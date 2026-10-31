@@ -1,0 +1,39 @@
+[package]
+name = "angzarr-ports"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "angzarr's shared storage contract: the event, snapshot and position stores, the unit of work, their errors, and the conformance suite every backend runs"
+repository = "https://github.com/angzarr-io/angzarr-project"
+publish = false
+
+# Standalone: angzarr-project has no Cargo workspace of its own.
+[workspace]
+
+[features]
+# The conformance suite: `angzarr_ports::contract` and `store_contract!`.
+# A backend enables it for its own tests (under dev-dependencies).
+contract = []
+# `memory::MemoryStore`: a real backend in memory, held to the whole suite.
+memory = []
+
+[dependencies]
+# The wire types the ports speak (Cover, EventPage, EventRef, Snapshot),
+# and `uuid` through its re-export. (The withdrawn Edition and
+# CreateEditionRequest live in src/pending_editions.rs until the editions
+# rework.)
+angzarr-proto = { path = "../angzarr-proto" }
+# `Timestamp`, as angzarr-proto's messages hold it.
+prost-types = "0.14"
+# Decoding a fork's `EditionForked` (a framework event) for `ListEditions`.
+prost = "0.14"
+# Nothing else: no async runtime, no proc macro. The traits use native
+# return-position `impl Future`; the dyn adapter boxes with std alone.
+
+# The tests' runtimes only: the suite itself is runtime-agnostic.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+# The browser build of the suite (tests/wasm.rs): a store that is not Send.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "=0.3.79"

@@ -1,0 +1,23 @@
+[package]
+name = "angzarr-proto"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "prost types for angzarr's domain-neutral wire contract (io.angzarr.v1 types, options, upcaster and edition-admin messages, reason keys); no services, no tonic"
+repository = "https://github.com/angzarr-io/angzarr-project"
+publish = false
+
+# Standalone: angzarr-project has no Cargo workspace of its own.
+[workspace]
+
+[dependencies]
+# `bytes` fields map to bytes::Bytes (cheap clones, Hash/Eq); wasm32-safe.
+bytes = "1"
+prost = "0.14"
+prost-types = "0.14"
+# UUID text form and v5 derivation for the generated `UUID` type. No default
+# features (no std, no RNG), so it stays wasm32-safe; `v5` adds sha1_smol.
+uuid = { version = "1", default-features = false, features = ["v5"] }
+
+[build-dependencies]
+prost-build = "0.14"
