@@ -106,7 +106,9 @@ fn the_owners_keys_are_these() {
             "HOST_REASON_NO_COMPONENTS_REGISTERED",
             "HOST_REASON_DESCRIPTOR_RULES_VERSION_MISMATCH",
             // Decision 14.55.
-            "HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN"
+            "HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN",
+            // Decision 14.59.
+            "HOST_REASON_HANDSHAKE_MALFORMED"
         ]
     );
     assert!(router().contains(&"ROUTER_REASON_DUPLICATE_COMPONENT"));
