@@ -458,39 +458,40 @@ fn lines(src: &str) -> Result<Vec<Line<'_>>, Error> {
         // A flow collection split across lines is one line: each line
         // break inside it a space, the comments cut off each line.
         let mut depth = open_flow(text);
-        if depth > 0 {
-            let mut joined = text.to_string();
-            while depth > 0 {
-                let Some(next) = raw.get(at) else { break };
-                let (next_no, l) = next.clone()?;
-                let s = scan(l, depth);
-                let piece = l[..s.cut].trim_end_matches(SPACE);
-                let content = piece.trim_start_matches(' ');
-                if content.starts_with('\t') {
-                    return err(next_no, ParseProblem::TabIndent);
-                }
-                if let Some(character) = content.chars().next().filter(|c| c.is_whitespace()) {
-                    return err(next_no, ParseProblem::NonAsciiIndent { character });
-                }
-                if piece == "---" || piece == "..." {
-                    return err(
-                        next_no,
-                        ParseProblem::DocumentMarker {
-                            marker: piece.to_string(),
-                        },
-                    );
-                }
-                if s.open_quote {
-                    return err(next_no, ParseProblem::UnterminatedQuote);
-                }
-                at += 1;
-                depth = s.depth;
-                if !content.is_empty() {
-                    joined.push(' ');
-                    joined.push_str(content);
-                    line.last = next_no;
-                }
+        let mut joined: Option<String> = None;
+        while depth > 0 {
+            let Some(next) = raw.get(at) else { break };
+            let (next_no, l) = next.clone()?;
+            let s = scan(l, depth);
+            let piece = l[..s.cut].trim_end_matches(SPACE);
+            let content = piece.trim_start_matches(' ');
+            if content.starts_with('\t') {
+                return err(next_no, ParseProblem::TabIndent);
             }
+            if let Some(character) = content.chars().next().filter(|c| c.is_whitespace()) {
+                return err(next_no, ParseProblem::NonAsciiIndent { character });
+            }
+            if piece == "---" || piece == "..." {
+                return err(
+                    next_no,
+                    ParseProblem::DocumentMarker {
+                        marker: piece.to_string(),
+                    },
+                );
+            }
+            if s.open_quote {
+                return err(next_no, ParseProblem::UnterminatedQuote);
+            }
+            at += 1;
+            depth = s.depth;
+            if !content.is_empty() {
+                let joined = joined.get_or_insert_with(|| text.to_string());
+                joined.push(' ');
+                joined.push_str(content);
+                line.last = next_no;
+            }
+        }
+        if let Some(joined) = joined {
             line.text = Cow::Owned(joined);
         }
         if let Some((h, parent)) = block_header(&line.text, indent) {
