@@ -453,7 +453,7 @@ check-proto-submodule:
     head=$(git -C "$sm" rev-parse HEAD 2>/dev/null) || { echo "FAIL check-proto-submodule: $sm is not checked out (git submodule update --init $sm)" >&2; exit 1; }
     [ "$head" = "$pinned" ] || { echo "FAIL check-proto-submodule: $sm is at $head, HEAD pins $pinned (git submodule update $sm)" >&2; exit 1; }
     [ -f "$sm/proto/io/angzarr/v1/types.proto" ] || { echo "FAIL check-proto-submodule: $sm@${pinned:0:12} has no proto/io/angzarr/v1/types.proto" >&2; exit 1; }
-    clash=$(git -C "$sm" ls-files -z -- 'Cargo.toml' '*/Cargo.toml' \
+    clash=$(cd "$sm" && git ls-files -z -- 'Cargo.toml' '*/Cargo.toml' \
         | xargs -0 -r grep -lE '^name[[:space:]]*=[[:space:]]*"angzarr-(proto|ports)"' || true)
     if [ -n "$clash" ] || [ -n "$(git -C "$sm" ls-files -- rust)" ]; then
         echo "FAIL check-proto-submodule: $sm@${pinned:0:12} still carries rust/ or a package named angzarr-proto or angzarr-ports:" >&2
