@@ -144,6 +144,29 @@ fn every() -> Vec<(StoreError, &'static str, Recovery)> {
             "angzarr-ports-store-edition-already-forked",
             Invalid,
         ),
+        (
+            StoreError::NewerThanBuild {
+                applied: 6,
+                build: 5,
+            },
+            "angzarr-ports-store-newer-than-build",
+            Invalid,
+        ),
+        (
+            StoreError::Unmigrated {
+                applied: 4,
+                build: 5,
+            },
+            "angzarr-ports-store-unmigrated",
+            Invalid,
+        ),
+        (
+            StoreError::BackupExists {
+                target: "/p/state.db.backup".to_string(),
+            },
+            "angzarr-ports-store-backup-exists",
+            Invalid,
+        ),
     ]
 }
 
@@ -193,6 +216,29 @@ fn args_carry_the_data_by_name() {
         vec![("cause", Arg::Cause(io()))]
     );
     assert_eq!(StoreError::EditionNameRequired.args(), vec![]);
+    assert_eq!(
+        StoreError::NewerThanBuild {
+            applied: 6,
+            build: 5
+        }
+        .to_string(),
+        "angzarr-ports-store-newer-than-build applied=6 build=5"
+    );
+    assert_eq!(
+        StoreError::Unmigrated {
+            applied: 4,
+            build: 5
+        }
+        .to_string(),
+        "angzarr-ports-store-unmigrated applied=4 build=5"
+    );
+    assert_eq!(
+        StoreError::BackupExists {
+            target: "/p/state.db.backup".to_string()
+        }
+        .args(),
+        vec![("target", Arg::Str("/p/state.db.backup".to_string()))]
+    );
 }
 
 /// 14.37: a store error's display is its code, then its args, never

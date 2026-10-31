@@ -138,13 +138,47 @@
 //!   position, is not pinned.
 //! - **FLAG(E3') `read_by_correlation` in an edition** answers an uncreated
 //!   stream's pages under the edition's cover.
+//!
+//! # Proposed, RED, for the owner's review (2026-10-31)
+//!
+//! The `migrations` and `migration_levels` sections: opt-in
+//! [`Migrations`](angzarr_ports::Migrations) (where the schema stands,
+//! applying what is pending) and [`Backup`](angzarr_ports::Backup) (a copy
+//! as one moment, never overwriting), store-agnostic, so a runtime migrates
+//! and backs up its stores without knowing their backend (the owner,
+//! 2026-10-31: "angzarr store sqlite needs to be abstracted"). The
+//! MemoryStore run below is `#[ignore]`d while red: `cargo test
+//! --all-features --test contract -- --ignored migrations` shows it.
+//!
+//! - **FLAG(M1) Where opening ends and the port begins.** Opening stays the
+//!   adapter's. An adapter whose read open refuses a store not current
+//!   gives a MAINTENANCE open of its own, at any standing, migrating
+//!   nothing, implementing `Migrations` and `Backup`; the suite reaches it
+//!   through a fixture (`contract::MigrationFixture`), which also opens a
+//!   store as the adapter's readers do. Not proposed: a port for opening.
+//! - **FLAG(M2) A level is a number,** the highest migration applied or
+//!   known (0: none); `Pending(n)` counts what is missing. Proposed over an
+//!   opaque version, so a refusal names both levels as data.
+//! - **FLAG(M3) The refusals are the ports' own codes:**
+//!   `NewerThanBuild { applied, build }`, `Unmigrated { applied, build }`
+//!   (the readers' open on a store with migrations pending) and
+//!   `BackupExists { target }`, so a runtime can name its migrate command
+//!   without knowing the backend. A migration that failed part way stays
+//!   the adapter's own cause under `Unavailable`, and the suite does not
+//!   pin it (a fixture cannot make one agnostically).
+//! - **FLAG(M4) Does a writer's open still migrate?** SQLite's `open`
+//!   migrates as it opens; with an explicit `migrate`, it could refuse a
+//!   store not current as the read open does. Not pinned here.
+//! - **FLAG(M5) No dyn twins yet** (`DynMigrations`, `DynBackup`): added
+//!   when a caller holds them behind `dyn`.
 
 #![cfg(not(target_arch = "wasm32"))]
 
 #[cfg(not(all(feature = "contract", feature = "memory")))]
 compile_error!("the suite runs on MemoryStore: run `just test` (every feature)");
 
-use angzarr_ports::memory::MemoryStore;
+use angzarr_ports::memory::{BackupSlot, MemoryStore};
+use angzarr_ports::{EventStore, StoreError};
 
 fn pair() -> (MemoryStore, MemoryStore) {
     let a = MemoryStore::new();
@@ -224,4 +258,76 @@ mod editions_outbox {
 mod outbox_watch {
     use super::*;
     angzarr_ports::store_contract!(outbox_watch, #[tokio::test], MemoryStore::new());
+}
+
+/// The migrations sections' fixture on `MemoryStore`: it has no schema, so
+/// every store is current; a backup target is a [`BackupSlot`].
+struct MemoryMigrations;
+
+impl angzarr_ports::contract::MigrationFixture for MemoryMigrations {
+    type Handle = MemoryStore;
+    type Target = BackupSlot;
+    type Store = MemoryStore;
+
+    async fn current(&mut self) -> MemoryStore {
+        let store = MemoryStore::new();
+        let (stream, pages) = angzarr_ports::contract::migration_content();
+        angzarr_ports::contract::append(&store, stream, 0, &pages)
+            .await
+            .unwrap();
+        store
+    }
+
+    fn vacant(&mut self) -> BackupSlot {
+        BackupSlot::new()
+    }
+
+    async fn occupied(&mut self) -> BackupSlot {
+        let occupant = MemoryStore::new();
+        let (stream, pages) = occupant_content();
+        angzarr_ports::contract::append(&occupant, stream, 0, &pages)
+            .await
+            .unwrap();
+        BackupSlot::holding(occupant)
+    }
+
+    async fn occupied_intact(&mut self, target: &BackupSlot) -> bool {
+        let Some(store) = target.store() else {
+            return false;
+        };
+        let (stream, pages) = occupant_content();
+        let (other, _) = angzarr_ports::contract::migration_content();
+        let theirs = store.read(stream, 0, None).await.map(|s| s.pages);
+        let ours = store.read(other, 0, None).await.map(|s| s.pages);
+        theirs == Ok(pages) && ours == Ok(vec![])
+    }
+
+    async fn open_reading(&mut self, handle: &MemoryStore) -> Result<MemoryStore, StoreError> {
+        Ok(handle.clone())
+    }
+
+    async fn open_backup(&mut self, target: &BackupSlot) -> MemoryStore {
+        target.store().expect("a backup is in the slot")
+    }
+}
+
+/// What an occupied slot holds: no backup of the fixture's stores.
+fn occupant_content() -> (
+    angzarr_ports::StreamRef<'static>,
+    Vec<angzarr_ports::angzarr_proto::v1::EventPage>,
+) {
+    (
+        angzarr_ports::contract::main_stream("occupant", 9),
+        vec![angzarr_ports::contract::page(0, 9)],
+    )
+}
+
+mod migrations {
+    use super::*;
+    angzarr_ports::store_contract!(
+        migrations,
+        #[tokio::test]
+        #[ignore = "red: the Migrations and Backup ports await the owner's review (2026-10-31)"],
+        MemoryMigrations
+    );
 }

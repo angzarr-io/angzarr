@@ -33,9 +33,10 @@ use prost_types::Timestamp;
 
 use crate::error::StoreError;
 use crate::store::{
-    Append, ChangeToken, Editions, EventStore, ListStreams, Outbox, OutboxEntry, PositionStore,
-    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write,
-    Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
+    Append, Backup, ChangeToken, Editions, EventStore, ListStreams, MigrationState, Migrations,
+    Outbox, OutboxEntry, PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit,
+    ReadUntilTime, SnapshotStore, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
+    EDITION_DELETED_TYPE_URL,
 };
 use crate::stream::{PositionKey, Slice, StreamRef};
 
@@ -566,6 +567,58 @@ impl Watch for MemoryStore {
     /// nothing was committed between.
     async fn change_token(&self) -> Result<ChangeToken, StoreError> {
         Ok(ChangeToken::new([self.data().commits, 0]))
+    }
+}
+
+/// Where a [`MemoryStore`] is backed up: a slot holding at most one copy.
+/// Clones share the slot.
+#[derive(Clone, Default)]
+pub struct BackupSlot {
+    copy: Arc<Mutex<Option<MemoryStore>>>,
+}
+
+impl BackupSlot {
+    /// An empty slot.
+    pub fn new() -> BackupSlot {
+        BackupSlot::default()
+    }
+
+    /// A slot already holding `store`.
+    pub fn holding(store: MemoryStore) -> BackupSlot {
+        BackupSlot {
+            copy: Arc::new(Mutex::new(Some(store))),
+        }
+    }
+
+    /// The store the slot holds, if any: a handle on it.
+    pub fn store(&self) -> Option<MemoryStore> {
+        self.copy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+/// A store in memory has no schema: it stands current, at level 0, and
+/// migrating it does nothing.
+impl Migrations for MemoryStore {
+    async fn migration_state(&self) -> Result<MigrationState, StoreError> {
+        todo!("red: the Migrations port awaits the owner's review")
+    }
+
+    async fn migrate(&self) -> Result<MigrationState, StoreError> {
+        todo!("red: the Migrations port awaits the owner's review")
+    }
+}
+
+/// A backup is a copy of the data as it stands, in a slot of its own,
+/// sharing nothing with the store after.
+impl Backup for MemoryStore {
+    type Target = BackupSlot;
+
+    async fn backup(&self, target: &BackupSlot) -> Result<(), StoreError> {
+        let _ = target;
+        todo!("red: the Backup port awaits the owner's review")
     }
 }
 

@@ -28,6 +28,8 @@
 //! | [`Watch`] | a cheap "anything committed?" | opt-in |
 //! | [`ReadUntilTime`], [`ReadByCorrelation`], [`ListStreams`] | core's queries | opt-in |
 //! | [`Outbox`] | the transactional outbox's relay side, kind-agnostic (entries are written in a [`Write`]) | opt-in |
+//! | [`Migrations`] | where the store's schema stands against the build, and applying what is pending, only when asked | opt-in, on a maintenance handle |
+//! | [`Backup`] | a copy of the store as one moment, never overwriting | opt-in, on a maintenance handle |
 //!
 //! # Send, wasm, dyn
 //!
@@ -68,9 +70,10 @@ pub use dyn_store::{
 pub use error::{Arg, Cause, Recovery, StoreError};
 pub use send::{MaybeSend, MaybeSync};
 pub use store::{
-    Append, ChangeToken, Editions, EventStore, ListStreams, Outbox, OutboxEntry, PositionStore,
-    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Store, Watch,
-    Write, Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
+    Append, Backup, ChangeToken, Editions, EventStore, ListStreams, MigrationState, Migrations,
+    Outbox, OutboxEntry, PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit,
+    ReadUntilTime, SnapshotStore, Standing, Store, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
+    EDITION_DELETED_TYPE_URL,
 };
 pub use stream::{Head, PositionKey, Slice, StreamRef};
 

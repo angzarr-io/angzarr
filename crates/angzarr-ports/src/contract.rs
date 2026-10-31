@@ -40,6 +40,17 @@
 //! | `list_streams` | [`ListStreams`] | a store |
 //! | `outbox` | [`Outbox`] | a store |
 //! | `outbox_watch` | [`Outbox`], [`Watch`] | a store |
+//! | `migrations` | [`Migrations`], [`Backup`] | a [`MigrationFixture`] |
+//! | `migration_levels` | [`Migrations`], [`Backup`] | a [`LevelFixture`] |
+//!
+//! The migrations sections take a fixture, not a store: opening is the
+//! adapter's (a path, a URL), and a store at another build's level is one
+//! only the adapter can make. The fixture makes stores at a standing, each
+//! holding [`migration_content`], on the adapter's maintenance handles,
+//! and opens them as the adapter's readers do. A backend with no schema
+//! (`MemoryStore`) runs `migrations` alone: it is always current.
+
+use std::future::Future;
 
 use angzarr_proto::ids::fact_command_id;
 use angzarr_proto::uuid::Uuid;
@@ -53,9 +64,9 @@ use prost_types::{Any, Timestamp};
 
 use crate::error::StoreError;
 use crate::store::{
-    Append, Editions, EventStore, ListStreams, Outbox, OutboxEntry, Purge, ReadByCorrelation,
-    ReadStore, ReadUnit, ReadUntilTime, Store, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
-    EDITION_DELETED_TYPE_URL,
+    Append, Backup, Editions, EventStore, ListStreams, MigrationState, Migrations, Outbox,
+    OutboxEntry, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Standing, Store,
+    Watch, Write, Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
 use crate::stream::{PositionKey, StreamRef};
 
@@ -2451,6 +2462,315 @@ where
     );
 }
 
+// -------------------------------------------------------------- migrations
+
+/// What every store a [`MigrationFixture`] makes holds: one stream and its
+/// events, written by whichever build made the store.
+pub fn migration_content() -> (StreamRef<'static>, Vec<EventPage>) {
+    (main_stream("migrated", 1), vec![page(0, 1), page(1, 2)])
+}
+
+/// What a backend gives the `migrations` section. Opening is the
+/// adapter's, so the fixture does it: it makes stores, each holding
+/// [`migration_content`], and hands them over on the adapter's
+/// MAINTENANCE handle, which opens a store at any standing and migrates
+/// nothing; and it opens a store as the adapter's readers do, an open that
+/// serves only a current store.
+pub trait MigrationFixture {
+    /// A maintenance handle on one store.
+    type Handle: Migrations + Backup<Target = Self::Target>;
+    /// Where a backup is written, as the adapter names it.
+    type Target;
+    /// The store as the adapter's readers open it.
+    type Store: Store;
+
+    /// A store this build made, current, on a maintenance handle.
+    fn current(&mut self) -> impl Future<Output = Self::Handle>;
+
+    /// A backup target nothing is at.
+    fn vacant(&mut self) -> Self::Target;
+
+    /// A backup target something is already at: something that is no
+    /// backup.
+    fn occupied(&mut self) -> impl Future<Output = Self::Target>;
+
+    /// Whether what [`occupied`](MigrationFixture::occupied) put at `target`
+    /// is there as it was.
+    fn occupied_intact(&mut self, target: &Self::Target) -> impl Future<Output = bool>;
+
+    /// The store `handle` is on, opened as the adapter's readers open it:
+    /// served only when current, and otherwise refused,
+    /// [`StoreError::Unmigrated`] or [`StoreError::NewerThanBuild`].
+    fn open_reading(
+        &mut self,
+        handle: &Self::Handle,
+    ) -> impl Future<Output = Result<Self::Store, StoreError>>;
+
+    /// The backup at `target`, on a maintenance handle.
+    fn open_backup(&mut self, target: &Self::Target) -> impl Future<Output = Self::Handle>;
+}
+
+/// What a backend with a schema adds for the `migration_levels` section:
+/// stores another build made.
+pub trait LevelFixture: MigrationFixture {
+    /// A store an older build made: at least one of this build's
+    /// migrations pending.
+    fn older(&mut self) -> impl Future<Output = Self::Handle>;
+
+    /// A store a newer build migrated: a migration beyond this build's
+    /// highest applied.
+    fn newer(&mut self) -> impl Future<Output = Self::Handle>;
+}
+
+/// Where `handle`'s store stands, which must be answered.
+async fn standing_of<M: Migrations>(handle: &M, what: &str) -> MigrationState {
+    match handle.migration_state().await {
+        Ok(state) => state,
+        Err(e) => panic!("{what}: where the store stands is not answered: {e}"),
+    }
+}
+
+/// That `store` holds [`migration_content`], as written.
+async fn holds_the_content<S: Store>(store: &S, what: &str) {
+    let (stream, pages) = migration_content();
+    let read = store.read(stream, 0, None).await;
+    assert_eq!(
+        read.map(|slice| slice.pages),
+        Ok(pages),
+        "{what}: the stream's events, as written"
+    );
+}
+
+/// A current store stands current at the build's level; migrating it
+/// changes nothing and answers as it stands; and the readers' open serves
+/// it.
+pub async fn a_current_store_stands_current_and_migrating_it_changes_nothing<F>(mut fixture: F)
+where
+    F: MigrationFixture,
+{
+    let handle = fixture.current().await;
+    let state = standing_of(&handle, "a current store").await;
+    assert_eq!(state.standing, Standing::Current, "{state:?}");
+    assert_eq!(
+        state.applied, state.build,
+        "current is at the build's level"
+    );
+    assert_eq!(
+        handle.migrate().await,
+        Ok(state),
+        "migrating a current store answers as it stands"
+    );
+    assert_eq!(
+        standing_of(&handle, "migrated again").await,
+        state,
+        "and changes nothing"
+    );
+    match fixture.open_reading(&handle).await {
+        Ok(store) => holds_the_content(&store, "a current store").await,
+        Err(e) => panic!("the readers' open refuses a current store: {e}"),
+    }
+}
+
+/// A backup is the store as it stood: at its level, holding its events;
+/// the store is left as it was.
+pub async fn a_backup_is_the_store_as_it_stood<F>(mut fixture: F)
+where
+    F: MigrationFixture,
+{
+    let handle = fixture.current().await;
+    let before = standing_of(&handle, "the store").await;
+    let target = fixture.vacant();
+    assert_eq!(
+        handle.backup(&target).await,
+        Ok(()),
+        "a backup to a vacant target"
+    );
+    assert_eq!(
+        standing_of(&handle, "the store, backed up").await,
+        before,
+        "the store is left as it was"
+    );
+    let copy = fixture.open_backup(&target).await;
+    assert_eq!(
+        standing_of(&copy, "the backup").await,
+        before,
+        "the backup stands where the store stood"
+    );
+    match fixture.open_reading(&copy).await {
+        Ok(store) => holds_the_content(&store, "the backup").await,
+        Err(e) => panic!("the readers' open refuses a current store's backup: {e}"),
+    }
+}
+
+/// A backup never overwrites: something already at its target, a backup
+/// or anything else, refuses it, and is left as it was.
+pub async fn a_backup_never_overwrites<F>(mut fixture: F)
+where
+    F: MigrationFixture,
+{
+    let handle = fixture.current().await;
+    let occupied = fixture.occupied().await;
+    let refused = handle.backup(&occupied).await;
+    assert!(
+        matches!(refused, Err(StoreError::BackupExists { .. })),
+        "a backup over something already there: {refused:?}"
+    );
+    assert!(
+        fixture.occupied_intact(&occupied).await,
+        "what was there is left as it was"
+    );
+    let target = fixture.vacant();
+    assert_eq!(handle.backup(&target).await, Ok(()), "the first backup");
+    let again = handle.backup(&target).await;
+    assert!(
+        matches!(again, Err(StoreError::BackupExists { .. })),
+        "a second backup to one target: {again:?}"
+    );
+    let copy = fixture.open_backup(&target).await;
+    match fixture.open_reading(&copy).await {
+        Ok(store) => holds_the_content(&store, "the first backup, kept").await,
+        Err(e) => panic!("the first backup does not open: {e}"),
+    }
+}
+
+/// An older store stands pending, below the build's level; saying so
+/// changes nothing; and the readers' open refuses it, naming both levels,
+/// migrating nothing.
+pub async fn an_older_store_stands_pending_and_reading_where_it_stands_changes_nothing<F>(
+    mut fixture: F,
+) where
+    F: LevelFixture,
+{
+    let handle = fixture.older().await;
+    let state = standing_of(&handle, "an older store").await;
+    assert!(
+        matches!(state.standing, Standing::Pending(n) if n >= 1),
+        "an older store has migrations pending: {state:?}"
+    );
+    assert!(state.applied < state.build, "{state:?}");
+    assert_eq!(
+        standing_of(&handle, "asked again").await,
+        state,
+        "asking where it stands changes nothing"
+    );
+    let read = fixture.open_reading(&handle).await.map(drop);
+    assert_eq!(
+        read,
+        Err(StoreError::Unmigrated {
+            applied: state.applied,
+            build: state.build,
+        }),
+        "the readers' open refuses it, naming both levels"
+    );
+    assert_eq!(
+        standing_of(&handle, "after the refused open").await,
+        state,
+        "the refused open migrates nothing"
+    );
+}
+
+/// Migrating an older store applies what is pending, answers it current
+/// at the build's level, and keeps every event; the readers' open then
+/// serves it.
+pub async fn migrating_an_older_store_applies_what_is_pending_and_keeps_its_events<F>(
+    mut fixture: F,
+) where
+    F: LevelFixture,
+{
+    let handle = fixture.older().await;
+    let before = standing_of(&handle, "an older store").await;
+    let current = MigrationState {
+        applied: before.build,
+        build: before.build,
+        standing: Standing::Current,
+    };
+    assert_eq!(handle.migrate().await, Ok(current), "migrated");
+    assert_eq!(
+        standing_of(&handle, "migrated").await,
+        current,
+        "where it then stands"
+    );
+    match fixture.open_reading(&handle).await {
+        Ok(store) => holds_the_content(&store, "the migrated store").await,
+        Err(e) => panic!("the readers' open refuses the migrated store: {e}"),
+    }
+}
+
+/// A newer store stands newer, beyond the build's level; it is neither
+/// migrated nor read, each refused naming both levels, and nothing in it
+/// changes.
+pub async fn a_newer_store_stands_newer_and_is_neither_migrated_nor_read<F>(mut fixture: F)
+where
+    F: LevelFixture,
+{
+    let handle = fixture.newer().await;
+    let state = standing_of(&handle, "a newer store").await;
+    assert_eq!(state.standing, Standing::Newer, "{state:?}");
+    assert!(state.applied > state.build, "{state:?}");
+    let refusal = StoreError::NewerThanBuild {
+        applied: state.applied,
+        build: state.build,
+    };
+    assert_eq!(handle.migrate().await, Err(refusal.clone()), "migrating it");
+    assert_eq!(
+        standing_of(&handle, "after the refused migration").await,
+        state,
+        "nothing in it changes"
+    );
+    let read = fixture.open_reading(&handle).await.map(drop);
+    assert_eq!(read, Err(refusal), "the readers' open");
+}
+
+/// A backup of an older store keeps the store's level, and is a copy
+/// apart from it: migrating the store leaves the backup where it stood,
+/// and the backup migrates on its own to hold every event.
+pub async fn a_backup_of_an_older_store_keeps_its_level_and_migrates_apart<F>(mut fixture: F)
+where
+    F: LevelFixture,
+{
+    let handle = fixture.older().await;
+    let before = standing_of(&handle, "an older store").await;
+    let target = fixture.vacant();
+    assert_eq!(handle.backup(&target).await, Ok(()), "a backup of it");
+    let copy = fixture.open_backup(&target).await;
+    assert_eq!(
+        standing_of(&copy, "the backup").await,
+        before,
+        "the backup stands at the store's level, migrated by nothing"
+    );
+    handle.migrate().await.expect("the store migrates");
+    assert_eq!(
+        standing_of(&copy, "the backup, its store migrated").await,
+        before,
+        "migrating the store leaves its backup as it stood"
+    );
+    handle_migrates_and_holds_the_content(&mut fixture, &copy, "the backup").await;
+}
+
+/// That `handle`'s store migrates current and then holds
+/// [`migration_content`] through the readers' open.
+async fn handle_migrates_and_holds_the_content<F: MigrationFixture>(
+    fixture: &mut F,
+    handle: &F::Handle,
+    what: &str,
+) {
+    let migrated = handle.migrate().await;
+    assert!(
+        matches!(
+            migrated,
+            Ok(MigrationState {
+                standing: Standing::Current,
+                ..
+            })
+        ),
+        "{what} migrates: {migrated:?}"
+    );
+    match fixture.open_reading(handle).await {
+        Ok(store) => holds_the_content(&store, what).await,
+        Err(e) => panic!("{what}: the readers' open refuses it migrated: {e}"),
+    }
+}
+
 // ------------------------------------------------------------------- macro
 
 /// One test per check of a section, under the caller's test attribute (its
@@ -2553,6 +2873,21 @@ macro_rules! store_contract {
     (outbox_watch, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             an_outbox_write_changes_the_change_token,
+        );
+    };
+    (migrations, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            a_current_store_stands_current_and_migrating_it_changes_nothing,
+            a_backup_is_the_store_as_it_stood,
+            a_backup_never_overwrites,
+        );
+    };
+    (migration_levels, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            an_older_store_stands_pending_and_reading_where_it_stands_changes_nothing,
+            migrating_an_older_store_applies_what_is_pending_and_keeps_its_events,
+            a_newer_store_stands_newer_and_is_neither_migrated_nor_read,
+            a_backup_of_an_older_store_keeps_its_level_and_migrates_apart,
         );
     };
     ($(#[$t:meta])+, $f:expr) => {
