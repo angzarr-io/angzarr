@@ -1,7 +1,9 @@
-# The mutation full pass of crates/angzarr-ports (moved from angzarr-project,
-# whose weekly pass this replaces), weekly and by hand: `just mutation-test`
-# (its justfile) mutates the whole crate and judges the kill rate against
-# its MUTATION_THRESHOLD. No git hook runs mutation. angzarr-proto is
+# The mutation full pass of the shared crates: crates/angzarr-ports (moved
+# from angzarr-project, whose weekly pass this replaces), and
+# crates/angzarr-diagnostic and crates/angzarr-yaml (moved from
+# angzarr-embedded); weekly and by hand. Each crate's `just mutation-test`
+# (its justfile, through the root justfile's shared-mutation) mutates the
+# whole crate and judges the kill rate against its MUTATION_THRESHOLD. No git hook runs mutation. angzarr-proto is
 # generated code, not mutated. The crate needs protoc (angzarr-proto's
 # build.rs) and the angzarr-project submodule. The runner is throwaway, so
 # cargo-mutants' scratch copy cannot leak into a working checkout.
@@ -21,9 +23,14 @@ env:
   CARGO_TERM_COLOR: never
 
 jobs:
-  angzarr-ports:
-    name: angzarr-ports mutation full pass
+  # One job per crate, the same steps.
+  mutation:
+    name: ${{ matrix.crate }} mutation full pass
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crate: [angzarr-ports, angzarr-diagnostic, angzarr-yaml]
     # GitHub's cap for a hosted job; let the full pass finish rather than
     # cancel it mid-run.
     timeout-minutes: 360
@@ -51,12 +58,12 @@ jobs:
         run: cargo install cargo-mutants --locked
 
       - name: Mutation test (full pass)
-        run: just -f crates/angzarr-ports/justfile mutation-test
+        run: just -f crates/${{ matrix.crate }}/justfile mutation-test
 
       - name: cargo-mutants' log and surviving mutants
         if: always()
         run: |
-          for f in crates/angzarr-ports/target/mutants/cargo-mutants.log crates/angzarr-ports/target/mutants/mutants.out/missed.txt; do
+          for f in crates/${{ matrix.crate }}/target/mutants/cargo-mutants.log crates/${{ matrix.crate }}/target/mutants/mutants.out/missed.txt; do
             [ -f "$f" ] || continue
             echo "::group::$f"; cat "$f"; echo "::endgroup::"
           done
