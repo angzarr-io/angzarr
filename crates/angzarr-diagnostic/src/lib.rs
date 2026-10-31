@@ -37,6 +37,10 @@
 //! trait), and one that carries what another process answered (a
 //! [`Report`] of a child's code) holds the text it answers, freed with it.
 //!
+//! [`Recovery`] is what a holder of an error does about it (retry, tell
+//! the person, fix the request, call an operator): the one such type of
+//! angzarr's crates, kept beside the code, never encoded in it.
+//!
 //! [`code`]: Diagnostic::code
 //! [`args`]: Diagnostic::args
 
@@ -67,6 +71,30 @@ impl Diagnostic for std::convert::Infallible {
     fn args(&self) -> Vec<(&str, Arg)> {
         match *self {}
     }
+}
+
+/// What to do about a failure: decision 14.37's classes, as whoever holds
+/// the failure acts on it. The one recovery of angzarr's crates: a store's
+/// error (angzarr-ports' `StoreError::recovery`) and a runtime's alike,
+/// each mapping its own errors onto it. Beside the code, never in it: a
+/// code names the condition, its recovery says who must act.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Recovery {
+    /// Run it again, with the same identity, in a fresh unit of work: a
+    /// write that lost a race, a stale read to re-read and re-decide, a
+    /// dependency down for now (a store, a handler, a sidecar). Safe where
+    /// a retry starts at deduplication, so work that landed after all is
+    /// answered as a duplicate.
+    Retry,
+    /// The business said no, deliberately: the same request is refused the
+    /// same way. Tell the person who made it.
+    Business,
+    /// The request was malformed, or names what does not exist: the
+    /// caller's to fix.
+    Invalid,
+    /// A bug, damage or a misconfiguration: retrying will not help; an
+    /// operator must act.
+    Bug,
 }
 
 /// One argument to a message.

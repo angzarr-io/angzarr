@@ -231,18 +231,12 @@ impl StoreError {
     }
 }
 
-/// What a caller does about a [`StoreError`].
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Recovery {
-    /// Run again from the dedup lookup, in a fresh unit: a conflict, the
-    /// store unavailable.
-    Retry,
-    /// The request was malformed or names what does not exist. Fix it.
-    Invalid,
-    /// A bug or damage: a discontinuous append, an unreadable event. An
-    /// operator must act.
-    Bug,
-}
+/// What a caller does about a [`StoreError`]: angzarr's one recovery,
+/// angzarr-diagnostic's. A store error is never
+/// [`Business`](Recovery::Business): a conflict or the store unavailable is
+/// `Retry`, a malformed request or one naming what does not exist
+/// `Invalid`, a discontinuous append or an unreadable event `Bug`.
+pub use angzarr_diagnostic::Recovery;
 
 /// An adapter's own failure, captured as data so [`StoreError`] stays
 /// `Clone` and `Eq`: the adapter's stable code (its own crate's prefix,

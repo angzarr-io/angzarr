@@ -212,6 +212,17 @@ fn every_error_says_how_to_recover() {
     }
 }
 
+/// The recovery is angzarr's one, angzarr-diagnostic's, and no store
+/// error is the business's to refuse.
+#[test]
+fn the_recovery_is_angzarr_diagnostics() {
+    let one: angzarr_ports::angzarr_diagnostic::Recovery = Recovery::Retry;
+    assert_eq!(one, Recovery::Retry);
+    for (error, _, _) in every() {
+        assert_ne!(error.recovery(), Recovery::Business, "{error:?}");
+    }
+}
+
 /// Args carry data, never English: the numbers as numbers, the stream as
 /// its text form, a cause nested whole.
 #[test]
