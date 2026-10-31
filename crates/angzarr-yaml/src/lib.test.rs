@@ -775,3 +775,111 @@ fn the_catalog_has_a_message_for_every_code_with_exactly_its_args() {
         []
     );
 }
+
+/// Go-era configs split a flow sequence across lines, as YAML allows:
+/// a line break inside `[...]` or `{...}` is a space between items.
+#[test]
+fn a_flow_collection_may_span_lines() {
+    let seq = |items: &[&str]| Value::Seq(items.iter().map(|i| s(i)).collect());
+    for src in [
+        "tags: [a,\n       b]\n",
+        "tags: [a,\n  b\n]\n",
+        "tags: [\n  a,\n  b\n]\n",
+        "tags: [a,   # the first\n       b]  # the last\n",
+        "tags: [a,\n\n       b]\n",
+        "tags: [a,\n  # between\n       b]\n",
+        "tags: [a,\r\n       b]\r\n",
+    ] {
+        let want = Value::Map(vec![("tags".into(), seq(&["a", "b"]))]);
+        assert_eq!(parse(src), Ok(want), "{src:?}");
+    }
+    assert_eq!(
+        parse("stat: {reflex: 3,\n       will: 1}\nnext: x\n"),
+        Ok(Value::Map(vec![
+            (
+                "stat".into(),
+                Value::Map(vec![("reflex".into(), s("3")), ("will".into(), s("1"))])
+            ),
+            ("next".into(), s("x")),
+        ]))
+    );
+    assert_eq!(
+        parse("- [a,\n   [b,\n    c]]\n- d\n"),
+        Ok(Value::Seq(vec![
+            Value::Seq(vec![s("a"), seq(&["b", "c"])]),
+            s("d")
+        ]))
+    );
+    // Quotes and a `#` inside them carry across, and a quoted `[` opens
+    // nothing.
+    assert_eq!(
+        parse("t: [\"x # y\",\n    'it''s', \"[\"]\nu: '['\n"),
+        Ok(Value::Map(vec![
+            ("t".into(), seq(&["x # y", "it's", "["])),
+            ("u".into(), s("[")),
+        ]))
+    );
+    // A plain `[` inside a scalar opens nothing either.
+    assert_eq!(parse("a: x[y\nb: z\n").unwrap().get("b"), Some(&s("z")));
+}
+
+/// The strict subset's refusals hold inside a split collection, and one
+/// that never closes is refused on its first line.
+#[test]
+fn a_flow_collection_across_lines_keeps_the_refusals() {
+    for (src, line, problem) in [
+        ("a: [1,\n    2\n", 1, ParseProblem::ExpectedSeqSeparator),
+        (
+            "a: {b: 1,\n    c: 2\n",
+            1,
+            ParseProblem::ExpectedMapSeparator,
+        ),
+        (
+            "a: [1,\n---\n2]\n",
+            2,
+            ParseProblem::DocumentMarker {
+                marker: "---".into(),
+            },
+        ),
+        ("a: [1,\n    \"x\n", 2, ParseProblem::UnterminatedQuote),
+        ("a: [1,\n\t2]\n", 2, ParseProblem::TabIndent),
+    ] {
+        assert_eq!(parse(src), Err(Error { line, problem }), "{src:?}");
+    }
+    for src in [
+        "a: [1,\n    &x 2]\n",
+        "a: [1,\n    *x]\n",
+        "a: [1,\n    !t 2]\n",
+    ] {
+        assert_eq!(
+            parse(src).map_err(|e| e.problem),
+            parse(&src.replace(",\n   ", ",")).map_err(|e| e.problem),
+            "{src:?}"
+        );
+    }
+}
+
+/// A file shaped like Go taskloom's config testdata reads, and the writer
+/// keeps a collection on one line.
+#[test]
+fn a_go_era_config_with_split_flow_sequences_reads() {
+    let src = include_str!("../testdata/flow-split-across-lines.yaml");
+    let v = parse(src).unwrap();
+    let ns = v.get("tag_permits").unwrap().get("namespaces").unwrap();
+    assert_eq!(ns.get("area").unwrap().as_seq().unwrap().len(), 14);
+    assert_eq!(
+        ns.get("area").unwrap().as_seq().unwrap()[8],
+        s("integration")
+    );
+    assert_eq!(
+        ns.get("triage").unwrap().as_seq().unwrap().last(),
+        Some(&s("flaky"))
+    );
+    assert_eq!(ns.get("relates"), Some(&s("open")));
+    let written = write(&v, 3);
+    assert!(
+        written.contains("    triage: [security, data-loss, crashes, no-workaround, regression, silent-no-op, flaky]\n"),
+        "{written}"
+    );
+    assert_eq!(parse(&written), Ok(v));
+}

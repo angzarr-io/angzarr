@@ -569,3 +569,19 @@ fn rename_key_refuses_what_it_cannot_do_and_changes_nothing() {
         EditProblem::InsideFlow
     );
 }
+
+/// An entry whose flow value is split across lines is set or removed with
+/// all its lines.
+#[test]
+fn an_entry_split_across_lines_is_set_and_removed_whole() {
+    let src = "a: [x,\n    y]\nb: 1\n";
+    let mut d = doc(src);
+    d.set(&[], "a", &Value::Seq(vec![s("z")]), 1).unwrap();
+    assert_eq!(d.text(), "a: [z]\nb: 1\n");
+    let mut d = doc(src);
+    d.remove_key(&[], "a").unwrap();
+    assert_eq!(d.text(), "b: 1\n");
+    let mut d = doc(src);
+    d.set(&[], "b", &s("2"), 2).unwrap();
+    assert_eq!(d.text(), "a: [x,\n    y]\nb: 2\n");
+}

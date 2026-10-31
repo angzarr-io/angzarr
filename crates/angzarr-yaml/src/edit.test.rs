@@ -532,3 +532,26 @@ fn an_edit_whose_text_reads_back_wrong_is_refused() {
     assert_eq!(d.push(&["l"], &s("y"), 0), Err(unfaithful(&["l"])));
     assert_eq!(d.text(), text, "a refused edit changes nothing");
 }
+
+/// A flow sequence split across lines (Go-era configs have them) is edited
+/// whole, written back on its key's line; the lines around it stay.
+#[test]
+fn a_flow_sequence_split_across_lines_is_edited_whole() {
+    let src = "# Tags.\nns:\n  area: [a, b,   # first\n         c]\n  # next\n  other: open\n";
+    let mut d = doc(src);
+    d.push(&["ns", "area"], &s("d"), 2).unwrap();
+    assert_eq!(
+        d.text(),
+        "# Tags.\nns:\n  area: [a, b, c, d]   # first\n  # next\n  other: open\n"
+    );
+    let mut d = doc(src);
+    d.remove(&["ns", "area"], 0).unwrap();
+    assert_eq!(
+        d.text(),
+        "# Tags.\nns:\n  area: [b, c]   # first\n  # next\n  other: open\n"
+    );
+    // An edit elsewhere leaves the split lines as written.
+    let mut d = doc(src);
+    d.push(&["ns", "more"], &s("x"), 2).unwrap();
+    assert_eq!(d.text(), format!("{src}  more:\n    - x\n"));
+}

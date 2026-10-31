@@ -23,7 +23,8 @@
 //! A new item is written with [`crate::write`]'s layout at the sequence's own
 //! indent, `flow_depth` levels counted from the item. A flow sequence
 //! (`[a, b]`) stays on its line while every item is a scalar, and becomes a
-//! block otherwise. Removing the last item of a block sequence writes `[]`,
+//! block otherwise; one split across lines is written back on its key's
+//! line, keeping that line's comment. Removing the last item of a block sequence writes `[]`,
 //! so the value stays an empty sequence rather than becoming null.
 
 use std::fmt;
@@ -802,6 +803,9 @@ fn splice(lines: &mut Vec<Raw>, m: &Meaningful, place: &Place, op: &Op, items: &
         Place::Inline { key } => {
             let k = m.raw(*key);
             let indent = m.indent(*key);
+            // A flow sequence split across lines is written back on the
+            // key's line: its other lines go.
+            lines.drain(k + 1..=m.end(*key));
             let whole = Value::Seq(items.to_vec());
             match flow(&whole).filter(|t| !t.is_empty()) {
                 Some(text) => lines[k].text = rekey(&lines[k].text, &text),

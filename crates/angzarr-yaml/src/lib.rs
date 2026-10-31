@@ -3,7 +3,9 @@
 //!
 //! Supported: block mappings (`key: value`, `key:` then an indented block),
 //! block sequences (`- item`, including `- key: value` starting a mapping),
-//! flow sequences `[a, b]` and flow mappings `{a: 1, b: 2}`, plain and quoted
+//! flow sequences `[a, b]` and flow mappings `{a: 1, b: 2}` (on one line or
+//! split across lines, each break a space, with comments and blank lines
+//! between; a quoted scalar in them stays on one line), plain and quoted
 //! scalars, block scalars as a key's or an item's value (literal `|`,
 //! folded `>`, each with `-` to strip the final line break or `+` to keep
 //! the empty lines after it), `#` comments, and an empty value as null. Not
@@ -67,6 +69,8 @@ pub mod edit;
 mod error;
 pub mod versioned;
 pub mod write_back;
+
+use std::borrow::Cow;
 
 pub use decode::{from_value, DecodeError};
 pub use error::{Error, ParseProblem};
@@ -183,12 +187,14 @@ impl Value {
 /// comment or trailing space. A line ending in a block scalar's header
 /// (`key: |`, `- >-`) holds the scalar's value, read from the lines under
 /// it, and `last` is the last of them that carries the value (text, or an
-/// empty line a `+` keeps); otherwise `last` is `no`.
+/// empty line a `+` keeps). A line opening a flow collection it does not
+/// close holds the lines up to the one that closes it, joined, and `last`
+/// is that one. Otherwise `last` is `no`.
 struct Line<'a> {
     no: usize,
     last: usize,
     indent: usize,
-    text: &'a str,
+    text: Cow<'a, str>,
     block: Option<String>,
 }
 
@@ -296,16 +302,46 @@ fn trim(s: &str) -> &str {
 /// start, after a space or tab, or after `[` `{` `,` inside a flow
 /// collection. Elsewhere (`l'épée`) it is a plain character.
 fn strip_comment(s: &str) -> &str {
+    &s[..scan(s, 0).cut]
+}
+
+/// One line read as [`strip_comment`] reads it, starting `depth` flow
+/// collections deep (a line of a collection split across lines).
+struct Scan {
+    /// Where the comment starts, or the length.
+    cut: usize,
+    /// The flow collections still open at the end of the line.
+    depth: u32,
+    /// Whether a quoted scalar is still open at the end of the line.
+    open_quote: bool,
+}
+
+fn scan(s: &str, mut depth: u32) -> Scan {
     let b = s.as_bytes();
-    let (mut i, mut prev, mut depth) = (0, b' ', 0u32);
+    let (mut i, mut prev) = (0, b' ');
     let starts = |prev: u8, depth: u32| {
         matches!(prev, b' ' | b'\t') || depth > 0 && matches!(prev, b'[' | b'{' | b',')
     };
     while i < b.len() {
         let c = b[i];
         match c {
-            b'"' | b'\'' if starts(prev, depth) => i = closing_quote(b, i),
-            b'#' if matches!(prev, b' ' | b'\t') => return &s[..i],
+            b'"' | b'\'' if starts(prev, depth) => {
+                i = closing_quote(b, i);
+                if i == b.len() {
+                    return Scan {
+                        cut: i,
+                        depth,
+                        open_quote: true,
+                    };
+                }
+            }
+            b'#' if matches!(prev, b' ' | b'\t') => {
+                return Scan {
+                    cut: i,
+                    depth,
+                    open_quote: false,
+                }
+            }
             b'[' | b'{' if starts(prev, depth) => depth += 1,
             b']' | b'}' => depth = depth.saturating_sub(1),
             _ => {}
@@ -313,7 +349,34 @@ fn strip_comment(s: &str) -> &str {
         prev = c;
         i += 1;
     }
-    s
+    Scan {
+        cut: i,
+        depth,
+        open_quote: false,
+    }
+}
+
+/// The flow collections a line's value leaves open: its value is what
+/// follows its dashes and its key, and only one starting `[` or `{` is a
+/// flow collection (`a: x[y` is a plain scalar). Zero if a quote is left
+/// open: a quoted scalar does not span lines here.
+fn open_flow(text: &str) -> u32 {
+    let mut t = text;
+    while is_item(t) {
+        t = t[1..].trim_start_matches(SPACE);
+    }
+    if let Some((_, rest)) = split_key(t) {
+        t = rest;
+    }
+    if !t.starts_with(['[', '{']) {
+        return 0;
+    }
+    let s = scan(t, 0);
+    if s.open_quote {
+        0
+    } else {
+        s.depth
+    }
 }
 
 /// The index of the quote closing the quoted scalar that opens at `b[open]`,
@@ -389,10 +452,48 @@ fn lines(src: &str) -> Result<Vec<Line<'_>>, Error> {
             no,
             last: no,
             indent,
-            text,
+            text: Cow::Borrowed(text),
             block: None,
         };
-        if let Some((h, parent)) = block_header(text, indent) {
+        // A flow collection split across lines is one line: each line
+        // break inside it a space, the comments cut off each line.
+        let mut depth = open_flow(text);
+        if depth > 0 {
+            let mut joined = text.to_string();
+            while depth > 0 {
+                let Some(next) = raw.get(at) else { break };
+                let (next_no, l) = next.clone()?;
+                let s = scan(l, depth);
+                let piece = l[..s.cut].trim_end_matches(SPACE);
+                let content = piece.trim_start_matches(' ');
+                if content.starts_with('\t') {
+                    return err(next_no, ParseProblem::TabIndent);
+                }
+                if let Some(character) = content.chars().next().filter(|c| c.is_whitespace()) {
+                    return err(next_no, ParseProblem::NonAsciiIndent { character });
+                }
+                if piece == "---" || piece == "..." {
+                    return err(
+                        next_no,
+                        ParseProblem::DocumentMarker {
+                            marker: piece.to_string(),
+                        },
+                    );
+                }
+                if s.open_quote {
+                    return err(next_no, ParseProblem::UnterminatedQuote);
+                }
+                at += 1;
+                depth = s.depth;
+                if !content.is_empty() {
+                    joined.push(' ');
+                    joined.push_str(content);
+                    line.last = next_no;
+                }
+            }
+            line.text = Cow::Owned(joined);
+        }
+        if let Some((h, parent)) = block_header(&line.text, indent) {
             // The content: the lines deeper than `parent`, at the first
             // one's indent or deeper, and the empty lines among them, as
             // written: comments and quotes are text there.
@@ -483,14 +584,14 @@ impl<'a> Parser<'a> {
     /// mapping, else a single scalar line.
     fn block(&mut self, indent: usize) -> Result<Value, Error> {
         let first = self.peek().expect("a line");
-        if is_item(first.text) {
+        if is_item(&first.text) {
             self.seq(indent)
-        } else if split_key(first.text).is_some() {
+        } else if split_key(&first.text).is_some() {
             self.map(indent)
         } else {
-            let (no, text) = (first.no, first.text);
+            let (no, text) = (first.no, first.text.clone());
             self.at += 1;
-            inline(text, no)
+            inline(&text, no)
         }
     }
 
@@ -503,11 +604,13 @@ impl<'a> Parser<'a> {
             if l.indent > indent {
                 return err(l.no, ParseProblem::UnexpectedIndent);
             }
-            if !is_item(l.text) {
+            if !is_item(&l.text) {
                 break;
             }
-            let (no, rest) = (l.no, l.text[1..].trim_start_matches(SPACE));
-            let inner = indent + (l.text.len() - rest.len());
+            let (no, text) = (l.no, l.text.clone());
+            let skip = text.len() - text[1..].trim_start_matches(SPACE).len();
+            let rest = &text[skip..];
+            let inner = indent + skip;
             let (last, block) = (l.last, l.block.clone());
             self.at += 1;
             if rest.is_empty() {
@@ -525,7 +628,10 @@ impl<'a> Parser<'a> {
                         no,
                         last,
                         indent: inner,
-                        text: rest,
+                        text: match text {
+                            Cow::Borrowed(t) => Cow::Borrowed(&t[skip..]),
+                            Cow::Owned(t) => Cow::Owned(t[skip..].to_string()),
+                        },
                         block,
                     },
                 );
@@ -544,15 +650,15 @@ impl<'a> Parser<'a> {
             if l.indent > indent {
                 return err(l.no, ParseProblem::UnexpectedIndent);
             }
-            if is_item(l.text) {
+            if is_item(&l.text) {
                 break;
             }
-            let (no, block) = (l.no, l.block.clone());
-            let Some((key, rest)) = split_key(l.text) else {
+            let (no, block, text) = (l.no, l.block.clone(), l.text.clone());
+            let Some((key, rest)) = split_key(&text) else {
                 return err(
                     no,
                     ParseProblem::ExpectedKeyValue {
-                        found: l.text.to_string(),
+                        found: text.to_string(),
                     },
                 );
             };
@@ -567,7 +673,7 @@ impl<'a> Parser<'a> {
             let value = if rest.is_empty() {
                 // A sequence may sit at the key's own indent.
                 match self.peek() {
-                    Some(n) if n.indent == indent && is_item(n.text) => self.seq(indent)?,
+                    Some(n) if n.indent == indent && is_item(&n.text) => self.seq(indent)?,
                     _ => self.nested(indent, no)?,
                 }
             } else if let Some(value) = block {

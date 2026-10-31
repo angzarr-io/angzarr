@@ -1,0 +1,17 @@
+# Shaped like Go taskloom's internal/taskloom/config/testdata: flow
+# sequences split across lines, the continuation aligned under the first
+# item, with comment lines between entries.
+schema_version: 1
+
+tag_permits:
+  namespaces:
+    # One per task.
+    area: [domain, read-model, tasks, tags, projects, store, import, config,
+           integration, cli, mcp, platform, build, docs]
+    human: [decision, voice, authority]
+    platform: [linux, macos, windows]
+    # Facts, searchable.
+    triage: [security, data-loss, crashes, no-workaround, regression,
+             silent-no-op, flaky]
+    relates: open
+  # No flat tags.
