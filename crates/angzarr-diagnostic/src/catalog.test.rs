@@ -229,6 +229,11 @@ fn what_is_and_is_not_a_variable() {
         "\n",
         "       *[other] { $n } of { $m }\n",
         "    }\n",
+        "demo-margin = { $len ->\n",
+        "    [one] { $len } item\n",
+        "   *[other] { $len } items\n",
+        "}\n",
+        "demo-after = { $x }\n",
     ))
     .expect("parses");
     // `$` outside a placeable is text.
@@ -238,6 +243,9 @@ fn what_is_and_is_not_a_variable() {
     // A blank line neither ends a pattern nor a placeable.
     assert_eq!(vars(&c, "demo-blank"), ["later"]);
     assert_eq!(vars(&c, "demo-sel"), ["m", "n"]);
+    // A placeable closes at the margin, and the next entry is its own.
+    assert_eq!(vars(&c, "demo-margin"), ["len"]);
+    assert_eq!(vars(&c, "demo-after"), ["x"]);
 }
 
 #[test]
@@ -248,9 +256,10 @@ fn a_name_that_is_no_id_a_stray_brace_or_an_open_literal_is_refused() {
         "demo-stray = a } b\n",
         "demo-later = a\n",
         "    b } c\n",
-        "demo-open = { \"abc\n",
         "demo-dup = y\n",
         "demo-dup = z\n",
+        "demo-open = { \"abc\n",
+        "demo-swallowed = { $x }\n",
     ))
     .unwrap_err();
     assert_eq!(
@@ -260,11 +269,12 @@ fn a_name_that_is_no_id_a_stray_brace_or_an_open_literal_is_refused() {
             Problem::Syntax { line: 2 },
             Problem::Syntax { line: 3 },
             Problem::Syntax { line: 5 },
-            // The open placeable ends at the next entry, which still counts.
-            Problem::Syntax { line: 6 },
             Problem::MessageTwice {
                 id: "demo-dup".to_string()
             },
+            // An open placeable takes every line after it, and is reported
+            // at the last.
+            Problem::Syntax { line: 9 },
         ]
     );
 }

@@ -143,9 +143,11 @@ impl Catalog {
             if text.is_empty() {
                 continue;
             }
-            if let (true, Some(o)) = (indented, open.as_mut()) {
+            let inside = open.as_ref().is_some_and(|o| o.depth > 0);
+            if let (true, Some(o)) = (indented || inside, open.as_mut()) {
                 // A continuation, or an attribute (`.name = value`), whose
-                // variables are its message's.
+                // variables are its message's; inside a placeable, any line
+                // (a selector's `}` may close it at the margin).
                 match scan(text, o.depth, &mut o.vars) {
                     Some(depth) => o.depth = depth,
                     None => problems.push(Problem::Syntax { line: no }),
