@@ -134,6 +134,8 @@ fn the_owners_keys_are_these() {
     ] {
         assert!(coordinator().contains(&key), "{key}");
     }
+    // Decision 14.56.
+    assert!(coordinator().contains(&"COORDINATOR_REASON_RULES_VERSION_MISMATCH"));
     let all: Vec<_> = [router(), host(), coordinator()].concat();
     let distinct: BTreeSet<_> = all.iter().collect();
     assert_eq!(all.len(), distinct.len(), "a key in two enums");
