@@ -422,7 +422,7 @@ test:
 precommit:
     just _container precommit
 
-# === Shared crates (crates/angzarr-proto, crates/angzarr-ports, crates/angzarr-diagnostic) ===
+# === Shared crates (crates/angzarr-proto, crates/angzarr-ports, crates/angzarr-diagnostic, crates/angzarr-yaml) ===
 # Moved from angzarr-project's rust/. They run on the host, not in the
 # toolchain container (its image lacks the wasm32 target and
 # wasm-bindgen-test-runner): protoc, the wasm32-unknown-unknown target,
@@ -435,6 +435,7 @@ check-shared-crates: check-proto-submodule
     just -f '{{TOP}}/crates/angzarr-diagnostic/justfile' check
     just -f '{{TOP}}/crates/angzarr-proto/justfile' check
     just -f '{{TOP}}/crates/angzarr-ports/justfile' check
+    just -f '{{TOP}}/crates/angzarr-yaml/justfile' check
 
 # Mutation-test a shared crate, judged by MIN, its kill-rate threshold in
 # percent over viable mutants (caught or timed out = killed; unviable count

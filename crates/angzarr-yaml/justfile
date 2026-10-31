@@ -1,0 +1,42 @@
+# angzarr-yaml: the strict YAML subset, versioned documents, in-place edits
+# and the strict serde decode. Depends on angzarr-diagnostic and serde only. A member of angzarr-core's workspace: every recipe names this
+# package, and --locked means the workspace's Cargo.lock. Runs on the host,
+# not in core's toolchain container (`just -f crates/angzarr-yaml/justfile check`).
+
+# Format check, build, lint and test natively, then the wasm32 build
+check: fmt-check build lint test wasm
+
+fmt:
+    cargo fmt -p angzarr-yaml
+
+fmt-check:
+    cargo fmt -p angzarr-yaml --check
+
+build:
+    cargo build --locked -p angzarr-yaml
+
+lint:
+    cargo clippy --locked -p angzarr-yaml --all-targets -- -D warnings
+
+test:
+    cargo test --locked -p angzarr-yaml
+
+# The crate must stay a dependency leaf that builds for the browser
+wasm:
+    cargo build --locked -p angzarr-yaml --target wasm32-unknown-unknown
+
+# Mutation kill-rate threshold, percent, over viable mutants; 90 is the
+# org's bar. No git hook runs mutation; the full pass runs weekly in CI
+# (.github/workflows/mutation-shared-crates.yml). The work is the root
+# justfile's shared-mutation (a scratch copy, never --in-place).
+MUTATION_THRESHOLD := "90"
+# Seconds per mutant's tests: the suite takes about a second.
+MUTATION_TIMEOUT := "20"
+
+# Mutation-test the whole crate, judged by MUTATION_THRESHOLD: the full pass.
+mutation-test:
+    just -f '{{justfile_directory()}}/../../justfile' shared-mutation angzarr-yaml {{MUTATION_THRESHOLD}} {{MUTATION_TIMEOUT}} target/mutants
+
+# Mutation-test only the lines the diff PATCH changes, judged the same way.
+mutation-diff PATCH:
+    just -f '{{justfile_directory()}}/../../justfile' shared-mutation angzarr-yaml {{MUTATION_THRESHOLD}} {{MUTATION_TIMEOUT}} target/mutants-diff '{{PATCH}}'

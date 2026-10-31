@@ -4,6 +4,7 @@ members = [
     "crates/angzarr-diagnostic",
     "crates/angzarr-ports",
     "crates/angzarr-proto",
+    "crates/angzarr-yaml",
     "crates/trivial-delegation",
     "xtask",
 ]

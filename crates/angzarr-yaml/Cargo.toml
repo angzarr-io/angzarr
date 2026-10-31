@@ -1,0 +1,28 @@
+[package]
+name = "angzarr-yaml"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "A strict subset of YAML, read and written, with no type coercion: versioned documents migrated on read, edited in place keeping comments, and decoded strictly through serde"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace's [workspace.package] is sererr's (see the root Cargo.toml),
+# not this crate's, so nothing is inherited.
+
+# Zero dependencies beyond angzarr-diagnostic, and nothing from any program
+# that uses it.
+[dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+
+[lints.clippy]
+# Zero-width and other invisible characters in source: never intended.
+invisible_characters = "deny"
+# A literal in another normalization form than NFC reads the same as its NFC
+# twin and compares unequal.
+unicode_not_nfc = "deny"
+# Non-ASCII in a literal is written as an escape, so what the code holds is
+# visible. Allowed, with a comment, only where a test's corpus is the point.
+non_ascii_literal = "deny"

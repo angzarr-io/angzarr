@@ -48,10 +48,11 @@ pre-commit:
         - "crates/angzarr-diagnostic/**"
         - "crates/angzarr-proto/**"
         - "crates/angzarr-ports/**"
+        - "crates/angzarr-yaml/**"
       run: just precommit
 
     shared-crates-precommit:
-      glob: "crates/angzarr-{diagnostic,proto,ports}/**/*.{rs,ftl,toml}"
+      glob: "crates/angzarr-{diagnostic,proto,ports,yaml}/**/*.{rs,ftl,toml}"
       run: just check-shared-crates
 
     # Python - runs in container via just (scripts only, client/examples extracted)

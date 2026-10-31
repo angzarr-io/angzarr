@@ -217,6 +217,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "angzarr-yaml"
+version = "0.1.0"
+dependencies = [
+ "angzarr-diagnostic",
+]
+
+[[package]]
 name = "anstream"
 version = "0.6.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
