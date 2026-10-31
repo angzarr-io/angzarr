@@ -121,6 +121,17 @@ fn the_owners_keys_are_these() {
     assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY"));
     assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_IS_FACT"));
     assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN"));
+    // Decision 14.51: every retryable failure carries a key.
+    for key in [
+        "COORDINATOR_REASON_STORE_CONFLICT",
+        "COORDINATOR_REASON_STORE_UNAVAILABLE",
+        "COORDINATOR_REASON_UPCASTER_UNAVAILABLE",
+        "COORDINATOR_REASON_COMPONENT_NOT_REGISTERED",
+        "COORDINATOR_REASON_COMMANDS_NOT_SERVED",
+        "COORDINATOR_REASON_PAYLOAD_UNAVAILABLE",
+    ] {
+        assert!(coordinator().contains(&key), "{key}");
+    }
     let all: Vec<_> = [router(), host(), coordinator()].concat();
     let distinct: BTreeSet<_> = all.iter().collect();
     assert_eq!(all.len(), distinct.len(), "a key in two enums");
