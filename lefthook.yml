@@ -45,12 +45,13 @@ pre-commit:
       # root package's container precommit: a change confined to them must
       # not be judged by an unrelated package.
       exclude:
+        - "crates/angzarr-diagnostic/**"
         - "crates/angzarr-proto/**"
         - "crates/angzarr-ports/**"
       run: just precommit
 
     shared-crates-precommit:
-      glob: "crates/angzarr-{proto,ports}/**/*.rs"
+      glob: "crates/angzarr-{diagnostic,proto,ports}/**/*.{rs,ftl,toml}"
       run: just check-shared-crates
 
     # Python - runs in container via just (scripts only, client/examples extracted)

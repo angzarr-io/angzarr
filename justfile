@@ -422,16 +422,17 @@ test:
 precommit:
     just _container precommit
 
-# === Shared crates (crates/angzarr-proto, crates/angzarr-ports) ===
+# === Shared crates (crates/angzarr-proto, crates/angzarr-ports, crates/angzarr-diagnostic) ===
 # Moved from angzarr-project's rust/. They run on the host, not in the
 # toolchain container (its image lacks the wasm32 target and
 # wasm-bindgen-test-runner): protoc, the wasm32-unknown-unknown target,
 # wasm-bindgen-test-runner (`just -f crates/angzarr-ports/justfile tools`)
 # and node. build.rs reads the protos from the angzarr-project submodule.
 
-# Every check of both shared crates: fmt-check, build, lint, test, wasm, and
+# Every check of the shared crates: fmt-check, build, lint, test, wasm, and
 # angzarr-ports' wasm-test; first, that the submodule cannot clash with them
 check-shared-crates: check-proto-submodule
+    just -f '{{TOP}}/crates/angzarr-diagnostic/justfile' check
     just -f '{{TOP}}/crates/angzarr-proto/justfile' check
     just -f '{{TOP}}/crates/angzarr-ports/justfile' check
 

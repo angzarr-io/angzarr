@@ -1,0 +1,26 @@
+[package]
+name = "angzarr-diagnostic"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "Localizable errors: a stable code and named data on every error, rendered where it is shown, from a Fluent catalog keyed by the code"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace's [workspace.package] is sererr's (see the root Cargo.toml),
+# not this crate's, so nothing is inherited.
+
+# Deliberately zero dependencies, and nothing from any program that uses it.
+[dependencies]
+
+[lints.clippy]
+# Zero-width and other invisible characters in source: never intended.
+invisible_characters = "deny"
+# A literal in another normalization form than NFC reads the same as its NFC
+# twin and compares unequal.
+unicode_not_nfc = "deny"
+# Non-ASCII in a literal is written as an escape, so what the code holds is
+# visible. Allowed, with a comment, only where a test's corpus is the point.
+non_ascii_literal = "deny"

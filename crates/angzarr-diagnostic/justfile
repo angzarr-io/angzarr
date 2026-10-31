@@ -1,0 +1,26 @@
+# angzarr-diagnostic: localizable errors, a code and named args. Zero
+# dependencies. A member of angzarr-core's workspace: every recipe names this
+# package, and --locked means the workspace's Cargo.lock. Runs on the host,
+# not in core's toolchain container (`just -f crates/angzarr-diagnostic/justfile check`).
+
+# Format check, build, lint and test natively, then the wasm32 build
+check: fmt-check build lint test wasm
+
+fmt:
+    cargo fmt -p angzarr-diagnostic
+
+fmt-check:
+    cargo fmt -p angzarr-diagnostic --check
+
+build:
+    cargo build --locked -p angzarr-diagnostic
+
+lint:
+    cargo clippy --locked -p angzarr-diagnostic --all-targets -- -D warnings
+
+test:
+    cargo test --locked -p angzarr-diagnostic
+
+# The crate must stay a dependency leaf that builds for the browser
+wasm:
+    cargo build --locked -p angzarr-diagnostic --target wasm32-unknown-unknown

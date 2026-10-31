@@ -190,6 +190,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "angzarr-diagnostic"
+version = "0.1.0"
+
+[[package]]
 name = "angzarr-ports"
 version = "0.1.0"
 dependencies = [

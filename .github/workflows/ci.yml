@@ -141,7 +141,7 @@ jobs:
   # All logic lives in justfile recipes; this job only installs tools and
   # invokes them.
   shared-crates:
-    name: Shared crates (angzarr-proto, angzarr-ports)
+    name: Shared crates (angzarr-diagnostic, angzarr-proto, angzarr-ports)
     runs-on: ubuntu-latest
     needs: [submodules]
     steps:
@@ -181,6 +181,9 @@ jobs:
 
       - name: The submodule carries no clashing package
         run: just check-proto-submodule
+
+      - name: angzarr-diagnostic (fmt-check, build, lint, test, wasm)
+        run: just -f crates/angzarr-diagnostic/justfile check
 
       - name: angzarr-proto (fmt-check, build, lint, test, wasm)
         run: just -f crates/angzarr-proto/justfile check
