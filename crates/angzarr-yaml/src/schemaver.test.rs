@@ -11,6 +11,9 @@
 //!   is not among the generation-0 inputs.
 //! - Multi-document streams are refused here by the parser (`---`), where Go
 //!   calls them unreadable.
+//! - A kind with no steps reads an unstamped document as current, where Go
+//!   refuses it below the floor: the config-versioning rule says "a format
+//!   with no older generation has nothing to run, so it decodes as current".
 
 use super::*;
 use crate::{parse, ParseProblem, Value};
@@ -199,23 +202,67 @@ fn below_the_floor_is_refused() {
     }
 }
 
-/// TestUpgrade_KeylessBelowFloorIsRefused: a keyless document is version
-/// 0, below every floor here; `version:` is just some other key.
+/// TestUpgrade_KeylessBelowFloorIsRefused, for a kind with steps: a
+/// keyless document is version 0, below this floor; `version:` is just some
+/// other key. A kind with no steps reads it as current instead (below).
 #[test]
 fn keyless_below_the_floor_is_refused() {
-    let one = Migrations::new("one", 1).build().unwrap();
     for text in ["kept: x\n", "version: 1\n"] {
-        for l in [with_steps(), zero_steps(), one.clone()] {
+        let l = with_steps();
+        assert_eq!(
+            problem(&l, text),
+            LoadProblem::TooOld {
+                found: 0,
+                oldest: l.oldest()
+            },
+            "{text:?}"
+        );
+    }
+}
+
+/// Where this differs from Go's port above, the owner's config-versioning
+/// rule decides: "missing: the oldest generation: every migration applies.
+/// A format with no older generation has nothing to run, so it decodes as
+/// current. An empty or comment-only file is this case, not a corrupt one."
+/// A kind with no steps, at any current version, reads an unstamped file as
+/// current: decoded as it is, left unstamped, and no upgrade to write.
+#[test]
+fn keyless_in_a_kind_with_no_older_generation_is_current() {
+    let one = Migrations::new("one", 1).build().unwrap();
+    for l in [zero_steps(), one] {
+        for text in ["kept: x\n", "version: 1\n"] {
+            let doc = parse(text).unwrap();
             assert_eq!(
-                problem(&l, text),
-                LoadProblem::TooOld {
-                    found: 0,
-                    oldest: l.oldest()
-                },
+                l.version_of(&doc),
+                Ok(l.current()),
                 "{}: {text:?}",
                 l.kind()
             );
+            assert_eq!(l.load(None, text).unwrap(), doc, "{}: {text:?}", l.kind());
+            assert_eq!(l.upgrade(None, text, 2).unwrap(), None, "{text:?}");
+            assert_eq!(l.upgrade_keeping(None, text, 2).unwrap(), None, "{text:?}");
         }
+        // Still refused: a stamp below the floor, a newer one, and a stamp
+        // that is no integer.
+        let current = l.current();
+        assert_eq!(
+            problem(&l, &doc(current - 1, "")),
+            LoadProblem::TooOld {
+                found: current - 1,
+                oldest: current
+            }
+        );
+        assert_eq!(
+            problem(&l, &doc(current + 1, "")),
+            LoadProblem::TooNew {
+                found: current + 1,
+                current
+            }
+        );
+        assert!(matches!(
+            problem(&l, "schema_version: one\n"),
+            LoadProblem::BadVersion { .. }
+        ));
     }
 }
 
@@ -284,8 +331,10 @@ fn a_document_that_is_no_well_formed_mapping_is_its_parse_failure() {
 }
 
 /// TestUpgrade_EmptyAndCommentOnlyAreGenerationZero. The config-versioning
-/// rule: a missing stamp is the oldest generation, every migration applies,
-/// and "an empty or comment-only file is this case, not a corrupt one".
+/// rule: a missing stamp is the oldest generation, every migration applies;
+/// "a format with no older generation has nothing to run, so it decodes as
+/// current"; and "an empty or comment-only file is this case, not a corrupt
+/// one".
 #[test]
 fn empty_and_comment_only_are_version_zero() {
     let gen0 = Migrations::new("fresh", 1)
@@ -293,12 +342,24 @@ fn empty_and_comment_only_are_version_zero() {
         .build()
         .unwrap();
     for text in ["", "\n\n", "# just a comment\n", "~\n", "null\n"] {
-        // No step from 0: too old, never a parse or root error.
+        // No older generation: nothing to run, so it is current, an empty
+        // mapping; never too old, a parse or a root error.
         assert_eq!(
-            problem(&zero_steps(), text),
+            zero_steps().load(None, text).unwrap(),
+            Value::Map(vec![]),
+            "{text:?}"
+        );
+        assert_eq!(
+            zero_steps().version_of(&parse(text).unwrap()),
+            Ok(2),
+            "{text:?}"
+        );
+        // Steps whose floor is above 0: version 0 is below it.
+        assert_eq!(
+            problem(&with_steps(), text),
             LoadProblem::TooOld {
                 found: 0,
-                oldest: 2
+                oldest: 1
             },
             "{text:?}"
         );
@@ -313,16 +374,18 @@ fn empty_and_comment_only_are_version_zero() {
     }
 }
 
-/// A kind with no older generation (current 0): an empty file is current,
-/// and decodes as an empty mapping.
+/// A kind with no older generation (at 0, or at 1 with no steps): an empty
+/// file is current, and decodes as an empty mapping.
 #[test]
-fn an_empty_file_of_a_version_zero_kind_is_current() {
+fn an_empty_file_of_a_kind_with_no_older_generation_is_current() {
     #[derive(Debug, PartialEq, serde::Deserialize)]
     struct Settings {
         name: Option<String>,
     }
-    let l = Migrations::new("settings", 0).build().unwrap();
-    for text in ["", "# nothing set yet\n", "~\n"] {
+    for (l, text) in [0, 1].into_iter().flat_map(|current| {
+        ["", "# nothing set yet\n", "~\n"]
+            .map(|text| (Migrations::new("settings", current).build().unwrap(), text))
+    }) {
         assert_eq!(l.load(None, text).unwrap(), Value::Map(vec![]), "{text:?}");
         assert_eq!(
             l.load_into::<Settings>(None, text).unwrap(),

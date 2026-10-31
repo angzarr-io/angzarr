@@ -5,10 +5,12 @@
 //!   key, [`DEFAULT_KEY`] (`schema_version`) unless the kind names its own
 //!   ([`Migrations::key`]), whose value is a non-negative integer (decimal
 //!   digits) that only ever increases: a format generation, never semver. A
-//!   mapping with no stamp is version 0, so files written before versioning
-//!   load through the whole chain. An empty, comment-only or null document
-//!   is that case, an empty mapping at version 0, not a corrupt file. A stamp that is not such an integer is
-//!   refused ([`LoadProblem::BadVersion`]).
+//!   mapping with no stamp is the oldest generation: version 0 for a kind
+//!   with steps, so files written before versioning load through the whole
+//!   chain, and current for a kind with none, which has nothing to run (the
+//!   config-versioning rule). An empty, comment-only or null document is
+//!   that case, an empty mapping, not a corrupt file. A stamp that is not
+//!   such an integer is refused ([`LoadProblem::BadVersion`]).
 //! - **A legacy key.** A kind whose files were stamped under another key
 //!   declares it ([`Migrations::legacy_key`]): before the stamp is read, a
 //!   pre-step renames that key, in its place, to the kind's key, so the old
@@ -489,7 +491,8 @@ impl Diagnostic for LoadError {
 /// A document's stamp under [`DEFAULT_KEY`]; a mapping without one is
 /// version 0, and so is an empty, comment-only or null document (the
 /// config-versioning rule: such a file is the oldest generation, not a
-/// corrupt one). [`Loader::version_of`] reads a kind's own key.
+/// corrupt one). It knows no kind: [`Loader::version_of`] reads a kind's
+/// own key, and reads a missing stamp as current for a kind with no steps.
 pub fn version_of(doc: &Value) -> Result<u32, LoadProblem> {
     version_at(doc, DEFAULT_KEY)
 }
@@ -575,20 +578,26 @@ impl Loader {
     }
 
     /// `doc`'s stamp, read as this kind reads it: under its key, or under
-    /// its legacy key when only that is set. A mapping with neither is
-    /// version 0, and so is an empty, comment-only or null document.
+    /// its legacy key when only that is set. A mapping with neither, and an
+    /// empty, comment-only or null document, is the oldest generation:
+    /// version 0 for a kind with steps, so every step runs (or it is below
+    /// the floor), and the current version for a kind with none, which has
+    /// nothing to run (the config-versioning rule).
     pub fn version_of(&self, doc: &Value) -> Result<u32, LoadProblem> {
         if !is_mapping_or_empty(doc) {
             return Err(LoadProblem::NotAMapping);
         }
         let key = self.legacy_stamp(doc)?.unwrap_or(&self.key);
+        if self.steps.is_empty() && doc.get(key).is_none() {
+            return Ok(self.current);
+        }
         version_at(doc, key)
     }
 
-    /// Whether `doc` needs no upgrade on disk: stamped under the kind's own
-    /// key at the current version.
+    /// Whether `doc` needs no upgrade on disk: under the kind's own key (or
+    /// none, for a kind with no steps) at the current version.
     fn is_current(&self, doc: &Value) -> bool {
-        matches!(self.legacy_stamp(doc), Ok(None)) && version_at(doc, &self.key) == Ok(self.current)
+        matches!(self.legacy_stamp(doc), Ok(None)) && self.version_of(doc) == Ok(self.current)
     }
 
     fn fail<T>(&self, source: Option<&str>, problem: LoadProblem) -> Result<T, LoadError> {
@@ -610,8 +619,9 @@ impl Loader {
 
     /// Migrate an already-parsed document to the current version. A
     /// current-version document comes back untouched. An empty,
-    /// comment-only or null document is an empty mapping at version 0: every
-    /// step runs on it, or, for a kind with no older version, it is current.
+    /// comment-only or null document is an empty mapping, unstamped like
+    /// any other ([`Loader::version_of`]): every step runs on it, or, for a
+    /// kind with no steps, it is current.
     pub fn migrate(&self, source: Option<&str>, mut doc: Value) -> Result<Value, LoadError> {
         let found = match self.version_of(&doc) {
             Ok(v) => v,
