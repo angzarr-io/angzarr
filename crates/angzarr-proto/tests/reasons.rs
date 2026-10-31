@@ -103,7 +103,8 @@ fn the_owners_keys_are_these() {
         host(),
         [
             "HOST_REASON_UPCASTER_WITH_COMPONENT",
-            "HOST_REASON_NO_COMPONENTS_REGISTERED"
+            "HOST_REASON_NO_COMPONENTS_REGISTERED",
+            "HOST_REASON_DESCRIPTOR_RULES_VERSION_MISMATCH"
         ]
     );
     assert!(router().contains(&"ROUTER_REASON_DUPLICATE_COMPONENT"));
