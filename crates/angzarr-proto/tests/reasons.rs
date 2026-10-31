@@ -104,7 +104,9 @@ fn the_owners_keys_are_these() {
         [
             "HOST_REASON_UPCASTER_WITH_COMPONENT",
             "HOST_REASON_NO_COMPONENTS_REGISTERED",
-            "HOST_REASON_DESCRIPTOR_RULES_VERSION_MISMATCH"
+            "HOST_REASON_DESCRIPTOR_RULES_VERSION_MISMATCH",
+            // Decision 14.55.
+            "HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN"
         ]
     );
     assert!(router().contains(&"ROUTER_REASON_DUPLICATE_COMPONENT"));
