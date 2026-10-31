@@ -32,11 +32,11 @@ use prost::Message;
 use prost_types::Timestamp;
 
 use crate::error::StoreError;
+use crate::migrate::{AppliedMigration, Backup, Migration, Migrations};
 use crate::store::{
-    Append, Backup, ChangeToken, Editions, EventStore, ListStreams, MigrationState, Migrations,
-    Outbox, OutboxEntry, PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit,
-    ReadUntilTime, SnapshotStore, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
-    EDITION_DELETED_TYPE_URL,
+    Append, ChangeToken, Editions, EventStore, ListStreams, Outbox, OutboxEntry, PositionStore,
+    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write,
+    Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
 use crate::stream::{PositionKey, Slice, StreamRef};
 
@@ -599,14 +599,18 @@ impl BackupSlot {
     }
 }
 
-/// A store in memory has no schema: it stands current, at level 0, and
-/// migrating it does nothing.
+/// A store in memory has no schema: its set and its ledger are empty, and
+/// a run applies nothing.
 impl Migrations for MemoryStore {
-    async fn migration_state(&self) -> Result<MigrationState, StoreError> {
+    fn migrations(&self) -> Vec<Migration> {
         todo!("red: the Migrations port awaits the owner's review")
     }
 
-    async fn migrate(&self) -> Result<MigrationState, StoreError> {
+    async fn applied(&self) -> Result<Vec<AppliedMigration>, StoreError> {
+        todo!("red: the Migrations port awaits the owner's review")
+    }
+
+    async fn run(&self) -> Result<Vec<AppliedMigration>, StoreError> {
         todo!("red: the Migrations port awaits the owner's review")
     }
 }

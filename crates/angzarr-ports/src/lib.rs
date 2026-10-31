@@ -28,8 +28,8 @@
 //! | [`Watch`] | a cheap "anything committed?" | opt-in |
 //! | [`ReadUntilTime`], [`ReadByCorrelation`], [`ListStreams`] | core's queries | opt-in |
 //! | [`Outbox`] | the transactional outbox's relay side, kind-agnostic (entries are written in a [`Write`]) | opt-in |
-//! | [`Migrations`] | where the store's schema stands against the build, and applying what is pending, only when asked | opt-in, on a maintenance handle |
-//! | [`Backup`] | a copy of the store as one moment, never overwriting | opt-in, on a maintenance handle |
+//! | [`Migrations`] | the build's migration set, the store's ledger, `info`, `validate` and `run` (every open runs it) | opt-in |
+//! | [`Backup`] | a copy of the store as one moment, never overwriting | opt-in |
 //!
 //! # Send, wasm, dyn
 //!
@@ -57,6 +57,7 @@ mod store;
 mod stream;
 
 pub mod dyn_store;
+pub mod migrate;
 
 #[cfg(feature = "contract")]
 pub mod contract;
@@ -68,12 +69,14 @@ pub use dyn_store::{
     DynReadByCorrelation, DynReadUntilTime, DynSnapshotStore, DynStore,
 };
 pub use error::{Arg, Cause, Recovery, StoreError};
+pub use migrate::{
+    AppliedMigration, Backup, Migration, MigrationInfo, MigrationStatus, Migrations,
+};
 pub use send::{MaybeSend, MaybeSync};
 pub use store::{
-    Append, Backup, ChangeToken, Editions, EventStore, ListStreams, MigrationState, Migrations,
-    Outbox, OutboxEntry, PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit,
-    ReadUntilTime, SnapshotStore, Standing, Store, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
-    EDITION_DELETED_TYPE_URL,
+    Append, ChangeToken, Editions, EventStore, ListStreams, Outbox, OutboxEntry, PositionStore,
+    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Store, Watch,
+    Write, Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
 pub use stream::{Head, PositionKey, Slice, StreamRef};
 

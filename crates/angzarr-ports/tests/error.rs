@@ -153,12 +153,19 @@ fn every() -> Vec<(StoreError, &'static str, Recovery)> {
             Invalid,
         ),
         (
-            StoreError::Unmigrated {
-                applied: 4,
-                build: 5,
-            },
-            "angzarr-ports-store-unmigrated",
-            Invalid,
+            StoreError::MigrationFailed { version: 3 },
+            "angzarr-ports-store-migration-failed",
+            Bug,
+        ),
+        (
+            StoreError::MigrationChanged { version: 2 },
+            "angzarr-ports-store-migration-changed",
+            Bug,
+        ),
+        (
+            StoreError::MigrationMissing { version: 2 },
+            "angzarr-ports-store-migration-missing",
+            Bug,
         ),
         (
             StoreError::BackupExists {
@@ -225,12 +232,8 @@ fn args_carry_the_data_by_name() {
         "angzarr-ports-store-newer-than-build applied=6 build=5"
     );
     assert_eq!(
-        StoreError::Unmigrated {
-            applied: 4,
-            build: 5
-        }
-        .to_string(),
-        "angzarr-ports-store-unmigrated applied=4 build=5"
+        StoreError::MigrationFailed { version: 3 }.to_string(),
+        "angzarr-ports-store-migration-failed version=3"
     );
     assert_eq!(
         StoreError::BackupExists {

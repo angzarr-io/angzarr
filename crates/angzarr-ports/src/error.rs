@@ -94,18 +94,22 @@ pub enum StoreError {
     EditionNameRequired,
     /// The edition does not exist: no fork event of it (NOT_FOUND).
     EditionNotFound { name: String },
-    /// A store a newer build migrated: its level, `applied`, is beyond
-    /// this build's highest, `build` (a [`MigrationState`] standing
-    /// [`Newer`](crate::Standing::Newer)). Neither read nor migrated;
-    /// nothing in it was changed. Run a build at least as new.
-    ///
-    /// [`MigrationState`]: crate::MigrationState
+    /// A store a newer build migrated: its ledger's highest version,
+    /// `applied`, is beyond the build's highest, `build` (a
+    /// [`MigrationStatus::Newer`](crate::MigrationStatus::Newer) in its
+    /// info). Refused at open and by a run, untouched: run a build at least
+    /// as new.
     NewerThanBuild { applied: u64, build: u64 },
-    /// A store with migrations pending, refused where only a current one is
-    /// served (an adapter's read-only open): its level, `applied`, and this
-    /// build's, `build`. Nothing was migrated; migrate it
-    /// ([`Migrations::migrate`](crate::Migrations::migrate)).
-    Unmigrated { applied: u64, build: u64 },
+    /// A store a migration failed in part way: `version`'s row in its
+    /// ledger is not a success, so the store is dirty. Refused at open and
+    /// by a run, untouched: an operator repairs it (or restores a backup).
+    MigrationFailed { version: u64 },
+    /// An applied migration, `version`, whose checksum is not the build's:
+    /// changed since it was applied. Refused at open and by a run.
+    MigrationChanged { version: u64 },
+    /// An applied migration, `version`, the build does not have, below the
+    /// build's highest. Refused at open and by a run.
+    MigrationMissing { version: u64 },
     /// A backup refused because something is already at its target, named
     /// as the adapter names it: a backup never overwrites. Nothing was
     /// written.
@@ -208,7 +212,9 @@ impl StoreError {
             | StoreError::EditionNameRequired
             | StoreError::EditionNotFound { .. }
             | StoreError::NewerThanBuild { .. }
-            | StoreError::Unmigrated { .. }
+            | StoreError::MigrationFailed { .. }
+            | StoreError::MigrationChanged { .. }
+            | StoreError::MigrationMissing { .. }
             | StoreError::BackupExists { .. } => None,
         }
     }
@@ -297,7 +303,9 @@ impl StoreError {
             StoreError::EditionNotDeleted { .. } => "angzarr-ports-store-edition-not-deleted",
             StoreError::EditionNotPropagated { .. } => "angzarr-ports-store-edition-not-propagated",
             StoreError::NewerThanBuild { .. } => "angzarr-ports-store-newer-than-build",
-            StoreError::Unmigrated { .. } => "angzarr-ports-store-unmigrated",
+            StoreError::MigrationFailed { .. } => "angzarr-ports-store-migration-failed",
+            StoreError::MigrationChanged { .. } => "angzarr-ports-store-migration-changed",
+            StoreError::MigrationMissing { .. } => "angzarr-ports-store-migration-missing",
             StoreError::BackupExists { .. } => "angzarr-ports-store-backup-exists",
         }
     }
@@ -352,11 +360,13 @@ impl StoreError {
             | StoreError::EditionAlreadyForked { stream }
             | StoreError::EditionNotDeleted { stream }
             | StoreError::EditionNotPropagated { stream } => vec![("stream", stream_arg(stream))],
-            StoreError::NewerThanBuild { applied, build }
-            | StoreError::Unmigrated { applied, build } => vec![
+            StoreError::NewerThanBuild { applied, build } => vec![
                 ("applied", Arg::Uint(*applied)),
                 ("build", Arg::Uint(*build)),
             ],
+            StoreError::MigrationFailed { version }
+            | StoreError::MigrationChanged { version }
+            | StoreError::MigrationMissing { version } => vec![("version", Arg::Uint(*version))],
             StoreError::BackupExists { target } => vec![("target", Arg::Str(target.clone()))],
         }
     }
@@ -376,9 +386,12 @@ impl StoreError {
             }
             StoreError::EditionNotDeleted { .. } => Recovery::Bug,
             StoreError::EditionNotPropagated { .. } => Recovery::Retry,
-            StoreError::NewerThanBuild { .. }
-            | StoreError::Unmigrated { .. }
-            | StoreError::BackupExists { .. } => Recovery::Invalid,
+            StoreError::NewerThanBuild { .. } | StoreError::BackupExists { .. } => {
+                Recovery::Invalid
+            }
+            StoreError::MigrationFailed { .. }
+            | StoreError::MigrationChanged { .. }
+            | StoreError::MigrationMissing { .. } => Recovery::Bug,
         }
     }
 }

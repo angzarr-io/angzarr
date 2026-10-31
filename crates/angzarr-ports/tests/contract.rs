@@ -141,36 +141,53 @@
 //!
 //! # Proposed, RED, for the owner's review (2026-10-31)
 //!
-//! The `migrations` and `migration_levels` sections: opt-in
-//! [`Migrations`](angzarr_ports::Migrations) (where the schema stands,
-//! applying what is pending) and [`Backup`](angzarr_ports::Backup) (a copy
-//! as one moment, never overwriting), store-agnostic, so a runtime migrates
-//! and backs up its stores without knowing their backend (the owner,
-//! 2026-10-31: "angzarr store sqlite needs to be abstracted"). The
-//! MemoryStore run below is `#[ignore]`d while red: `cargo test
-//! --all-features --test contract -- --ignored migrations` shows it.
+//! Opt-in [`Migrations`](angzarr_ports::Migrations) and
+//! [`Backup`](angzarr_ports::Backup) (`src/migrate.rs`), store-agnostic and
+//! after the common shape of SQL migrators (the owner: "largely mimic the
+//! ideas and flows of sqlx migrate and other SQL migrators"): a build's
+//! versioned set, a store's ledger, `info`, `validate` and `run`, under the
+//! store's lock. RULED by the owner (M4): every open, reading or writing,
+//! runs what is pending, and refuses a store newer than the build, dirty or
+//! changed, untouched. The MemoryStore runs below are `#[ignore]`d while
+//! red: `cargo test --all-features --test contract -- --ignored migrat`
+//! and `--ignored backup` show them; `tests/migrate.rs` holds `info` and
+//! `validate` red as they stand.
 //!
-//! - **FLAG(M1) Where opening ends and the port begins.** Opening stays the
-//!   adapter's. An adapter whose read open refuses a store not current
-//!   gives a MAINTENANCE open of its own, at any standing, migrating
-//!   nothing, implementing `Migrations` and `Backup`; the suite reaches it
-//!   through a fixture (`contract::MigrationFixture`), which also opens a
-//!   store as the adapter's readers do. Not proposed: a port for opening.
-//! - **FLAG(M2) A level is a number,** the highest migration applied or
-//!   known (0: none); `Pending(n)` counts what is missing. Proposed over an
-//!   opaque version, so a refusal names both levels as data.
-//! - **FLAG(M3) The refusals are the ports' own codes:**
-//!   `NewerThanBuild { applied, build }`, `Unmigrated { applied, build }`
-//!   (the readers' open on a store with migrations pending) and
-//!   `BackupExists { target }`, so a runtime can name its migrate command
-//!   without knowing the backend. A migration that failed part way stays
-//!   the adapter's own cause under `Unavailable`, and the suite does not
-//!   pin it (a fixture cannot make one agnostically).
-//! - **FLAG(M4) Does a writer's open still migrate?** SQLite's `open`
-//!   migrates as it opens; with an explicit `migrate`, it could refuse a
-//!   store not current as the read open does. Not pinned here.
-//! - **FLAG(M5) No dyn twins yet** (`DynMigrations`, `DynBackup`): added
-//!   when a caller holds them behind `dyn`.
+//! - **FLAG(M1) No undo, and no run to a target.** Reversible migrations
+//!   are not common to the model (refinery has none; Flyway's undo is a
+//!   paid edition's; sqlx's run goes only to the latest), and no adapter
+//!   here writes one. Proposed out.
+//! - **FLAG(M2) A version is a `u64`** (sqlx's `i64`, never negative in
+//!   practice); a checksum is bytes, compared whole.
+//! - **FLAG(M3) Missing and newer are told apart:** an applied version
+//!   unknown to the build is `Newer` above the build's highest (Flyway's
+//!   "future"), `Missing` below it. sqlx reports both as one
+//!   `VersionMissing`; the adapter tells them apart by the build's highest.
+//! - **FLAG(M4') The refusals are the ports' own codes:** `NewerThanBuild {
+//!   applied, build }`, `MigrationFailed { version }` (sqlx's `Dirty`),
+//!   `MigrationChanged { version }` (`VersionMismatch`), `MigrationMissing
+//!   { version }` and `BackupExists { target }`. `validate`'s precedence:
+//!   failed, newer, changed, missing (sqlx checks dirty first, then
+//!   missing, then each checksum in version order).
+//! - **FLAG(M5) The lock is the store's,** promised only as an effect:
+//!   two migrators at once apply each migration once
+//!   (`opening_an_older_store_twice_at_once_applies_each_migration_once`).
+//!   No `lock`/`unlock` in the port: sqlx's are a backend's (on SQLite a
+//!   no-op, so the adapter's `BEGIN IMMEDIATE` is the lock).
+//! - **FLAG(M6) `info` and `validate` are judged in the port**
+//!   (`migrate::info`, `migrate::validate`, the traits' defaults), from the
+//!   two lists an adapter gives; an adapter gives `migrations`, `applied`
+//!   and `run`. The ledger's `installed_on` and `execution_time` are data,
+//!   never compared.
+//! - **FLAG(M7) PROPOSED: an open with migrations pending backs the store up
+//!   first,** through `Backup`, to a place the adapter chooses beside it
+//!   (for a file, `state.db` gives `state.db.pre-<applied>-<UTC time>`);
+//!   an open with nothing pending, or refused, takes none. Its own section,
+//!   `migrate_on_open_backup`, to drop if refused.
+//! - **FLAG(M8) Backup has no analogue in these migrators:** Flyway,
+//!   golang-migrate, refinery, diesel and sqlx take none, leaving it to the
+//!   operator, so it is its own trait, not part of `Migrations`.
+//! - **FLAG(M9) No dyn twins yet** (`DynMigrations`, `DynBackup`).
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -260,16 +277,15 @@ mod outbox_watch {
     angzarr_ports::store_contract!(outbox_watch, #[tokio::test], MemoryStore::new());
 }
 
-/// The migrations sections' fixture on `MemoryStore`: it has no schema, so
-/// every store is current; a backup target is a [`BackupSlot`].
-struct MemoryMigrations;
+/// The backup section's fixture on `MemoryStore`: a target is a
+/// [`BackupSlot`].
+struct MemoryBackups;
 
-impl angzarr_ports::contract::MigrationFixture for MemoryMigrations {
-    type Handle = MemoryStore;
-    type Target = BackupSlot;
+impl angzarr_ports::contract::BackupFixture for MemoryBackups {
     type Store = MemoryStore;
+    type Target = BackupSlot;
 
-    async fn current(&mut self) -> MemoryStore {
+    async fn store(&self) -> MemoryStore {
         let store = MemoryStore::new();
         let (stream, pages) = angzarr_ports::contract::migration_content();
         angzarr_ports::contract::append(&store, stream, 0, &pages)
@@ -278,11 +294,11 @@ impl angzarr_ports::contract::MigrationFixture for MemoryMigrations {
         store
     }
 
-    fn vacant(&mut self) -> BackupSlot {
+    fn vacant(&self) -> BackupSlot {
         BackupSlot::new()
     }
 
-    async fn occupied(&mut self) -> BackupSlot {
+    async fn occupied(&self) -> BackupSlot {
         let occupant = MemoryStore::new();
         let (stream, pages) = occupant_content();
         angzarr_ports::contract::append(&occupant, stream, 0, &pages)
@@ -291,7 +307,7 @@ impl angzarr_ports::contract::MigrationFixture for MemoryMigrations {
         BackupSlot::holding(occupant)
     }
 
-    async fn occupied_intact(&mut self, target: &BackupSlot) -> bool {
+    async fn occupied_intact(&self, target: &BackupSlot) -> bool {
         let Some(store) = target.store() else {
             return false;
         };
@@ -302,12 +318,8 @@ impl angzarr_ports::contract::MigrationFixture for MemoryMigrations {
         theirs == Ok(pages) && ours == Ok(vec![])
     }
 
-    async fn open_reading(&mut self, handle: &MemoryStore) -> Result<MemoryStore, StoreError> {
-        Ok(handle.clone())
-    }
-
-    async fn open_backup(&mut self, target: &BackupSlot) -> MemoryStore {
-        target.store().expect("a backup is in the slot")
+    async fn open_backup(&self, target: &BackupSlot) -> Result<MemoryStore, StoreError> {
+        Ok(target.store().expect("a backup is in the slot"))
     }
 }
 
@@ -327,7 +339,17 @@ mod migrations {
     angzarr_ports::store_contract!(
         migrations,
         #[tokio::test]
-        #[ignore = "red: the Migrations and Backup ports await the owner's review (2026-10-31)"],
-        MemoryMigrations
+        #[ignore = "red: the Migrations port awaits the owner's review (2026-10-31)"],
+        MemoryStore::new()
+    );
+}
+
+mod backup {
+    use super::*;
+    angzarr_ports::store_contract!(
+        backup,
+        #[tokio::test]
+        #[ignore = "red: the Backup port awaits the owner's review (2026-10-31)"],
+        MemoryBackups
     );
 }
