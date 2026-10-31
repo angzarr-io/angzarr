@@ -1105,3 +1105,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
 #[cfg(test)]
 #[path = "versioned.test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "schemaver.test.rs"]
+mod schemaver_tests;
