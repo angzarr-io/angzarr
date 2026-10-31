@@ -153,10 +153,12 @@
 //! and `--ignored backup` show them; `tests/migrate.rs` holds `info` and
 //! `validate` red as they stand.
 //!
-//! - **FLAG(M1) No undo, and no run to a target.** Reversible migrations
-//!   are not common to the model (refinery has none; Flyway's undo is a
-//!   paid edition's; sqlx's run goes only to the latest), and no adapter
-//!   here writes one. Proposed out.
+//! - **RULED(M1) Undo and run to a target are in** (the owner,
+//!   2026-10-31): a migration may have a down; `run_to` and `undo_to` run
+//!   under the same lock and validation, an undo in reverse order and
+//!   refused, nothing changed, past a migration with no down
+//!   (`MigrationIrreversible`); a target neither 0 nor in the build is
+//!   refused (`MigrationUnknown`); an open still runs only forward.
 //! - **FLAG(M2) A version is a `u64`** (sqlx's `i64`, never negative in
 //!   practice); a checksum is bytes, compared whole.
 //! - **FLAG(M3) Missing and newer are told apart:** an applied version
@@ -179,11 +181,11 @@
 //!   two lists an adapter gives; an adapter gives `migrations`, `applied`
 //!   and `run`. The ledger's `installed_on` and `execution_time` are data,
 //!   never compared.
-//! - **FLAG(M7) PROPOSED: an open with migrations pending backs the store up
-//!   first,** through `Backup`, to a place the adapter chooses beside it
-//!   (for a file, `state.db` gives `state.db.pre-<applied>-<UTC time>`);
-//!   an open with nothing pending, or refused, takes none. Its own section,
-//!   `migrate_on_open_backup`, to drop if refused.
+//! - **RULED(M7) An open with migrations pending backs the store up
+//!   first** (the owner, 2026-10-31), through `Backup`, beside it: for a
+//!   file `state.db`, `state.db.pre-<applied level>-<UTC time>`; so does an
+//!   undo that reverts anything. An open with nothing pending, or refused,
+//!   takes none.
 //! - **FLAG(M8) Backup has no analogue in these migrators:** Flyway,
 //!   golang-migrate, refinery, diesel and sqlx take none, leaving it to the
 //!   operator, so it is its own trait, not part of `Migrations`.

@@ -610,7 +610,13 @@ impl Migrations for MemoryStore {
         todo!("red: the Migrations port awaits the owner's review")
     }
 
-    async fn run(&self) -> Result<Vec<AppliedMigration>, StoreError> {
+    async fn run_to(&self, target: u64) -> Result<Vec<AppliedMigration>, StoreError> {
+        let _ = target;
+        todo!("red: the Migrations port awaits the owner's review")
+    }
+
+    async fn undo_to(&self, target: u64) -> Result<Vec<AppliedMigration>, StoreError> {
+        let _ = target;
         todo!("red: the Migrations port awaits the owner's review")
     }
 }

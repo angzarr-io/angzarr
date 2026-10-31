@@ -6,16 +6,18 @@
 
 use std::time::Duration;
 
-use angzarr_ports::migrate::{info, validate};
+use angzarr_ports::migrate::{info, latest, plan_run, plan_undo, validate};
 use angzarr_ports::{AppliedMigration, Migration, MigrationStatus, StoreError};
 use prost_types::Timestamp;
 
-/// Migration `version` of the build: checksum `[version]`.
+/// Migration `version` of the build: checksum `[version]`, reversible
+/// when its version is even.
 fn migration(version: u64) -> Migration {
     Migration {
         version,
         description: format!("step {version}"),
         checksum: vec![version as u8],
+        reversible: version.is_multiple_of(2),
     }
 }
 
@@ -204,4 +206,81 @@ fn info_is_in_version_order_and_empty_for_no_schema() {
     );
     assert_eq!(info(&[], &[]), vec![]);
     assert_eq!(validate(&[], &[]), Ok(()));
+}
+
+/// A run to a target plans what is pending at or below it, in order; to 0
+/// nothing; and refuses a target not in the build, or what validate does.
+#[test]
+#[ignore = "red: run_to and undo_to (the owner's ruling, 2026-10-31: M1)"]
+fn a_run_plans_what_is_pending_up_to_its_target() {
+    let set = build(&[1, 2, 3, 4]);
+    let ledger = vec![applied(1)];
+    assert_eq!(plan_run(&set, &ledger, 3), Ok(vec![2, 3]));
+    assert_eq!(plan_run(&set, &ledger, 4), Ok(vec![2, 3, 4]));
+    assert_eq!(plan_run(&set, &ledger, 1), Ok(vec![]));
+    assert_eq!(plan_run(&set, &ledger, 0), Ok(vec![]));
+    assert_eq!(
+        plan_run(&set, &[applied(1), applied(3)], 4),
+        Ok(vec![2, 4]),
+        "a gap below an applied one is pending too"
+    );
+    assert_eq!(
+        plan_run(&set, &ledger, 5),
+        Err(StoreError::MigrationUnknown { version: 5 })
+    );
+    let sparse = build(&[1, 3]);
+    assert_eq!(
+        plan_run(&sparse, &[], 2),
+        Err(StoreError::MigrationUnknown { version: 2 }),
+        "a version between the build's is not one of them"
+    );
+    let mut dirty = applied(1);
+    dirty.success = false;
+    assert_eq!(
+        plan_run(&set, &[dirty], 4),
+        Err(StoreError::MigrationFailed { version: 1 }),
+        "validated first"
+    );
+    assert_eq!(latest(&set), 4);
+    assert_eq!(latest(&[]), 0);
+}
+
+/// An undo to a target plans what is applied above it, highest first, and
+/// refuses the whole undo past one with no down, naming the highest.
+#[test]
+#[ignore = "red: run_to and undo_to (the owner's ruling, 2026-10-31: M1)"]
+fn an_undo_plans_what_is_applied_above_its_target_highest_first() {
+    let set = build(&[1, 2, 3, 4]);
+    let all = vec![applied(1), applied(2), applied(3), applied(4)];
+    assert_eq!(plan_undo(&set, &all, 3), Ok(vec![4]));
+    assert_eq!(plan_undo(&set, &all, 4), Ok(vec![]));
+    assert_eq!(
+        plan_undo(&set, &all, 1),
+        Err(StoreError::MigrationIrreversible { version: 3 }),
+        "3 has no down"
+    );
+    assert_eq!(
+        plan_undo(&set, &all, 0),
+        Err(StoreError::MigrationIrreversible { version: 3 }),
+        "the highest with no down"
+    );
+    let reversible = build(&[2, 4, 6]);
+    let applied_all = vec![applied(2), applied(4), applied(6)];
+    assert_eq!(plan_undo(&reversible, &applied_all, 0), Ok(vec![6, 4, 2]));
+    assert_eq!(
+        plan_undo(&reversible, &[applied(2), applied(6)], 2),
+        Ok(vec![6]),
+        "only what is applied"
+    );
+    assert_eq!(
+        plan_undo(&set, &all, 7),
+        Err(StoreError::MigrationUnknown { version: 7 })
+    );
+    let mut changed = applied(4);
+    changed.checksum = vec![0xFF];
+    assert_eq!(
+        plan_undo(&set, &[applied(1), applied(2), applied(3), changed], 3),
+        Err(StoreError::MigrationChanged { version: 4 }),
+        "validated first"
+    );
 }

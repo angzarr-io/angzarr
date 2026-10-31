@@ -110,6 +110,12 @@ pub enum StoreError {
     /// An applied migration, `version`, the build does not have, below the
     /// build's highest. Refused at open and by a run.
     MigrationMissing { version: u64 },
+    /// A run or undo to `version`, which is neither 0 nor a version of the
+    /// build. Nothing was changed.
+    MigrationUnknown { version: u64 },
+    /// An undo past `version`, an applied migration with no down to undo
+    /// it (the highest such). Nothing was changed.
+    MigrationIrreversible { version: u64 },
     /// A backup refused because something is already at its target, named
     /// as the adapter names it: a backup never overwrites. Nothing was
     /// written.
@@ -215,6 +221,8 @@ impl StoreError {
             | StoreError::MigrationFailed { .. }
             | StoreError::MigrationChanged { .. }
             | StoreError::MigrationMissing { .. }
+            | StoreError::MigrationUnknown { .. }
+            | StoreError::MigrationIrreversible { .. }
             | StoreError::BackupExists { .. } => None,
         }
     }
@@ -306,6 +314,10 @@ impl StoreError {
             StoreError::MigrationFailed { .. } => "angzarr-ports-store-migration-failed",
             StoreError::MigrationChanged { .. } => "angzarr-ports-store-migration-changed",
             StoreError::MigrationMissing { .. } => "angzarr-ports-store-migration-missing",
+            StoreError::MigrationUnknown { .. } => "angzarr-ports-store-migration-unknown",
+            StoreError::MigrationIrreversible { .. } => {
+                "angzarr-ports-store-migration-irreversible"
+            }
             StoreError::BackupExists { .. } => "angzarr-ports-store-backup-exists",
         }
     }
@@ -366,7 +378,11 @@ impl StoreError {
             ],
             StoreError::MigrationFailed { version }
             | StoreError::MigrationChanged { version }
-            | StoreError::MigrationMissing { version } => vec![("version", Arg::Uint(*version))],
+            | StoreError::MigrationMissing { version }
+            | StoreError::MigrationUnknown { version }
+            | StoreError::MigrationIrreversible { version } => {
+                vec![("version", Arg::Uint(*version))]
+            }
             StoreError::BackupExists { target } => vec![("target", Arg::Str(target.clone()))],
         }
     }
@@ -386,9 +402,10 @@ impl StoreError {
             }
             StoreError::EditionNotDeleted { .. } => Recovery::Bug,
             StoreError::EditionNotPropagated { .. } => Recovery::Retry,
-            StoreError::NewerThanBuild { .. } | StoreError::BackupExists { .. } => {
-                Recovery::Invalid
-            }
+            StoreError::NewerThanBuild { .. }
+            | StoreError::BackupExists { .. }
+            | StoreError::MigrationUnknown { .. }
+            | StoreError::MigrationIrreversible { .. } => Recovery::Invalid,
             StoreError::MigrationFailed { .. }
             | StoreError::MigrationChanged { .. }
             | StoreError::MigrationMissing { .. } => Recovery::Bug,

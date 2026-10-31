@@ -168,6 +168,16 @@ fn every() -> Vec<(StoreError, &'static str, Recovery)> {
             Bug,
         ),
         (
+            StoreError::MigrationUnknown { version: 7 },
+            "angzarr-ports-store-migration-unknown",
+            Invalid,
+        ),
+        (
+            StoreError::MigrationIrreversible { version: 4 },
+            "angzarr-ports-store-migration-irreversible",
+            Invalid,
+        ),
+        (
             StoreError::BackupExists {
                 target: "/p/state.db.backup".to_string(),
             },

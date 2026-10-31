@@ -43,7 +43,8 @@
 //! | `migrations` | [`Migrations`] | an opened store |
 //! | `backup` | [`Migrations`], [`Backup`] | a [`BackupFixture`] |
 //! | `migrate_on_open` | [`Migrations`] | an [`OpenFixture`] |
-//! | `migrate_on_open_backup` | [`Migrations`] (proposed: FLAG(M7)) | an [`OpenBackupFixture`] |
+//! | `migrate_to` | [`Migrations`], a build whose top migrations are reversible above one that is not | an [`OpenFixture`] |
+//! | `migrate_on_open_backup` | [`Migrations`], [`Backup`] | an [`OpenBackupFixture`] |
 //!
 //! Every open migrates (the owner, 2026-10-31): reading and writing both
 //! run what is pending before they serve, and refuse a store newer than
@@ -67,7 +68,7 @@ use prost::Message;
 use prost_types::{Any, Timestamp};
 
 use crate::error::StoreError;
-use crate::migrate::{AppliedMigration, Backup, Migration, MigrationStatus, Migrations};
+use crate::migrate::{latest, AppliedMigration, Backup, Migration, MigrationStatus, Migrations};
 use crate::store::{
     Append, Editions, EventStore, ListStreams, Outbox, OutboxEntry, Purge, ReadByCorrelation,
     ReadStore, ReadUnit, ReadUntilTime, Store, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
@@ -2564,6 +2565,40 @@ where
     );
 }
 
+/// A run or an undo to the build's latest changes nothing on an opened
+/// store, and a target neither 0 nor in the build is refused, nothing
+/// changed.
+pub async fn a_run_or_undo_to_the_latest_changes_nothing_and_an_unknown_target_is_refused<S>(
+    store: S,
+) where
+    S: Store + Migrations,
+{
+    let top = latest(&store.migrations());
+    let before = ledger_of(&store, "an opened store").await;
+    assert_eq!(store.run_to(top).await, Ok(vec![]), "a run to the latest");
+    assert_eq!(
+        store.undo_to(top).await,
+        Ok(vec![]),
+        "an undo to the latest"
+    );
+    let unknown = StoreError::MigrationUnknown { version: top + 1 };
+    assert_eq!(
+        store.run_to(top + 1).await,
+        Err(unknown.clone()),
+        "a run beyond the build"
+    );
+    assert_eq!(
+        store.undo_to(top + 1).await,
+        Err(unknown),
+        "an undo beyond the build"
+    );
+    assert_eq!(
+        ledger_of(&store, "after them").await,
+        before,
+        "no row changed"
+    );
+}
+
 /// What a backend gives the `backup` section: opened stores holding
 /// [`migration_content`], backup targets, and the open of a backup.
 pub trait BackupFixture {
@@ -2800,15 +2835,15 @@ pub async fn a_store_with_a_changed_migration_is_refused_at_open_untouched<F: Op
     assert_eq!(fixture.ledger(&at).await, before, "left untouched");
 }
 
-/// PROPOSED (FLAG(M7)): what a backend adds for the `migrate_on_open_backup`
-/// section: the backups its opens took of the store at a place.
+/// What a backend with [`Backup`] adds for the `migrate_on_open_backup`
+/// section (the owner, 2026-10-31: M7): the backups taken of the store at
+/// a place, before its schema was changed.
 pub trait OpenBackupFixture: OpenFixture {
-    /// The backups opens took of the store at `at`, oldest first.
+    /// The backups taken of the store at `at`, oldest first.
     fn backups(&self, at: &Self::Location) -> impl Future<Output = Vec<Self::Location>>;
 }
 
-/// PROPOSED (FLAG(M7)): opening a store with migrations pending backs it
-/// up first, as it stood: the backup's ledger is the store's before the
+/// Opening a store with migrations pending backs it up first, as it stood: the backup's ledger is the store's before the
 /// open, and it holds the store's events.
 pub async fn opening_a_store_with_migrations_pending_backs_it_up_first<F>(fixture: F)
 where
@@ -2828,8 +2863,7 @@ where
     );
 }
 
-/// PROPOSED (FLAG(M7)): an open with nothing pending, and an open refused,
-/// take no backup.
+/// An open with nothing pending, and one refused, take no backup.
 pub async fn an_open_with_nothing_pending_or_refused_takes_no_backup<F>(fixture: F)
 where
     F: OpenBackupFixture,
@@ -2851,6 +2885,152 @@ where
         fixture.backups(&newer).await.len(),
         0,
         "the refused open took none"
+    );
+}
+
+/// An undo that reverts something backs the store up first, as it stood;
+/// one refused takes none.
+pub async fn an_undo_backs_the_store_up_first<F>(fixture: F)
+where
+    F: OpenBackupFixture,
+{
+    let build = fixture.build();
+    let (below, _) = reversible_tail(&build);
+    let at = fixture.older().await;
+    let store = fixture.open(&at).await.expect("an older store opens");
+    let taken = fixture.backups(&at).await.len();
+    let before = fixture.ledger(&at).await;
+    assert!(
+        store.undo_to(0).await.is_err(),
+        "an undo past the irreversible"
+    );
+    assert_eq!(
+        fixture.backups(&at).await.len(),
+        taken,
+        "a refused undo takes no backup"
+    );
+    store
+        .undo_to(below)
+        .await
+        .expect("an undo of the reversible tail");
+    let backups = fixture.backups(&at).await;
+    assert_eq!(backups.len(), taken + 1, "the undo took one backup");
+    assert_eq!(
+        fixture.ledger(&backups[taken]).await,
+        before,
+        "the backup is the store before the undo"
+    );
+}
+
+/// The build's reversible tail, the longest run of migrations at its top
+/// with downs, as (the version just below it, its versions ascending). The
+/// `migrate_to` sections need one, below an irreversible migration.
+fn reversible_tail(build: &[Migration]) -> (u64, Vec<u64>) {
+    let mut tail: Vec<u64> = build
+        .iter()
+        .rev()
+        .take_while(|m| m.reversible)
+        .map(|m| m.version)
+        .collect();
+    tail.reverse();
+    let below = build
+        .iter()
+        .rev()
+        .find(|m| !m.reversible)
+        .map(|m| m.version);
+    match (tail.is_empty(), below) {
+        (false, Some(below)) => (below, tail),
+        _ => panic!(
+            "the fixture's build needs reversible migrations at its top, \
+             above one that is not"
+        ),
+    }
+}
+
+/// `ledger`'s versions, in its order.
+fn versions(ledger: &[AppliedMigration]) -> Vec<u64> {
+    ledger.iter().map(|r| r.version).collect()
+}
+
+/// An undo to a target reverts every migration applied above it, highest
+/// first, through its down: the ledger drops their rows and keeps the
+/// rest as they were, and every event is kept.
+pub async fn undoing_to_a_target_reverts_what_is_above_it_highest_first<F: OpenFixture>(
+    fixture: F,
+) {
+    let build = fixture.build();
+    let (below, tail) = reversible_tail(&build);
+    let at = fixture.older().await;
+    let store = fixture.open(&at).await.expect("an older store opens");
+    let before = ledger_of(&store, "the opened store").await;
+    let undone = store
+        .undo_to(below)
+        .await
+        .expect("an undo of the reversible tail");
+    let mut highest_first = tail.clone();
+    highest_first.reverse();
+    assert_eq!(versions(&undone), highest_first, "reverted highest first");
+    let kept: Vec<AppliedMigration> = before
+        .iter()
+        .filter(|r| r.version <= below)
+        .cloned()
+        .collect();
+    assert_eq!(
+        ledger_of(&store, "after the undo").await,
+        kept,
+        "the undone rows dropped, the rest as they were"
+    );
+    holds_the_content(&store, "after the undo").await;
+}
+
+/// A run to a target applies only what is pending at or below it; a run
+/// to the latest then applies the rest.
+pub async fn running_to_a_target_applies_only_what_is_at_or_below_it<F: OpenFixture>(fixture: F) {
+    let build = fixture.build();
+    let (below, tail) = reversible_tail(&build);
+    let at = fixture.older().await;
+    let store = fixture.open(&at).await.expect("an older store opens");
+    store
+        .undo_to(below)
+        .await
+        .expect("an undo of the reversible tail");
+    assert_eq!(
+        store.run_to(below).await,
+        Ok(vec![]),
+        "nothing pending at or below the target"
+    );
+    let first = tail[0];
+    let applied = store
+        .run_to(first)
+        .await
+        .expect("a run to the tail's first");
+    assert_eq!(versions(&applied), [first], "only what is at or below it");
+    let rest = store.run().await.expect("a run to the latest");
+    assert_eq!(versions(&rest), tail[1..], "then the rest");
+    is_the_build(&ledger_of(&store, "run").await, &build, "run to the latest");
+    holds_the_content(&store, "run again").await;
+}
+
+/// An undo past a migration with no down is refused, naming it, and
+/// changes nothing, not even the reversible migrations above it.
+pub async fn undoing_past_an_irreversible_migration_is_refused_and_changes_nothing<F>(fixture: F)
+where
+    F: OpenFixture,
+{
+    let build = fixture.build();
+    let (below, _) = reversible_tail(&build);
+    let at = fixture.older().await;
+    let store = fixture.open(&at).await.expect("an older store opens");
+    let before = ledger_of(&store, "the opened store").await;
+    assert_eq!(
+        store.undo_to(0).await,
+        Err(StoreError::MigrationIrreversible { version: below }),
+        "an undo past the highest irreversible"
+    );
+    assert_eq!(
+        ledger_of(&store, "after the refusal").await,
+        before,
+        "nothing changed"
     );
 }
 
@@ -2993,6 +3173,14 @@ macro_rules! store_contract {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             an_opened_store_is_current_its_ledger_the_builds_set,
             a_run_on_a_current_store_applies_nothing,
+            a_run_or_undo_to_the_latest_changes_nothing_and_an_unknown_target_is_refused,
+        );
+    };
+    (migrate_to, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            undoing_to_a_target_reverts_what_is_above_it_highest_first,
+            running_to_a_target_applies_only_what_is_at_or_below_it,
+            undoing_past_an_irreversible_migration_is_refused_and_changes_nothing,
         );
     };
     (backup, $(#[$t:meta])+, $f:expr) => {
@@ -3014,6 +3202,7 @@ macro_rules! store_contract {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             opening_a_store_with_migrations_pending_backs_it_up_first,
             an_open_with_nothing_pending_or_refused_takes_no_backup,
+            an_undo_backs_the_store_up_first,
         );
     };
     ($(#[$t:meta])+, $f:expr) => {

@@ -4,7 +4,8 @@
 //! migrator almost one to one, and nothing here names one.
 //!
 //! - **A build has a versioned migration set** ([`Migration`]: a version,
-//!   a description, a checksum), in version order.
+//!   a description, a checksum, and whether it has a down to undo it), in
+//!   version order.
 //! - **A store keeps a ledger** of what was applied to it
 //!   ([`AppliedMigration`]: the same three, whether it succeeded, when it
 //!   was installed, how long it ran).
@@ -12,16 +13,21 @@
 //!   version ([`MigrationStatus`]), as `flyway info` and `sqlx migrate
 //!   info` do; **[`Migrations::validate`]** refuses what a run would
 //!   refuse; **[`Migrations::run`]** applies every pending migration to the
-//!   latest, under the store's own lock against concurrent migrators.
+//!   latest, and [`Migrations::run_to`] those up to a target, under the
+//!   store's own lock against concurrent migrators; **[`Migrations::undo_to`]**
+//!   reverts the applied ones above a target, highest first, through their
+//!   downs (sqlx's `undo`, golang-migrate's `down`, diesel's revert).
 //! - **A store is migrated when it is opened,** for reading or for writing
 //!   (the owner, 2026-10-31): opening is the adapter's, and an adapter's
-//!   every open runs [`Migrations::run`] before it serves. A store newer
-//!   than the build, or one a migration failed in or was changed in, is
-//!   refused at open, untouched.
-//! - **No undo, and no run to a target version.** Reversible migrations
-//!   are not common to the model (refinery has none, Flyway's undo is not
-//!   in its free edition, and sqlx's run goes only to the latest), and
-//!   this crate's adapters write none.
+//!   every open runs [`Migrations::run`], to the latest, before it serves.
+//!   A store newer than the build, or one a migration failed in or was
+//!   changed in, is refused at open, untouched.
+//! - **A backend with [`Backup`] backs a store up before changing its
+//!   schema** (the owner, 2026-10-31): an open with migrations pending, and
+//!   any undo that reverts something, first back the store up beside it,
+//!   as it stood; for a file `state.db`, to
+//!   `state.db.pre-<applied level>-<UTC time>`. An open with nothing
+//!   pending, and one refused, take none.
 //! - **[`Backup`] is its own capability:** no migrator above takes one
 //!   (Flyway and golang-migrate leave it to the operator).
 //!
@@ -47,6 +53,9 @@ pub struct Migration {
     /// A digest of what it runs: an applied migration whose checksum
     /// differs from the build's was changed since it was applied.
     pub checksum: Vec<u8>,
+    /// Whether it has a down that undoes it. An undo past one that has
+    /// none is refused ([`StoreError::MigrationIrreversible`]).
+    pub reversible: bool,
 }
 
 /// One row of a store's ledger: a migration applied to it.
@@ -114,6 +123,37 @@ pub fn validate(build: &[Migration], ledger: &[AppliedMigration]) -> Result<(), 
     todo!("red: validate awaits the owner's review")
 }
 
+/// The versions a run to `target` applies, in order: every one pending at
+/// or below it, after [`validate`]. `target` is 0 or a version of the
+/// build ([`StoreError::MigrationUnknown`] otherwise).
+pub fn plan_run(
+    build: &[Migration],
+    ledger: &[AppliedMigration],
+    target: u64,
+) -> Result<Vec<u64>, StoreError> {
+    let _ = (build, ledger, target);
+    todo!("red: plan_run")
+}
+
+/// The versions an undo to `target` reverts, highest first: every one
+/// applied above it, after [`validate`]. `target` is 0 or a version of the
+/// build ([`StoreError::MigrationUnknown`] otherwise); one of them with no
+/// down refuses the whole undo, naming the highest such
+/// ([`StoreError::MigrationIrreversible`]).
+pub fn plan_undo(
+    build: &[Migration],
+    ledger: &[AppliedMigration],
+    target: u64,
+) -> Result<Vec<u64>, StoreError> {
+    let _ = (build, ledger, target);
+    todo!("red: plan_undo")
+}
+
+/// The highest version of the build's set, 0 for none: where a run goes.
+pub fn latest(build: &[Migration]) -> u64 {
+    build.iter().map(|m| m.version).max().unwrap_or(0)
+}
+
 /// Opt-in: a store's schema migrations. A backend with no schema has an
 /// empty set and an empty ledger, and every run applies nothing.
 pub trait Migrations: MaybeSend + MaybeSync {
@@ -141,13 +181,32 @@ pub trait Migrations: MaybeSend + MaybeSync {
         async move { validate(&self.migrations(), &self.applied().await?) }
     }
 
-    /// Apply every pending migration, in version order, under the store's
-    /// lock against concurrent migrators, after validating as
-    /// [`validate`](Migrations::validate) does (a refusal applies
-    /// nothing). Answers the rows it added to the ledger: none for a
-    /// current store, and none for a migrator that found another had just
-    /// applied them. Every stream's events are kept.
-    fn run(&self) -> impl Future<Output = Result<Vec<AppliedMigration>, StoreError>> + MaybeSend;
+    /// Apply every pending migration: [`run_to`](Migrations::run_to) the
+    /// build's latest. What every open does.
+    fn run(&self) -> impl Future<Output = Result<Vec<AppliedMigration>, StoreError>> + MaybeSend {
+        async move { self.run_to(latest(&self.migrations())).await }
+    }
+
+    /// Apply every pending migration at or below `target`, in version
+    /// order, under the store's lock against concurrent migrators, as
+    /// [`plan_run`] plans it (a refusal applies nothing). Answers the rows
+    /// it added to the ledger: none for a store already there, and none for
+    /// a migrator that found another had just applied them. Every stream's
+    /// events are kept.
+    fn run_to(
+        &self,
+        target: u64,
+    ) -> impl Future<Output = Result<Vec<AppliedMigration>, StoreError>> + MaybeSend;
+
+    /// Revert every applied migration above `target`, highest first,
+    /// through its down, under the same lock, as [`plan_undo`] plans it (a
+    /// refusal changes nothing), dropping their rows from the ledger.
+    /// Answers the rows it dropped, highest first. A backend with
+    /// [`Backup`] backs the store up first when it reverts anything.
+    fn undo_to(
+        &self,
+        target: u64,
+    ) -> impl Future<Output = Result<Vec<AppliedMigration>, StoreError>> + MaybeSend;
 }
 
 /// Opt-in: a copy of the store as one moment of it, ledger and all,
