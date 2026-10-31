@@ -1,6 +1,7 @@
 //! prost types for angzarr's domain-neutral wire contract.
 //!
-//! Generated from `proto/` in this repository: `io.angzarr.v1` books, pages
+//! Generated from angzarr-project's `proto/` (the `angzarr-project`
+//! submodule of angzarr-core): `io.angzarr.v1` books, pages
 //! (the `CommandPage` body, `Command` or `Fact`, with the command's identity:
 //! `command_id`, `correlation_id`, `causation_id`, `fact_origin`), covers,
 //! `Handling` (on `CommandBook`, with `ConflictResolution`),

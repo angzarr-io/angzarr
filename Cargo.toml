@@ -1,6 +1,8 @@
 [workspace]
 members = [
     ".",
+    "crates/angzarr-ports",
+    "crates/angzarr-proto",
     "crates/trivial-delegation",
     "xtask",
 ]

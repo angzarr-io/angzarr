@@ -1,12 +1,16 @@
 # angzarr-ports: the shared storage contract and its conformance suite.
-# Needs protoc on PATH (or PROTOC set, for angzarr-proto) and the
-# wasm32-unknown-unknown target.
+# Needs protoc on PATH (or PROTOC set, for angzarr-proto), the
+# wasm32-unknown-unknown target, and the angzarr-project submodule checked
+# out (angzarr-proto's build.rs reads its proto/). A member of angzarr-core's
+# workspace: every recipe names this package, and --locked means the
+# workspace's Cargo.lock. Runs on the host, not in core's toolchain container
+# (`just -f crates/angzarr-ports/justfile check`).
 
 # Format check, build, lint and test natively, then the wasm32 builds and
 # the wasm32 run of the suite on a store that is not Send
 check: fmt-check build lint test wasm wasm-test
 
-# The wasm test runner, pinned to the wasm-bindgen in Cargo.lock (the CLI
+# The wasm test runner, pinned to the wasm-bindgen in the workspace Cargo.lock (the CLI
 # and the library must match exactly). Installs into ~/.cargo/bin.
 WASM_BINDGEN := "0.2.129"
 
@@ -18,55 +22,61 @@ tools:
     if [ "$have" != "{{WASM_BINDGEN}}" ]; then
         cargo install --locked wasm-bindgen-cli --version {{WASM_BINDGEN}}
     fi
-    locked="$(grep -A1 '^name = "wasm-bindgen"$' Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')"
+    locked="$(grep -A1 '^name = "wasm-bindgen"$' ../../Cargo.lock | sed -n 's/^version = "\(.*\)"/\1/p')"
     [ "$locked" = "{{WASM_BINDGEN}}" ] || { echo "Cargo.lock has wasm-bindgen $locked; WASM_BINDGEN is {{WASM_BINDGEN}}: bump them together" >&2; exit 1; }
 
 fmt:
-    cargo fmt
+    cargo fmt -p angzarr-ports
 
 fmt-check:
-    cargo fmt --check
+    cargo fmt -p angzarr-ports --check
 
 build:
-    cargo build --locked --all-features
+    cargo build --locked -p angzarr-ports --all-features
 
 lint:
-    cargo clippy --locked --all-targets --all-features -- -D warnings
+    cargo clippy --locked -p angzarr-ports --all-targets --all-features -- -D warnings
 
 # The tests are the suite run against the reference backend: they need it
 test:
-    cargo test --locked --all-features
+    cargo test --locked -p angzarr-ports --all-features
 
 # The contract must build for the browser, suite and memory store included,
 # and so must the suite's run on a store that is not Send (tests/wasm.rs).
 # Running the wasm tests needs wasm-bindgen-test-runner: `just wasm-test`.
 wasm:
-    cargo build --locked --target wasm32-unknown-unknown
-    cargo build --locked --target wasm32-unknown-unknown --all-features
-    cargo test --locked --target wasm32-unknown-unknown --all-features --no-run
+    cargo build --locked -p angzarr-ports --target wasm32-unknown-unknown
+    cargo build --locked -p angzarr-ports --target wasm32-unknown-unknown --all-features
+    cargo test --locked -p angzarr-ports --target wasm32-unknown-unknown --all-features --no-run
 
 # Run the wasm tests: the suite on a store that is not Send (`just tools`
 # installs the runner). Needs node on PATH.
 wasm-test:
-    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test --locked --target wasm32-unknown-unknown --all-features --test wasm
+    CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER=wasm-bindgen-test-runner cargo test --locked -p angzarr-ports --target wasm32-unknown-unknown --all-features --test wasm
 
 # Mutation kill-rate threshold, percent, over viable mutants (caught or timed
 # out = killed; unviable mutants count neither way). The full pass killed
-# 271/284 (95%) on 2026-10-29; 90 is the org's bar.
+# 271/284 (95%) on 2026-10-29, in angzarr-project; 90 is the org's bar.
 MUTATION_THRESHOLD := "90"
 
+# No git hook runs mutation. The full pass runs weekly in CI
+# (.github/workflows/mutation-shared-crates.yml); by hand, run it where a
+# mutated tree cannot leak (CI, or a throwaway container: angzarr-core
+# forbids host cargo-mutants in a working checkout). cargo-mutants copies
+# the workspace to a scratch directory and mutates the copy (never
+# --in-place). angzarr-proto is generated code (build.rs), not mutated.
+
 # Mutation-test the whole crate, judged by MUTATION_THRESHOLD: the full pass.
-# mutants.out is target/mutants/mutants.out.
+# mutants.out is target/mutants/mutants.out (in this crate's directory).
 mutation-test:
     @just --justfile '{{justfile_directory()}}/justfile' _mutation target/mutants
 
-# Mutation-test only the lines the diff PATCH changes (paths relative to this
-# crate, a/ and b/ prefixes; this tree's lines on the b side), judged the same
-# way, in place: `mutation-push` (the repository's justfile, by hand) runs it
-# in a throwaway tree of the pushed commit. Exits 4 when the tests
-# fail unmutated (cargo-mutants' baseline), so no mutant can be judged.
+# Mutation-test only the lines the diff PATCH changes (paths relative to the
+# workspace root, a/ and b/ prefixes; this tree's lines on the b side),
+# judged the same way. Exits 4 when the tests fail unmutated (cargo-mutants'
+# baseline), so no mutant can be judged.
 mutation-diff PATCH:
-    @just --justfile '{{justfile_directory()}}/justfile' _mutation target/mutants-push '{{PATCH}}' --in-place
+    @just --justfile '{{justfile_directory()}}/justfile' _mutation target/mutants-diff '{{PATCH}}'
 
 [positional-arguments]
 _mutation out patch="" *flags:
@@ -81,11 +91,11 @@ _mutation out patch="" *flags:
         exit 1
     fi
     scope=()
-    [ -n "$patch" ] && scope=(--in-diff "$patch")
+    [ -n "$patch" ] && scope=(--in-diff "$(realpath "$patch")")
     rm -rf "$out"
     mkdir -p "$out"
     rc=0
-    cargo mutants "${scope[@]}" "$@" --all-features --timeout 120 --output "$out" --colors never \
+    cargo mutants --package angzarr-ports "${scope[@]}" "$@" --all-features --timeout 120 --output "$out" --colors never \
         > "$out/cargo-mutants.log" 2>&1 || rc=$?
     case "$rc" in
         0|2|3) ;;

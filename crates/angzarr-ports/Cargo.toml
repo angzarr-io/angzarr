@@ -4,11 +4,12 @@ version = "0.1.0"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "angzarr's shared storage contract: the event, snapshot and position stores, the unit of work, their errors, and the conformance suite every backend runs"
-repository = "https://github.com/angzarr-io/angzarr-project"
+repository = "https://github.com/angzarr-io/angzarr"
 publish = false
 
-# Standalone: angzarr-project has no Cargo workspace of its own.
-[workspace]
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace's [workspace.package] is sererr's (see the root Cargo.toml),
+# not this crate's, so nothing is inherited.
 
 [features]
 # The conformance suite: `angzarr_ports::contract` and `store_contract!`.

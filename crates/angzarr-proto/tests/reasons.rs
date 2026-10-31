@@ -127,7 +127,8 @@ fn the_owners_keys_are_these() {
 
 /// reasons.proto compiled by protoc into a FileDescriptorSet.
 fn descriptor() -> FileDescriptorSet {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../proto");
+    // The proto root build.rs generated the library from (exported by it).
+    let root = Path::new(env!("ANGZARR_PROTO_ROOT"));
     let out = Path::new(env!("CARGO_TARGET_TMPDIR")).join("reasons.binpb");
     let protoc = std::env::var("PROTOC").unwrap_or_else(|_| "protoc".into());
     let status = Command::new(protoc)

@@ -1,0 +1,62 @@
+# The mutation full pass of crates/angzarr-ports (moved from angzarr-project,
+# whose weekly pass this replaces), weekly and by hand: `just mutation-test`
+# (its justfile) mutates the whole crate and judges the kill rate against
+# its MUTATION_THRESHOLD. No git hook runs mutation. angzarr-proto is
+# generated code, not mutated. The crate needs protoc (angzarr-proto's
+# build.rs) and the angzarr-project submodule. The runner is throwaway, so
+# cargo-mutants' scratch copy cannot leak into a working checkout.
+# All logic lives in justfile recipes; this workflow only invokes them.
+name: Mutation (shared crates)
+
+on:
+  schedule:
+    # Weekly, Monday 06:00 UTC.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  angzarr-ports:
+    name: angzarr-ports mutation full pass
+    runs-on: ubuntu-latest
+    # GitHub's cap for a hosted job; let the full pass finish rather than
+    # cancel it mid-run.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: extractions/setup-just@v2
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-mutants-registry-${{ hashFiles('Cargo.lock') }}
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Mutation test (full pass)
+        run: just -f crates/angzarr-ports/justfile mutation-test
+
+      - name: cargo-mutants' log and surviving mutants
+        if: always()
+        run: |
+          for f in crates/angzarr-ports/target/mutants/cargo-mutants.log crates/angzarr-ports/target/mutants/mutants.out/missed.txt; do
+            [ -f "$f" ] || continue
+            echo "::group::$f"; cat "$f"; echo "::endgroup::"
+          done

@@ -422,6 +422,46 @@ test:
 precommit:
     just _container precommit
 
+# === Shared crates (crates/angzarr-proto, crates/angzarr-ports) ===
+# Moved from angzarr-project's rust/. They run on the host, not in the
+# toolchain container (its image lacks the wasm32 target and
+# wasm-bindgen-test-runner): protoc, the wasm32-unknown-unknown target,
+# wasm-bindgen-test-runner (`just -f crates/angzarr-ports/justfile tools`)
+# and node. build.rs reads the protos from the angzarr-project submodule.
+
+# Every check of both shared crates: fmt-check, build, lint, test, wasm, and
+# angzarr-ports' wasm-test; first, that the submodule cannot clash with them
+check-shared-crates: check-proto-submodule
+    just -f '{{TOP}}/crates/angzarr-proto/justfile' check
+    just -f '{{TOP}}/crates/angzarr-ports/justfile' check
+
+# The angzarr-project submodule is checked out at the commit this tree pins,
+# and that commit carries no Rust package named angzarr-proto or
+# angzarr-ports (its old rust/). Cargo resolves a git dependency on this
+# repository by package name across every Cargo.toml in the checkout,
+# submodules included: two packages of one name there and a consumer's
+# build fails. Pin the submodule only at an angzarr-project revision after
+# rust/ was removed.
+check-proto-submodule:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd '{{TOP}}'
+    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
+    sm=angzarr-project
+    pinned=$(git ls-tree HEAD "$sm" | awk '$2 == "commit" {print $3}')
+    [ -n "$pinned" ] || { echo "FAIL check-proto-submodule: $sm is not a submodule of HEAD" >&2; exit 1; }
+    head=$(git -C "$sm" rev-parse HEAD 2>/dev/null) || { echo "FAIL check-proto-submodule: $sm is not checked out (git submodule update --init $sm)" >&2; exit 1; }
+    [ "$head" = "$pinned" ] || { echo "FAIL check-proto-submodule: $sm is at $head, HEAD pins $pinned (git submodule update $sm)" >&2; exit 1; }
+    [ -f "$sm/proto/io/angzarr/v1/types.proto" ] || { echo "FAIL check-proto-submodule: $sm@${pinned:0:12} has no proto/io/angzarr/v1/types.proto" >&2; exit 1; }
+    clash=$(git -C "$sm" ls-files -z -- 'Cargo.toml' '*/Cargo.toml' \
+        | xargs -0 -r grep -lE '^name[[:space:]]*=[[:space:]]*"angzarr-(proto|ports)"' || true)
+    if [ -n "$clash" ] || [ -n "$(git -C "$sm" ls-files -- rust)" ]; then
+        echo "FAIL check-proto-submodule: $sm@${pinned:0:12} still carries rust/ or a package named angzarr-proto or angzarr-ports:" >&2
+        { [ -n "$clash" ] && sed "s|^|  $sm/|" <<< "$clash"; git -C "$sm" ls-files -- rust | head -5 | sed "s|^|  $sm/|"; } >&2
+        exit 1
+    fi
+    echo "ok   check-proto-submodule ($sm@${pinned:0:12}: protos present, no angzarr-proto or angzarr-ports package)"
+
 # Regenerate mutation test exclusions from #[trivial_delegation] attributes
 gen-mutants-exclude:
     just _container gen-mutants-exclude

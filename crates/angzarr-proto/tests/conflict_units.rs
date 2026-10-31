@@ -20,8 +20,9 @@ use prost_types::FileDescriptorSet;
 const STATE: u32 = 50106;
 const CONFLICT: u32 = 50107;
 
+/// The proto root build.rs generated the library from (exported by it).
 fn proto_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../proto")
+    PathBuf::from(env!("ANGZARR_PROTO_ROOT"))
 }
 
 /// Compiles the fixture (and, with --include_imports, options.proto itself)

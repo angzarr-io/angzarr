@@ -1,5 +1,8 @@
-//! Generates the domain-neutral `io.angzarr.v1` types from this repo's
-//! canonical protos (lifted from angzarr-router's `crates/router/build.rs`).
+//! Generates the domain-neutral `io.angzarr.v1` types from the canonical
+//! protos: angzarr-project's `proto/`, which this repository carries as the
+//! `angzarr-project` submodule (lifted from angzarr-router's
+//! `crates/router/build.rs`; the crate moved here from angzarr-project's
+//! `rust/`).
 //!
 //! Only `types.proto` (with `sererr/v1/sererr.proto`, which it imports),
 //! `upcaster.proto`, `options.proto`, `meta.proto`, `reasons.proto` (the
@@ -14,7 +17,7 @@
 //! `ListEditionsRequest`/`Response`, `EditionSummary`,
 //! `DeleteEditionRequest`). meta.proto imports
 //! `google/api/annotations.proto` for its HTTP bindings: protoc resolves it
-//! from this repo's vendored `proto/google/api/`, and nothing generated
+//! from angzarr-project's vendored `proto/google/api/`, and nothing generated
 //! here references `google.api` (its code is emitted to `$OUT_DIR` but not
 //! included by the library).
 //!
@@ -26,22 +29,33 @@
 //! `angzarr_proto::protos::write_include_dir`, with no vendored copy and no
 //! path into this repository.
 //!
+//! The proto root is exported to the crate's own tests as
+//! `ANGZARR_PROTO_ROOT` (`env!("ANGZARR_PROTO_ROOT")`), so they compile the
+//! very protos the library was generated from.
+//!
 //! Requires `protoc` on PATH (or `PROTOC` set): prost-build 0.14 does not
 //! bundle it.
 
 use std::path::PathBuf;
 
-/// Resolves the proto root: env override first, then this repo's `proto/`.
+/// Resolves the proto root: the `ANGZARR_PROJECT_PROTO` override first,
+/// then the angzarr-project submodule's `proto/` at the repository root.
 fn proto_root() -> PathBuf {
     if let Ok(root) = std::env::var("ANGZARR_PROJECT_PROTO") {
         return PathBuf::from(root);
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let repo_proto = manifest.join("../../proto");
-    if repo_proto.join("io/angzarr/v1/types.proto").exists() {
-        return repo_proto;
+    let submodule = manifest.join("../../angzarr-project/proto");
+    if submodule.join("io/angzarr/v1/types.proto").exists() {
+        return submodule
+            .canonicalize()
+            .expect("canonicalize the proto root");
     }
-    panic!("angzarr protos not found at ../../proto; set ANGZARR_PROJECT_PROTO");
+    panic!(
+        "angzarr protos not found at {} (is the angzarr-project submodule checked out, at a \
+         revision with proto/io/angzarr/v1?); set ANGZARR_PROJECT_PROTO",
+        submodule.display()
+    );
 }
 
 fn main() {
@@ -62,6 +76,8 @@ fn main() {
         root.join("google/api/http.proto"),
     ];
     println!("cargo:rerun-if-env-changed=ANGZARR_PROJECT_PROTO");
+    // The tests read the root the library was generated from.
+    println!("cargo:rustc-env=ANGZARR_PROTO_ROOT={}", root.display());
     println!("cargo:rerun-if-env-changed=PROTOC");
     for f in files.iter().chain(&imports_only) {
         println!("cargo:rerun-if-changed={}", f.display());

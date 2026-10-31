@@ -1,14 +1,13 @@
-//! The embedded protos are the repository's, byte for byte, and written
+//! The embedded protos are angzarr-project's, byte for byte, and written
 //! out they form an include directory protoc can import from.
 
 use std::path::PathBuf;
 
 use angzarr_proto::protos::{write_include_dir, FILES};
 
+/// The proto root build.rs generated the library from (exported by it).
 fn repo_proto() -> PathBuf {
-    std::env::var("ANGZARR_PROJECT_PROTO")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../proto"))
+    PathBuf::from(env!("ANGZARR_PROTO_ROOT"))
 }
 
 #[test]

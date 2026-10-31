@@ -1,24 +1,28 @@
 # angzarr-proto: prost types for the domain-neutral io.angzarr.v1 protos.
-# Needs protoc on PATH (or PROTOC set) and the wasm32-unknown-unknown target.
+# Needs protoc on PATH (or PROTOC set), the wasm32-unknown-unknown target,
+# and the angzarr-project submodule checked out (build.rs reads its proto/).
+# A member of angzarr-core's workspace: every recipe names this package, and
+# --locked means the workspace's Cargo.lock. Runs on the host, not in core's
+# toolchain container (`just -f crates/angzarr-proto/justfile check`).
 
 # Format check, build, lint and test natively, then the wasm32 build
 check: fmt-check build lint test wasm
 
 fmt:
-    cargo fmt
+    cargo fmt -p angzarr-proto
 
 fmt-check:
-    cargo fmt --check
+    cargo fmt -p angzarr-proto --check
 
 build:
-    cargo build --locked
+    cargo build --locked -p angzarr-proto
 
 lint:
-    cargo clippy --locked --all-targets -- -D warnings
+    cargo clippy --locked -p angzarr-proto --all-targets -- -D warnings
 
 test:
-    cargo test --locked
+    cargo test --locked -p angzarr-proto
 
 # The crate must stay a dependency leaf that builds for the browser
 wasm:
-    cargo build --locked --target wasm32-unknown-unknown
+    cargo build --locked -p angzarr-proto --target wasm32-unknown-unknown
