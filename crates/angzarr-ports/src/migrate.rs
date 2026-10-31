@@ -108,8 +108,39 @@ pub struct MigrationInfo {
 /// order, with how it stands. What [`Migrations::info`] answers, and what
 /// an adapter's open may judge by.
 pub fn info(build: &[Migration], ledger: &[AppliedMigration]) -> Vec<MigrationInfo> {
-    let _ = (build, ledger);
-    todo!("red: info awaits the owner's review")
+    let top = latest(build);
+    let mut versions: Vec<u64> = build
+        .iter()
+        .map(|m| m.version)
+        .chain(ledger.iter().map(|r| r.version))
+        .collect();
+    versions.sort_unstable();
+    versions.dedup();
+    versions
+        .into_iter()
+        .map(|version| {
+            let known = build.iter().find(|m| m.version == version);
+            let row = ledger.iter().find(|r| r.version == version);
+            let status = match (known, row) {
+                (_, Some(r)) if !r.success => MigrationStatus::Failed,
+                (Some(m), Some(r)) if m.checksum != r.checksum => MigrationStatus::Changed,
+                (Some(_), Some(_)) => MigrationStatus::Applied,
+                (Some(_), None) => MigrationStatus::Pending,
+                (None, _) if version > top => MigrationStatus::Newer,
+                (None, _) => MigrationStatus::Missing,
+            };
+            let description = known
+                .map(|m| m.description.clone())
+                .or_else(|| row.map(|r| r.description.clone()))
+                .unwrap_or_default();
+            MigrationInfo {
+                version,
+                description,
+                status,
+                applied: row.cloned(),
+            }
+        })
+        .collect()
 }
 
 /// What a run refuses, judged from `build`'s set and `ledger`: dirty
@@ -119,8 +150,38 @@ pub fn info(build: &[Migration], ledger: &[AppliedMigration]) -> Vec<MigrationIn
 /// missing ([`StoreError::MigrationMissing`]), each the lowest version so
 /// standing. Pending migrations are no refusal.
 pub fn validate(build: &[Migration], ledger: &[AppliedMigration]) -> Result<(), StoreError> {
-    let _ = (build, ledger);
-    todo!("red: validate awaits the owner's review")
+    let lines = info(build, ledger);
+    let lowest = |status| {
+        lines
+            .iter()
+            .find(|line| line.status == status)
+            .map(|line| line.version)
+    };
+    if let Some(version) = lowest(MigrationStatus::Failed) {
+        return Err(StoreError::MigrationFailed { version });
+    }
+    if lowest(MigrationStatus::Newer).is_some() {
+        return Err(StoreError::NewerThanBuild {
+            applied: ledger.iter().map(|r| r.version).max().unwrap_or(0),
+            build: latest(build),
+        });
+    }
+    if let Some(version) = lowest(MigrationStatus::Changed) {
+        return Err(StoreError::MigrationChanged { version });
+    }
+    if let Some(version) = lowest(MigrationStatus::Missing) {
+        return Err(StoreError::MigrationMissing { version });
+    }
+    Ok(())
+}
+
+/// That `target` is 0 or a version of `build`.
+fn known_target(build: &[Migration], target: u64) -> Result<(), StoreError> {
+    if target == 0 || build.iter().any(|m| m.version == target) {
+        Ok(())
+    } else {
+        Err(StoreError::MigrationUnknown { version: target })
+    }
 }
 
 /// The versions a run to `target` applies, in order: every one pending at
@@ -131,8 +192,15 @@ pub fn plan_run(
     ledger: &[AppliedMigration],
     target: u64,
 ) -> Result<Vec<u64>, StoreError> {
-    let _ = (build, ledger, target);
-    todo!("red: plan_run")
+    validate(build, ledger)?;
+    known_target(build, target)?;
+    let mut planned: Vec<u64> = build
+        .iter()
+        .map(|m| m.version)
+        .filter(|v| *v <= target && !ledger.iter().any(|r| r.version == *v))
+        .collect();
+    planned.sort_unstable();
+    Ok(planned)
 }
 
 /// The versions an undo to `target` reverts, highest first: every one
@@ -145,8 +213,22 @@ pub fn plan_undo(
     ledger: &[AppliedMigration],
     target: u64,
 ) -> Result<Vec<u64>, StoreError> {
-    let _ = (build, ledger, target);
-    todo!("red: plan_undo")
+    validate(build, ledger)?;
+    known_target(build, target)?;
+    let mut planned: Vec<u64> = ledger
+        .iter()
+        .map(|r| r.version)
+        .filter(|v| *v > target)
+        .collect();
+    planned.sort_unstable_by(|a, b| b.cmp(a));
+    let irreversible = planned
+        .iter()
+        .copied()
+        .find(|v| build.iter().any(|m| m.version == *v && !m.reversible));
+    match irreversible {
+        Some(version) => Err(StoreError::MigrationIrreversible { version }),
+        None => Ok(planned),
+    }
 }
 
 /// The highest version of the build's set, 0 for none: where a run goes.

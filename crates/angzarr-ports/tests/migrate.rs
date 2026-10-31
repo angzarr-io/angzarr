@@ -1,8 +1,6 @@
 //! `migrate::info` and `migrate::validate`: a build's migration set laid
 //! over a store's ledger, as `flyway info` and sqlx's migrator judge it
-//! (`src/migrate.rs`). RED while the port awaits the owner's review
-//! (2026-10-31): `#[ignore]`d, `cargo test --all-features --test migrate
-//! -- --ignored` shows them.
+//! (`src/migrate.rs`), and the plans of a run and an undo to a target.
 
 use std::time::Duration;
 
@@ -52,7 +50,6 @@ fn statuses(build: &[Migration], ledger: &[AppliedMigration]) -> Vec<(u64, Migra
 use MigrationStatus::*;
 
 #[test]
-#[ignore = "red: the Migrations port awaits the owner's review (2026-10-31)"]
 fn a_current_ledger_is_every_migration_applied_and_validates() {
     let set = build(&[1, 2, 3]);
     let ledger = vec![applied(1), applied(2), applied(3)];
@@ -64,7 +61,6 @@ fn a_current_ledger_is_every_migration_applied_and_validates() {
 }
 
 #[test]
-#[ignore = "red: the Migrations port awaits the owner's review (2026-10-31)"]
 fn what_the_ledger_lacks_is_pending_and_no_refusal() {
     let set = build(&[1, 2, 3]);
     let ledger = vec![applied(1)];
@@ -81,7 +77,6 @@ fn what_the_ledger_lacks_is_pending_and_no_refusal() {
 }
 
 #[test]
-#[ignore = "red: the Migrations port awaits the owner's review (2026-10-31)"]
 fn a_row_not_a_success_is_failed_and_refused_dirty() {
     let set = build(&[1, 2, 3]);
     let mut dirty = applied(2);
@@ -98,7 +93,6 @@ fn a_row_not_a_success_is_failed_and_refused_dirty() {
 }
 
 #[test]
-#[ignore = "red: the Migrations port awaits the owner's review (2026-10-31)"]
 fn a_checksum_not_the_builds_is_changed_and_refused() {
     let set = build(&[1, 2]);
     let mut changed = applied(1);
@@ -112,7 +106,6 @@ fn a_checksum_not_the_builds_is_changed_and_refused() {
 }
 
 #[test]
-#[ignore = "red: the Migrations port awaits the owner's review (2026-10-31)"]
 fn an_unknown_version_beyond_the_builds_highest_is_newer_and_refused() {
     let set = build(&[1, 2]);
     let ledger = vec![applied(1), applied(2), applied(9)];
@@ -140,7 +133,6 @@ fn an_unknown_version_beyond_the_builds_highest_is_newer_and_refused() {
 }
 
 #[test]
-#[ignore = "red: the Migrations port awaits the owner's review (2026-10-31)"]
 fn an_unknown_version_below_the_builds_highest_is_missing_and_refused() {
     let set = build(&[1, 3]);
     let ledger = vec![applied(1), applied(2), applied(3)];
@@ -157,7 +149,6 @@ fn an_unknown_version_below_the_builds_highest_is_missing_and_refused() {
 /// Failed, then newer, then changed, then missing; and within one, the
 /// lowest version.
 #[test]
-#[ignore = "red: the Migrations port awaits the owner's review (2026-10-31)"]
 fn the_refusals_take_precedence_failed_newer_changed_missing() {
     let set = build(&[1, 3, 4]);
     let mut dirty = applied(4);
@@ -196,7 +187,6 @@ fn the_refusals_take_precedence_failed_newer_changed_missing() {
 /// In version order whatever the ledger's order; a backend with no schema
 /// has no lines and validates.
 #[test]
-#[ignore = "red: the Migrations port awaits the owner's review (2026-10-31)"]
 fn info_is_in_version_order_and_empty_for_no_schema() {
     let set = build(&[1, 2, 3]);
     let ledger = vec![applied(3), applied(1)];
@@ -211,7 +201,6 @@ fn info_is_in_version_order_and_empty_for_no_schema() {
 /// A run to a target plans what is pending at or below it, in order; to 0
 /// nothing; and refuses a target not in the build, or what validate does.
 #[test]
-#[ignore = "red: run_to and undo_to (the owner's ruling, 2026-10-31: M1)"]
 fn a_run_plans_what_is_pending_up_to_its_target() {
     let set = build(&[1, 2, 3, 4]);
     let ledger = vec![applied(1)];
@@ -248,7 +237,6 @@ fn a_run_plans_what_is_pending_up_to_its_target() {
 /// An undo to a target plans what is applied above it, highest first, and
 /// refuses the whole undo past one with no down, naming the highest.
 #[test]
-#[ignore = "red: run_to and undo_to (the owner's ruling, 2026-10-31: M1)"]
 fn an_undo_plans_what_is_applied_above_its_target_highest_first() {
     let set = build(&[1, 2, 3, 4]);
     let all = vec![applied(1), applied(2), applied(3), applied(4)];

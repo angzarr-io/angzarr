@@ -139,19 +139,18 @@
 //! - **FLAG(E3') `read_by_correlation` in an edition** answers an uncreated
 //!   stream's pages under the edition's cover.
 //!
-//! # Proposed, RED, for the owner's review (2026-10-31)
+//! # Migrations and backups (the owner's review, 2026-10-31)
 //!
 //! Opt-in [`Migrations`](angzarr_ports::Migrations) and
 //! [`Backup`](angzarr_ports::Backup) (`src/migrate.rs`), store-agnostic and
 //! after the common shape of SQL migrators (the owner: "largely mimic the
 //! ideas and flows of sqlx migrate and other SQL migrators"): a build's
-//! versioned set, a store's ledger, `info`, `validate` and `run`, under the
-//! store's lock. RULED by the owner (M4): every open, reading or writing,
-//! runs what is pending, and refuses a store newer than the build, dirty or
-//! changed, untouched. The MemoryStore runs below are `#[ignore]`d while
-//! red: `cargo test --all-features --test contract -- --ignored migrat`
-//! and `--ignored backup` show them; `tests/migrate.rs` holds `info` and
-//! `validate` red as they stand.
+//! versioned set, a store's ledger, `info`, `validate`, `run`, `run_to`
+//! and `undo_to`, under the store's lock (`tests/migrate.rs` holds the
+//! judging and planning). The shape is APPROVED, and M2, M3, M4', M5, M6,
+//! M8 and M9 with it. RULED (M4): every open, reading or writing, runs
+//! what is pending, and refuses a store newer than the build, dirty or
+//! changed, untouched.
 //!
 //! - **RULED(M1) Undo and run to a target are in** (the owner,
 //!   2026-10-31): a migration may have a down; `run_to` and `undo_to` run
@@ -159,24 +158,24 @@
 //!   refused, nothing changed, past a migration with no down
 //!   (`MigrationIrreversible`); a target neither 0 nor in the build is
 //!   refused (`MigrationUnknown`); an open still runs only forward.
-//! - **FLAG(M2) A version is a `u64`** (sqlx's `i64`, never negative in
+//! - **RULED(M2) A version is a `u64`** (sqlx's `i64`, never negative in
 //!   practice); a checksum is bytes, compared whole.
-//! - **FLAG(M3) Missing and newer are told apart:** an applied version
+//! - **RULED(M3) Missing and newer are told apart:** an applied version
 //!   unknown to the build is `Newer` above the build's highest (Flyway's
 //!   "future"), `Missing` below it. sqlx reports both as one
 //!   `VersionMissing`; the adapter tells them apart by the build's highest.
-//! - **FLAG(M4') The refusals are the ports' own codes:** `NewerThanBuild {
+//! - **RULED(M4') The refusals are the ports' own codes:** `NewerThanBuild {
 //!   applied, build }`, `MigrationFailed { version }` (sqlx's `Dirty`),
 //!   `MigrationChanged { version }` (`VersionMismatch`), `MigrationMissing
 //!   { version }` and `BackupExists { target }`. `validate`'s precedence:
 //!   failed, newer, changed, missing (sqlx checks dirty first, then
 //!   missing, then each checksum in version order).
-//! - **FLAG(M5) The lock is the store's,** promised only as an effect:
+//! - **RULED(M5) The lock is the store's,** promised only as an effect:
 //!   two migrators at once apply each migration once
 //!   (`opening_an_older_store_twice_at_once_applies_each_migration_once`).
 //!   No `lock`/`unlock` in the port: sqlx's are a backend's (on SQLite a
 //!   no-op, so the adapter's `BEGIN IMMEDIATE` is the lock).
-//! - **FLAG(M6) `info` and `validate` are judged in the port**
+//! - **RULED(M6) `info` and `validate` are judged in the port**
 //!   (`migrate::info`, `migrate::validate`, the traits' defaults), from the
 //!   two lists an adapter gives; an adapter gives `migrations`, `applied`
 //!   and `run`. The ledger's `installed_on` and `execution_time` are data,
@@ -186,10 +185,10 @@
 //!   file `state.db`, `state.db.pre-<applied level>-<UTC time>`; so does an
 //!   undo that reverts anything. An open with nothing pending, or refused,
 //!   takes none.
-//! - **FLAG(M8) Backup has no analogue in these migrators:** Flyway,
+//! - **RULED(M8) Backup has no analogue in these migrators:** Flyway,
 //!   golang-migrate, refinery, diesel and sqlx take none, leaving it to the
 //!   operator, so it is its own trait, not part of `Migrations`.
-//! - **FLAG(M9) No dyn twins yet** (`DynMigrations`, `DynBackup`).
+//! - **RULED(M9) No dyn twins yet** (`DynMigrations`, `DynBackup`).
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -340,8 +339,7 @@ mod migrations {
     use super::*;
     angzarr_ports::store_contract!(
         migrations,
-        #[tokio::test]
-        #[ignore = "red: the Migrations port awaits the owner's review (2026-10-31)"],
+        #[tokio::test],
         MemoryStore::new()
     );
 }
@@ -350,8 +348,7 @@ mod backup {
     use super::*;
     angzarr_ports::store_contract!(
         backup,
-        #[tokio::test]
-        #[ignore = "red: the Backup port awaits the owner's review (2026-10-31)"],
+        #[tokio::test],
         MemoryBackups
     );
 }

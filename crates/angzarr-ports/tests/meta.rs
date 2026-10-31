@@ -1556,3 +1556,695 @@ fn an_honest_broken_store_passes_every_check() {
         a_change_token_changes_when_another_handle_commits,
     );
 }
+
+// ============================================== migrations and backups
+
+/// The migrations sections' checks, run against a backend simulated here
+/// with a schema (`MemoryStore` has none): a build of four migrations, 1
+/// and 2 with no down, 3 and 4 reversible; stores at places of their own,
+/// each a ledger and a `MemoryStore` of its data; opens that migrate and
+/// back up first. `Sim` gets exactly one thing wrong, its [`MBug`].
+mod migrations {
+    use super::{caught, run};
+
+    use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use angzarr_ports::angzarr_proto::v1::{Cover, EventPage, Snapshot};
+    use angzarr_ports::contract::{self, migration_content};
+    use angzarr_ports::memory::{BackupSlot, MemoryStore};
+    use angzarr_ports::migrate::{latest, plan_run, plan_undo, validate};
+    use angzarr_ports::{
+        AppliedMigration, Backup, EventStore, Migration, Migrations, PositionKey, PositionStore,
+        Slice, SnapshotStore, StoreError, StreamRef, Uuid, Write, Written,
+    };
+    use prost_types::Timestamp;
+
+    /// What a [`Sim`] gets wrong: one bug each.
+    #[derive(Clone, Copy, PartialEq, Eq, Debug)]
+    enum MBug {
+        /// None: every check passes it.
+        Honest,
+        // ---- an opened store
+        /// Its ledger omits its last row.
+        LedgerShort,
+        /// A run answers every migration as applied again.
+        RunReapplies,
+        /// A run or undo to a target not in the build does nothing, Ok.
+        TakesUnknownTarget,
+        /// An undo to the latest reverts the latest.
+        UndoAtLatestReverts,
+        // ---- backups
+        /// A backup shares the store's data, so later writes reach it.
+        BackupAliases,
+        /// A backup's ledger is empty.
+        BackupDropsLedger,
+        /// A backup overwrites what is at its target.
+        BackupOverwrites,
+        // ---- opens
+        /// An open leaves the last pending migration unapplied.
+        OpenLeavesOnePending,
+        /// An open loses the store's events.
+        OpenLosesEvents,
+        /// An open rewrites the rows it keeps (their install time).
+        OpenRewritesKeptRows,
+        /// Two opens at once each apply what is pending (no lock).
+        RacingOpensApplyTwice,
+        /// An open takes a newer store, as if current.
+        OpenTakesNewer,
+        /// An open refuses a newer store, but touches its ledger first.
+        OpenTouchesNewer,
+        /// An open takes a dirty store.
+        OpenTakesDirty,
+        /// An open takes a store with a changed migration.
+        OpenTakesChanged,
+        // ---- to a target
+        /// An undo answers what it reverted, but keeps the rows.
+        UndoKeepsRows,
+        /// An undo reverts lowest first.
+        UndoLowestFirst,
+        /// A run to a target runs to the latest.
+        RunToOvershoots,
+        /// An undo past an irreversible migration reverts everything.
+        UndoTakesIrreversible,
+        /// An undo past an irreversible migration reverts the reversible
+        /// ones above it, then refuses.
+        UndoRevertsBeforeRefusing,
+        // ---- backups before changes
+        /// An open with migrations pending takes no backup.
+        NoBackupOnOpen,
+        /// An open backs up after migrating, not before.
+        BackupAfterMigrating,
+        /// Every open takes a backup, nothing pending or not.
+        BackupEveryOpen,
+        /// A refused open takes a backup.
+        RefusedOpenBacksUp,
+        /// An undo takes no backup.
+        UndoNoBackup,
+        /// A refused undo takes a backup.
+        RefusedUndoBacksUp,
+    }
+
+    /// The simulated build: 1 and 2 with no down, 3 and 4 reversible.
+    fn build() -> Vec<Migration> {
+        (1..=4)
+            .map(|version| Migration {
+                version,
+                description: format!("step {version}"),
+                checksum: vec![version as u8],
+                reversible: version >= 3,
+            })
+            .collect()
+    }
+
+    /// One store's place.
+    #[derive(Default)]
+    struct Db {
+        /// Whether anything is there.
+        filled: bool,
+        ledger: Vec<AppliedMigration>,
+        data: MemoryStore,
+        /// The places of the backups taken of it, oldest first.
+        backups: Vec<usize>,
+    }
+
+    /// The simulated backend: its places, and a clock for install times.
+    #[derive(Clone)]
+    struct Sim {
+        bug: MBug,
+        dbs: Arc<Mutex<Vec<Db>>>,
+        clock: Arc<AtomicI64>,
+        /// Opens so far.
+        opens: Arc<AtomicU64>,
+    }
+
+    fn sim(bug: MBug) -> Sim {
+        Sim {
+            bug,
+            dbs: Arc::default(),
+            clock: Arc::default(),
+            opens: Arc::default(),
+        }
+    }
+
+    impl Sim {
+        fn is(&self, bug: MBug) -> bool {
+            self.bug == bug
+        }
+
+        fn with<T>(&self, f: impl FnOnce(&mut Vec<Db>) -> T) -> T {
+            f(&mut self.dbs.lock().unwrap_or_else(|p| p.into_inner()))
+        }
+
+        /// A row for `version` of the build, installed now.
+        fn row(&self, version: u64) -> AppliedMigration {
+            let m = build().into_iter().find(|m| m.version == version);
+            let (description, checksum) = m.map_or_else(
+                || (format!("step {version}"), vec![version as u8]),
+                |m| (m.description, m.checksum),
+            );
+            AppliedMigration {
+                version,
+                description,
+                checksum,
+                success: true,
+                installed_on: Timestamp {
+                    seconds: self.clock.fetch_add(1, Ordering::Relaxed),
+                    nanos: 0,
+                },
+                execution_time: Duration::from_millis(1),
+            }
+        }
+
+        /// A new place holding `ledger` and the suite's content.
+        async fn make(&self, ledger: Vec<AppliedMigration>) -> usize {
+            let data = MemoryStore::new();
+            let (stream, pages) = migration_content();
+            contract::append(&data, stream, 0, &pages).await.unwrap();
+            self.with(|dbs| {
+                dbs.push(Db {
+                    filled: true,
+                    ledger,
+                    data,
+                    backups: Vec::new(),
+                });
+                dbs.len() - 1
+            })
+        }
+
+        fn ledger_at(&self, at: usize) -> Vec<AppliedMigration> {
+            self.with(|dbs| dbs[at].ledger.clone())
+        }
+
+        fn data_at(&self, at: usize) -> MemoryStore {
+            self.with(|dbs| dbs[at].data.clone())
+        }
+
+        /// Copy the store at `at` to `target`, as [`Backup`] does.
+        async fn copy(&self, at: usize, target: usize) -> Result<(), StoreError> {
+            let occupied = self.with(|dbs| dbs[target].filled);
+            if occupied && !self.is(MBug::BackupOverwrites) {
+                return Err(StoreError::BackupExists {
+                    target: target.to_string(),
+                });
+            }
+            let source = self.data_at(at);
+            let data = if self.is(MBug::BackupAliases) {
+                source
+            } else {
+                let slot = BackupSlot::new();
+                source.backup(&slot).await?;
+                slot.store().expect("the slot holds the copy")
+            };
+            let ledger = if self.is(MBug::BackupDropsLedger) {
+                Vec::new()
+            } else {
+                self.ledger_at(at)
+            };
+            self.with(|dbs| {
+                dbs[target] = Db {
+                    filled: true,
+                    ledger,
+                    data,
+                    backups: Vec::new(),
+                }
+            });
+            Ok(())
+        }
+
+        /// A backup of the store at `at` beside it, before its schema
+        /// changes.
+        async fn back_up(&self, at: usize) {
+            let target = self.vacant_place();
+            self.copy(at, target).await.expect("a vacant place");
+            self.with(|dbs| dbs[at].backups.push(target));
+        }
+
+        fn vacant_place(&self) -> usize {
+            self.with(|dbs| {
+                dbs.push(Db::default());
+                dbs.len() - 1
+            })
+        }
+
+        /// The open: validate, back up if anything is pending, run to the
+        /// latest.
+        async fn open_at(&self, at: usize) -> Result<SimStore, StoreError> {
+            let build = build();
+            let ledger = self.ledger_at(at);
+            let refusal = match validate(&build, &ledger) {
+                Err(StoreError::NewerThanBuild { .. }) if self.is(MBug::OpenTakesNewer) => None,
+                Err(StoreError::MigrationFailed { .. }) if self.is(MBug::OpenTakesDirty) => None,
+                Err(StoreError::MigrationChanged { .. }) if self.is(MBug::OpenTakesChanged) => None,
+                Err(e) => Some(e),
+                Ok(()) => None,
+            };
+            if let Some(e) = refusal {
+                if self.is(MBug::OpenTouchesNewer) {
+                    self.with(|dbs| dbs[at].ledger[0].installed_on.nanos += 1);
+                }
+                if self.is(MBug::RefusedOpenBacksUp) {
+                    self.back_up(at).await;
+                }
+                return Err(e);
+            }
+            // Each open waits once more than the last before it writes, so
+            // two at once finish on different polls; without the lock
+            // (the bug) both have read the ledger before either writes.
+            let opens = self.opens.fetch_add(1, Ordering::Relaxed);
+            for _ in 0..=opens {
+                tokio::task::yield_now().await;
+            }
+            let ledger = if self.is(MBug::RacingOpensApplyTwice) {
+                ledger
+            } else {
+                self.ledger_at(at)
+            };
+            let pending: Vec<u64> = build
+                .iter()
+                .map(|m| m.version)
+                .filter(|v| !ledger.iter().any(|r| r.version == *v))
+                .collect();
+            let backing = (!pending.is_empty() && !self.is(MBug::NoBackupOnOpen))
+                || self.is(MBug::BackupEveryOpen);
+            if backing && !self.is(MBug::BackupAfterMigrating) {
+                self.back_up(at).await;
+            }
+            let mut applying = pending.clone();
+            if self.is(MBug::OpenLeavesOnePending) {
+                applying.pop();
+            }
+            let rows: Vec<AppliedMigration> = applying.iter().map(|v| self.row(*v)).collect();
+            let racing = self.is(MBug::RacingOpensApplyTwice);
+            let rewrite = self.is(MBug::OpenRewritesKeptRows) && !pending.is_empty();
+            self.with(|dbs| {
+                let db = &mut dbs[at];
+                if rewrite {
+                    for row in &mut db.ledger {
+                        row.installed_on.nanos += 1;
+                    }
+                }
+                for row in rows {
+                    // With the lock a second migrator finds it applied.
+                    if racing || !db.ledger.iter().any(|r| r.version == row.version) {
+                        db.ledger.push(row);
+                    }
+                }
+                db.ledger.sort_by_key(|r| r.version);
+            });
+            if backing && self.is(MBug::BackupAfterMigrating) {
+                self.back_up(at).await;
+            }
+            if self.is(MBug::OpenLosesEvents) && !pending.is_empty() {
+                self.with(|dbs| dbs[at].data = MemoryStore::new());
+            }
+            Ok(SimStore {
+                sim: self.clone(),
+                at,
+                data: self.data_at(at),
+            })
+        }
+    }
+
+    /// A store opened on a [`Sim`].
+    struct SimStore {
+        sim: Sim,
+        at: usize,
+        data: MemoryStore,
+    }
+
+    impl EventStore for SimStore {
+        async fn write(&self, write: Write<'_>) -> Result<Written, StoreError> {
+            self.data.write(write).await
+        }
+
+        async fn read(
+            &self,
+            stream: StreamRef<'_>,
+            from: u64,
+            to: Option<u64>,
+        ) -> Result<Slice, StoreError> {
+            self.data.read(stream, from, to).await
+        }
+
+        async fn find_command(
+            &self,
+            stream: StreamRef<'_>,
+            command_id: Uuid,
+        ) -> Result<Vec<EventPage>, StoreError> {
+            self.data.find_command(stream, command_id).await
+        }
+
+        async fn covers(&self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+            self.data.covers(domain).await
+        }
+    }
+
+    impl SnapshotStore for SimStore {
+        async fn read_snapshot(
+            &self,
+            stream: StreamRef<'_>,
+        ) -> Result<Option<Snapshot>, StoreError> {
+            self.data.read_snapshot(stream).await
+        }
+
+        async fn write_snapshot(
+            &self,
+            stream: StreamRef<'_>,
+            snapshot: &Snapshot,
+        ) -> Result<(), StoreError> {
+            self.data.write_snapshot(stream, snapshot).await
+        }
+    }
+
+    impl PositionStore for SimStore {
+        async fn position(&self, key: PositionKey<'_>) -> Result<u64, StoreError> {
+            self.data.position(key).await
+        }
+    }
+
+    impl Migrations for SimStore {
+        fn migrations(&self) -> Vec<Migration> {
+            build()
+        }
+
+        async fn applied(&self) -> Result<Vec<AppliedMigration>, StoreError> {
+            let mut ledger = self.sim.ledger_at(self.at);
+            if self.sim.is(MBug::LedgerShort) {
+                ledger.pop();
+            }
+            Ok(ledger)
+        }
+
+        async fn run_to(&self, target: u64) -> Result<Vec<AppliedMigration>, StoreError> {
+            let build = build();
+            let ledger = self.sim.ledger_at(self.at);
+            let goal = if self.sim.is(MBug::RunToOvershoots) {
+                latest(&build)
+            } else {
+                target
+            };
+            let planned = match plan_run(&build, &ledger, goal) {
+                Err(StoreError::MigrationUnknown { .. })
+                    if self.sim.is(MBug::TakesUnknownTarget) =>
+                {
+                    return Ok(Vec::new())
+                }
+                planned => planned?,
+            };
+            if self.sim.is(MBug::RunReapplies) {
+                return Ok(ledger);
+            }
+            let rows: Vec<AppliedMigration> = planned.iter().map(|v| self.sim.row(*v)).collect();
+            self.sim.with(|dbs| {
+                dbs[self.at].ledger.extend(rows.iter().cloned());
+                dbs[self.at].ledger.sort_by_key(|r| r.version);
+            });
+            Ok(rows)
+        }
+
+        async fn undo_to(&self, target: u64) -> Result<Vec<AppliedMigration>, StoreError> {
+            let build = build();
+            let ledger = self.sim.ledger_at(self.at);
+            if self.sim.is(MBug::UndoAtLatestReverts) && target == latest(&build) {
+                let row = self.sim.with(|dbs| dbs[self.at].ledger.pop());
+                return Ok(row.into_iter().collect());
+            }
+            let above = |t: u64| -> Vec<u64> {
+                let mut v: Vec<u64> = ledger
+                    .iter()
+                    .map(|r| r.version)
+                    .filter(|v| *v > t)
+                    .collect();
+                v.sort_unstable_by(|a, b| b.cmp(a));
+                v
+            };
+            let planned = match plan_undo(&build, &ledger, target) {
+                Err(StoreError::MigrationUnknown { .. })
+                    if self.sim.is(MBug::TakesUnknownTarget) =>
+                {
+                    return Ok(Vec::new())
+                }
+                Err(StoreError::MigrationIrreversible { .. })
+                    if self.sim.is(MBug::UndoTakesIrreversible) =>
+                {
+                    above(target)
+                }
+                Err(e @ StoreError::MigrationIrreversible { .. }) => {
+                    if self.sim.is(MBug::RefusedUndoBacksUp) {
+                        self.sim.back_up(self.at).await;
+                    }
+                    if self.sim.is(MBug::UndoRevertsBeforeRefusing) {
+                        let reversible: Vec<u64> = build
+                            .iter()
+                            .filter(|m| m.reversible)
+                            .map(|m| m.version)
+                            .collect();
+                        self.sim.with(|dbs| {
+                            dbs[self.at]
+                                .ledger
+                                .retain(|r| !reversible.contains(&r.version))
+                        });
+                    }
+                    return Err(e);
+                }
+                planned => planned?,
+            };
+            if !planned.is_empty() && !self.sim.is(MBug::UndoNoBackup) {
+                self.sim.back_up(self.at).await;
+            }
+            let mut undone: Vec<AppliedMigration> = planned
+                .iter()
+                .filter_map(|v| ledger.iter().find(|r| r.version == *v).cloned())
+                .collect();
+            if self.sim.is(MBug::UndoLowestFirst) {
+                undone.reverse();
+            }
+            if !self.sim.is(MBug::UndoKeepsRows) {
+                self.sim.with(|dbs| {
+                    dbs[self.at]
+                        .ledger
+                        .retain(|r| !planned.contains(&r.version))
+                });
+            }
+            Ok(undone)
+        }
+    }
+
+    impl Backup for SimStore {
+        type Target = usize;
+
+        async fn backup(&self, target: &usize) -> Result<(), StoreError> {
+            self.sim.copy(self.at, *target).await
+        }
+    }
+
+    impl contract::BackupFixture for Sim {
+        type Store = SimStore;
+        type Target = usize;
+
+        async fn store(&self) -> SimStore {
+            let ledger = build().iter().map(|m| self.row(m.version)).collect();
+            let at = self.make(ledger).await;
+            self.open_at(at).await.expect("a current store opens")
+        }
+
+        fn vacant(&self) -> usize {
+            self.vacant_place()
+        }
+
+        async fn occupied(&self) -> usize {
+            self.make(vec![self.row(1)]).await
+        }
+
+        async fn occupied_intact(&self, target: &usize) -> bool {
+            self.ledger_at(*target).iter().map(|r| r.version).eq([1])
+        }
+
+        async fn open_backup(&self, target: &usize) -> Result<SimStore, StoreError> {
+            self.open_at(*target).await
+        }
+    }
+
+    impl contract::OpenFixture for Sim {
+        type Location = usize;
+        type Store = SimStore;
+
+        fn build(&self) -> Vec<Migration> {
+            build()
+        }
+
+        async fn older(&self) -> usize {
+            self.make(vec![self.row(1)]).await
+        }
+
+        async fn newer(&self) -> usize {
+            let ledger = [1, 2, 3, 4, 9].into_iter().map(|v| self.row(v)).collect();
+            self.make(ledger).await
+        }
+
+        async fn failed(&self) -> usize {
+            let mut dirty = self.row(2);
+            dirty.success = false;
+            self.make(vec![self.row(1), dirty]).await
+        }
+
+        async fn changed(&self) -> usize {
+            let mut changed = self.row(2);
+            changed.checksum = vec![0xFF];
+            self.make(vec![self.row(1), changed]).await
+        }
+
+        async fn open(&self, at: &usize) -> Result<SimStore, StoreError> {
+            self.open_at(*at).await
+        }
+
+        async fn ledger(&self, at: &usize) -> Vec<AppliedMigration> {
+            self.ledger_at(*at)
+        }
+    }
+
+    impl contract::OpenBackupFixture for Sim {
+        async fn backups(&self, at: &usize) -> Vec<usize> {
+            self.with(|dbs| dbs[*at].backups.clone())
+        }
+    }
+
+    /// An opened, current store on a fresh [`Sim`].
+    fn opened(bug: MBug) -> SimStore {
+        let sim = sim(bug);
+        let ledger: Vec<AppliedMigration> = build().iter().map(|m| sim.row(m.version)).collect();
+        let data = MemoryStore::new();
+        let at = sim.with(|dbs| {
+            dbs.push(Db {
+                filled: true,
+                ledger,
+                data: data.clone(),
+                backups: Vec::new(),
+            });
+            dbs.len() - 1
+        });
+        SimStore { sim, at, data }
+    }
+
+    /// Require `check` to pass the honest sim, then to catch each bug.
+    macro_rules! catches {
+        ($check:ident, $make:ident, $($bug:ident),+ $(,)?) => {
+            if let Err(why) = run(contract::$check($make(MBug::Honest))) {
+                panic!("{} fails an honest sim, so no catch counts: {why}", stringify!($check));
+            }
+            $(
+                if let Err(why) = caught(contract::$check($make(MBug::$bug))) {
+                    panic!("{} on a sim that {:?}: {why}", stringify!($check), MBug::$bug);
+                }
+            )+
+        };
+    }
+
+    #[test]
+    fn the_opened_store_checks_catch_a_short_ledger_and_a_run_that_reapplies() {
+        catches!(
+            an_opened_store_is_current_its_ledger_the_builds_set,
+            opened,
+            LedgerShort
+        );
+        catches!(
+            a_run_on_a_current_store_applies_nothing,
+            opened,
+            RunReapplies
+        );
+        catches!(
+            a_run_or_undo_to_the_latest_changes_nothing_and_an_unknown_target_is_refused,
+            opened,
+            TakesUnknownTarget,
+            UndoAtLatestReverts,
+        );
+    }
+
+    #[test]
+    fn the_backup_checks_catch_an_alias_a_lost_ledger_and_an_overwrite() {
+        catches!(
+            a_backup_is_the_store_as_it_stood,
+            sim,
+            BackupAliases,
+            BackupDropsLedger
+        );
+        catches!(a_backup_never_overwrites, sim, BackupOverwrites);
+    }
+
+    #[test]
+    fn the_open_checks_catch_an_open_that_migrates_wrongly_or_takes_what_it_must_refuse() {
+        catches!(
+            opening_an_older_store_runs_what_is_pending_and_keeps_its_events,
+            sim,
+            OpenLeavesOnePending,
+            OpenLosesEvents,
+            OpenRewritesKeptRows,
+        );
+        catches!(
+            opening_an_older_store_twice_at_once_applies_each_migration_once,
+            sim,
+            RacingOpensApplyTwice,
+        );
+        catches!(
+            a_newer_store_is_refused_at_open_untouched,
+            sim,
+            OpenTakesNewer,
+            OpenTouchesNewer,
+        );
+        catches!(
+            a_store_a_migration_failed_in_is_refused_at_open_untouched,
+            sim,
+            OpenTakesDirty
+        );
+        catches!(
+            a_store_with_a_changed_migration_is_refused_at_open_untouched,
+            sim,
+            OpenTakesChanged,
+        );
+    }
+
+    #[test]
+    fn the_target_checks_catch_a_wrong_undo_or_run() {
+        catches!(
+            undoing_to_a_target_reverts_what_is_above_it_highest_first,
+            sim,
+            UndoKeepsRows,
+            UndoLowestFirst,
+        );
+        catches!(
+            running_to_a_target_applies_only_what_is_at_or_below_it,
+            sim,
+            RunToOvershoots
+        );
+        catches!(
+            undoing_past_an_irreversible_migration_is_refused_and_changes_nothing,
+            sim,
+            UndoTakesIrreversible,
+            UndoRevertsBeforeRefusing,
+        );
+    }
+
+    #[test]
+    fn the_backup_before_change_checks_catch_a_missing_late_or_needless_backup() {
+        catches!(
+            opening_a_store_with_migrations_pending_backs_it_up_first,
+            sim,
+            NoBackupOnOpen,
+            BackupAfterMigrating,
+        );
+        catches!(
+            an_open_with_nothing_pending_or_refused_takes_no_backup,
+            sim,
+            BackupEveryOpen,
+            RefusedOpenBacksUp,
+        );
+        catches!(
+            an_undo_backs_the_store_up_first,
+            sim,
+            UndoNoBackup,
+            RefusedUndoBacksUp
+        );
+    }
+}

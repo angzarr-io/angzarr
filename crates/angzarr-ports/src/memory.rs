@@ -32,7 +32,7 @@ use prost::Message;
 use prost_types::Timestamp;
 
 use crate::error::StoreError;
-use crate::migrate::{AppliedMigration, Backup, Migration, Migrations};
+use crate::migrate::{plan_run, plan_undo, AppliedMigration, Backup, Migration, Migrations};
 use crate::store::{
     Append, ChangeToken, Editions, EventStore, ListStreams, Outbox, OutboxEntry, PositionStore,
     Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write,
@@ -603,21 +603,19 @@ impl BackupSlot {
 /// a run applies nothing.
 impl Migrations for MemoryStore {
     fn migrations(&self) -> Vec<Migration> {
-        todo!("red: the Migrations port awaits the owner's review")
+        Vec::new()
     }
 
     async fn applied(&self) -> Result<Vec<AppliedMigration>, StoreError> {
-        todo!("red: the Migrations port awaits the owner's review")
+        Ok(Vec::new())
     }
 
     async fn run_to(&self, target: u64) -> Result<Vec<AppliedMigration>, StoreError> {
-        let _ = target;
-        todo!("red: the Migrations port awaits the owner's review")
+        plan_run(&[], &[], target).map(|_| Vec::new())
     }
 
     async fn undo_to(&self, target: u64) -> Result<Vec<AppliedMigration>, StoreError> {
-        let _ = target;
-        todo!("red: the Migrations port awaits the owner's review")
+        plan_undo(&[], &[], target).map(|_| Vec::new())
     }
 }
 
@@ -627,8 +625,21 @@ impl Backup for MemoryStore {
     type Target = BackupSlot;
 
     async fn backup(&self, target: &BackupSlot) -> Result<(), StoreError> {
-        let _ = target;
-        todo!("red: the Backup port awaits the owner's review")
+        let mut slot = target
+            .copy
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot.is_some() {
+            return Err(StoreError::BackupExists {
+                target: "memory".to_string(),
+            });
+        }
+        // The data is copy-on-write: the copy shares it until either side
+        // writes, and then neither sees the other's write.
+        *slot = Some(MemoryStore {
+            state: Arc::new(Mutex::new(self.data())),
+        });
+        Ok(())
     }
 }
 
