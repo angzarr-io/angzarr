@@ -39,6 +39,13 @@
 //! through `angzarr_proto::protos::write_include_dir`, with no vendored
 //! copy and no path into this repository.
 //!
+//! The reason keys' args are read from that descriptor set (their
+//! `(io.angzarr.v1.reason)` options, which prost does not generate) and
+//! written to `$OUT_DIR/reason_args.rs` (`build_reasons.rs`), which the
+//! library includes in `v1`. The spec's en-US catalog of the keys,
+//! `io/angzarr/v1/reasons.en-US.ftl`, is copied to `$OUT_DIR` for the
+//! library to embed as `REASONS_EN_US` (decision 14.60).
+//!
 //! The proto root is exported to the crate's own tests as
 //! `ANGZARR_PROTO_ROOT` (`env!("ANGZARR_PROTO_ROOT")`), so they compile the
 //! very protos the library was generated from.
@@ -48,6 +55,12 @@
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
+
+#[path = "build_reasons.rs"]
+mod reasons;
+
+/// The spec's en-US catalog of the reason keys, under the proto root.
+const REASONS_CATALOG: &str = "io/angzarr/v1/reasons.en-US.ftl";
 
 /// Resolves the proto root: the `ANGZARR_PROJECT_PROTO` override first,
 /// then the angzarr-project submodule's `proto/` at the repository root.
@@ -106,7 +119,8 @@ fn main() {
         "cargo:rerun-if-changed={}",
         root.join("io/angzarr/v1").display()
     );
-    for f in files.iter().chain(&imports_only) {
+    let catalog = root.join(REASONS_CATALOG);
+    for f in files.iter().chain(&imports_only).chain([&catalog]) {
         println!("cargo:rerun-if-changed={}", f.display());
     }
 
@@ -129,6 +143,16 @@ fn main() {
     config
         .compile_protos(&files, std::slice::from_ref(&root))
         .expect("prost: compile angzarr's io.angzarr.v1 protos");
+
+    let set = std::fs::read(out.join("file_descriptor_set.bin")).expect("read the descriptor set");
+    std::fs::write(out.join("reason_args.rs"), reasons::generate(&set))
+        .expect("write reason_args.rs");
+    std::fs::copy(&catalog, out.join("reasons.en-US.ftl")).unwrap_or_else(|e| {
+        panic!(
+            "copy {} (an angzarr-project revision before decision 14.60?): {e}",
+            catalog.display()
+        )
+    });
 
     #[cfg(feature = "grpc")]
     grpc(&root, &out, &files);

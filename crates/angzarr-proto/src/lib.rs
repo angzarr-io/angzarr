@@ -76,6 +76,10 @@ pub mod io {
         #[allow(clippy::doc_overindented_list_items, clippy::doc_lazy_continuation)]
         pub mod v1 {
             include!(concat!(env!("OUT_DIR"), "/io.angzarr.v1.rs"));
+            // Each reason key's args (`RouterReason::args` and the others)
+            // and the `reason_args` name constants, from reasons.proto's
+            // `(reason)` options (decision 14.60; build.rs).
+            include!(concat!(env!("OUT_DIR"), "/reason_args.rs"));
             // tonic's client and server modules, one pair per service, on
             // the messages above (extern-pathed to `crate::v1`).
             #[cfg(feature = "grpc")]
@@ -98,6 +102,38 @@ pub use io::angzarr::v1;
 /// serves.
 pub const FILE_DESCRIPTOR_SET: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/file_descriptor_set.bin"));
+
+/// The spec's en-US Fluent catalog of the framework's reason keys
+/// (`io/angzarr/v1/reasons.en-US.ftl`; decision 14.60): its name and its
+/// text, as each crate with codes exports its `EN_US`. Every message id is
+/// a live key, verbatim (`ROUTER_REASON_DUPLICATE_COMPONENT`), and its
+/// variables are args the key declares. A runtime adds it to the catalogs
+/// it renders from; no runtime keeps English of its own for a key.
+pub const REASONS_EN_US: (&str, &str) = (
+    "angzarr-reasons",
+    include_str!(concat!(env!("OUT_DIR"), "/reasons.en-US.ftl")),
+);
+
+/// The args a framework reason key declares (decision 14.60), by the key's
+/// full name (`ROUTER_REASON_ANY_DECODE_FAILED`): `None` for a name that is
+/// no live key of `RouterReason`, `HostReason` or `CoordinatorReason` (a
+/// domain's own code, or an `UNSPECIFIED`).
+pub fn reason_key_args(key: &str) -> Option<&'static [&'static str]> {
+    use v1::{CoordinatorReason, HostReason, RouterReason};
+    RouterReason::from_str_name(key)
+        .filter(|r| *r != RouterReason::Unspecified)
+        .map(RouterReason::args)
+        .or_else(|| {
+            HostReason::from_str_name(key)
+                .filter(|r| *r != HostReason::Unspecified)
+                .map(HostReason::args)
+        })
+        .or_else(|| {
+            CoordinatorReason::from_str_name(key)
+                .filter(|r| *r != CoordinatorReason::Unspecified)
+                .map(CoordinatorReason::args)
+        })
+}
 
 pub mod ids;
 pub mod protos;
