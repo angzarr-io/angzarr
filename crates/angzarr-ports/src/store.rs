@@ -395,8 +395,14 @@ pub struct OutboxEntry {
 /// events and positions; the relay reads what is pending, delivers it,
 /// then clears it.
 pub trait Outbox: MaybeSend + MaybeSync {
-    /// Up to `limit` pending entries, oldest commit first. Reading clears
-    /// nothing: an entry is pending until cleared.
+    /// Up to `limit` pending entries. Delivery is at least once: reading
+    /// clears nothing, and an entry is pending until cleared. The order is
+    /// per stream (ruled 2026-10-31): within one stream, by that stream's
+    /// own event sequence, then the entries' order in their write; across
+    /// streams, none, so no store keeps an outbox sequence or any order of
+    /// its own. A limit takes each stream's oldest first. (Which stream
+    /// orders a write that appends to none, a policy's step, is not yet
+    /// ruled: `tests/contract.rs`, FLAG(O7).)
     fn pending(
         &self,
         limit: usize,

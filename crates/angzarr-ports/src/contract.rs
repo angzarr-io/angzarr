@@ -2299,31 +2299,87 @@ where
     );
 }
 
-pub async fn the_outbox_drains_oldest_first_and_clears<S>(store: S)
+/// Write `entries` with one page appended to `stream` at `expected`: the
+/// step of a component whose output beyond its stream is `entries`.
+async fn put_outbox_on<S: EventStore>(
+    store: &S,
+    stream: StreamRef<'_>,
+    expected: u64,
+    entries: &[OutboxEntry],
+) {
+    let pages = [page(expected, 1)];
+    store
+        .write(Write {
+            outbox: entries,
+            ..Write::append(stream, expected, &pages)
+        })
+        .await
+        .unwrap();
+}
+
+/// The entries of `pending` written by `origin`, in the order answered.
+fn of_origin(pending: &[OutboxEntry], origin: &str) -> Vec<OutboxEntry> {
+    pending
+        .iter()
+        .filter(|e| e.origin == origin)
+        .cloned()
+        .collect()
+}
+
+/// Whether `got` holds exactly `want`'s entries, in any order.
+fn same_entries(got: &[OutboxEntry], want: &[&OutboxEntry]) -> bool {
+    got.len() == want.len() && want.iter().all(|w| got.contains(w))
+}
+
+/// Ruled 2026-10-31: delivery is at least once, in order WITHIN a stream,
+/// by the stream's own event sequence and then the entries' order in their
+/// write, and in NO order across streams: nothing here compares one
+/// stream's entries with another's. A limit takes each stream's oldest
+/// first: it never answers a later entry of a stream without the earlier.
+/// Each stream's writer here is its own origin, so an origin's entries are
+/// its stream's.
+pub async fn the_outbox_drains_each_stream_in_order_and_clears<S>(store: S)
 where
     S: Store + Outbox,
 {
-    put_outbox(&store, &[entry(3, "a", 1), entry(1, "b", 1)]).await;
-    put_outbox(&store, &[entry(2, "a", 1)]).await;
-    let (e3, e1, e2) = (entry(3, "a", 1), entry(1, "b", 1), entry(2, "a", 1));
-    assert_eq!(
-        store.pending(10).await,
-        Ok(vec![e3.clone(), e1.clone(), e2.clone()]),
-        "write order, then entry order; never by id"
+    let (a, b) = (main_stream("a", 1), main_stream("b", 1));
+    let (e3, e1, e5, e2) = (
+        entry(3, "a", 1),
+        entry(1, "a", 1),
+        entry(5, "b", 1),
+        entry(2, "a", 1),
+    );
+    put_outbox_on(&store, a, 0, &[e3.clone(), e1.clone()]).await;
+    put_outbox_on(&store, b, 0, std::slice::from_ref(&e5)).await;
+    put_outbox_on(&store, a, 1, std::slice::from_ref(&e2)).await;
+    let a_order = [e3.clone(), e1.clone(), e2.clone()];
+    let all = store.pending(10).await.unwrap();
+    assert!(
+        same_entries(&all, &[&e3, &e1, &e5, &e2]),
+        "every entry pending, once: {all:?}"
     );
     assert_eq!(
-        store.pending(2).await,
-        Ok(vec![e3.clone(), e1.clone()]),
-        "a limit"
+        of_origin(&all, "a"),
+        a_order.to_vec(),
+        "a stream's by its sequence, then entry order; never by id"
+    );
+    let two = store.pending(2).await.unwrap();
+    assert_eq!(two.len(), 2, "a limit: {two:?}");
+    let a_taken = of_origin(&two, "a");
+    assert_eq!(
+        a_taken,
+        a_order[..a_taken.len()].to_vec(),
+        "a limit takes a stream's oldest first"
     );
     assert_eq!(store.clear(&[e3.id, e1.id]).await, Ok(2));
-    assert_eq!(store.pending(10).await, Ok(vec![e2.clone()]));
+    let left = store.pending(10).await.unwrap();
+    assert!(same_entries(&left, &[&e5, &e2]), "cleared: {left:?}");
     assert_eq!(
         store.clear(&[e1.id]).await,
         Ok(0),
         "cleared twice: no error"
     );
-    assert_eq!(store.clear(&[e2.id]).await, Ok(1));
+    assert_eq!(store.clear(&[e2.id, e5.id]).await, Ok(2));
     assert_eq!(store.pending(10).await, Ok(vec![]));
 }
 
@@ -2487,7 +2543,7 @@ macro_rules! store_contract {
     (outbox, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             an_outbox_entry_lands_with_its_write_or_not_at_all,
-            the_outbox_drains_oldest_first_and_clears,
+            the_outbox_drains_each_stream_in_order_and_clears,
             a_pending_entry_is_redelivered_until_cleared,
             an_entry_put_again_while_pending_keeps_its_first_message,
             a_cleared_id_put_again_is_a_new_pending_entry,

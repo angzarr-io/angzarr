@@ -182,6 +182,13 @@ enum Bug {
     OutboxDropsEdition,
     /// `pending` answers the newest first.
     OutboxNewestFirst,
+    /// `pending` under a limit answers the newest entries, not the oldest.
+    OutboxLimitTakesNewest,
+    /// NOT a bug (no order across streams, ruled 2026-10-31): `pending`
+    /// answers the entries origin by origin, the last origin first, each
+    /// origin's in its order.
+    /// The suite's outbox checks give each stream its own origin.
+    OutboxOriginsReversed,
     /// Reading `pending` clears it.
     PendingClears,
     /// An entry put again replaces the first.
@@ -970,6 +977,13 @@ impl Outbox for Broken {
         if self.is(Bug::OutboxNewestFirst) {
             pending.reverse();
         }
+        if self.is(Bug::OutboxOriginsReversed) {
+            // A stable sort: each origin's entries keep their order.
+            pending.sort_by(|a, b| b.origin.cmp(&a.origin));
+        }
+        if self.is(Bug::OutboxLimitTakesNewest) {
+            pending.drain(..pending.len().saturating_sub(limit));
+        }
         pending.truncate(limit);
         if self.is(Bug::PendingClears) {
             let ids: Vec<Uuid> = pending.iter().map(|e| e.id).collect();
@@ -1421,6 +1435,18 @@ fn the_core_read_checks_catch_a_wrong_bound_filter_or_order() {
     );
 }
 
+/// Ruled 2026-10-31: the outbox promises order within a stream and none
+/// across streams, so a store answering another stream's entries first
+/// passes.
+#[test]
+fn the_outbox_check_promises_no_order_across_streams() {
+    if let Err(why) = run(contract::the_outbox_drains_each_stream_in_order_and_clears(
+        broken(Bug::OutboxOriginsReversed),
+    )) {
+        panic!("a store answering streams in another order is no bug: {why}");
+    }
+}
+
 #[test]
 fn the_outbox_checks_catch_early_lost_reordered_or_replaced_entries() {
     catches!(
@@ -1429,9 +1455,10 @@ fn the_outbox_checks_catch_early_lost_reordered_or_replaced_entries() {
         ConflictLandsOutbox
     );
     catches!(
-        the_outbox_drains_oldest_first_and_clears,
+        the_outbox_drains_each_stream_in_order_and_clears,
         broken,
-        OutboxNewestFirst
+        OutboxNewestFirst,
+        OutboxLimitTakesNewest,
     );
     catches!(
         a_pending_entry_is_redelivered_until_cleared,
@@ -1512,7 +1539,7 @@ fn an_honest_broken_store_passes_every_check() {
         read_by_correlation_gives_one_book_per_stream,
         list_streams_is_every_domains_covers_in_order,
         an_outbox_entry_lands_with_its_write_or_not_at_all,
-        the_outbox_drains_oldest_first_and_clears,
+        the_outbox_drains_each_stream_in_order_and_clears,
         a_pending_entry_is_redelivered_until_cleared,
         an_entry_put_again_while_pending_keeps_its_first_message,
         a_cleared_id_put_again_is_a_new_pending_entry,

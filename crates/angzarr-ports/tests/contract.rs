@@ -95,8 +95,10 @@
 //! - **RULED(O1-O6, E2) The outbox:** the entry `{ id, origin, message,
 //!   edition }` (`an_outbox_entry_keeps_its_edition`); an id put again
 //!   while pending keeps its first message, once cleared is a new entry;
-//!   write order; one relay per store; no origin filter; an entry is no
-//!   event but changes the `Watch` token.
+//!   in order within a stream, by its own event sequence, and in no order
+//!   across streams (ruled 2026-10-31, replacing write order: no outbox
+//!   sequence, no store-wide order); one relay per store; no origin
+//!   filter; an entry is no event but changes the `Watch` token.
 //! - **RULED(H) The wasm suite runs** (`just wasm-test`, in `just check`).
 //!
 //! - **RULED(W1) The write's shape:** `write(Write { events:
@@ -128,6 +130,12 @@
 //!   arrival at a removed stream would be taken.
 //! - **FLAG(W3) A store that keeps no outbox** refuses a write that carries
 //!   entries (proposed; not pinned, since `MemoryStore` keeps one).
+//! - **FLAG(O7) Which stream orders a write that appends to none.** The
+//!   per-stream order (ruled 2026-10-31) is pinned for entries written with
+//!   their stream's events (`the_outbox_drains_each_stream_in_order_and_clears`).
+//!   A policy's step writes positions and entries but no events: whether its
+//!   entries are ordered by the stream its position is on, at that
+//!   position, is not pinned.
 //! - **FLAG(E3') `read_by_correlation` in an edition** answers an uncreated
 //!   stream's pages under the edition's cover.
 

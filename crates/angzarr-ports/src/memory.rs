@@ -111,7 +111,8 @@ struct Data {
     streams: BTreeMap<Key, Vec<EventPage>>,
     snapshots: BTreeMap<Key, Snapshot>,
     positions: BTreeMap<PositionPlace, u64>,
-    /// Pending outbox entries, oldest write first.
+    /// Pending outbox entries, oldest write first (which keeps each
+    /// stream's order; the contract promises none across streams).
     outbox: Vec<Pending>,
     /// Commits of anything: the change token.
     commits: u64,
