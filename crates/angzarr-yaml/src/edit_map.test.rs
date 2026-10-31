@@ -509,3 +509,63 @@ fn update_to_reaches_any_nearby_target_and_keeps_unchanged_lines() {
         }
     }
 }
+
+#[test]
+fn rename_key_rewrites_only_the_key_in_its_place() {
+    let mut d = doc(MANIFEST);
+    d.rename_key(&[], "version", "schema_version").unwrap();
+    assert_eq!(
+        d.text(),
+        MANIFEST.replace("version: 1   # format", "schema_version: 1   # format")
+    );
+    let keys: Vec<&str> = d
+        .value()
+        .as_map()
+        .unwrap()
+        .iter()
+        .map(|(k, _)| k.as_str())
+        .collect();
+    assert_eq!(keys, ["schema_version", "targets", "packages"]);
+    assert_eq!(d.value(), &parse(&d.text()).unwrap());
+
+    // A nested key, with a block value under it, and a key that must be
+    // quoted.
+    let mut d = doc("a:\n  b:   # note\n    - 1\n  c: 2\n");
+    d.rename_key(&[Seg::Key("a")], "b", "x: y").unwrap();
+    assert_eq!(d.text(), "a:\n  \"x: y\":   # note\n    - 1\n  c: 2\n");
+    // A quoted key, renamed to a plain one.
+    let mut d = doc("'old key': 1\n");
+    d.rename_key(&[], "old key", "new").unwrap();
+    assert_eq!(d.text(), "new: 1\n");
+    // To itself: nothing to do.
+    let mut d = doc("a: 1\n");
+    d.rename_key(&[], "a", "a").unwrap();
+    assert_eq!(d.text(), "a: 1\n");
+}
+
+#[test]
+fn rename_key_refuses_what_it_cannot_do_and_changes_nothing() {
+    let problem = |src: &str, path: &[Seg<'_>], from: &str, to: &str| {
+        let mut d = doc(src);
+        let e = d.rename_key(path, from, to).unwrap_err();
+        assert_eq!(d.text(), src, "a refused rename changes nothing");
+        (e.path, e.problem)
+    };
+    let p = |x: &[&str]| x.iter().map(|k| k.to_string()).collect::<Vec<_>>();
+    assert_eq!(
+        problem("a: 1\nb: 2\n", &[], "a", "b"),
+        (p(&["a"]), EditProblem::KeyExists { key: "b".into() })
+    );
+    assert_eq!(
+        problem("a: 1\n", &[], "z", "b"),
+        (p(&["z"]), EditProblem::NotFound)
+    );
+    assert_eq!(
+        problem("- a: 1\n  b: 2\n", &[Seg::Item(0)], "a", "c"),
+        (p(&["0", "a"]), EditProblem::ItemFirstKey)
+    );
+    assert_eq!(
+        problem("a: [1]\n", &[Seg::Key("a")], "x", "y").1,
+        EditProblem::InsideFlow
+    );
+}

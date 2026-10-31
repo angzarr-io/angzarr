@@ -1,10 +1,18 @@
-//! Versioned documents: a root mapping stamped `version: N`, read through a
-//! chain of registered migrations up to the version the code reads.
+//! Versioned documents: a root mapping stamped `schema_version: N`, read
+//! through a chain of registered migrations up to the version the code reads.
 //!
-//! - **The stamp.** Every versioned document is a mapping with a root
-//!   `version` whose value is a non-negative integer (decimal digits). A
-//!   mapping with no `version` is version 0, so files written before
-//!   versioning load through the whole chain.
+//! - **The stamp.** Every versioned document is a mapping with a root stamp
+//!   key, [`DEFAULT_KEY`] (`schema_version`) unless the kind names its own
+//!   ([`Migrations::key`]), whose value is a non-negative integer (decimal
+//!   digits) that only ever increases: a format generation, never semver. A
+//!   mapping with no stamp is version 0, so files written before versioning
+//!   load through the whole chain. A stamp that is not such an integer is
+//!   refused ([`LoadProblem::BadVersion`]).
+//! - **A legacy key.** A kind whose files were stamped under another key
+//!   declares it ([`Migrations::legacy_key`]): before the stamp is read, a
+//!   pre-step renames that key, in its place, to the kind's key, so the old
+//!   files load and an upgrade rewrites them under the new key. A document
+//!   holding both is refused ([`LoadProblem::LegacyAndStamp`]).
 //! - **The chain.** [`Migrations::new`] names the document kind and the
 //!   current version; [`Migrations::step`] registers the step from `N` to
 //!   `N + 1`. [`Migrations::build`] checks the chain and gives a [`Loader`]:
@@ -13,7 +21,7 @@
 //!   version is the lowest registered step's (the current version with no
 //!   steps). Dropping support for old files is deleting their oldest steps.
 //! - **A step** edits the tree in place and leaves the stamp to the loader,
-//!   which writes `version: N + 1` after the step returns. The helpers here
+//!   which writes `schema_version: N + 1` after the step returns. The helpers here
 //!   ([`rename_key`], [`move_key`], [`set_default`], [`remove_key`],
 //!   [`map_seq`]) cover the usual edits.
 //! - **Loading** is string in, tree out: parse, read the version, run the
@@ -35,6 +43,11 @@ use std::fmt;
 use angzarr_diagnostic::{Arg, Diagnostic, Report};
 
 use crate::{parse, write, Error, Value};
+
+/// The stamp key every kind uses unless it names its own: a root
+/// `schema_version`, as Go ctxloom's `schemaver.Key` (owner ruling,
+/// 2026-10-31: one key, a monotonically increasing unsigned integer).
+pub const DEFAULT_KEY: &str = "schema_version";
 
 /// A migration step: edits a document at version `N` into version `N + 1`.
 /// The loader stamps the new version; the step need not.
@@ -168,6 +181,8 @@ impl Diagnostic for MigrationError {
 pub struct Migrations {
     kind: String,
     current: u32,
+    key: String,
+    legacy: Option<String>,
     steps: Vec<(u32, Step)>,
 }
 
@@ -225,12 +240,30 @@ impl Diagnostic for ChainError {
 impl Migrations {
     /// No steps yet, for documents of `kind` (named in every error) whose
     /// current version is `current`.
+    /// Its stamp key is [`DEFAULT_KEY`].
     pub fn new(kind: &str, current: u32) -> Migrations {
         Migrations {
             kind: kind.to_string(),
             current,
+            key: DEFAULT_KEY.to_string(),
+            legacy: None,
             steps: Vec::new(),
         }
+    }
+
+    /// Stamp this kind under `key` instead of [`DEFAULT_KEY`].
+    pub fn key(mut self, key: &str) -> Migrations {
+        self.key = key.to_string();
+        self
+    }
+
+    /// Read a stamp written under `legacy` as this kind's key: a pre-step,
+    /// before the stamp is read, renames `legacy` to the key in its place.
+    /// For a kind moving off an old stamp key (bosun's and the cli's
+    /// `version`). The same as the key, it is no legacy key.
+    pub fn legacy_key(mut self, legacy: &str) -> Migrations {
+        self.legacy = Some(legacy.to_string());
+        self
     }
 
     /// Register the step from version `from` to `from + 1`.
@@ -247,8 +280,11 @@ impl Migrations {
         let Migrations {
             kind,
             current,
+            key,
+            legacy,
             mut steps,
         } = self;
+        let legacy = legacy.filter(|l| *l != key);
         let fail = |problem| {
             Err(ChainError {
                 kind: kind.clone(),
@@ -279,6 +315,8 @@ impl Migrations {
         Ok(Loader {
             kind,
             current,
+            key,
+            legacy,
             oldest,
             steps: steps.into_iter().map(|(_, s)| s).collect(),
         })
@@ -294,6 +332,8 @@ impl Migrations {
 pub struct Loader {
     kind: String,
     current: u32,
+    key: String,
+    legacy: Option<String>,
     oldest: u32,
     /// The step from `oldest + i` at index `i`.
     steps: Vec<Step>,
@@ -316,8 +356,12 @@ pub enum LoadProblem {
     Yaml(Error),
     /// The root is not a mapping.
     NotAMapping,
-    /// `version` is not a non-negative integer.
-    BadVersion(BadVersion),
+    /// The stamp, under `key` (the kind's, or its legacy key), is not a
+    /// non-negative integer.
+    BadVersion { key: String, problem: BadVersion },
+    /// Both the kind's key and the legacy key it replaces are set: which
+    /// one stamps the document is not for the loader to guess.
+    LegacyAndStamp { key: String, legacy: String },
     /// Written by a newer build than this one.
     TooNew { found: u32, current: u32 },
     /// Older than the oldest version this build migrates.
@@ -332,10 +376,10 @@ pub enum LoadProblem {
     Decode(Report),
 }
 
-/// What a `version` that is not a non-negative integer is instead.
+/// What a stamp that is not a non-negative integer is instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BadVersion {
-    /// `version:` with no value.
+    /// The key with no value.
     Empty,
     Sequence,
     Mapping,
@@ -360,15 +404,14 @@ impl Diagnostic for LoadProblem {
         match self {
             LoadProblem::Yaml(e) => e.code(),
             LoadProblem::NotAMapping => "angzarr-yaml-root-not-a-mapping",
-            LoadProblem::BadVersion(BadVersion::Empty) => "angzarr-yaml-version-empty",
-            LoadProblem::BadVersion(BadVersion::Sequence) => "angzarr-yaml-version-sequence",
-            LoadProblem::BadVersion(BadVersion::Mapping) => "angzarr-yaml-version-mapping",
-            LoadProblem::BadVersion(BadVersion::NotAnInteger { .. }) => {
-                "angzarr-yaml-version-not-an-integer"
-            }
-            LoadProblem::BadVersion(BadVersion::TooLarge { .. }) => {
-                "angzarr-yaml-version-too-large"
-            }
+            LoadProblem::BadVersion { problem, .. } => match problem {
+                BadVersion::Empty => "angzarr-yaml-version-empty",
+                BadVersion::Sequence => "angzarr-yaml-version-sequence",
+                BadVersion::Mapping => "angzarr-yaml-version-mapping",
+                BadVersion::NotAnInteger { .. } => "angzarr-yaml-version-not-an-integer",
+                BadVersion::TooLarge { .. } => "angzarr-yaml-version-too-large",
+            },
+            LoadProblem::LegacyAndStamp { .. } => "angzarr-yaml-legacy-and-stamp",
             LoadProblem::TooNew { .. } => "angzarr-yaml-too-new",
             LoadProblem::TooOld { .. } => "angzarr-yaml-too-old",
             LoadProblem::Step { .. } => "angzarr-yaml-step-failed",
@@ -379,15 +422,18 @@ impl Diagnostic for LoadProblem {
     fn args(&self) -> Vec<(&str, Arg)> {
         match self {
             LoadProblem::Yaml(e) => e.args(),
-            LoadProblem::NotAMapping
-            | LoadProblem::BadVersion(
-                BadVersion::Empty | BadVersion::Sequence | BadVersion::Mapping,
-            ) => vec![],
-            LoadProblem::BadVersion(
-                BadVersion::NotAnInteger { text } | BadVersion::TooLarge { text },
-            ) => {
-                vec![("text", text.as_str().into())]
+            LoadProblem::NotAMapping => vec![],
+            LoadProblem::BadVersion { key, problem } => {
+                let mut args = vec![("key", Arg::from(key.as_str()))];
+                if let BadVersion::NotAnInteger { text } | BadVersion::TooLarge { text } = problem {
+                    args.push(("text", text.as_str().into()));
+                }
+                args
             }
+            LoadProblem::LegacyAndStamp { key, legacy } => vec![
+                ("key", key.as_str().into()),
+                ("legacy", legacy.as_str().into()),
+            ],
             LoadProblem::TooNew { found, current } => {
                 vec![("found", (*found).into()), ("current", (*current).into())]
             }
@@ -439,13 +485,24 @@ impl Diagnostic for LoadError {
     }
 }
 
-/// A document's root `version`; a mapping without one is version 0.
+/// A document's stamp under [`DEFAULT_KEY`]; a mapping without one is
+/// version 0. [`Loader::version_of`] reads a kind's own key.
 pub fn version_of(doc: &Value) -> Result<u32, LoadProblem> {
+    version_at(doc, DEFAULT_KEY)
+}
+
+/// A document's stamp under `key`; a mapping without one is version 0.
+pub fn version_at(doc: &Value, key: &str) -> Result<u32, LoadProblem> {
     if doc.as_map().is_none() {
         return Err(LoadProblem::NotAMapping);
     }
-    let bad = |b| Err(LoadProblem::BadVersion(b));
-    let found = match doc.get("version") {
+    let bad = |problem| {
+        Err(LoadProblem::BadVersion {
+            key: key.to_string(),
+            problem,
+        })
+    };
+    let found = match doc.get(key) {
         None => return Ok(0),
         Some(Value::Scalar(s)) => s,
         Some(Value::Null) => return bad(BadVersion::Empty),
@@ -480,6 +537,50 @@ impl Loader {
         self.oldest
     }
 
+    /// The key documents are stamped under.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    /// The old stamp key a pre-step renames to [`Loader::key`], if the kind
+    /// has one.
+    pub fn legacy_key(&self) -> Option<&str> {
+        self.legacy.as_deref()
+    }
+
+    /// The legacy key, if `doc` is stamped under it rather than the kind's
+    /// key; refused if under both.
+    fn legacy_stamp(&self, doc: &Value) -> Result<Option<&str>, LoadProblem> {
+        let Some(legacy) = self.legacy.as_deref() else {
+            return Ok(None);
+        };
+        match (doc.get(&self.key), doc.get(legacy)) {
+            (Some(_), Some(_)) => Err(LoadProblem::LegacyAndStamp {
+                key: self.key.clone(),
+                legacy: legacy.to_string(),
+            }),
+            (None, Some(_)) => Ok(Some(legacy)),
+            _ => Ok(None),
+        }
+    }
+
+    /// `doc`'s stamp, read as this kind reads it: under its key, or under
+    /// its legacy key when only that is set. A mapping with neither is
+    /// version 0.
+    pub fn version_of(&self, doc: &Value) -> Result<u32, LoadProblem> {
+        if doc.as_map().is_none() {
+            return Err(LoadProblem::NotAMapping);
+        }
+        let key = self.legacy_stamp(doc)?.unwrap_or(&self.key);
+        version_at(doc, key)
+    }
+
+    /// Whether `doc` needs no upgrade on disk: stamped under the kind's own
+    /// key at the current version.
+    fn is_current(&self, doc: &Value) -> bool {
+        matches!(self.legacy_stamp(doc), Ok(None)) && version_at(doc, &self.key) == Ok(self.current)
+    }
+
     fn fail<T>(&self, source: Option<&str>, problem: LoadProblem) -> Result<T, LoadError> {
         Err(LoadError {
             kind: self.kind.clone(),
@@ -500,7 +601,7 @@ impl Loader {
     /// Migrate an already-parsed document to the current version. A
     /// current-version document comes back untouched.
     pub fn migrate(&self, source: Option<&str>, mut doc: Value) -> Result<Value, LoadError> {
-        let found = match version_of(&doc) {
+        let found = match self.version_of(&doc) {
             Ok(v) => v,
             Err(problem) => return self.fail(source, problem),
         };
@@ -522,9 +623,17 @@ impl Loader {
                 },
             );
         }
+        // The pre-step: a legacy stamp takes the kind's key, in its place.
+        if let Ok(Some(legacy)) = self.legacy_stamp(&doc) {
+            if let Value::Map(entries) = &mut doc {
+                for (k, _) in entries.iter_mut().filter(|(k, _)| k == legacy) {
+                    *k = self.key.clone();
+                }
+            }
+        }
         if let Value::Map(entries) = &mut doc {
-            if found < self.current && !entries.iter().any(|(k, _)| k == "version") {
-                entries.insert(0, ("version".to_string(), Value::Scalar("0".to_string())));
+            if found < self.current && !entries.iter().any(|(k, _)| *k == self.key) {
+                entries.insert(0, (self.key.clone(), Value::Scalar("0".to_string())));
             }
         }
         for from in found..self.current {
@@ -542,7 +651,7 @@ impl Loader {
                     },
                 );
             }
-            *doc.entry("version") = Value::Scalar((from + 1).to_string());
+            *doc.entry(&self.key) = Value::Scalar((from + 1).to_string());
         }
         Ok(doc)
     }
@@ -574,7 +683,7 @@ impl Loader {
             Ok(doc) => doc,
             Err(e) => return self.fail(source, LoadProblem::Yaml(e)),
         };
-        if version_of(&doc) == Ok(self.current) {
+        if self.is_current(&doc) {
             return Ok(None);
         }
         Ok(Some(write(&self.migrate(source, doc)?, flow_depth)))
@@ -596,10 +705,16 @@ impl Loader {
             Ok(doc) => doc,
             Err(e) => return self.fail(source, LoadProblem::Yaml(e)),
         };
-        if version_of(doc.value()) == Ok(self.current) {
+        if self.is_current(doc.value()) {
             return Ok(None);
         }
         let migrated = self.migrate(source, doc.value().clone())?;
+        // The legacy stamp is renamed where it stands, so the update has
+        // only its value left to change.
+        if let Ok(Some(legacy)) = self.legacy_stamp(doc.value()) {
+            let renamed = doc.rename_key(&[], legacy, &self.key);
+            debug_assert!(renamed.is_ok(), "{renamed:?}");
+        }
         Ok(Some(match doc.update_to(&migrated, flow_depth) {
             Ok(()) => Upgraded {
                 text: doc.into_string(),
@@ -643,7 +758,7 @@ impl Loader {
                     }
                 },
             };
-            match version_of(&want) {
+            match version_at(&want, &self.key) {
                 Ok(v) if v == self.current => {}
                 Ok(v) if fx.expected.is_none() => failures.push(format!(
                     "{}: at version {v}, not the current {}: give it its expected current-version output",
@@ -909,13 +1024,32 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
     };
     let problems = vec![
         LoadProblem::NotAMapping,
-        LoadProblem::BadVersion(BadVersion::Empty),
-        LoadProblem::BadVersion(BadVersion::Sequence),
-        LoadProblem::BadVersion(BadVersion::Mapping),
-        LoadProblem::BadVersion(BadVersion::NotAnInteger { text: s("two") }),
-        LoadProblem::BadVersion(BadVersion::TooLarge {
-            text: s("99999999999"),
-        }),
+        LoadProblem::BadVersion {
+            key: s(DEFAULT_KEY),
+            problem: BadVersion::Empty,
+        },
+        LoadProblem::BadVersion {
+            key: s(DEFAULT_KEY),
+            problem: BadVersion::Sequence,
+        },
+        LoadProblem::BadVersion {
+            key: s(DEFAULT_KEY),
+            problem: BadVersion::Mapping,
+        },
+        LoadProblem::BadVersion {
+            key: s(DEFAULT_KEY),
+            problem: BadVersion::NotAnInteger { text: s("two") },
+        },
+        LoadProblem::BadVersion {
+            key: s(DEFAULT_KEY),
+            problem: BadVersion::TooLarge {
+                text: s("99999999999"),
+            },
+        },
+        LoadProblem::LegacyAndStamp {
+            key: s(DEFAULT_KEY),
+            legacy: s("version"),
+        },
         LoadProblem::TooNew {
             found: 4,
             current: 3,

@@ -13,9 +13,10 @@
 //! removes one blank line where two would otherwise meet, or where one would
 //! be left between a key and its first item.
 //!
-//! A mapping entry is edited the same way: [`Document::set`] and
-//! [`Document::remove_key`] find the mapping by a path of keys and sequence
-//! items ([`Seg`]) and change only that entry's lines, and
+//! A mapping entry is edited the same way: [`Document::set`],
+//! [`Document::remove_key`] and [`Document::rename_key`] find the mapping by
+//! a path of keys and sequence items ([`Seg`]) and change only that entry's
+//! lines (a rename, only its key), and
 //! [`Document::update_to`] brings the whole document to a target value
 //! through such edits, so only what differs is rewritten.
 //!
@@ -77,6 +78,8 @@ pub enum EditProblem {
     /// The edited text would not read back as the value intended. A bug in
     /// this module, refused rather than written.
     Unfaithful,
+    /// A rename onto `key`, which the mapping already has.
+    KeyExists { key: String },
 }
 
 /// One step of a path into a document: a mapping key, or a sequence item by
@@ -170,6 +173,70 @@ impl Document {
     /// above it and the deeper ones directly below it.
     pub fn remove_key(&mut self, path: &[Seg<'_>], key: &str) -> Result<(), EditError> {
         self.map_edit(path, key, MapOp::Remove)
+    }
+
+    /// Rename `from` to `to` in the mapping at `path`, in its place: only the
+    /// key on the entry's line is rewritten, its value, the spacing after the
+    /// colon and any comment staying as written. Renaming a key to itself
+    /// does nothing.
+    pub fn rename_key(&mut self, path: &[Seg<'_>], from: &str, to: &str) -> Result<(), EditError> {
+        let mut full = path.to_vec();
+        full.push(Seg::Key(from));
+        let fail = |problem| EditError {
+            path: seg_path(&full),
+            problem,
+        };
+        let body = self.body();
+        let meaningful = Meaningful::of(&body);
+        let view = View::descend(&meaningful, path).map_err(|p| EditError {
+            path: seg_path(path),
+            problem: p,
+        })?;
+        let (at, _) = view
+            .entry(from)
+            .map_err(fail)?
+            .ok_or_else(|| fail(EditProblem::NotFound))?;
+        if at == 0 && view.dash_first {
+            return Err(fail(EditProblem::ItemFirstKey));
+        }
+        if from == to {
+            return Ok(());
+        }
+        let mut expected = self.value.clone();
+        let Some(Value::Map(entries)) = value_at(&mut expected, path) else {
+            return Err(fail(EditProblem::NotAMapping));
+        };
+        if entries.iter().any(|(k, _)| k == to) {
+            return Err(fail(EditProblem::KeyExists {
+                key: to.to_string(),
+            }));
+        }
+        for (k, _) in entries.iter_mut().filter(|(k, _)| k == from) {
+            *k = to.to_string();
+        }
+        let raw = view.raw(at);
+        let text = &self.lines[raw].text;
+        let indent = indent_of(text);
+        let (key, _) = split_key(strip_comment(&text[indent..])).expect("a key line");
+        let mut lines = self.lines.clone();
+        lines[raw].text = format!(
+            "{}{}{}",
+            &text[..indent],
+            scalar_text(to, At::Key),
+            &text[indent + key.len()..]
+        );
+        let edited = Document {
+            bom: self.bom,
+            lines,
+            value: expected,
+        };
+        match parse(&edited.body()) {
+            Ok(back) if back == edited.value => {
+                *self = edited;
+                Ok(())
+            }
+            _ => Err(fail(EditProblem::Unfaithful)),
+        }
     }
 
     /// Edit the document until it reads as `target` (up to the order of
@@ -1011,14 +1078,19 @@ impl Diagnostic for EditError {
             EditProblem::NoSuchItem { .. } => "angzarr-yaml-edit-no-such-item",
             EditProblem::ItemFirstKey => "angzarr-yaml-edit-item-first-key",
             EditProblem::Unfaithful => "angzarr-yaml-edit-unfaithful",
+            EditProblem::KeyExists { .. } => "angzarr-yaml-edit-key-exists",
         }
     }
 
     fn args(&self) -> Vec<(&str, Arg)> {
         let mut args = vec![("path", Arg::from(path_text(&self.path)))];
-        if let EditProblem::NoSuchItem { index, len } = self.problem {
-            args.push(("index", Arg::from(index)));
-            args.push(("len", Arg::from(len)));
+        match &self.problem {
+            EditProblem::NoSuchItem { index, len } => {
+                args.push(("index", Arg::from(*index)));
+                args.push(("len", Arg::from(*len)));
+            }
+            EditProblem::KeyExists { key } => args.push(("key", Arg::from(key.as_str()))),
+            _ => {}
         }
         args
     }
@@ -1035,6 +1107,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         EditProblem::NoSuchItem { index: 3, len: 2 },
         EditProblem::ItemFirstKey,
         EditProblem::Unfaithful,
+        EditProblem::KeyExists { key: "name".into() },
     ]
     .into_iter()
     .map(|problem| {

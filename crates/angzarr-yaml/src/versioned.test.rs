@@ -2,8 +2,9 @@
 //! with the helpers, pass-through, write-back and determinism.
 
 use crate::versioned::{
-    map_seq, move_key, remove_key, rename_key, set_default, version_of, BadVersion, ChainError,
-    ChainProblem, Fixture, LoadProblem, Loader, MigrationError, Migrations,
+    map_seq, move_key, remove_key, rename_key, set_default, version_at, version_of, BadVersion,
+    ChainError, ChainProblem, Fixture, LoadProblem, Loader, MigrationError, Migrations,
+    DEFAULT_KEY,
 };
 use crate::{parse, write, Value};
 use angzarr_diagnostic::{Arg, Diagnostic, Report};
@@ -100,8 +101,8 @@ fn toy() -> Loader {
         .unwrap()
 }
 
-const V0: &str = "# an old file\nversion: 0\nname: Ogre\nhp: 12\nlegacy: yes\nunits:\n  - {kind: club, hp: 3}\n  - {kind: rock, hp: 1}\n";
-const V3: &str = "version: 3\nhealth: 12\nunits:\n  - {kind: club, health: 3}\n  - {kind: rock, health: 1}\nspeed: 1\nmeta:\n  title: Ogre\n";
+const V0: &str = "# an old file\nschema_version: 0\nname: Ogre\nhp: 12\nlegacy: yes\nunits:\n  - {kind: club, hp: 3}\n  - {kind: rock, hp: 1}\n";
+const V3: &str = "schema_version: 3\nhealth: 12\nunits:\n  - {kind: club, health: 3}\n  - {kind: rock, health: 1}\nspeed: 1\nmeta:\n  title: Ogre\n";
 
 #[test]
 fn migrates_v0_to_v3_with_the_helpers() {
@@ -114,9 +115,9 @@ fn migrates_v0_to_v3_with_the_helpers() {
         .iter()
         .map(|(k, _)| k.as_str())
         .collect();
-    assert_eq!(keys, ["version", "health", "units", "speed", "meta"]);
+    assert_eq!(keys, ["schema_version", "health", "units", "speed", "meta"]);
     // Each intermediate version migrates from where it is.
-    let v2 = "version: 2\nname: Ogre\nhealth: 12\nunits:\n  - {kind: club, health: 3}\n  - {kind: rock, health: 1}\nspeed: 1\n";
+    let v2 = "schema_version: 2\nname: Ogre\nhealth: 12\nunits:\n  - {kind: club, health: 3}\n  - {kind: rock, health: 1}\nspeed: 1\n";
     assert_eq!(toy().load(None, v2).unwrap(), parse(V3).unwrap());
 }
 
@@ -127,7 +128,7 @@ fn a_current_document_passes_through_untouched() {
     assert_eq!(toy().upgrade(None, V3, 1).unwrap(), None);
     // No steps at all: the identity on current documents.
     let none = Migrations::new("toy", 1).build().unwrap();
-    let text = "version: 1\nb: 2\na: [1, 2]\n";
+    let text = "schema_version: 1\nb: 2\na: [1, 2]\n";
     assert_eq!(none.load(None, text).unwrap(), parse(text).unwrap());
 }
 
@@ -170,37 +171,52 @@ fn missing() -> Report {
 #[test]
 fn every_failure_is_a_typed_error() {
     assert!(matches!(
-        problem("version: 3\na: [1, 2\n"),
+        problem("schema_version: 3\na: [1, 2\n"),
         LoadProblem::Yaml(_)
     ));
-    assert_eq!(problem("- version: 3\n"), LoadProblem::NotAMapping);
+    assert_eq!(problem("- schema_version: 3\n"), LoadProblem::NotAMapping);
     assert_eq!(problem(""), LoadProblem::NotAMapping);
     assert_eq!(
-        problem("version: two\n"),
-        LoadProblem::BadVersion(BadVersion::NotAnInteger { text: "two".into() })
+        problem("schema_version: two\n"),
+        LoadProblem::BadVersion {
+            key: "schema_version".into(),
+            problem: BadVersion::NotAnInteger { text: "two".into() }
+        }
     );
     assert_eq!(
-        problem("version: -1\n"),
-        LoadProblem::BadVersion(BadVersion::NotAnInteger { text: "-1".into() })
+        problem("schema_version: -1\n"),
+        LoadProblem::BadVersion {
+            key: "schema_version".into(),
+            problem: BadVersion::NotAnInteger { text: "-1".into() }
+        }
     );
     assert_eq!(
-        problem("version: 1.0\n"),
-        LoadProblem::BadVersion(BadVersion::NotAnInteger { text: "1.0".into() })
+        problem("schema_version: 1.0\n"),
+        LoadProblem::BadVersion {
+            key: "schema_version".into(),
+            problem: BadVersion::NotAnInteger { text: "1.0".into() }
+        }
     );
     assert_eq!(
-        problem("version:\n"),
-        LoadProblem::BadVersion(BadVersion::Empty)
+        problem("schema_version:\n"),
+        LoadProblem::BadVersion {
+            key: "schema_version".into(),
+            problem: BadVersion::Empty
+        }
     );
     assert_eq!(
-        problem("version: [1]\n"),
-        LoadProblem::BadVersion(BadVersion::Sequence)
+        problem("schema_version: [1]\n"),
+        LoadProblem::BadVersion {
+            key: "schema_version".into(),
+            problem: BadVersion::Sequence
+        }
     );
     assert!(matches!(
-        problem("version: 99999999999\n"),
-        LoadProblem::BadVersion(_)
+        problem("schema_version: 99999999999\n"),
+        LoadProblem::BadVersion { .. }
     ));
     assert_eq!(
-        problem("version: 4\n"),
+        problem("schema_version: 4\n"),
         LoadProblem::TooNew {
             found: 4,
             current: 3
@@ -223,7 +239,7 @@ fn every_failure_is_a_typed_error() {
 
     // A step that fails: which step, and what went wrong.
     let e = toy()
-        .load(Some("bad.yaml"), "version: 0\nhp: 1\nhealth: 2\n")
+        .load(Some("bad.yaml"), "schema_version: 0\nhp: 1\nhealth: 2\n")
         .unwrap_err();
     assert_eq!(
         e.problem,
@@ -243,7 +259,10 @@ fn every_failure_is_a_typed_error() {
          problem.error.to=health"
     );
     let e = toy()
-        .load(None, "version: 0\nunits: [{hp: 1}, {hp: 2, health: 2}]\n")
+        .load(
+            None,
+            "schema_version: 0\nunits: [{hp: 1}, {hp: 2, health: 2}]\n",
+        )
         .unwrap_err();
     assert_eq!(
         e.to_string(),
@@ -261,7 +280,10 @@ fn every_failure_is_a_typed_error() {
     }
     let broken = Migrations::new("toy", 1).step(0, clobber).build().unwrap();
     assert!(matches!(
-        broken.load(None, "version: 0\n").unwrap_err().problem,
+        broken
+            .load(None, "schema_version: 0\n")
+            .unwrap_err()
+            .problem,
         LoadProblem::Step { from: 0, .. }
     ));
 
@@ -291,7 +313,7 @@ fn every_failure_is_a_typed_error() {
     // The error messages name the problem.
     assert_eq!(
         toy()
-            .load(Some("new.yaml"), "version: 7\n")
+            .load(Some("new.yaml"), "schema_version: 7\n")
             .unwrap_err()
             .to_string(),
         "angzarr-yaml-load-failed-at kind=toy source=new.yaml \
@@ -404,7 +426,7 @@ fn fixtures_must_migrate_to_their_expected_trees() {
             Fixture {
                 name: "wrong.yaml",
                 input: V0,
-                expected: Some("version: 3\n"),
+                expected: Some("schema_version: 3\n"),
             },
             // Expected output not at the current version.
             Fixture {
@@ -415,7 +437,7 @@ fn fixtures_must_migrate_to_their_expected_trees() {
             // Does not load.
             Fixture {
                 name: "broken.yaml",
-                input: "version: 9\n",
+                input: "schema_version: 9\n",
                 expected: None,
             },
         ])
@@ -446,7 +468,7 @@ fn assert_fixtures_panics_on_failure() {
 
 #[test]
 fn a_document_without_a_version_is_version_0() {
-    let unstamped = V0.replace("version: 0\n", "");
+    let unstamped = V0.replace("schema_version: 0\n", "");
     assert_eq!(version_of(&crate::parse(&unstamped).unwrap()), Ok(0));
     assert_eq!(
         toy().load(None, &unstamped).unwrap(),
@@ -490,7 +512,9 @@ fn a_callers_step_raises_its_own_code() {
         .step(0, needs_a_number)
         .build()
         .unwrap();
-    let e = loader.load(None, "version: 0\nhp: lots\n").unwrap_err();
+    let e = loader
+        .load(None, "schema_version: 0\nhp: lots\n")
+        .unwrap_err();
     let LoadProblem::Step { from: 0, error } = &e.problem else {
         panic!("{e:?}")
     };
@@ -530,7 +554,7 @@ fn hp_loader() -> Loader {
 fn upgrade_keeping_rewrites_only_what_the_migration_changed() {
     let old = "\
 # A toy.
-version: 1   # the format
+schema_version: 1   # the format
 name: imp    # its name
 stats:
   # Hit points.
@@ -546,7 +570,7 @@ stats:
         up.text,
         "\
 # A toy.
-version: 2   # the format
+schema_version: 2   # the format
 name: imp    # its name
 stats:
   speed: 2   # tiles per turn
@@ -566,7 +590,7 @@ stats:
 #[test]
 fn upgrade_keeping_a_current_document_is_none() {
     assert!(hp_loader()
-        .upgrade_keeping(None, "version: 2\nstats: {health: 1}\n", 2)
+        .upgrade_keeping(None, "schema_version: 2\nstats: {health: 1}\n", 2)
         .unwrap()
         .is_none());
 }
@@ -574,7 +598,7 @@ fn upgrade_keeping_a_current_document_is_none() {
 #[test]
 fn upgrade_keeping_reports_a_bad_document_like_load() {
     assert!(hp_loader()
-        .upgrade_keeping(None, "version: 9\n", 2)
+        .upgrade_keeping(None, "schema_version: 9\n", 2)
         .is_err());
     assert!(hp_loader().upgrade_keeping(None, "a: &x 1\n", 2).is_err());
 }
@@ -614,7 +638,7 @@ fn a_load_error_gives_its_cause_as_its_source() {
     let yaml = source("a: [1\n").expect("a parse error has a source");
     assert_eq!(yaml, crate::parse("a: [1\n").unwrap_err().to_string());
     assert_eq!(
-        source("version: 0\nhp: 1\nhealth: 2\n").as_deref(),
+        source("schema_version: 0\nhp: 1\nhealth: 2\n").as_deref(),
         Some("angzarr-yaml-rename-target-exists from=hp to=health")
     );
     let decode = toy()
@@ -626,6 +650,165 @@ fn a_load_error_gives_its_cause_as_its_source() {
         decode.source().map(|s| s.to_string()).as_deref(),
         Some("toy-missing-key key=missing")
     );
-    assert!(source("version: 9\n").is_none());
+    assert!(source("schema_version: 9\n").is_none());
     assert!(source("- a\n").is_none());
+}
+
+// ------------------------------------------------------------- the stamp key
+
+#[test]
+fn the_stamp_key_is_schema_version_unless_a_kind_names_its_own() {
+    assert_eq!(DEFAULT_KEY, "schema_version");
+    assert_eq!(toy().key(), "schema_version");
+    assert_eq!(toy().legacy_key(), None);
+    // Under the default key, `version` is just some other key: the document
+    // is version 0.
+    let doc = parse("version: 3\nname: Ogre\n").unwrap();
+    assert_eq!(version_of(&doc), Ok(0));
+    assert_eq!(version_at(&doc, "version"), Ok(3));
+    let from_1 = Migrations::new("toy", 3)
+        .step(1, v1_to_v2)
+        .step(2, v2_to_v3)
+        .build()
+        .unwrap();
+    assert_eq!(
+        from_1
+            .load(None, "version: 3\nname: Ogre\n")
+            .unwrap_err()
+            .problem,
+        LoadProblem::TooOld {
+            found: 0,
+            oldest: 1
+        }
+    );
+
+    // A kind with its own key reads and stamps that key, and the default is
+    // just some other key.
+    let own = Migrations::new("manifest", 2)
+        .key("version")
+        .step(0, ok)
+        .step(1, ok)
+        .build()
+        .unwrap();
+    assert_eq!(own.key(), "version");
+    assert_eq!(
+        own.load(None, "version: 1\nschema_version: x\n").unwrap(),
+        parse("version: 2\nschema_version: x\n").unwrap()
+    );
+    assert_eq!(
+        own.load(None, "a: 1\n").unwrap(),
+        parse("version: 2\na: 1\n").unwrap()
+    );
+    assert_eq!(
+        own.load(None, "version: x\n").unwrap_err().problem,
+        LoadProblem::BadVersion {
+            key: "version".into(),
+            problem: BadVersion::NotAnInteger { text: "x".into() }
+        }
+    );
+    assert_eq!(own.upgrade(None, "version: 2\n", 2).unwrap(), None);
+}
+
+/// bosun's manifests and the cli's project files are stamped `version`: a
+/// kind declares it as its legacy key, and a pre-step renames it, in place,
+/// to the kind's key before the stamp is read (as Go schemaver's kinds
+/// rename a key in a step, here before the gate).
+fn manifest() -> Loader {
+    Migrations::new("manifest", 2)
+        .legacy_key("version")
+        .step(1, rename_hp_at_root)
+        .build()
+        .unwrap()
+}
+
+fn rename_hp_at_root(doc: &mut Value) -> Result<(), MigrationError> {
+    rename_key(doc, "hp", "health")
+}
+
+#[test]
+fn a_legacy_key_is_renamed_to_the_kinds_key_before_the_stamp_is_read() {
+    let l = manifest();
+    assert_eq!(
+        (l.key(), l.legacy_key()),
+        ("schema_version", Some("version"))
+    );
+    // Renamed in its place, then migrated and stamped under the new key.
+    assert_eq!(
+        l.load(None, "name: imp\nversion: 1\nhp: 3\n").unwrap(),
+        parse("name: imp\nschema_version: 2\nhealth: 3\n").unwrap()
+    );
+    // A current document under the legacy key loads with the key renamed,
+    // and is not current on disk: upgrading rewrites it.
+    let current = "version: 2   # format\nhealth: 3\n";
+    assert_eq!(
+        l.load(None, current).unwrap(),
+        parse("schema_version: 2\nhealth: 3\n").unwrap()
+    );
+    assert_eq!(
+        l.upgrade(None, current, 2).unwrap().as_deref(),
+        Some("schema_version: 2\nhealth: 3\n")
+    );
+    let kept = l.upgrade_keeping(None, current, 2).unwrap().unwrap();
+    assert_eq!(
+        parse(&kept.text).unwrap(),
+        parse("schema_version: 2\nhealth: 3\n").unwrap()
+    );
+    // A document stamped under the kind's key is read as it is, and its
+    // `version`, if any, is some other key.
+    assert_eq!(
+        l.load(None, "schema_version: 2\nhealth: 3\n").unwrap(),
+        parse("schema_version: 2\nhealth: 3\n").unwrap()
+    );
+    assert_eq!(
+        l.upgrade(None, "schema_version: 2\nhealth: 3\n", 2)
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn a_legacy_stamp_is_judged_like_any_stamp_and_both_at_once_is_refused() {
+    let l = manifest();
+    assert_eq!(
+        l.load(None, "version: 3\n").unwrap_err().problem,
+        LoadProblem::TooNew {
+            found: 3,
+            current: 2
+        }
+    );
+    // The bad stamp is named by the key it was written under.
+    assert_eq!(
+        l.load(None, "version: one\n").unwrap_err().problem,
+        LoadProblem::BadVersion {
+            key: "version".into(),
+            problem: BadVersion::NotAnInteger { text: "one".into() }
+        }
+    );
+    let both = l
+        .load(Some("m.yaml"), "version: 1\nschema_version: 1\n")
+        .unwrap_err();
+    assert_eq!(
+        both.problem,
+        LoadProblem::LegacyAndStamp {
+            key: "schema_version".into(),
+            legacy: "version".into()
+        }
+    );
+    assert_eq!(
+        both.to_string(),
+        "angzarr-yaml-load-failed-at kind=manifest source=m.yaml \
+         problem=angzarr-yaml-legacy-and-stamp problem.key=schema_version \
+         problem.legacy=version"
+    );
+    assert!(l
+        .upgrade(None, "version: 1\nschema_version: 1\n", 2)
+        .is_err());
+    // A legacy key the same as the kind's key is no legacy key.
+    let same = Migrations::new("toy", 1)
+        .key("version")
+        .legacy_key("version")
+        .build()
+        .unwrap();
+    assert_eq!(same.legacy_key(), None);
+    assert!(same.load(None, "version: 1\n").is_ok());
 }

@@ -31,12 +31,13 @@ angzarr-yaml-unterminated-quote = line { $line }: unterminated quote
 angzarr-yaml-load-failed = { $kind } document: { $problem }
 angzarr-yaml-load-failed-at = { $kind } document { $source }: { $problem }
 
-angzarr-yaml-root-not-a-mapping = the root must be a mapping with a `version`
-angzarr-yaml-version-empty = `version` must be a non-negative integer, not an empty value
-angzarr-yaml-version-sequence = `version` must be a non-negative integer, not a sequence
-angzarr-yaml-version-mapping = `version` must be a non-negative integer, not a mapping
-angzarr-yaml-version-not-an-integer = `version` must be a non-negative integer, not "{ $text }"
-angzarr-yaml-version-too-large = `version` must be a non-negative integer, not "{ $text }" (too large)
+angzarr-yaml-root-not-a-mapping = the root must be a mapping, stamped with its format version
+angzarr-yaml-version-empty = `{ $key }` must be a non-negative integer, not an empty value
+angzarr-yaml-version-sequence = `{ $key }` must be a non-negative integer, not a sequence
+angzarr-yaml-version-mapping = `{ $key }` must be a non-negative integer, not a mapping
+angzarr-yaml-version-not-an-integer = `{ $key }` must be a non-negative integer, not "{ $text }"
+angzarr-yaml-version-too-large = `{ $key }` must be a non-negative integer, not "{ $text }" (too large)
+angzarr-yaml-legacy-and-stamp = both `{ $key }` and the old `{ $legacy }` it replaces are set: keep `{ $key }` alone
 angzarr-yaml-too-new = version { $found } was written by a newer build; this build reads up to version { $current }
 angzarr-yaml-too-old = version { $found } is older than this build migrates; the oldest it reads is version { $oldest }
 angzarr-yaml-step-failed = migrating version { $from } to { $to }: { $error }
@@ -75,3 +76,4 @@ angzarr-yaml-edit-no-such-item = { $path }: no item { $index }: the sequence has
    *[other] { $len } items
 }
 angzarr-yaml-edit-unfaithful = { $path }: the edit would not read back as written; nothing was changed
+angzarr-yaml-edit-key-exists = { $path }: cannot be renamed to "{ $key }", which is already there

@@ -43,8 +43,9 @@
 //! [`ParseProblem`]. Every error here is an [`angzarr_diagnostic::Diagnostic`],
 //! with its en-US messages in `locales/en-US/angzarr-yaml.ftl`.
 //!
-//! [`versioned`] loads documents stamped with a root `version`, running
-//! registered migrations up to the version the code reads. [`edit`] changes
+//! [`versioned`] loads documents stamped with a root `schema_version` (or a
+//! key the kind names), running registered migrations up to the version the
+//! code reads. [`edit`] changes
 //! one sequence item of a document in place and leaves every other byte,
 //! comments included, as written.
 
