@@ -17,6 +17,9 @@ publish = false
 contract = []
 # `memory::MemoryStore`: a real backend in memory, held to the whole suite.
 memory = []
+# `faulty::FaultyStore`: any backend failing what a test says, and changed
+# between its calls. For a backend's callers' tests.
+faulty = []
 
 [dependencies]
 # Every error is an angzarr_diagnostic::Diagnostic (zero dependencies;

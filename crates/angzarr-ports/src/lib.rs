@@ -51,6 +51,10 @@
 //!   unchanged).
 //! - `contract`: the conformance suite, [`contract`] and
 //!   [`store_contract!`].
+//! - `faulty`: [`faulty::FaultyStore`], any backend failing what a test
+//!   says (scripted write and read faults) and changed by "another
+//!   process" between its calls: for a caller's tests of its retries,
+//!   races and lost answers.
 
 mod error;
 mod send;
@@ -62,6 +66,8 @@ pub mod migrate;
 
 #[cfg(feature = "contract")]
 pub mod contract;
+#[cfg(feature = "faulty")]
+pub mod faulty;
 #[cfg(feature = "memory")]
 pub mod memory;
 
