@@ -1,5 +1,5 @@
-//! A crate's Fluent catalog checked against its errors, with no Fluent
-//! library: for each crate's parity test.
+//! A crate's Fluent catalog checked against its errors, and an error
+//! rendered through one, with no Fluent library.
 //!
 //! A crate that has codes ships `locales/en-US/<crate>.ftl` and exports it as
 //! `EN_US`, and its tests call [`check`] with one value of every error it
@@ -15,6 +15,12 @@
 //! placeables with variables, selectors, function calls and string
 //! literals. It is not a Fluent validator: a renderer still parses the
 //! catalog for itself.
+//!
+//! [`render`] shows an error where it is shown, through a catalog's text:
+//! a message on one line, its placeables variables (`{ $name }`), filled
+//! with the args; anything else falls back to the code and args
+//! ([`display`](crate::display)). A program with a Fluent renderer renders
+//! through that instead.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -198,6 +204,56 @@ impl Catalog {
     pub fn variables(&self, id: &str) -> Option<&BTreeSet<String>> {
         self.messages.get(id)
     }
+}
+
+/// `d` through the catalog `ftl`: its message there, each `{ $name }` the
+/// value of its arg `name` (a number in digits, a text as it is, a nested
+/// cause as its own `Display`). A code with no message in `ftl`, or one this
+/// cannot fill without a Fluent library (a value over several lines, a
+/// placeable that is no variable, or a variable `d` has no arg for), is
+/// shown as its code and args ([`display`](crate::display)), never guessed.
+pub fn render(ftl: &str, d: &dyn Diagnostic, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    match one_line_message(ftl, d.code()).and_then(|value| filled(value, &d.args())) {
+        Some(text) => f.write_str(&text),
+        None => crate::display(d, f),
+    }
+}
+
+/// The value of message `id` in `ftl`, if it is one line: the next line
+/// with text is no continuation (an attribute, `.name = ...`, may follow).
+fn one_line_message<'a>(ftl: &'a str, id: &str) -> Option<&'a str> {
+    let mut lines = ftl.lines();
+    let (_, value) = lines
+        .by_ref()
+        .find_map(|line| entry(line).filter(|(n, _)| *n == id))?;
+    let next = lines.find(|line| !line.trim_start_matches(' ').is_empty());
+    let continued = next.is_some_and(|line| {
+        line.starts_with(' ') && !line.trim_start_matches(' ').starts_with('.')
+    });
+    (!value.is_empty() && !continued).then(|| value.trim_end_matches(' '))
+}
+
+/// `text` with each placeable a variable of `args`, filled; `None` for any
+/// other placeable, or a brace that opens or closes none.
+fn filled(mut text: &str, args: &[(&str, Arg)]) -> Option<String> {
+    let mut out = String::new();
+    while let Some((before, after)) = text.split_once('{') {
+        let (inside, after) = after.split_once('}')?;
+        let name = inside.trim_matches(' ').strip_prefix('$')?;
+        let (_, arg) = args.iter().find(|(n, _)| *n == name)?;
+        if before.contains('}') {
+            return None;
+        }
+        out.push_str(before);
+        match arg {
+            Arg::Int(n) => out.push_str(&n.to_string()),
+            Arg::Uint(n) => out.push_str(&n.to_string()),
+            Arg::Str(s) => out.push_str(s),
+            Arg::Nested(cause) => out.push_str(&cause.to_string()),
+        }
+        text = after;
+    }
+    (!text.contains('}')).then(|| out + text)
 }
 
 /// kebab-case, starting with `krate` and a dash.

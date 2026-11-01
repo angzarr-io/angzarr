@@ -28,7 +28,10 @@ Each crate ships an en-US Fluent catalog,
 `crates/<crate>/locales/en-US/<crate>.ftl`, with a message for every code,
 and exports it as `EN_US`. A library renders nothing: whoever shows the error
 looks the code up in its catalogs and passes the args by name, rendering a
-nested cause first.
+nested cause first. `catalog::render(ftl, d, f)` does that with no Fluent
+library, for a catalog whose messages are one line of text and `{ $arg }`
+placeables; any other message, or a code the catalog lacks, falls back to
+the code and args (`display`).
 
 A program's own errors implement `Diagnostic` too, with codes starting with
 the program's name. Where a library's error holds its caller's error (a

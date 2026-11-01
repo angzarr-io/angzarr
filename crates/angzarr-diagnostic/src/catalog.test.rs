@@ -278,3 +278,65 @@ fn a_name_that_is_no_id_a_stray_brace_or_an_open_literal_is_refused() {
         ]
     );
 }
+
+// ------------------------------------------------------------------ render
+
+/// A report shown through [`render`] with `ftl`.
+struct Rendered<'a>(&'a str, &'a dyn Diagnostic);
+
+impl fmt::Display for Rendered<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        render(self.0, self.1, f)
+    }
+}
+
+fn rendered(ftl: &str, d: &dyn Diagnostic) -> String {
+    Rendered(ftl, d).to_string()
+}
+
+const SHOWN: &str = "t-other = other\n\
+                     t-shown-more = not this one\n\
+                     t-shown = { $b } before {$a}: { $n }, { $u } and { $cause }.  \n\
+                     t-hinted = top\n    .hint = see { $path }\n\
+                     t-spanning = first\n    second\n\
+                     t-select = { $a ->\n   *[x] y\n}\n\
+                     t-term = { -brand } { $a }\n\
+                     t-absent = { $missing }\n\
+                     t-open = { $a\n\
+                     t-stray = a } { $a }\n\
+                     t-stray-after = { $a } }\n";
+
+#[test]
+fn a_message_is_filled_by_arg_name_each_kind_of_arg_its_own_way() {
+    let cause = Report::new("t-cause").arg("k", "v w");
+    let shown = Report::new("t-shown")
+        .arg("a", "first")
+        .arg("b", "second")
+        .arg("n", -3i64)
+        .arg("u", 7u64)
+        .arg("cause", Arg::Nested(Box::new(cause)));
+    assert_eq!(
+        rendered(SHOWN, &shown),
+        "second before first: -3, 7 and t-cause k=\"v w\"."
+    );
+    assert_eq!(rendered(SHOWN, &Report::new("t-other")), "other");
+    // An attribute after the value is no part of it.
+    assert_eq!(rendered(SHOWN, &Report::new("t-hinted")), "top");
+}
+
+#[test]
+fn what_this_cannot_fill_is_shown_as_its_code_and_args() {
+    for code in [
+        "t-none",
+        "t-spanning",
+        "t-select",
+        "t-term",
+        "t-absent",
+        "t-open",
+        "t-stray",
+        "t-stray-after",
+    ] {
+        let d = Report::new(code).arg("a", "x y");
+        assert_eq!(rendered(SHOWN, &d), format!("{code} a=\"x y\""), "{code}");
+    }
+}
