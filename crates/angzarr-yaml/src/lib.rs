@@ -71,6 +71,7 @@ pub mod versioned;
 pub mod write_back;
 
 use std::borrow::Cow;
+use std::iter::Peekable;
 
 pub use decode::{from_value, DecodeError};
 pub use error::{Error, ParseProblem};
@@ -415,77 +416,118 @@ fn raw_lines(src: &str) -> impl Iterator<Item = Result<(usize, &str), Error>> {
 }
 
 fn lines(src: &str) -> Result<Vec<Line<'_>>, Error> {
-    let mut raw: Vec<Result<(usize, &str), Error>> = raw_lines(src).collect();
-    // The empty piece after a final line break is no line.
-    if matches!(raw.last(), Some(Ok((_, "")))) {
-        raw.pop();
-    }
+    let mut raw = Raw::of(src);
     let mut out = Vec::new();
-    let mut at = 0;
-    while at < raw.len() {
-        let (no, raw_line) = raw[at].clone()?;
-        at += 1;
-        let body = strip_comment(raw_line).trim_end_matches(SPACE);
-        if trim(body).is_empty() {
-            continue;
+    while let Some(next) = raw.take() {
+        let (no, raw_line) = next?;
+        if let Some(line) = meaningful(no, raw_line)? {
+            let line = raw.join_flow(line)?;
+            out.push(raw.take_block(line)?);
         }
-        let indent = body.len() - body.trim_start_matches(' ').len();
-        let text = &body[indent..];
-        if text.starts_with('\t') {
-            return err(no, ParseProblem::TabIndent);
-        }
-        if let Some(character) = text.chars().next().filter(|c| c.is_whitespace()) {
-            return err(no, ParseProblem::NonAsciiIndent { character });
-        }
-        if text == "---" || text == "..." {
-            return err(
-                no,
-                ParseProblem::DocumentMarker {
-                    marker: text.to_string(),
-                },
-            );
-        }
-        if let Some(problem) = unsupported(text) {
-            return err(no, problem);
-        }
-        let mut line = Line {
+    }
+    Ok(out)
+}
+
+/// Line `no` as a [`Line`] on its own, or `None` if it is empty or a
+/// comment: refused if it starts with what this reader does not take.
+fn meaningful(no: usize, raw_line: &str) -> Result<Option<Line<'_>>, Error> {
+    let body = strip_comment(raw_line).trim_end_matches(SPACE);
+    if trim(body).is_empty() {
+        return Ok(None);
+    }
+    let indent = body.len() - body.trim_start_matches(' ').len();
+    let text = &body[indent..];
+    indented_by_spaces(no, text)?;
+    no_document_marker(no, text)?;
+    if let Some(problem) = unsupported(text) {
+        return err(no, problem);
+    }
+    Ok(Some(Line {
+        no,
+        last: no,
+        indent,
+        text: Cow::Borrowed(text),
+        block: None,
+    }))
+}
+
+/// Line `no`'s text after its indent spaces starts with no other
+/// whitespace: a tab is no indent here, and any other space character is
+/// content, which cannot start a line.
+fn indented_by_spaces(no: usize, text: &str) -> Result<(), Error> {
+    if text.starts_with('\t') {
+        return err(no, ParseProblem::TabIndent);
+    }
+    match text.chars().next().filter(|c| c.is_whitespace()) {
+        Some(character) => err(no, ParseProblem::NonAsciiIndent { character }),
+        None => Ok(()),
+    }
+}
+
+/// `text` is no document marker (`---`, `...`): one document per file.
+fn no_document_marker(no: usize, text: &str) -> Result<(), Error> {
+    if text == "---" || text == "..." {
+        return err(
             no,
-            last: no,
-            indent,
-            text: Cow::Borrowed(text),
-            block: None,
-        };
-        // A flow collection split across lines is one line: each line
-        // break inside it a space, the comments cut off each line.
-        let mut depth = open_flow(text);
+            ParseProblem::DocumentMarker {
+                marker: text.to_string(),
+            },
+        );
+    }
+    Ok(())
+}
+
+/// A document's raw lines (see [`raw_lines`]), and the next one to read: a
+/// line that spans several (a flow collection split across lines, a block
+/// scalar's header) reads on past its own.
+struct Raw<'a> {
+    lines: Vec<Result<(usize, &'a str), Error>>,
+    at: usize,
+}
+
+impl<'a> Raw<'a> {
+    fn of(src: &'a str) -> Raw<'a> {
+        let mut lines: Vec<_> = raw_lines(src).collect();
+        // The empty piece after a final line break is no line.
+        if matches!(lines.last(), Some(Ok((_, "")))) {
+            lines.pop();
+        }
+        Raw { lines, at: 0 }
+    }
+
+    /// The next raw line, left to read.
+    fn peek(&self) -> Option<Result<(usize, &'a str), Error>> {
+        self.lines.get(self.at).cloned()
+    }
+
+    /// The next raw line, read.
+    fn take(&mut self) -> Option<Result<(usize, &'a str), Error>> {
+        let next = self.peek();
+        self.at += usize::from(next.is_some());
+        next
+    }
+
+    /// `line` with the lines that close the flow collection it opens: one
+    /// line, each line break inside it a space, the comments cut off each
+    /// line.
+    fn join_flow(&mut self, mut line: Line<'a>) -> Result<Line<'a>, Error> {
+        let mut depth = open_flow(&line.text);
         let mut joined: Option<String> = None;
         while depth > 0 {
-            let Some(next) = raw.get(at) else { break };
-            let (next_no, l) = next.clone()?;
+            let Some(next) = self.peek() else { break };
+            let (next_no, l) = next?;
             let s = scan(l, depth);
             let piece = l[..s.cut].trim_end_matches(SPACE);
             let content = piece.trim_start_matches(' ');
-            if content.starts_with('\t') {
-                return err(next_no, ParseProblem::TabIndent);
-            }
-            if let Some(character) = content.chars().next().filter(|c| c.is_whitespace()) {
-                return err(next_no, ParseProblem::NonAsciiIndent { character });
-            }
-            if piece == "---" || piece == "..." {
-                return err(
-                    next_no,
-                    ParseProblem::DocumentMarker {
-                        marker: piece.to_string(),
-                    },
-                );
-            }
+            indented_by_spaces(next_no, content)?;
+            no_document_marker(next_no, piece)?;
             if s.open_quote {
                 return err(next_no, ParseProblem::UnterminatedQuote);
             }
-            at += 1;
+            self.at += 1;
             depth = s.depth;
             if !content.is_empty() {
-                let joined = joined.get_or_insert_with(|| text.to_string());
+                let joined = joined.get_or_insert_with(|| line.text.to_string());
                 joined.push(' ');
                 joined.push_str(content);
                 line.last = next_no;
@@ -494,38 +536,43 @@ fn lines(src: &str) -> Result<Vec<Line<'_>>, Error> {
         if let Some(joined) = joined {
             line.text = Cow::Owned(joined);
         }
-        if let Some((h, parent)) = block_header(&line.text, indent) {
-            // The content: the lines deeper than `parent`, at the first
-            // one's indent or deeper, and the empty lines among them, as
-            // written: comments and quotes are text there.
-            let mut content: Vec<&str> = Vec::new();
-            let mut deep: Option<usize> = None;
-            while let Some(next) = raw.get(at) {
-                let (next_no, l) = next.clone()?;
-                let spaces = l.len() - l.trim_start_matches(' ').len();
-                let blank = spaces == l.len();
-                match deep {
-                    None if blank => content.push(""),
-                    None if spaces > parent => {
-                        deep = Some(spaces);
-                        content.push(&l[spaces..]);
-                    }
-                    Some(m) if blank => content.push(l.get(m..).unwrap_or("")),
-                    Some(m) if spaces >= m => content.push(&l[m..]),
-                    _ => break,
-                }
-                // Empty lines after the text are the line's only when they
-                // are the value's (kept); otherwise they are layout.
-                if h.chomp == Chomp::Keep || content.last().is_some_and(|c| !c.is_empty()) {
-                    line.last = next_no;
-                }
-                at += 1;
-            }
-            line.block = Some(block_value(&content, h));
-        }
-        out.push(line);
+        Ok(line)
     }
-    Ok(out)
+
+    /// `line` with its block scalar's value, if it ends in a header: the
+    /// lines deeper than the header's parent, at the first one's indent or
+    /// deeper, and the empty lines among them, as written (comments and
+    /// quotes are text there).
+    fn take_block(&mut self, mut line: Line<'a>) -> Result<Line<'a>, Error> {
+        let Some((h, parent)) = block_header(&line.text, line.indent) else {
+            return Ok(line);
+        };
+        let mut content: Vec<&str> = Vec::new();
+        let mut deep: Option<usize> = None;
+        while let Some(next) = self.peek() {
+            let (next_no, l) = next?;
+            let spaces = l.len() - l.trim_start_matches(' ').len();
+            let blank = spaces == l.len();
+            match deep {
+                None if blank => content.push(""),
+                None if spaces > parent => {
+                    deep = Some(spaces);
+                    content.push(&l[spaces..]);
+                }
+                Some(m) if blank => content.push(l.get(m..).unwrap_or("")),
+                Some(m) if spaces >= m => content.push(&l[m..]),
+                _ => break,
+            }
+            // Empty lines after the text are the line's only when they
+            // are the value's (kept); otherwise they are layout.
+            if h.chomp == Chomp::Keep || content.last().is_some_and(|c| !c.is_empty()) {
+                line.last = next_no;
+            }
+            self.at += 1;
+        }
+        line.block = Some(block_value(&content, h));
+        Ok(line)
+    }
 }
 
 /// Parse a document. One leading byte-order mark is skipped: editors add it,
@@ -808,86 +855,103 @@ impl<'a> Flow<'a> {
     /// collection, up to `,` `]` `}` (and `:` for a key).
     fn scalar(&mut self, key: bool) -> Result<Value, Error> {
         self.space();
-        let rest = self.rest();
-        let nested = self.s.starts_with('[') || self.s.starts_with('{');
-        match rest.chars().next() {
-            Some(q @ ('"' | '\'')) => {
-                let mut out = String::new();
-                let mut chars = rest.char_indices().skip(1).peekable();
-                while let Some((i, c)) = chars.next() {
-                    if c == q {
-                        if q == '\'' && matches!(chars.peek(), Some((_, '\''))) {
-                            chars.next();
-                            out.push('\'');
-                            continue;
-                        }
-                        self.at += i + 1;
-                        return Ok(Value::Scalar(out));
-                    }
-                    if q == '"' && c == '\\' {
-                        match chars.next() {
-                            Some((_, 'n')) => out.push('\n'),
-                            Some((_, 't')) => out.push('\t'),
-                            Some((_, 'r')) => out.push('\r'),
-                            Some((_, '0')) => out.push('\0'),
-                            Some((_, e @ ('"' | '\\'))) => out.push(e),
-                            Some((_, u @ ('u' | 'U'))) => {
-                                let n = if u == 'u' { 4 } else { 8 };
-                                let digits: String = (0..n)
-                                    .map_while(|_| {
-                                        chars
-                                            .next_if(|(_, c)| c.is_ascii_hexdigit())
-                                            .map(|(_, c)| c)
-                                    })
-                                    .collect();
-                                let c = u32::from_str_radix(&digits, 16)
-                                    .ok()
-                                    .filter(|_| digits.len() == n)
-                                    .and_then(char::from_u32);
-                                match c {
-                                    Some(c) => out.push(c),
-                                    None => {
-                                        return err(
-                                            self.no,
-                                            ParseProblem::BadUnicodeEscape {
-                                                escape: format!("\\{u}{digits}"),
-                                            },
-                                        )
-                                    }
-                                }
-                            }
-                            other => {
-                                let escape =
-                                    other.map_or(String::from("\\"), |(_, c)| format!("\\{c}"));
-                                return err(self.no, ParseProblem::UnknownEscape { escape });
-                            }
-                        }
-                        continue;
-                    }
-                    out.push(c);
-                }
-                err(self.no, ParseProblem::UnterminatedQuote)
-            }
+        match self.rest().chars().next() {
+            Some(q @ ('"' | '\'')) => self.quoted(q),
             None => Ok(Value::Null),
-            Some(_) => {
-                let end = if nested {
-                    rest.find(|c| c == ',' || c == ']' || c == '}' || (key && c == ':'))
-                        .unwrap_or(rest.len())
-                } else {
-                    rest.len()
-                };
-                let text = rest[..end].trim_end_matches(SPACE);
-                self.at += end;
-                if text.is_empty() {
-                    return Ok(Value::Null);
-                }
-                if text == "~" || text == "null" {
-                    return Ok(Value::Null);
-                }
-                Ok(Value::Scalar(text.to_string()))
-            }
+            Some(_) => Ok(self.plain(key)),
         }
     }
+
+    /// The scalar quoted by `q`, which opens it: inside `"`, a backslash
+    /// starts an escape ([`unescape`]); inside `'`, `''` is a quote.
+    fn quoted(&mut self, q: char) -> Result<Value, Error> {
+        let mut out = String::new();
+        let mut chars = self.rest().char_indices().skip(1).peekable();
+        while let Some((i, c)) = chars.next() {
+            match c {
+                '\'' if q == '\'' && chars.next_if(|&(_, c)| c == '\'').is_some() => out.push(c),
+                c if c == q => {
+                    self.at += i + 1;
+                    return Ok(Value::Scalar(out));
+                }
+                '\\' if q == '"' => match unescape(&mut chars) {
+                    Ok(c) => out.push(c),
+                    Err(problem) => return err(self.no, problem),
+                },
+                c => out.push(c),
+            }
+        }
+        err(self.no, ParseProblem::UnterminatedQuote)
+    }
+
+    /// A plain scalar: `~`, `null` and nothing are null.
+    fn plain(&mut self, key: bool) -> Value {
+        let rest = self.rest();
+        let nested = self.s.starts_with('[') || self.s.starts_with('{');
+        let end = if nested {
+            rest.find(|c| c == ',' || c == ']' || c == '}' || (key && c == ':'))
+                .unwrap_or(rest.len())
+        } else {
+            rest.len()
+        };
+        let text = rest[..end].trim_end_matches(SPACE);
+        self.at += end;
+        if text.is_empty() || text == "~" || text == "null" {
+            return Value::Null;
+        }
+        Value::Scalar(text.to_string())
+    }
+}
+
+/// The escapes a double-quoted scalar takes by name, each `\` and the
+/// letter, and the character it stands for: what the reader reads and the
+/// writer writes.
+const NAMED_ESCAPES: [(char, char); 6] = [
+    ('"', '"'),
+    ('\\', '\\'),
+    ('n', '\n'),
+    ('t', '\t'),
+    ('r', '\r'),
+    ('0', '\0'),
+];
+
+/// The character the escape after a backslash names, read from `chars`: a
+/// [`NAMED_ESCAPES`] letter, or `u` and four hex digits or `U` and eight
+/// naming a Unicode scalar value.
+fn unescape(
+    chars: &mut Peekable<impl Iterator<Item = (usize, char)>>,
+) -> Result<char, ParseProblem> {
+    let Some((_, e)) = chars.next() else {
+        return Err(ParseProblem::UnknownEscape {
+            escape: String::from("\\"),
+        });
+    };
+    if let Some(&(_, c)) = NAMED_ESCAPES.iter().find(|(name, _)| *name == e) {
+        return Ok(c);
+    }
+    let n = match e {
+        'u' => 4,
+        'U' => 8,
+        _ => {
+            return Err(ParseProblem::UnknownEscape {
+                escape: format!("\\{e}"),
+            })
+        }
+    };
+    let digits: String = (0..n)
+        .map_while(|_| {
+            chars
+                .next_if(|(_, c)| c.is_ascii_hexdigit())
+                .map(|(_, c)| c)
+        })
+        .collect();
+    u32::from_str_radix(&digits, 16)
+        .ok()
+        .filter(|_| digits.len() == n)
+        .and_then(char::from_u32)
+        .ok_or_else(|| ParseProblem::BadUnicodeEscape {
+            escape: format!("\\{e}{digits}"),
+        })
 }
 
 // ---------------------------------------------------------------- writing
@@ -950,15 +1014,13 @@ fn scalar_text(s: &str, at: At) -> String {
     }
     let mut out = String::from("\"");
     for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\t' => out.push_str("\\t"),
-            '\r' => out.push_str("\\r"),
-            '\0' => out.push_str("\\0"),
-            c if escaped(c) => out.push_str(&format!("\\u{:04X}", c as u32)),
-            c => out.push(c),
+        if let Some(&(name, _)) = NAMED_ESCAPES.iter().find(|(_, named)| *named == c) {
+            out.push('\\');
+            out.push(name);
+        } else if escaped(c) {
+            out.push_str(&format!("\\u{:04X}", c as u32));
+        } else {
+            out.push(c);
         }
     }
     out.push('"');

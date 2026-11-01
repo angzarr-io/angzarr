@@ -168,8 +168,19 @@ fn missing() -> Report {
     Report::new("toy-missing-key").arg("key", "missing")
 }
 
+/// The problem with the version stamp `text` gives.
+fn bad_version(text: &str) -> BadVersion {
+    match problem(text) {
+        LoadProblem::BadVersion { key, problem } => {
+            assert_eq!(key, DEFAULT_KEY);
+            problem
+        }
+        other => panic!("{text:?} should have a bad stamp, not {other:?}"),
+    }
+}
+
 #[test]
-fn every_failure_is_a_typed_error() {
+fn a_document_that_is_no_mapping_fails() {
     assert!(matches!(
         problem("schema_version: 3\na: [1, 2\n"),
         LoadProblem::Yaml(_)
@@ -181,45 +192,26 @@ fn every_failure_is_a_typed_error() {
         toy().load(None, "").unwrap(),
         parse("schema_version: 3\nspeed: 1\n").unwrap()
     );
-    assert_eq!(
-        problem("schema_version: two\n"),
-        LoadProblem::BadVersion {
-            key: "schema_version".into(),
-            problem: BadVersion::NotAnInteger { text: "two".into() }
-        }
-    );
-    assert_eq!(
-        problem("schema_version: -1\n"),
-        LoadProblem::BadVersion {
-            key: "schema_version".into(),
-            problem: BadVersion::NotAnInteger { text: "-1".into() }
-        }
-    );
-    assert_eq!(
-        problem("schema_version: 1.0\n"),
-        LoadProblem::BadVersion {
-            key: "schema_version".into(),
-            problem: BadVersion::NotAnInteger { text: "1.0".into() }
-        }
-    );
-    assert_eq!(
-        problem("schema_version:\n"),
-        LoadProblem::BadVersion {
-            key: "schema_version".into(),
-            problem: BadVersion::Empty
-        }
-    );
-    assert_eq!(
-        problem("schema_version: [1]\n"),
-        LoadProblem::BadVersion {
-            key: "schema_version".into(),
-            problem: BadVersion::Sequence
-        }
-    );
+}
+
+#[test]
+fn a_stamp_that_is_no_version_fails() {
+    for text in ["two", "-1", "1.0"] {
+        assert_eq!(
+            bad_version(&format!("schema_version: {text}\n")),
+            BadVersion::NotAnInteger { text: text.into() }
+        );
+    }
+    assert_eq!(bad_version("schema_version:\n"), BadVersion::Empty);
+    assert_eq!(bad_version("schema_version: [1]\n"), BadVersion::Sequence);
     assert!(matches!(
-        problem("schema_version: 99999999999\n"),
-        LoadProblem::BadVersion { .. }
+        bad_version("schema_version: 99999999999\n"),
+        BadVersion::TooLarge { .. }
     ));
+}
+
+#[test]
+fn a_version_the_chain_does_not_reach_fails() {
     assert_eq!(
         problem("schema_version: 4\n"),
         LoadProblem::TooNew {
@@ -227,7 +219,6 @@ fn every_failure_is_a_typed_error() {
             current: 3
         }
     );
-
     let trimmed = Migrations::new("toy", 3)
         .step(1, v1_to_v2)
         .step(2, v2_to_v3)
@@ -241,8 +232,20 @@ fn every_failure_is_a_typed_error() {
             oldest: 1
         }
     );
+    // The error messages name the problem.
+    assert_eq!(
+        toy()
+            .load(Some("new.yaml"), "schema_version: 7\n")
+            .unwrap_err()
+            .to_string(),
+        "angzarr-yaml-load-failed-at kind=toy source=new.yaml \
+         problem=angzarr-yaml-too-new problem.found=7 problem.current=3"
+    );
+}
 
-    // A step that fails: which step, and what went wrong.
+/// A step that fails: which step, and what went wrong.
+#[test]
+fn a_failing_step_names_itself_and_its_error() {
     let e = toy()
         .load(Some("bad.yaml"), "schema_version: 0\nhp: 1\nhealth: 2\n")
         .unwrap_err();
@@ -277,7 +280,6 @@ fn every_failure_is_a_typed_error() {
          problem.error.error=angzarr-yaml-rename-target-exists \
          problem.error.error.from=hp problem.error.error.to=health"
     );
-
     // A step that breaks the root.
     fn clobber(doc: &mut Value) -> Result<(), MigrationError> {
         *doc = Value::Null;
@@ -291,8 +293,11 @@ fn every_failure_is_a_typed_error() {
             .problem,
         LoadProblem::Step { from: 0, .. }
     ));
+}
 
-    // The decoder's error.
+/// The decoder's error, the caller's own code, nested as it is.
+#[test]
+fn a_failing_decoder_fails_with_its_own_error() {
     let e = toy()
         .load_as(Some("ogre.yaml"), V0, |doc| {
             doc.get("missing").cloned().ok_or_else(missing)
@@ -313,16 +318,6 @@ fn every_failure_is_a_typed_error() {
         e.to_string(),
         "angzarr-yaml-load-failed-at kind=toy source=ogre.yaml problem=toy-missing-key \
          problem.key=missing"
-    );
-
-    // The error messages name the problem.
-    assert_eq!(
-        toy()
-            .load(Some("new.yaml"), "schema_version: 7\n")
-            .unwrap_err()
-            .to_string(),
-        "angzarr-yaml-load-failed-at kind=toy source=new.yaml \
-         problem=angzarr-yaml-too-new problem.found=7 problem.current=3"
     );
 }
 

@@ -44,6 +44,14 @@ fn args(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// A scalar refused: the type asked for, and the text as read.
+fn scalar(expected: Expected, text: &str) -> DecodeProblem {
+    DecodeProblem::Scalar {
+        expected,
+        text: text.into(),
+    }
+}
+
 #[derive(Debug, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -328,48 +336,23 @@ fn a_scalar_that_is_not_what_the_type_asks_is_refused_as_read() {
     );
     assert_eq!(
         bad("port: 8080", "port: '-1'").problem,
-        DecodeProblem::Scalar {
-            expected: Expected::U16,
-            text: "-1".into()
-        }
+        scalar(Expected::U16, "-1")
     );
     // Booleans are `true` and `false`, nothing else.
     for no in ["no", "False", "0", "off"] {
         let e = bad("debug: false", &format!("debug: {no}"));
-        assert_eq!(
-            e.problem,
-            DecodeProblem::Scalar {
-                expected: Expected::Bool,
-                text: no.into()
-            },
-            "{no}"
-        );
+        assert_eq!(e.problem, scalar(Expected::Bool, no), "{no}");
     }
     assert_eq!(
         bad("ratio: 0.5", "ratio: half").problem,
-        DecodeProblem::Scalar {
-            expected: Expected::F64,
-            text: "half".into()
-        }
+        scalar(Expected::F64, "half")
     );
     let e = bad("  attempts: 3", "  attempts: 3.0");
     assert_eq!(e.key_path(), "retry.attempts");
-    assert_eq!(
-        e.problem,
-        DecodeProblem::Scalar {
-            expected: Expected::U8,
-            text: "3.0".into()
-        }
-    );
+    assert_eq!(e.problem, scalar(Expected::U8, "3.0"));
     let e = bad("{cpu: 2, mem: 512}", "{cpu: 2, mem: lots}");
     assert_eq!(e.key_path(), "limits.mem");
-    assert_eq!(
-        e.problem,
-        DecodeProblem::Scalar {
-            expected: Expected::U32,
-            text: "lots".into()
-        }
-    );
+    assert_eq!(e.problem, scalar(Expected::U32, "lots"));
     let e = bad("tags: [a, 'b c']", "tags: [a, [b]]");
     assert_eq!(e.key_path(), "tags[1]");
     assert_eq!(
@@ -449,33 +432,35 @@ fn a_value_of_the_wrong_shape_is_refused_with_what_it_is() {
     );
 }
 
-#[test]
-fn every_primitive_is_parsed_from_its_text() {
-    #[derive(Debug, PartialEq, Deserialize)]
-    struct All {
-        i8: i8,
-        i16: i16,
-        i32: i32,
-        i64: i64,
-        i128: i128,
-        u8: u8,
-        u16: u16,
-        u32: u32,
-        u64: u64,
-        u128: u128,
-        f32: f32,
-        f64: f64,
-        c: char,
-        unit: (),
-        pair: (u8, String),
-        bytes: serde_bytes_like::Bytes,
-        opt: Option<u8>,
-        none: Option<u8>,
-        newtype: Meters,
-    }
-    #[derive(Debug, PartialEq, Deserialize)]
-    struct Meters(u32);
-    let text = "\
+/// Every primitive serde reads, one field each.
+#[derive(Debug, PartialEq, Deserialize)]
+struct All {
+    i8: i8,
+    i16: i16,
+    i32: i32,
+    i64: i64,
+    i128: i128,
+    u8: u8,
+    u16: u16,
+    u32: u32,
+    u64: u64,
+    u128: u128,
+    f32: f32,
+    f64: f64,
+    c: char,
+    unit: (),
+    pair: (u8, String),
+    bytes: serde_bytes_like::Bytes,
+    opt: Option<u8>,
+    none: Option<u8>,
+    newtype: Meters,
+}
+
+#[derive(Debug, PartialEq, Deserialize)]
+struct Meters(u32);
+
+/// An [`All`] at each primitive's edges.
+const ALL: &str = "\
 i8: -128
 i16: -32768
 i32: '-7'
@@ -496,7 +481,26 @@ opt: 4
 none: ~
 newtype: 12
 ";
-    let all: All = decode(&doc(text)).unwrap();
+
+/// The problem decoding [`ALL`] with `key`'s value `value` instead.
+fn all_with(key: &str, value: &str) -> DecodeProblem {
+    let text = ALL
+        .lines()
+        .map(|l| {
+            if l.starts_with(&format!("{key}:")) {
+                format!("{key}: {value}")
+            } else {
+                l.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    decode::<All>(&doc(&text)).unwrap_err().problem
+}
+
+#[test]
+fn every_primitive_is_parsed_from_its_text() {
+    let all: All = decode(&doc(ALL)).unwrap();
     assert_eq!(
         all,
         All {
@@ -521,71 +525,61 @@ newtype: 12
             newtype: Meters(12),
         }
     );
-    // Each refuses what does not fit.
-    let one = |key: &str, value: &str| {
-        let text = text
-            .lines()
-            .map(|l| {
-                if l.starts_with(&format!("{key}:")) {
-                    format!("{key}: {value}")
-                } else {
-                    l.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        decode::<All>(&doc(&text)).unwrap_err().problem
-    };
-    let scalar = |expected, text: &str| DecodeProblem::Scalar {
-        expected,
-        text: text.into(),
-    };
-    assert_eq!(one("i8", "128"), scalar(Expected::I8, "128"));
-    assert_eq!(one("i16", "x"), scalar(Expected::I16, "x"));
-    assert_eq!(one("i32", "1e3"), scalar(Expected::I32, "1e3"));
-    assert_eq!(one("i64", "0x10"), scalar(Expected::I64, "0x10"));
-    assert_eq!(one("i128", "1_000"), scalar(Expected::I128, "1_000"));
-    assert_eq!(one("u8", "-1"), scalar(Expected::U8, "-1"));
-    assert_eq!(one("u16", "1.0"), scalar(Expected::U16, "1.0"));
+}
+
+#[test]
+fn every_primitive_refuses_what_does_not_fit() {
+    assert_eq!(all_with("i8", "128"), scalar(Expected::I8, "128"));
+    assert_eq!(all_with("i16", "x"), scalar(Expected::I16, "x"));
+    assert_eq!(all_with("i32", "1e3"), scalar(Expected::I32, "1e3"));
+    assert_eq!(all_with("i64", "0x10"), scalar(Expected::I64, "0x10"));
+    assert_eq!(all_with("i128", "1_000"), scalar(Expected::I128, "1_000"));
+    assert_eq!(all_with("u8", "-1"), scalar(Expected::U8, "-1"));
+    assert_eq!(all_with("u16", "1.0"), scalar(Expected::U16, "1.0"));
     assert_eq!(
-        one("u32", "4294967296"),
+        all_with("u32", "4294967296"),
         scalar(Expected::U32, "4294967296")
     );
-    assert_eq!(one("u64", "y"), scalar(Expected::U64, "y"));
-    assert_eq!(one("u128", "-0x1"), scalar(Expected::U128, "-0x1"));
-    assert_eq!(one("f32", "one"), scalar(Expected::F32, "one"));
-    assert_eq!(one("c", "xy"), scalar(Expected::Char, "xy"));
+    assert_eq!(all_with("u64", "y"), scalar(Expected::U64, "y"));
+    assert_eq!(all_with("u128", "-0x1"), scalar(Expected::U128, "-0x1"));
+    assert_eq!(all_with("f32", "one"), scalar(Expected::F32, "one"));
+    assert_eq!(all_with("c", "xy"), scalar(Expected::Char, "xy"));
     assert_eq!(
-        one("unit", "x"),
+        all_with("unit", "x"),
         DecodeProblem::Type {
             expected: Expected::Null,
             found: Kind::Scalar
         }
     );
     assert_eq!(
-        one("pair", "[1, a, b]"),
+        all_with("pair", "[1, a, b]"),
         DecodeProblem::Length {
             expected: 2,
             found: 3
         }
     );
     assert_eq!(
-        one("pair", "x"),
+        all_with("pair", "x"),
         DecodeProblem::Type {
             expected: Expected::Sequence,
             found: Kind::Scalar
         }
     );
     assert_eq!(
-        one("bytes", "[1]"),
+        all_with("bytes", "[1]"),
         DecodeProblem::Type {
             expected: Expected::Bytes,
             found: Kind::Sequence
         }
     );
-    assert_eq!(one("opt", "x"), scalar(Expected::U8, "x"));
-    assert_eq!(one("newtype", "-1"), scalar(Expected::U32, "-1"));
-    // YAML's spellings of the infinities and not-a-number.
+    assert_eq!(all_with("opt", "x"), scalar(Expected::U8, "x"));
+    assert_eq!(all_with("newtype", "-1"), scalar(Expected::U32, "-1"));
+}
+
+/// YAML's spellings of the infinities and not-a-number, not Rust's; and a
+/// sign alone, or a `+`, is no number.
+#[test]
+fn numbers_are_spelled_as_yaml_spells_them() {
     #[derive(Deserialize)]
     struct F {
         a: f64,
@@ -595,7 +589,6 @@ newtype: 12
     let f: F = decode(&doc("a: .inf\nb: -.inf\nc: .nan\n")).unwrap();
     assert_eq!((f.a, f.b), (f64::INFINITY, f64::NEG_INFINITY));
     assert!(f.c.is_nan());
-    // Rust's own spellings of them are not YAML's.
     for rust in ["inf", "NaN", "infinity", "-inf"] {
         assert_eq!(
             decode::<f64>(&doc(&format!("{rust}\n")))
@@ -693,13 +686,7 @@ fn a_types_own_refusal_keeps_its_text_as_the_external_arg() {
         }
     }
     let e = decode::<Picky>(&doc("nope\n")).err().unwrap();
-    assert_eq!(
-        e.problem,
-        DecodeProblem::Scalar {
-            expected: Expected::String,
-            text: "nope".into()
-        }
-    );
+    assert_eq!(e.problem, scalar(Expected::String, "nope"));
     // A visitor that takes no string: serde's invalid_type.
     let e = decode::<Vec<u8>>(&doc("{a: 1}\n")).unwrap_err();
     assert_eq!(
@@ -755,13 +742,7 @@ fn map_keys_are_parsed_as_their_type_asks() {
     );
     let e = decode::<BTreeMap<u32, String>>(&doc("x: a\n")).unwrap_err();
     assert_eq!(e.key_path(), "x");
-    assert_eq!(
-        e.problem,
-        DecodeProblem::Scalar {
-            expected: Expected::U32,
-            text: "x".into()
-        }
-    );
+    assert_eq!(e.problem, scalar(Expected::U32, "x"));
     let b: BTreeMap<bool, u8> = decode(&doc("true: 1\n")).unwrap();
     assert_eq!(b.get(&true), Some(&1));
 }

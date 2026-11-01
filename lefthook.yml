@@ -49,10 +49,16 @@ pre-commit:
         - "crates/angzarr-proto/**"
         - "crates/angzarr-ports/**"
         - "crates/angzarr-yaml/**"
+        - "crates/trivial-delegation/**"
       run: just precommit
 
+    # The shared crates' own checks, their lints denied: the root
+    # Cargo.toml's [workspace.lints] and crates/clippy.toml are theirs too.
     shared-crates-precommit:
-      glob: "crates/angzarr-{diagnostic,proto,ports,yaml}/**/*.{rs,ftl,toml}"
+      glob:
+        - "crates/{angzarr-diagnostic,angzarr-proto,angzarr-ports,angzarr-yaml,trivial-delegation}/**/*.{rs,ftl,toml}"
+        - "crates/clippy.toml"
+        - "Cargo.toml"
       run: just check-shared-crates
 
     # Python - runs in container via just (scripts only, client/examples extracted)

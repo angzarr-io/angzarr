@@ -1463,17 +1463,62 @@ where
     );
 }
 
-/// Main's pages, snapshot and a position on it, to compare.
-async fn main_state<S: Store>(
+/// A stream's rows, to compare: its pages, its snapshot and the position
+/// `k` on it.
+async fn rows<S: Store>(
     store: &S,
-    main: StreamRef<'_>,
+    stream: StreamRef<'_>,
     k: PositionKey<'_>,
 ) -> (crate::stream::Slice, Option<Snapshot>, u64) {
     (
-        store.read(main, 0, None).await.unwrap(),
-        store.read_snapshot(main).await.unwrap(),
+        store.read(stream, 0, None).await.unwrap(),
+        store.read_snapshot(stream).await.unwrap(),
         store.position(k).await.unwrap(),
     )
+}
+
+/// `s`'s rows are `want`, as [`rows`] reads them with `k`.
+async fn assert_rows<S: Store>(
+    store: &S,
+    s: StreamRef<'_>,
+    k: PositionKey<'_>,
+    want: &(crate::stream::Slice, Option<Snapshot>, u64),
+    what: &str,
+) {
+    assert_eq!(&rows(store, s, k).await, want, "{what}");
+}
+
+/// Give `s` a row of each kind at `at`: event `n`, a snapshot at it with
+/// `rules`, and handler `h`'s position past it.
+async fn rows_at<S: Store>(store: &S, s: StreamRef<'_>, at: u64, n: u8, rules: &str) {
+    append(store, s, at, &[page(at, n)]).await.unwrap();
+    store.write_snapshot(s, &snapshot(at, rules)).await.unwrap();
+    put(store, key("h", s), at + 1).await.unwrap();
+}
+
+/// Fork edition stream `s` at its head, then give it a row of each kind
+/// of its own ([`rows_at`]) after the fork. Returns their sequence.
+async fn forked_with_rows<S: Store>(store: &S, s: StreamRef<'_>) -> u64 {
+    let at = fork(store, s).await + 1;
+    rows_at(store, s, at, 2, "v2").await;
+    at
+}
+
+/// Record edition stream `s`'s deletion at its head, then remove it: what
+/// the removal counts.
+async fn delete_and_remove<S: Store + Editions>(store: &S, s: StreamRef<'_>) -> u64 {
+    let edition = s.edition.expect("an edition stream");
+    let at = store.head(s).await.unwrap().next_sequence;
+    append(store, s, at, &[deleted_page(at, edition)])
+        .await
+        .unwrap();
+    store.remove_deleted(s).await.unwrap()
+}
+
+/// The names of the editions the store lists.
+async fn edition_names<S: Editions>(store: &S) -> Vec<String> {
+    let listed = store.list_editions().await.unwrap();
+    listed.into_iter().map(|s| s.name).collect()
 }
 
 /// 14.32, deletion, step 1: a stream's deletion is RECORDED like any
@@ -1486,10 +1531,7 @@ where
     let main = main_stream("account", 1);
     let e = edition_stream("account", 1, "what-if");
     append(&store, main, 0, &[page(0, 1)]).await.unwrap();
-    fork(&store, e).await;
-    append(&store, e, 2, &[page(2, 2)]).await.unwrap();
-    store.write_snapshot(e, &snapshot(2, "v2")).await.unwrap();
-    put(&store, key("h", e), 3).await.unwrap();
+    assert_eq!(forked_with_rows(&store, e).await, 2);
     assert_eq!(
         append(&store, e, 3, &[deleted_page(3, "what-if")]).await,
         Ok(4)
@@ -1506,14 +1548,11 @@ where
     );
     assert_eq!(store.read_snapshot(e).await, Ok(Some(snapshot(2, "v2"))));
     assert_eq!(store.position(key("h", e)).await, Ok(3));
-    let names: Vec<String> = store
-        .list_editions()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|s| s.name)
-        .collect();
-    assert_eq!(names, ["what-if"], "still listed until removed");
+    assert_eq!(
+        edition_names(&store).await,
+        ["what-if"],
+        "still listed until removed"
+    );
     assert_eq!(store.read(main, 0, None).await.unwrap().pages, [page(0, 1)]);
 }
 
@@ -1531,18 +1570,12 @@ where
         edition_stream("account", 1, "what-if"),
         edition_stream("account", 1, "keep"),
     );
-    append(&store, main, 0, &[page(0, 1)]).await.unwrap();
-    store
-        .write_snapshot(main, &snapshot(0, "v1"))
-        .await
-        .unwrap();
-    put(&store, key("h", main), 1).await.unwrap();
+    rows_at(&store, main, 0, 1, "v1").await;
     for s in [e, kept] {
-        fork(&store, s).await;
-        append(&store, s, 2, &[page(2, 2)]).await.unwrap();
-        store.write_snapshot(s, &snapshot(2, "v2")).await.unwrap();
-        put(&store, key("h", s), 3).await.unwrap();
+        forked_with_rows(&store, s).await;
     }
+    let mains = rows(&store, main, key("h", main)).await;
+    let kepts = rows(&store, kept, key("h", kept)).await;
     assert_eq!(
         store.remove_deleted(e).await,
         Err(StoreError::edition_not_deleted(e)),
@@ -1561,13 +1594,14 @@ where
         Ok(3),
         "its three events: the creation, its own, the deletion"
     );
-    assert_eq!(
-        store.read(e, 0, None).await.unwrap().pages,
-        [page(0, 1)],
-        "main's again"
-    );
-    assert_eq!(store.read_snapshot(e).await, Ok(None));
-    assert_eq!(store.position(key("h", e)).await, Ok(0));
+    assert_rows(
+        &store,
+        e,
+        key("h", e),
+        &(mains.0.clone(), None, 0),
+        "main's again: its events, no snapshot of its own, no position",
+    )
+    .await;
     assert_eq!(
         append(&store, e, 1, &[page(1, 3)]).await,
         Err(StoreError::edition_not_forked(e)),
@@ -1578,24 +1612,10 @@ where
         Ok(0),
         "removed already: nothing left"
     );
-    let names: Vec<String> = store
-        .list_editions()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|s| s.name)
-        .collect();
-    assert_eq!(names, ["keep"]);
+    assert_eq!(edition_names(&store).await, ["keep"]);
     assert_eq!(store.covers("account").await, Ok(covers(&[main, kept])));
-    assert_eq!(store.read(main, 0, None).await.unwrap().pages, [page(0, 1)]);
-    assert_eq!(store.read_snapshot(main).await, Ok(Some(snapshot(0, "v1"))));
-    assert_eq!(store.position(key("h", main)).await, Ok(1));
-    assert_eq!(
-        store.read(kept, 0, None).await.unwrap().pages,
-        [page(0, 1), created_page(1, "keep"), page(2, 2)]
-    );
-    assert_eq!(store.read_snapshot(kept).await, Ok(Some(snapshot(2, "v2"))));
-    assert_eq!(store.position(key("h", kept)).await, Ok(3));
+    assert_rows(&store, main, key("h", main), &mains, "main untouched").await;
+    assert_rows(&store, kept, key("h", kept), &kepts, "another untouched").await;
 }
 
 /// A deletion reaching a stream with no event in the edition writes
@@ -1646,10 +1666,7 @@ where
     )
     .await
     .unwrap();
-    append(&store, origin, 1, &[deleted_page(1, "what-if")])
-        .await
-        .unwrap();
-    store.remove_deleted(origin).await.unwrap();
+    delete_and_remove(&store, origin).await;
     assert_eq!(store.head(origin).await.unwrap().next_sequence, 0);
     assert_eq!(
         store.head(reached).await.unwrap().next_sequence,
@@ -1758,6 +1775,23 @@ where
     );
 }
 
+/// One step on `s`, as a command handler and a projector take it: event
+/// `n` at its head with `k`'s position past it, in one write; then a
+/// snapshot at the event.
+async fn step_at_head<S: Store>(store: &S, s: StreamRef<'_>, k: PositionKey<'_>, n: u8) {
+    let at = store.head(s).await.unwrap().next_sequence;
+    let pages = [page(at, 10 + n)];
+    let positions = [(k, at + 1)];
+    store
+        .write(Write {
+            positions: &positions,
+            ..Write::append(s, at, &pages)
+        })
+        .await
+        .unwrap();
+    store.write_snapshot(s, &snapshot(at, "v1")).await.unwrap();
+}
+
 /// The reference what-if (the owner's use: games and AI experimentation):
 /// create a stream in an edition, run several steps there, read both
 /// timelines, delete the edition (recorded, then removed), and main is
@@ -1777,29 +1811,23 @@ where
         .await
         .unwrap();
     put(&store, projector(main), 3).await.unwrap();
-    let before = main_state(&store, main, projector(main)).await;
+    let before = rows(&store, main, projector(main)).await;
     fork(&store, e).await;
     for n in 0..3u8 {
-        let at = store.head(e).await.unwrap().next_sequence;
-        let pages = [page(at, 10 + n)];
-        let positions = [(projector(e), at + 1)];
-        store
-            .write(Write {
-                positions: &positions,
-                ..Write::append(e, at, &pages)
-            })
-            .await
-            .unwrap();
-        store.write_snapshot(e, &snapshot(at, "v1")).await.unwrap();
+        step_at_head(&store, e, projector(e), n).await;
     }
-    assert_eq!(
-        main_state(&store, main, projector(main)).await,
-        before,
-        "the edition's steps never touch main"
-    );
+    assert_rows(
+        &store,
+        main,
+        projector(main),
+        &before,
+        "the edition's steps never touch main",
+    )
+    .await;
     append(&store, main, 3, &[page(3, 4)]).await.unwrap();
+    let (timeline, snapshotted, position) = rows(&store, e, projector(e)).await;
     assert_eq!(
-        store.read(e, 0, None).await.unwrap().pages,
+        timeline.pages,
         [
             page(0, 1),
             page(1, 2),
@@ -1811,19 +1839,19 @@ where
         ],
         "the edition's timeline: main's history, its creation, its own steps"
     );
-    assert_eq!(store.read_snapshot(e).await, Ok(Some(snapshot(6, "v1"))));
-    assert_eq!(store.position(projector(e)).await, Ok(7));
-    let main_alone = main_state(&store, main, projector(main)).await;
+    assert_eq!(snapshotted, Some(snapshot(6, "v1")));
+    assert_eq!(position, 7);
+    let main_alone = rows(&store, main, projector(main)).await;
     assert_eq!(main_alone.0.pages.len(), 4, "main's timeline: its own four");
-    append(&store, e, 7, &[deleted_page(7, "what-if")])
-        .await
-        .unwrap();
-    store.remove_deleted(e).await.unwrap();
-    assert_eq!(
-        main_state(&store, main, projector(main)).await,
-        main_alone,
-        "the delete never touches main"
-    );
+    delete_and_remove(&store, e).await;
+    assert_rows(
+        &store,
+        main,
+        projector(main),
+        &main_alone,
+        "the delete never touches main",
+    )
+    .await;
     assert_eq!(store.list_editions().await, Ok(vec![]));
     assert_eq!(
         store.read(e, 0, None).await.unwrap(),
@@ -2854,10 +2882,7 @@ where
     let in_edition = dead_letter(e, DeadLetterAt::Sequence(1), "wallet", 1);
     let on_main = dead_letter(main, DeadLetterAt::Sequence(0), "wallet", 2);
     put_dead_letters(&store, &[in_edition, on_main.clone()]).await;
-    append(&store, e, 2, &[deleted_page(2, "what-if")])
-        .await
-        .unwrap();
-    store.remove_deleted(e).await.unwrap();
+    delete_and_remove(&store, e).await;
     assert_eq!(store.dead_letters(e).await, Ok(vec![]), "removed with it");
     assert_eq!(
         store.dead_letters(main).await,

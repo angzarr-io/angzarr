@@ -16,6 +16,7 @@
 compile_error!("the meta-tests need the `contract` and `memory` features: run `just test`");
 
 use std::future::Future;
+use std::ops::ControlFlow;
 use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -410,242 +411,310 @@ impl Broken {
     }
 }
 
-impl EventStore for Broken {
-    async fn write(&self, write: Write<'_>) -> Result<Written, StoreError> {
-        // The stream's part, as the bug bends it.
-        let mut pages: Vec<EventPage> = Vec::new();
-        let mut events: Option<(StreamRef<'_>, u64)> = None;
-        if let Some(Append {
-            stream,
-            expected,
-            pages: given,
-        }) = write.events
-        {
-            let stream = self.keyed(stream);
-            if given.is_empty() {
-                match self.bug {
-                    Bug::EmptyAppendUnchecked => {
-                        return Ok(Written {
-                            next_sequence: Some(expected),
-                        })
-                    }
-                    Bug::EmptyAppendCreates => {
-                        self.shared.created.lock().unwrap().push(Owned::of(stream))
-                    }
-                    _ => {}
-                }
-            }
-            let mut expected = expected;
-            if self.is(Bug::IgnoresExpected) {
-                expected = self.inner.head(stream).await?.next_sequence;
-            }
-            pages = given.to_vec();
-            if given.first().is_some_and(is_fork) && stream.edition.is_some() {
-                let head = self.inner.head(stream).await?.next_sequence;
-                let moved = match self.bug {
-                    Bug::ForkOnlyAtHead if expected < head => {
-                        return Err(StoreError::conflict(stream, expected, head));
-                    }
-                    Bug::ForkMovedToHead => true,
-                    Bug::ForkAboveHeadAccepted => expected > head,
-                    _ => false,
-                };
-                if moved {
-                    expected = head;
-                    for (due, page) in (head..).zip(&mut pages) {
-                        page.sequence = due;
-                    }
-                }
-                if self.is(Bug::MismatchedCreationAccepted) {
-                    let first = &mut pages[0];
-                    let payload = first.payload.as_mut().unwrap();
-                    let mut fork = EditionCreated::decode(payload.value.as_slice()).unwrap();
-                    fork.parent_sequence = first.sequence;
-                    payload.value = fork.encode_to_vec();
-                }
-            }
-            if self.is(Bug::AcceptsAGap) {
-                for (due, page) in (expected..).zip(&mut pages) {
-                    page.sequence = due;
-                }
-            }
-            if self.is(Bug::DeletionToUncreatedRefused)
-                && pages.iter().any(is_deletion)
-                && !self
-                    .inner
-                    .read(stream, 0, None)
-                    .await?
-                    .pages
-                    .iter()
-                    .any(is_fork)
-            {
-                return Err(StoreError::edition_not_forked(stream));
-            }
-            events = Some((stream, expected));
-        } else if self.is(Bug::PositionOnlyDropped) {
-            return Ok(Written::default());
-        }
-        // The positions, as the bug bends them.
-        let mut positions: Vec<(PositionKey<'_>, u64)> = Vec::new();
-        for (key, next) in write.positions {
-            let key = if self.is(Bug::PositionIgnoresHandler) {
-                PositionKey {
-                    handler: "",
-                    ..*key
-                }
-            } else {
-                *key
-            };
-            let mut next = *next;
-            if self.is(Bug::PositionNeverLowers) {
-                next = next.max(self.inner.position(key).await?);
-            }
-            positions.push((key, next));
-        }
-        if self.is(Bug::PositionsDropped) && events.is_some() {
-            positions.clear();
-        }
-        // The outbox, as the bug bends it.
-        let mut outbox = write.outbox.to_vec();
-        if self.is(Bug::ClearedIdsRemembered) {
-            let cleared = self.shared.cleared.lock().unwrap().clone();
-            outbox.retain(|e| !cleared.contains(&e.id));
-        }
-        if self.is(Bug::OutboxKeepsLast) {
-            let mut last: Vec<OutboxEntry> = Vec::new();
-            for e in outbox {
-                last.retain(|kept| kept.id != e.id);
-                last.push(e);
-            }
-            let ids: Vec<Uuid> = last.iter().map(|e| e.id).collect();
-            self.inner.clear(&ids).await?;
-            outbox = last;
-        }
-        if self.is(Bug::OutboxDropsEdition) {
-            for e in &mut outbox {
-                e.edition = None;
-            }
-        }
-        let letters = self
-            .bent_letters(write.dead_letters, !positions.is_empty())
-            .await?;
-        if self.is(Bug::LetterOnlyDropped)
-            && events.is_none()
-            && positions.is_empty()
-            && outbox.is_empty()
-        {
-            return Ok(Written::default());
-        }
-        let bent = Write {
-            events: events.map(|(stream, expected)| Append {
+/// A write as a [`Broken`] store's bug bends it, owning its parts.
+struct Bent<'a> {
+    /// The stream and the length expected of it, if the write names one.
+    stream: Option<(StreamRef<'a>, u64)>,
+    pages: Vec<EventPage>,
+    positions: Vec<(PositionKey<'a>, u64)>,
+    outbox: Vec<OutboxEntry>,
+    letters: Vec<DeadLetter>,
+}
+
+impl Bent<'_> {
+    /// The write to hand the honest store.
+    fn write(&self) -> Write<'_> {
+        Write {
+            events: self.stream.map(|(stream, expected)| Append {
                 stream,
                 expected,
-                pages: &pages,
+                pages: &self.pages,
             }),
-            positions: &positions,
-            outbox: &outbox,
-            dead_letters: &letters,
-        };
-        let written = match self.inner.write(bent).await {
-            Err(StoreError::Conflict { actual, .. }) if self.is(Bug::LastWriterWins) => {
-                let (stream, _) = events.unwrap();
-                for (due, page) in (actual..).zip(&mut pages) {
-                    page.sequence = due;
+            positions: &self.positions,
+            outbox: &self.outbox,
+            dead_letters: &self.letters,
+        }
+    }
+
+    /// What a store that took the write would answer: the stream's length
+    /// after its pages.
+    fn as_if_landed(&self) -> Written {
+        let (_, expected) = self.stream.expect("a write to a stream");
+        Written {
+            next_sequence: Some(expected + self.pages.len() as u64),
+        }
+    }
+
+    /// Whether the write holds dead letters alone.
+    fn letters_only(&self) -> bool {
+        self.stream.is_none() && self.positions.is_empty() && self.outbox.is_empty()
+    }
+}
+
+/// Number `pages` on from `from`, whatever they stated.
+fn renumber(pages: &mut [EventPage], from: u64) {
+    for (due, page) in (from..).zip(pages) {
+        page.sequence = due;
+    }
+}
+
+/// A creation page restated to name its own sequence as its parent's.
+fn restate_parent(creation: &mut EventPage) {
+    let payload = creation.payload.as_mut().unwrap();
+    let mut fork = EditionCreated::decode(payload.value.as_slice()).unwrap();
+    fork.parent_sequence = creation.sequence;
+    payload.value = fork.encode_to_vec();
+}
+
+impl Broken {
+    /// A write's stream part, as the bug bends it: the stream, the length
+    /// expected and the pages to write, or the answer the bug gives at once.
+    async fn bent_events<'a>(
+        &self,
+        append: Append<'a>,
+    ) -> Result<ControlFlow<Written, (StreamRef<'a>, u64, Vec<EventPage>)>, StoreError> {
+        let stream = self.keyed(append.stream);
+        if append.pages.is_empty() {
+            match self.bug {
+                Bug::EmptyAppendUnchecked => {
+                    return Ok(ControlFlow::Break(Written {
+                        next_sequence: Some(append.expected),
+                    }))
                 }
-                self.inner
-                    .write(Write {
-                        events: Some(Append {
-                            stream,
-                            expected: actual,
-                            pages: &pages,
-                        }),
-                        positions: &positions,
-                        outbox: &outbox,
-                        dead_letters: &letters,
-                    })
-                    .await?
+                Bug::EmptyAppendCreates => {
+                    self.shared.created.lock().unwrap().push(Owned::of(stream))
+                }
+                _ => {}
             }
-            Err(refused @ StoreError::Conflict { .. })
-                if self.is(Bug::ConflictLandsPositions)
-                    || self.is(Bug::ConflictLandsOutbox)
-                    || self.is(Bug::ConflictLandsLetters) =>
-            {
-                let landed = Write {
-                    positions: if self.is(Bug::ConflictLandsPositions) {
-                        &positions
-                    } else {
-                        &[]
-                    },
-                    outbox: if self.is(Bug::ConflictLandsOutbox) {
-                        &outbox
-                    } else {
-                        &[]
-                    },
-                    dead_letters: if self.is(Bug::ConflictLandsLetters) {
-                        &letters
-                    } else {
-                        &[]
-                    },
-                    ..Write::default()
-                };
-                self.inner.write(landed).await?;
-                return Err(refused);
-            }
-            Err(StoreError::EditionNotFound { .. })
-                if self.is(Bug::ArrivalRecreates) && events.is_some() =>
-            {
-                // Write the arrival as an origin creation.
-                let (stream, expected) = events.unwrap();
-                let name = stream.edition.unwrap_or_default();
-                let mut origin = pages.clone();
-                origin[0] = contract::created_page(origin[0].sequence, name);
-                self.inner
-                    .write(Write {
-                        events: Some(Append {
-                            stream,
-                            expected,
-                            pages: &origin,
-                        }),
-                        positions: &positions,
-                        outbox: &outbox,
-                        dead_letters: &letters,
-                    })
-                    .await?
-            }
-            Err(StoreError::EditionNotFound { .. })
-                if self.is(Bug::PositionOnRemovedAccepted) && events.is_none() =>
-            {
-                return Ok(Written::default());
-            }
-            Err(StoreError::EditionNotForked { .. }) if self.is(Bug::AcceptsUnforkedInput) => {
-                let (_, expected) = events.unwrap();
-                return Ok(Written {
-                    next_sequence: Some(expected + pages.len() as u64),
-                });
-            }
-            Err(StoreError::EditionAlreadyForked { .. }) if self.is(Bug::SecondForkAccepted) => {
-                let (_, expected) = events.unwrap();
-                return Ok(Written {
-                    next_sequence: Some(expected + pages.len() as u64),
-                });
-            }
-            landed => landed?,
+        }
+        let mut expected = match self.bug {
+            Bug::IgnoresExpected => self.inner.head(stream).await?.next_sequence,
+            _ => append.expected,
         };
-        for (key, _) in &positions {
+        let mut pages = append.pages.to_vec();
+        if pages.first().is_some_and(is_fork) && stream.edition.is_some() {
+            expected = self.bent_fork(stream, expected, &mut pages).await?;
+        }
+        if self.is(Bug::AcceptsAGap) {
+            renumber(&mut pages, expected);
+        }
+        if self.is(Bug::DeletionToUncreatedRefused)
+            && pages.iter().any(is_deletion)
+            && !self.is_forked(stream).await?
+        {
+            return Err(StoreError::edition_not_forked(stream));
+        }
+        Ok(ControlFlow::Continue((stream, expected, pages)))
+    }
+
+    /// A fork's pages, as the bug bends them: the length now expected.
+    async fn bent_fork(
+        &self,
+        stream: StreamRef<'_>,
+        expected: u64,
+        pages: &mut [EventPage],
+    ) -> Result<u64, StoreError> {
+        let head = self.inner.head(stream).await?.next_sequence;
+        let moved = match self.bug {
+            Bug::ForkOnlyAtHead if expected < head => {
+                return Err(StoreError::conflict(stream, expected, head));
+            }
+            Bug::ForkMovedToHead => true,
+            Bug::ForkAboveHeadAccepted => expected > head,
+            _ => false,
+        };
+        let expected = if moved {
+            renumber(pages, head);
+            head
+        } else {
+            expected
+        };
+        if self.is(Bug::MismatchedCreationAccepted) {
+            restate_parent(&mut pages[0]);
+        }
+        Ok(expected)
+    }
+
+    /// Whether `stream` holds its fork.
+    async fn is_forked(&self, stream: StreamRef<'_>) -> Result<bool, StoreError> {
+        let pages = self.inner.read(stream, 0, None).await?.pages;
+        Ok(pages.iter().any(is_fork))
+    }
+
+    /// The position key `key` is kept under, as the bug bends it.
+    fn position_key<'a>(&self, key: PositionKey<'a>) -> PositionKey<'a> {
+        match self.bug {
+            Bug::PositionIgnoresHandler => PositionKey { handler: "", ..key },
+            _ => key,
+        }
+    }
+
+    /// A write's positions, as the bug bends them; `with_events`, whether
+    /// the write names a stream.
+    async fn bent_positions<'a>(
+        &self,
+        given: &[(PositionKey<'a>, u64)],
+        with_events: bool,
+    ) -> Result<Vec<(PositionKey<'a>, u64)>, StoreError> {
+        if self.is(Bug::PositionsDropped) && with_events {
+            return Ok(Vec::new());
+        }
+        let mut positions = Vec::new();
+        for &(key, next) in given {
+            let key = self.position_key(key);
+            let next = match self.bug {
+                Bug::PositionNeverLowers => next.max(self.inner.position(key).await?),
+                _ => next,
+            };
+            positions.push((key, next));
+        }
+        Ok(positions)
+    }
+
+    /// A write's outbox entries, as the bug bends them.
+    async fn bent_outbox(&self, given: &[OutboxEntry]) -> Result<Vec<OutboxEntry>, StoreError> {
+        let mut outbox = given.to_vec();
+        match self.bug {
+            Bug::ClearedIdsRemembered => {
+                let cleared = self.shared.cleared.lock().unwrap().clone();
+                outbox.retain(|e| !cleared.contains(&e.id));
+            }
+            Bug::OutboxKeepsLast => {
+                let mut last: Vec<OutboxEntry> = Vec::new();
+                for e in outbox {
+                    last.retain(|kept| kept.id != e.id);
+                    last.push(e);
+                }
+                let ids: Vec<Uuid> = last.iter().map(|e| e.id).collect();
+                self.inner.clear(&ids).await?;
+                outbox = last;
+            }
+            Bug::OutboxDropsEdition => {
+                for e in &mut outbox {
+                    e.edition = None;
+                }
+            }
+            _ => {}
+        }
+        Ok(outbox)
+    }
+
+    /// The honest store's refusal of `bent`, as the bug bends it: the
+    /// refusal, a retry that landed, or the answer the bug gives instead.
+    async fn on_refusal(
+        &self,
+        refused: StoreError,
+        bent: &mut Bent<'_>,
+    ) -> Result<ControlFlow<Written, Written>, StoreError> {
+        match refused {
+            StoreError::Conflict { actual, .. } if self.is(Bug::LastWriterWins) => {
+                renumber(&mut bent.pages, actual);
+                bent.stream = bent.stream.map(|(stream, _)| (stream, actual));
+                Ok(ControlFlow::Continue(self.inner.write(bent.write()).await?))
+            }
+            StoreError::Conflict { .. } => {
+                if let Some(landed) = self.landed_despite(bent) {
+                    self.inner.write(landed).await?;
+                }
+                Err(refused)
+            }
+            StoreError::EditionNotFound { .. } if self.is(Bug::ArrivalRecreates) => {
+                // Write the arrival as an origin creation.
+                let (stream, _) = bent.stream.ok_or(refused)?;
+                let first = &mut bent.pages[0];
+                *first = contract::created_page(first.sequence, stream.edition.unwrap_or_default());
+                Ok(ControlFlow::Continue(self.inner.write(bent.write()).await?))
+            }
+            StoreError::EditionNotFound { .. }
+                if self.is(Bug::PositionOnRemovedAccepted) && bent.stream.is_none() =>
+            {
+                Ok(ControlFlow::Break(Written::default()))
+            }
+            StoreError::EditionNotForked { .. } if self.is(Bug::AcceptsUnforkedInput) => {
+                Ok(ControlFlow::Break(bent.as_if_landed()))
+            }
+            StoreError::EditionAlreadyForked { .. } if self.is(Bug::SecondForkAccepted) => {
+                Ok(ControlFlow::Break(bent.as_if_landed()))
+            }
+            refused => Err(refused),
+        }
+    }
+
+    /// What of a write refused for a conflict the bug lands anyway.
+    fn landed_despite<'a>(&self, bent: &'a Bent<'_>) -> Option<Write<'a>> {
+        match self.bug {
+            Bug::ConflictLandsPositions => Some(Write::positions(&bent.positions)),
+            Bug::ConflictLandsOutbox => Some(Write {
+                outbox: &bent.outbox,
+                ..Write::default()
+            }),
+            Bug::ConflictLandsLetters => Some(Write {
+                dead_letters: &bent.letters,
+                ..Write::default()
+            }),
+            _ => None,
+        }
+    }
+
+    /// The bookkeeping after `bent` landed: its positions put, its commit
+    /// counted, and the removal a bug runs on recording a deletion.
+    async fn landed(&self, bent: &Bent<'_>) {
+        for (key, _) in &bent.positions {
             self.shared
                 .positions
                 .lock()
                 .unwrap()
                 .push((key.handler.to_string(), Owned::of(key.stream)));
         }
-        if let Some((stream, _)) = events {
-            if !pages.is_empty() {
-                self.local.commits.fetch_add(1, Ordering::SeqCst);
-            }
-            if self.is(Bug::RemovedOnRecording) && pages.iter().any(is_deletion) {
-                let _ = self.inner.remove_deleted(stream).await;
-            }
+        let Some((stream, _)) = bent.stream else {
+            return;
+        };
+        if !bent.pages.is_empty() {
+            self.local.commits.fetch_add(1, Ordering::SeqCst);
         }
+        if self.is(Bug::RemovedOnRecording) && bent.pages.iter().any(is_deletion) {
+            let _ = self.inner.remove_deleted(stream).await;
+        }
+    }
+}
+
+impl EventStore for Broken {
+    async fn write(&self, write: Write<'_>) -> Result<Written, StoreError> {
+        let (stream, pages) = match write.events {
+            Some(append) => match self.bent_events(append).await? {
+                ControlFlow::Break(answer) => return Ok(answer),
+                ControlFlow::Continue((stream, expected, pages)) => {
+                    (Some((stream, expected)), pages)
+                }
+            },
+            None if self.is(Bug::PositionOnlyDropped) => return Ok(Written::default()),
+            None => (None, Vec::new()),
+        };
+        let positions = self
+            .bent_positions(write.positions, stream.is_some())
+            .await?;
+        let outbox = self.bent_outbox(write.outbox).await?;
+        let letters = self
+            .bent_letters(write.dead_letters, !positions.is_empty())
+            .await?;
+        let mut bent = Bent {
+            stream,
+            pages,
+            positions,
+            outbox,
+            letters,
+        };
+        if self.is(Bug::LetterOnlyDropped) && bent.letters_only() {
+            return Ok(Written::default());
+        }
+        let written = match self.inner.write(bent.write()).await {
+            Ok(written) => written,
+            Err(refused) => match self.on_refusal(refused, &mut bent).await? {
+                ControlFlow::Break(answer) => return Ok(answer),
+                ControlFlow::Continue(written) => written,
+            },
+        };
+        self.landed(&bent).await;
         Ok(written)
     }
 
@@ -778,12 +847,141 @@ impl SnapshotStore for Broken {
 
 impl PositionStore for Broken {
     async fn position(&self, key: PositionKey<'_>) -> Result<u64, StoreError> {
-        let key = if self.is(Bug::PositionIgnoresHandler) {
-            PositionKey { handler: "", ..key }
-        } else {
-            key
-        };
-        self.inner.position(key).await
+        self.inner.position(self.position_key(key)).await
+    }
+}
+
+impl Broken {
+    /// The head a purge of `stream` expecting `expected` is guarded by, as
+    /// the bug bends it.
+    async fn purge_guard(&self, stream: StreamRef<'_>, expected: u64) -> Result<u64, StoreError> {
+        match self.bug {
+            Bug::PurgeIgnoresTheHead => Ok(self.inner.head(stream).await?.next_sequence),
+            Bug::PurgeGuardsByMain if stream.edition.is_some() => {
+                let mains = self.inner.head(main_of(stream)).await?.next_sequence;
+                if expected != mains {
+                    return Err(StoreError::conflict(stream, expected, mains));
+                }
+                Ok(self.inner.head(stream).await?.next_sequence)
+            }
+            _ => Ok(expected),
+        }
+    }
+
+    /// Each handler's position on `stream`, of those ever put on it.
+    async fn positions_on(&self, stream: StreamRef<'_>) -> Result<Vec<(String, u64)>, StoreError> {
+        let puts = self.shared.positions.lock().unwrap().clone();
+        let mut found = Vec::new();
+        for (handler, s) in puts.iter().filter(|(_, s)| s.get() == stream) {
+            let key = PositionKey {
+                handler,
+                stream: s.get(),
+            };
+            found.push((handler.clone(), self.inner.position(key).await?));
+        }
+        Ok(found)
+    }
+
+    /// Put each handler's position on `stream` back where `positions` say.
+    async fn put_positions(
+        &self,
+        stream: StreamRef<'_>,
+        positions: Vec<(String, u64)>,
+    ) -> Result<(), StoreError> {
+        for (handler, next) in positions {
+            let key = PositionKey {
+                handler: &handler,
+                stream,
+            };
+            self.inner.write(Write::positions(&[(key, next)])).await?;
+        }
+        Ok(())
+    }
+
+    /// What a purge of `stream` refused at head `actual` takes anyway, as
+    /// the bug bends it.
+    async fn taken_despite_refusal(
+        &self,
+        stream: StreamRef<'_>,
+        actual: u64,
+    ) -> Result<(), StoreError> {
+        match self.bug {
+            Bug::RefusedPurgeTakesLetters => {
+                let letters = self.inner.dead_letters(stream).await?;
+                let keys: Vec<DeadLetterKey<'_>> =
+                    letters.iter().map(|l| l.key().unwrap()).collect();
+                self.inner.remove_dead_letters(&keys).await?;
+            }
+            Bug::RefusedPurgeTakesPositions => {
+                let zeroed = self.positions_on(stream).await?;
+                let zeroed = zeroed.into_iter().map(|(handler, _)| (handler, 0));
+                self.put_positions(stream, zeroed.collect()).await?;
+            }
+            Bug::RefusedPurgeTakesSnapshot => {
+                // Purge at the head found, then put back all but the
+                // snapshot: the events and the positions.
+                let pages = self.inner.read(stream, 0, None).await?.pages;
+                let kept = self.positions_on(stream).await?;
+                self.inner.purge(stream, actual).await?;
+                self.inner.write(Write::append(stream, 0, &pages)).await?;
+                self.put_positions(stream, kept).await?;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// A removal of `stream`, refused with `refused`, as the bug bends it:
+    /// the refusal, or the removal the bug makes anyway.
+    async fn removed_despite_refusal(
+        &self,
+        stream: StreamRef<'_>,
+        edition: &str,
+        refused: StoreError,
+    ) -> Result<u64, StoreError> {
+        match refused {
+            StoreError::EditionNotPropagated { .. } if self.is(Bug::RemovesBeforePropagation) => {
+                // Clear the edition's pending entries, undelivered, and go.
+                let pending = self.inner.pending(usize::MAX).await?;
+                let ids: Vec<Uuid> = pending
+                    .iter()
+                    .filter(|e| e.edition.as_deref() == Some(edition))
+                    .map(|e| e.id)
+                    .collect();
+                self.inner.clear(&ids).await?;
+            }
+            StoreError::EditionNotDeleted { .. } if self.is(Bug::RemovesUndeleted) => {
+                self.record_deletion(stream, edition).await?;
+            }
+            refused => return Err(refused),
+        }
+        self.inner.remove_deleted(stream).await
+    }
+
+    /// Record `stream`'s deletion from `edition` at its head.
+    async fn record_deletion(
+        &self,
+        stream: StreamRef<'_>,
+        edition: &str,
+    ) -> Result<(), StoreError> {
+        let at = self.inner.head(stream).await?.next_sequence;
+        let deletion = [contract::deleted_page(at, edition)];
+        self.inner
+            .write(Write::append(stream, at, &deletion))
+            .await?;
+        Ok(())
+    }
+
+    /// Delete and remove each of `others`, the edition's other streams,
+    /// but `stream`: a removal that spreads.
+    async fn spread_removal(&self, stream: StreamRef<'_>, edition: &str, others: &[(Owned, u64)]) {
+        for (other, _) in others {
+            let other = other.get();
+            if other != stream {
+                let _ = self.record_deletion(other, edition).await;
+                let _ = self.inner.remove_deleted(other).await;
+            }
+        }
     }
 }
 
@@ -792,79 +990,16 @@ impl Purge for Broken {
         if self.is(Bug::PurgeIsANoOp) {
             return Ok(self.inner.head(stream).await?.next_sequence);
         }
-        let expected = match self.bug {
-            Bug::PurgeIgnoresTheHead => self.inner.head(stream).await?.next_sequence,
-            Bug::PurgeGuardsByMain if stream.edition.is_some() => {
-                let mains = self.inner.head(main_of(stream)).await?.next_sequence;
-                if expected != mains {
-                    return Err(StoreError::conflict(stream, expected, mains));
-                }
-                self.inner.head(stream).await?.next_sequence
-            }
-            _ => expected,
-        };
+        let expected = self.purge_guard(stream, expected).await?;
         let snapshot = self.inner.read_snapshot(stream).await?;
         let letters = self.letters_kept(stream, Bug::PurgeKeepsLetters).await;
-        let kept: Vec<(String, u64)> = if self.is(Bug::PurgeKeepsPositions) {
-            let puts = self.shared.positions.lock().unwrap().clone();
-            let mut kept = Vec::new();
-            for (handler, s) in puts.iter().filter(|(_, s)| s.get() == stream) {
-                let key = PositionKey {
-                    handler,
-                    stream: s.get(),
-                };
-                kept.push((handler.clone(), self.inner.position(key).await?));
-            }
-            kept
-        } else {
-            Vec::new()
+        let kept = match self.bug {
+            Bug::PurgeKeepsPositions => self.positions_on(stream).await?,
+            _ => Vec::new(),
         };
         let deleted = match self.inner.purge(stream, expected).await {
-            Err(refused @ StoreError::Conflict { .. })
-                if self.is(Bug::RefusedPurgeTakesLetters) =>
-            {
-                let keys: Vec<DeadLetter> = self.inner.dead_letters(stream).await?;
-                let keys: Vec<DeadLetterKey<'_>> = keys.iter().map(|l| l.key().unwrap()).collect();
-                self.inner.remove_dead_letters(&keys).await?;
-                return Err(refused);
-            }
-            Err(refused @ StoreError::Conflict { .. })
-                if self.is(Bug::RefusedPurgeTakesPositions) =>
-            {
-                let puts = self.shared.positions.lock().unwrap().clone();
-                for (handler, s) in puts.iter().filter(|(_, s)| s.get() == stream) {
-                    let key = PositionKey {
-                        handler,
-                        stream: s.get(),
-                    };
-                    self.inner.write(Write::positions(&[(key, 0)])).await?;
-                }
-                return Err(refused);
-            }
-            Err(refused @ StoreError::Conflict { actual, .. })
-                if self.is(Bug::RefusedPurgeTakesSnapshot) =>
-            {
-                // Purge at the head found, then put back all but the
-                // snapshot: the events and the positions.
-                let pages = self.inner.read(stream, 0, None).await?.pages;
-                let puts = self.shared.positions.lock().unwrap().clone();
-                let mut kept = Vec::new();
-                for (handler, s) in puts.iter().filter(|(_, s)| s.get() == stream) {
-                    let key = PositionKey {
-                        handler,
-                        stream: s.get(),
-                    };
-                    kept.push((handler.clone(), self.inner.position(key).await?));
-                }
-                self.inner.purge(stream, actual).await?;
-                self.inner.write(Write::append(stream, 0, &pages)).await?;
-                for (handler, next) in kept {
-                    let key = PositionKey {
-                        handler: &handler,
-                        stream,
-                    };
-                    self.inner.write(Write::positions(&[(key, next)])).await?;
-                }
+            Err(refused @ StoreError::Conflict { actual, .. }) => {
+                self.taken_despite_refusal(stream, actual).await?;
                 return Err(refused);
             }
             deleted => deleted?,
@@ -873,13 +1008,7 @@ impl Purge for Broken {
             self.inner.write_snapshot(stream, &s).await?;
         }
         self.put_back(&letters).await?;
-        for (handler, next) in kept {
-            let key = PositionKey {
-                handler: &handler,
-                stream,
-            };
-            self.inner.write(Write::positions(&[(key, next)])).await?;
-        }
+        self.put_positions(stream, kept).await?;
         Ok(deleted)
     }
 }
@@ -908,33 +1037,11 @@ impl Editions for Broken {
         let edition = stream.edition.unwrap_or_default().to_string();
         let others = self.edition_streams(&edition).await;
         let removed = match self.inner.remove_deleted(stream).await {
-            Err(StoreError::EditionNotPropagated { .. })
-                if self.is(Bug::RemovesBeforePropagation) =>
-            {
-                // Clear the edition's pending entries, undelivered, and go.
-                let ids: Vec<Uuid> = self
-                    .inner
-                    .pending(usize::MAX)
+            Err(refused) => {
+                self.removed_despite_refusal(stream, &edition, refused)
                     .await?
-                    .iter()
-                    .filter(|e| e.edition.as_deref() == Some(edition.as_str()))
-                    .map(|e| e.id)
-                    .collect();
-                self.inner.clear(&ids).await?;
-                self.inner.remove_deleted(stream).await?
             }
-            Err(StoreError::EditionNotDeleted { .. }) if self.is(Bug::RemovesUndeleted) => {
-                let at = self.inner.head(stream).await?.next_sequence;
-                self.inner
-                    .write(Write::append(
-                        stream,
-                        at,
-                        &[contract::deleted_page(at, &edition)],
-                    ))
-                    .await?;
-                self.inner.remove_deleted(stream).await?
-            }
-            removed => removed?,
+            Ok(removed) => removed,
         };
         if let (Bug::RemoveKeepsSnapshot, Some(kept)) = (self.bug, snapshot) {
             self.inner.write_snapshot(stream, &kept).await?;
@@ -945,21 +1052,7 @@ impl Editions for Broken {
             self.inner.purge(main_of(stream), mains).await?;
         }
         if self.is(Bug::RemoveSpreads) {
-            for (other, _) in others {
-                let other = other.get();
-                if other != stream {
-                    let at = self.inner.head(other).await?.next_sequence;
-                    let _ = self
-                        .inner
-                        .write(Write::append(
-                            other,
-                            at,
-                            &[contract::deleted_page(at, &edition)],
-                        ))
-                        .await;
-                    let _ = self.inner.remove_deleted(other).await;
-                }
-            }
+            self.spread_removal(stream, &edition, &others).await;
         }
         Ok(removed)
     }
@@ -1249,23 +1342,30 @@ fn caught<F: Future>(check: F) -> Result<(), String> {
     }
 }
 
+/// Panic unless `outcome`, a run of `check` on the honest wrapper, passed.
+fn honest_passed(check: &str, outcome: Result<(), String>) {
+    if let Err(why) = outcome {
+        panic!("{check} fails an honest store: {why}");
+    }
+}
+
+/// Panic unless `outcome`, a run of `check` on a store with `bug`, caught it.
+fn bug_caught(check: &str, bug: Bug, outcome: Result<(), String>) {
+    if let Err(why) = outcome {
+        panic!("{check} on a store that {bug:?}: {why}");
+    }
+}
+
 /// Require `check` to pass the honest wrapper, then to catch each bug, on
 /// a fresh store or pair.
 macro_rules! catches {
     ($check:ident, $make:ident, $($bug:ident),+ $(,)?) => {
         // A catch proves something only if the same wrapper with no bug
         // passes the check: otherwise the check fails for the store's own
-        // gap, whatever the bug.
-        if let Err(why) = run(contract::$check($make(Bug::Honest))) {
-            panic!(
-                "{} fails an honest store, so no catch counts: {why}",
-                stringify!($check)
-            );
-        }
+        // gap, whatever the bug, and no catch counts.
+        honest_passed(stringify!($check), run(contract::$check($make(Bug::Honest))));
         $(
-            if let Err(why) = caught(contract::$check($make(Bug::$bug))) {
-                panic!("{} on a store that {:?}: {why}", stringify!($check), Bug::$bug);
-            }
+            bug_caught(stringify!($check), Bug::$bug, caught(contract::$check($make(Bug::$bug))));
         )+
     };
 }
@@ -1274,9 +1374,7 @@ macro_rules! catches {
 macro_rules! passes {
     ($make:ident; $($check:ident),+ $(,)?) => {
         $(
-            if let Err(why) = run(contract::$check($make(Bug::Honest))) {
-                panic!("{} fails an honest store: {why}", stringify!($check));
-            }
+            honest_passed(stringify!($check), run(contract::$check($make(Bug::Honest))));
         )+
     };
 }

@@ -45,6 +45,25 @@ prost = "0.14"
 sererr = { version = "0.1", path = "sererr/packages/rust/sererr" }
 sererr-proto = { version = "0.1", path = "sererr/packages/rust/sererr-proto" }
 
+# The shared crates' lints (crates/*: each opts in with `[lints] workspace =
+# true`). The root package does not inherit them. Complexity is taskloom's
+# gate: cognitive_complexity and too_many_lines at clippy's defaults (25,
+# 100), excessive_nesting at crates/clippy.toml's threshold. All warn, and
+# every shared crate's `lint` (`just check-shared-crates`, the pre-commit
+# hook) denies warnings.
+[workspace.lints.clippy]
+# Zero-width and other invisible characters in source: never intended.
+invisible_characters = "deny"
+# A literal in another normalization form than NFC reads the same as its NFC
+# twin and compares unequal.
+unicode_not_nfc = "deny"
+# Non-ASCII in a literal is written as an escape, so what the code holds is
+# visible. Allowed, with a comment, only where a test's corpus is the point.
+non_ascii_literal = "deny"
+cognitive_complexity = "warn"
+too_many_lines = "warn"
+excessive_nesting = "warn"
+
 [package]
 name = "angzarr"
 version = "0.5.1"

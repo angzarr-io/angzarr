@@ -422,7 +422,7 @@ test:
 precommit:
     just _container precommit
 
-# === Shared crates (crates/angzarr-proto, crates/angzarr-ports, crates/angzarr-diagnostic, crates/angzarr-yaml) ===
+# === Shared crates (crates/angzarr-proto, crates/angzarr-ports, crates/angzarr-diagnostic, crates/angzarr-yaml, crates/trivial-delegation) ===
 # Moved from angzarr-project's rust/. They run on the host, not in the
 # toolchain container (its image lacks the wasm32 target and
 # wasm-bindgen-test-runner): protoc, the wasm32-unknown-unknown target,
@@ -430,12 +430,16 @@ precommit:
 # and node. build.rs reads the protos from the angzarr-project submodule.
 
 # Every check of the shared crates: fmt-check, build, lint, test, wasm, and
-# angzarr-ports' wasm-test; first, that the submodule cannot clash with them
+# angzarr-ports' wasm-test; first, that the submodule cannot clash with them.
+# Each crate's lint denies warnings, so the complexity lints the crates
+# inherit from the root Cargo.toml's [workspace.lints] (threshold in
+# crates/clippy.toml) are a gate here and in the pre-commit hook.
 check-shared-crates: check-proto-submodule
     just -f '{{TOP}}/crates/angzarr-diagnostic/justfile' check
     just -f '{{TOP}}/crates/angzarr-proto/justfile' check
     just -f '{{TOP}}/crates/angzarr-ports/justfile' check
     just -f '{{TOP}}/crates/angzarr-yaml/justfile' check
+    just -f '{{TOP}}/crates/trivial-delegation/justfile' check
 
 # Mutation-test a shared crate, judged by MIN, its kill-rate threshold in
 # percent over viable mutants (caught or timed out = killed; unviable count

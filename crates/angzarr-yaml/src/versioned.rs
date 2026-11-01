@@ -1033,8 +1033,33 @@ pub fn map_seq(
 /// [`crate::diagnostic_samples`]. A caller's own code ([`MigrationError::Game`],
 /// [`LoadProblem::Decode`]) is the caller's to sample.
 pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
+    let yaml = Error {
+        line: 2,
+        problem: crate::ParseProblem::TabIndent,
+    };
+    let load = |source: Option<&str>| LoadError {
+        kind: "unit".to_string(),
+        source: source.map(str::to_string),
+        problem: LoadProblem::Yaml(yaml.clone()),
+    };
+    let mut out: Vec<Box<dyn Diagnostic>> = Vec::new();
+    out.extend(migration_samples().into_iter().map(|e| Box::new(e) as _));
+    out.extend(load_problem_samples().into_iter().map(|e| Box::new(e) as _));
+    out.push(Box::new(load(None)));
+    out.push(Box::new(load(Some("content/units.yaml"))));
+    out.extend(chain_problem_samples().into_iter().map(|problem| {
+        Box::new(ChainError {
+            kind: "unit".to_string(),
+            problem,
+        }) as _
+    }));
+    out
+}
+
+/// Each [`MigrationError`] variant but the caller's own.
+fn migration_samples() -> Vec<MigrationError> {
     let s = |s: &str| s.to_string();
-    let migration = vec![
+    vec![
         MigrationError::RenameNotAMapping { from: s("hp") },
         MigrationError::RenameTargetExists {
             from: s("hp"),
@@ -1068,38 +1093,38 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             error: Box::new(MigrationError::DefaultNotAMapping { key: s("hp") }),
         },
         MigrationError::RootNotAMapping,
-    ];
-    let yaml = Error {
-        line: 2,
-        problem: crate::ParseProblem::TabIndent,
-    };
-    let problems = vec![
-        LoadProblem::NotAMapping,
-        LoadProblem::BadVersion {
-            key: s(DEFAULT_KEY),
-            problem: BadVersion::Empty,
+    ]
+}
+
+/// Each [`BadVersion`] variant.
+fn bad_version_samples() -> Vec<BadVersion> {
+    vec![
+        BadVersion::Empty,
+        BadVersion::Sequence,
+        BadVersion::Mapping,
+        BadVersion::NotAnInteger {
+            text: "two".to_string(),
         },
-        LoadProblem::BadVersion {
-            key: s(DEFAULT_KEY),
-            problem: BadVersion::Sequence,
+        BadVersion::TooLarge {
+            text: "99999999999".to_string(),
         },
-        LoadProblem::BadVersion {
-            key: s(DEFAULT_KEY),
-            problem: BadVersion::Mapping,
-        },
-        LoadProblem::BadVersion {
-            key: s(DEFAULT_KEY),
-            problem: BadVersion::NotAnInteger { text: s("two") },
-        },
-        LoadProblem::BadVersion {
-            key: s(DEFAULT_KEY),
-            problem: BadVersion::TooLarge {
-                text: s("99999999999"),
-            },
-        },
+    ]
+}
+
+/// Each [`LoadProblem`] variant, one `BadVersion` per [`BadVersion`]; but
+/// `Yaml`, which the load errors' samples carry, and the caller's own
+/// `Decode`.
+fn load_problem_samples() -> Vec<LoadProblem> {
+    let bad_versions = bad_version_samples()
+        .into_iter()
+        .map(|problem| LoadProblem::BadVersion {
+            key: DEFAULT_KEY.to_string(),
+            problem,
+        });
+    let rest = [
         LoadProblem::LegacyAndStamp {
-            key: s(DEFAULT_KEY),
-            legacy: s("version"),
+            key: DEFAULT_KEY.to_string(),
+            legacy: "version".to_string(),
         },
         LoadProblem::TooNew {
             found: 4,
@@ -1114,30 +1139,22 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             error: Box::new(MigrationError::RootNotAMapping),
         },
     ];
-    let load = |source: Option<&str>, problem| LoadError {
-        kind: s("unit"),
-        source: source.map(s),
-        problem,
-    };
-    let chain = |problem| ChainError {
-        kind: s("unit"),
-        problem,
-    };
-    let mut out: Vec<Box<dyn Diagnostic>> = Vec::new();
-    out.extend(migration.into_iter().map(|e| Box::new(e) as _));
-    out.extend(problems.into_iter().map(|e| Box::new(e) as _));
-    out.push(Box::new(load(None, LoadProblem::Yaml(yaml.clone()))));
-    out.push(Box::new(load(
-        Some("content/units.yaml"),
-        LoadProblem::Yaml(yaml),
-    )));
-    out.push(Box::new(chain(ChainProblem::Duplicate { from: 1 })));
-    out.push(Box::new(chain(ChainProblem::BeyondCurrent {
-        from: 3,
-        current: 3,
-    })));
-    out.push(Box::new(chain(ChainProblem::Gap { from: 1 })));
-    out
+    std::iter::once(LoadProblem::NotAMapping)
+        .chain(bad_versions)
+        .chain(rest)
+        .collect()
+}
+
+/// Each [`ChainProblem`] variant.
+fn chain_problem_samples() -> Vec<ChainProblem> {
+    vec![
+        ChainProblem::Duplicate { from: 1 },
+        ChainProblem::BeyondCurrent {
+            from: 3,
+            current: 3,
+        },
+        ChainProblem::Gap { from: 1 },
+    ]
 }
 
 #[cfg(test)]

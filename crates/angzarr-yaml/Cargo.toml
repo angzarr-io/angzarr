@@ -23,12 +23,6 @@ serde = { version = "1.0.228", default-features = false, features = ["std"] }
 # The decode's tests derive their types.
 serde = { version = "1.0.228", features = ["derive"] }
 
-[lints.clippy]
-# Zero-width and other invisible characters in source: never intended.
-invisible_characters = "deny"
-# A literal in another normalization form than NFC reads the same as its NFC
-# twin and compares unequal.
-unicode_not_nfc = "deny"
-# Non-ASCII in a literal is written as an escape, so what the code holds is
-# visible. Allowed, with a comment, only where a test's corpus is the point.
-non_ascii_literal = "deny"
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

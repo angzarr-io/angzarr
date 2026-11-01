@@ -81,9 +81,23 @@ pub mod io {
             // `(reason)` options (decision 14.60; build.rs).
             include!(concat!(env!("OUT_DIR"), "/reason_args.rs"));
             // tonic's client and server modules, one pair per service, on
-            // the messages above (extern-pathed to `crate::v1`).
+            // the messages above (extern-pathed to `crate::v1`), re-exported
+            // here as `v1::<service>_client` and `v1::<service>_server`.
             #[cfg(feature = "grpc")]
-            include!(concat!(env!("OUT_DIR"), "/grpc/io.angzarr.v1.rs"));
+            pub use grpc::*;
+            // tonic-prost-build's code, not ours: its routers' long, deeply
+            // nested `call` arms trip the shared crates' complexity lints
+            // (the root Cargo.toml's [workspace.lints]). The one stated
+            // exemption, at its include site.
+            #[cfg(feature = "grpc")]
+            #[allow(
+                clippy::too_many_lines,
+                clippy::excessive_nesting,
+                clippy::cognitive_complexity
+            )]
+            mod grpc {
+                include!(concat!(env!("OUT_DIR"), "/grpc/io.angzarr.v1.rs"));
+            }
             /// The framework meta-events (`io.angzarr.v1.meta`): stores
             /// and coordinators may recognise them by type; business
             /// handlers never see them.

@@ -41,3 +41,7 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] 
 # The browser build of the suite (tests/wasm.rs): a store that is not Send.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "=0.3.79"
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

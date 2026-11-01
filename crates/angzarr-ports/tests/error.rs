@@ -76,8 +76,12 @@ fn rendered(code: &str, args: &[(&'static str, Arg)]) -> String {
 
 /// One of every variant, with its pinned code and recovery.
 fn every() -> Vec<(StoreError, &'static str, Recovery)> {
+    [stream_errors(), edition_errors(), migration_errors()].concat()
+}
+
+/// The errors of a stream's reads and writes, and the store's own.
+fn stream_errors() -> Vec<(StoreError, &'static str, Recovery)> {
     use Recovery::*;
-    let name = || "what-if".to_string();
     vec![
         (
             StoreError::conflict(stream(), 1, 2),
@@ -95,11 +99,6 @@ fn every() -> Vec<(StoreError, &'static str, Recovery)> {
             Invalid,
         ),
         (
-            StoreError::malformed_creation(stream_in("what-if"), 3, 5),
-            "angzarr-ports-store-malformed-creation",
-            Invalid,
-        ),
-        (
             StoreError::Unavailable(io()),
             "angzarr-ports-store-unavailable",
             Retry,
@@ -113,6 +112,19 @@ fn every() -> Vec<(StoreError, &'static str, Recovery)> {
             StoreError::dead_letter_unreadable(stream(), io()),
             "angzarr-ports-store-dead-letter-unreadable",
             Bug,
+        ),
+    ]
+}
+
+/// The errors of editions: their names, creations, forks and removal.
+fn edition_errors() -> Vec<(StoreError, &'static str, Recovery)> {
+    use Recovery::*;
+    let name = || "what-if".to_string();
+    vec![
+        (
+            StoreError::malformed_creation(stream_in("what-if"), 3, 5),
+            "angzarr-ports-store-malformed-creation",
+            Invalid,
         ),
         (
             StoreError::unknown_edition(stream()),
@@ -149,6 +161,13 @@ fn every() -> Vec<(StoreError, &'static str, Recovery)> {
             "angzarr-ports-store-edition-already-forked",
             Invalid,
         ),
+    ]
+}
+
+/// The errors of opening a store: its migrations and backups.
+fn migration_errors() -> Vec<(StoreError, &'static str, Recovery)> {
+    use Recovery::*;
+    vec![
         (
             StoreError::NewerThanBuild {
                 applied: 6,
