@@ -15,6 +15,7 @@ angzarr-ports-store-malformed-stream = { $stream } is no stream: it needs a 16-b
 angzarr-ports-store-malformed-creation = the creation of stream { $stream } at sequence { $sequence } names { $parent_sequence } as its parent sequence: the two must agree
 angzarr-ports-store-unavailable = the store is unavailable: { $cause }
 angzarr-ports-store-unreadable = event { $sequence } of stream { $stream } cannot be read: { $cause }
+angzarr-ports-store-dead-letter-unreadable = a dead letter about stream { $stream } cannot be read: { $cause }
 angzarr-ports-store-unknown-edition = stream { $stream } names an edition that does not exist
 angzarr-ports-edition-name-required = an edition operation needs an edition: main is never forked into or deleted
 angzarr-ports-store-edition-not-forked = stream { $stream } is not yet created in its edition: only its creation may be written first

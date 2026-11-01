@@ -8,8 +8,8 @@
 //! **There is no unit of work** (the owner's ruling, 2026-10-28: a
 //! cross-stream unit was cascade, and a step-scoped one is "just write").
 //! A handling step makes ONE atomic [`EventStore::write`]: optionally one
-//! stream's events at an expected length, with the step's positions and
-//! outbox entries, landing together or not at all. No transaction is held
+//! stream's events at an expected length, with the step's positions,
+//! outbox entries and dead letters, landing together or not at all. No transaction is held
 //! open; a race is caught by the expected length ([`StoreError::Conflict`]).
 //! A step's dedup lookups ([`EventStore::find_command`]) come before its
 //! write; its snapshot is its own call ([`SnapshotStore::write_snapshot`]).
@@ -21,7 +21,7 @@ use std::future::Future;
 use std::sync::Arc;
 
 use angzarr_proto::uuid::Uuid;
-use angzarr_proto::v1::{Cover, EditionSummary, EventBook, EventPage, Snapshot};
+use angzarr_proto::v1::{AngzarrDeadLetter, Cover, EditionSummary, EventBook, EventPage, Snapshot};
 use prost_types::{Any, Timestamp};
 
 use crate::error::StoreError;
@@ -43,6 +43,14 @@ pub struct Write<'a> {
     /// The step's outbox entries. A store that keeps no outbox (no
     /// [`Outbox`]) is never given any.
     pub outbox: &'a [OutboxEntry],
+    /// The step's dead letters: what it gave up on, kept with the
+    /// position it moved past (owner ruling Q5, 2026-10-31: in the same
+    /// atomic write). Each replaces the letter of its key already kept
+    /// ([`DeadLetter::key`]). A letter about a malformed stream refuses
+    /// the write ([`StoreError::MalformedStream`]). A store that keeps no
+    /// dead letters (no [`DeadLetterStore`]) lands the rest of the write
+    /// and drops them: the writer has them already.
+    pub dead_letters: &'a [DeadLetter],
 }
 
 /// One stream's pages at the length the writer expects it to have.
@@ -200,15 +208,17 @@ impl<T: EventStore + SnapshotStore + PositionStore + ?Sized> Store for T {}
 
 // ================================================================== purge
 
-/// Opt-in: delete a stream, its snapshot, its command ids and every
-/// handler's position on it. It restarts at 0. Its own call.
+/// Opt-in: delete a stream, its snapshot, its command ids, every
+/// handler's position on it and the dead letters about it
+/// ([`DeadLetterStore`]). It restarts at 0. Its own call.
 ///
 /// **Guarded by the head the caller read** (14.43). A purge is a
 /// decision made on a read: the stream is deleted only if it is still at
 /// `expected`, its head as [`EventStore::read`] gives it (the same length a
 /// [`Write`]'s `expected` is checked against). Otherwise it is refused
 /// [`StoreError::Conflict`], `actual` the head it found, and NOTHING is
-/// removed: not its events, snapshot, command ids or positions. A conflict
+/// removed: not its events, snapshot, command ids, positions or dead
+/// letters. A conflict
 /// is retried as a write's is: re-read, decide again.
 /// - An absent stream is at 0: a purge at 0 removes whatever it still
 ///   holds (a snapshot, positions) and answers 0; a purge at more is a
@@ -254,7 +264,7 @@ pub trait Editions: MaybeSend + MaybeSync {
     /// The third step of a stream's deletion (14.32: recorded, propagated,
     /// then removed): remove every row of edition stream `stream` (its
     /// events, the creation and deletion included, its snapshot, the
-    /// positions on it). Refused, removing nothing: a stream whose last
+    /// positions on it, the dead letters about it). Refused, removing nothing: a stream whose last
     /// event is not its deletion ([`StoreError::EditionNotDeleted`]); one
     /// whose deletion has not propagated onward, an outbox entry of its
     /// edition written with the stream or a position on it still pending
@@ -411,6 +421,93 @@ pub trait Outbox: MaybeSend + MaybeSync {
     /// Clear delivered entries by id. An id not pending is no error (a
     /// relay may clear twice). Returns how many were cleared.
     fn clear(&self, ids: &[Uuid]) -> impl Future<Output = Result<u64, StoreError>> + MaybeSend;
+}
+
+// ============================================================ dead letters
+
+/// Where on its stream a dead letter is: the event it is about, by its
+/// sequence (a policy's trigger, a projector's events), or the command to
+/// the stream it is about, by its id.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub enum DeadLetterAt {
+    Sequence(u64),
+    Command(Uuid),
+}
+
+/// A dead letter's identity: the stream it is about, where on it, and the
+/// component that could not take it (two policies on one event each keep
+/// their own). Ordered by stream, then place, then component: the order a
+/// stream's letters are read in. There is no order across streams.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub struct DeadLetterKey<'a> {
+    pub stream: StreamRef<'a>,
+    pub at: DeadLetterAt,
+    pub component: &'a str,
+}
+
+/// One dead letter as a store keeps it: angzarr's `AngzarrDeadLetter`
+/// whole, the stream it is about and where on it. Its component is the
+/// letter's `source_component`.
+#[derive(Clone, PartialEq, Debug)]
+pub struct DeadLetter {
+    pub stream: Cover,
+    pub at: DeadLetterAt,
+    pub letter: AngzarrDeadLetter,
+}
+
+impl DeadLetter {
+    /// Its identity. A stream that is no stream is
+    /// [`StoreError::MalformedStream`].
+    pub fn key(&self) -> Result<DeadLetterKey<'_>, StoreError> {
+        Ok(DeadLetterKey {
+            stream: StreamRef::try_from(&self.stream)?,
+            at: self.at,
+            component: &self.letter.source_component,
+        })
+    }
+}
+
+/// Opt-in: dead letters kept, durably where the store is: written only in
+/// a [`Write`], with the step that gave up on them, then read and drained
+/// per stream or by key. Ordering is per stream only: a stream's letters
+/// in key order ([`DeadLetterKey`]), and nothing orders one stream's
+/// against another's. A letter about an edition stream is that stream's,
+/// never main's. A [`Purge`] of a stream, and the removal of a deleted
+/// edition stream ([`Editions::remove_deleted`]), remove its letters with
+/// its other rows.
+pub trait DeadLetterStore: MaybeSend + MaybeSync {
+    /// Every letter about `stream`, in key order.
+    fn dead_letters(
+        &self,
+        stream: StreamRef<'_>,
+    ) -> impl Future<Output = Result<Vec<DeadLetter>, StoreError>> + MaybeSend;
+
+    /// The letter of `key`, if one is kept.
+    fn dead_letter(
+        &self,
+        key: DeadLetterKey<'_>,
+    ) -> impl Future<Output = Result<Option<DeadLetter>, StoreError>> + MaybeSend;
+
+    /// Every stream of `domain` a letter is about, in every edition, in
+    /// [`StreamRef`]'s order, each once.
+    fn dead_lettered(
+        &self,
+        domain: &str,
+    ) -> impl Future<Output = Result<Vec<Cover>, StoreError>> + MaybeSend;
+
+    /// Every letter about `stream`, in key order, removed as it is read:
+    /// one atomic take.
+    fn drain_dead_letters(
+        &self,
+        stream: StreamRef<'_>,
+    ) -> impl Future<Output = Result<Vec<DeadLetter>, StoreError>> + MaybeSend;
+
+    /// Remove the letters of `keys`. A key with no letter is no error.
+    /// Returns how many were removed.
+    fn remove_dead_letters(
+        &self,
+        keys: &[DeadLetterKey<'_>],
+    ) -> impl Future<Output = Result<u64, StoreError>> + MaybeSend;
 }
 
 // ========================================== shared handles: Arc<T> (base)

@@ -28,6 +28,7 @@
 //! | [`Watch`] | a cheap "anything committed?" | opt-in |
 //! | [`ReadUntilTime`], [`ReadByCorrelation`], [`ListStreams`] | core's queries | opt-in |
 //! | [`Outbox`] | the transactional outbox's relay side, kind-agnostic (entries are written in a [`Write`]) | opt-in |
+//! | [`DeadLetterStore`] | dead letters, read and drained per stream or by key (written in a [`Write`]) | opt-in |
 //! | [`Migrations`] | the build's migration set, the store's ledger, `info`, `validate` and `run` (every open runs it) | opt-in |
 //! | [`Backup`] | a copy of the store as one moment, never overwriting | opt-in |
 //!
@@ -74,9 +75,10 @@ pub use migrate::{
 };
 pub use send::{MaybeSend, MaybeSync};
 pub use store::{
-    Append, ChangeToken, Editions, EventStore, ListStreams, Outbox, OutboxEntry, PositionStore,
-    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Store, Watch,
-    Write, Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
+    Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions,
+    EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, Purge, ReadByCorrelation,
+    ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Store, Watch, Write, Written,
+    EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
 pub use stream::{Head, PositionKey, Slice, StreamRef};
 

@@ -40,6 +40,10 @@
 //! | `list_streams` | [`ListStreams`] | a store |
 //! | `outbox` | [`Outbox`] | a store |
 //! | `outbox_watch` | [`Outbox`], [`Watch`] | a store |
+//! | `dead_letters` | [`DeadLetterStore`] | a store |
+//! | `dead_letters_watch` | [`DeadLetterStore`], [`Watch`] | a store |
+//! | `dead_letters_purge` | [`DeadLetterStore`], [`Purge`] | a store |
+//! | `dead_letters_editions` | [`DeadLetterStore`], [`Editions`] | a store |
 //! | `migrations` | [`Migrations`] | an opened store |
 //! | `backup` | [`Migrations`], [`Backup`] | a [`BackupFixture`] |
 //! | `migrate_on_open` | [`Migrations`] | an [`OpenFixture`] |
@@ -62,7 +66,8 @@ use angzarr_proto::uuid::Uuid;
 use angzarr_proto::v1::event_meta::Causation;
 use angzarr_proto::v1::meta::{EditionCreated, EditionDeleted};
 use angzarr_proto::v1::{
-    Cover, EditionSummary, EventBook, EventMeta, EventPage, EventRef, FactOrigin, Snapshot,
+    AngzarrDeadLetter, Cover, EditionSummary, EventBook, EventMeta, EventPage, EventRef,
+    FactOrigin, Snapshot,
 };
 use prost::Message;
 use prost_types::{Any, Timestamp};
@@ -70,9 +75,9 @@ use prost_types::{Any, Timestamp};
 use crate::error::StoreError;
 use crate::migrate::{latest, AppliedMigration, Backup, Migration, MigrationStatus, Migrations};
 use crate::store::{
-    Append, Editions, EventStore, ListStreams, Outbox, OutboxEntry, Purge, ReadByCorrelation,
-    ReadStore, ReadUnit, ReadUntilTime, Store, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
-    EDITION_DELETED_TYPE_URL,
+    Append, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions, EventStore,
+    ListStreams, Outbox, OutboxEntry, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime,
+    Store, Watch, Write, Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
 use crate::stream::{PositionKey, StreamRef};
 
@@ -2468,6 +2473,428 @@ where
     );
 }
 
+// ------------------------------------------------------- dead letters (opt-in)
+
+/// Dead letter `body` from `component` about `stream` at `at`: a whole
+/// `AngzarrDeadLetter` (its payload the stream's one page, a reason, the
+/// one rejection detail its reason chooses), so a store that keeps less
+/// than all of it is caught.
+pub fn dead_letter(
+    stream: StreamRef<'_>,
+    at: DeadLetterAt,
+    component: &str,
+    body: u8,
+) -> DeadLetter {
+    use angzarr_proto::v1::angzarr_dead_letter::{Payload, RejectionDetails};
+    use angzarr_proto::v1::{Diagnostic, ProcessingFailedDetails};
+    let reason = Diagnostic {
+        code: "ROUTER_REASON_UNHANDLED_HANDLER_ERROR".to_string(),
+        args: [("body".to_string(), body.to_string())].into(),
+    };
+    DeadLetter {
+        stream: stream.to_cover(),
+        at,
+        letter: AngzarrDeadLetter {
+            payload: Some(Payload::RejectedEvents(EventBook {
+                cover: Some(stream.to_cover()),
+                pages: vec![page(0, body)],
+                ..EventBook::default()
+            })),
+            reason: Some(reason.clone()),
+            rejection_details: Some(RejectionDetails::ProcessingFailed(
+                ProcessingFailedDetails {
+                    failure: Some(reason),
+                    retry_count: u32::from(body),
+                    is_transient: true,
+                    ..ProcessingFailedDetails::default()
+                },
+            )),
+            source_component: component.to_string(),
+            source_component_kind: 2,
+            metadata: [("n".to_string(), body.to_string())].into(),
+            ..AngzarrDeadLetter::default()
+        },
+    }
+}
+
+/// Write `letters` alone: a step that gave up and keeps its position.
+pub async fn put_dead_letters<S: EventStore>(store: &S, letters: &[DeadLetter]) {
+    store
+        .write(Write {
+            dead_letters: letters,
+            ..Write::default()
+        })
+        .await
+        .unwrap();
+}
+
+fn keys(letters: &[DeadLetter]) -> Vec<DeadLetterKey<'_>> {
+    letters.iter().map(|l| l.key().unwrap()).collect()
+}
+
+/// Q5 (owner, 2026-10-31): a dead letter lands in the same atomic write
+/// as the position its step moved past, or not at all.
+pub async fn a_dead_letter_lands_with_its_write_or_not_at_all<S>(store: S)
+where
+    S: Store + DeadLetterStore,
+{
+    let source = main_stream("order", 1);
+    let own = main_stream("order-wallet", 1);
+    append(&store, source, 0, &[page(0, 1)]).await.unwrap();
+    append(&store, own, 0, &[page(0, 1)]).await.unwrap();
+    let k = key("order-wallet", source);
+    let positions = [(k, 1)];
+    let letters = [dead_letter(
+        source,
+        DeadLetterAt::Sequence(0),
+        "order-wallet",
+        1,
+    )];
+    assert_eq!(
+        store
+            .write(Write {
+                positions: &positions,
+                dead_letters: &letters,
+                ..Write::append(own, 0, &[page(0, 2)])
+            })
+            .await,
+        Err(conflict(own, 0, 1)),
+        "a conflict"
+    );
+    assert_eq!(
+        store.dead_letters(source).await,
+        Ok(vec![]),
+        "refused: no letter"
+    );
+    assert_eq!(store.position(k).await, Ok(0));
+    store
+        .write(Write {
+            positions: &positions,
+            dead_letters: &letters,
+            ..Write::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        store.dead_letters(source).await,
+        Ok(letters.to_vec()),
+        "kept whole, with the position moved past"
+    );
+    assert_eq!(store.position(k).await, Ok(1));
+    assert_eq!(
+        store.covers("order-wallet").await,
+        Ok(vec![own.to_cover()]),
+        "a letter is no event"
+    );
+}
+
+/// A step that gives up and moves no position writes its letters alone.
+pub async fn a_dead_letter_alone_is_a_write<S>(store: S)
+where
+    S: Store + DeadLetterStore,
+{
+    let s = main_stream("order", 1);
+    let letters = [dead_letter(
+        s,
+        DeadLetterAt::Command(command(4)),
+        "order",
+        1,
+    )];
+    put_dead_letters(&store, &letters).await;
+    assert_eq!(store.dead_letters(s).await, Ok(letters.to_vec()));
+    assert_eq!(store.head(s).await.unwrap().next_sequence, 0, "no event");
+}
+
+/// Ordering is per stream only (the owner's rule): a stream's letters are
+/// read in key order (its events' by sequence, then its commands' by id;
+/// one place's by component), never another stream's, and an edition
+/// stream's are its own, never main's.
+pub async fn dead_letters_are_read_per_stream_in_key_order<S>(store: S)
+where
+    S: Store + DeadLetterStore,
+{
+    let (a, b, e) = (
+        main_stream("order", 1),
+        main_stream("order", 2),
+        edition_stream("order", 1, "what-if"),
+    );
+    let a_letters = [
+        dead_letter(a, DeadLetterAt::Sequence(7), "zeta", 1),
+        dead_letter(a, DeadLetterAt::Command(command(1)), "alpha", 2),
+        dead_letter(a, DeadLetterAt::Sequence(2), "beta", 3),
+        dead_letter(a, DeadLetterAt::Sequence(7), "alpha", 4),
+    ];
+    put_dead_letters(&store, &a_letters).await;
+    put_dead_letters(
+        &store,
+        &[dead_letter(b, DeadLetterAt::Sequence(0), "alpha", 5)],
+    )
+    .await;
+    put_dead_letters(
+        &store,
+        &[dead_letter(e, DeadLetterAt::Sequence(1), "alpha", 6)],
+    )
+    .await;
+    let order = |n: &[usize]| n.iter().map(|i| a_letters[*i].clone()).collect::<Vec<_>>();
+    assert_eq!(
+        store.dead_letters(a).await,
+        Ok(order(&[2, 3, 0, 1])),
+        "sequences ascending, a place's by component, then the commands"
+    );
+    assert_eq!(
+        store.dead_letters(b).await,
+        Ok(vec![dead_letter(b, DeadLetterAt::Sequence(0), "alpha", 5)])
+    );
+    assert_eq!(
+        store.dead_letters(e).await,
+        Ok(vec![dead_letter(e, DeadLetterAt::Sequence(1), "alpha", 6)]),
+        "an edition stream's own"
+    );
+    assert_eq!(
+        store.dead_letters(main_stream("order", 3)).await,
+        Ok(vec![]),
+        "a stream with none"
+    );
+}
+
+/// A letter is read by its key: stream, place and component, each.
+pub async fn a_dead_letter_is_read_by_its_key<S>(store: S)
+where
+    S: Store + DeadLetterStore,
+{
+    let (a, b) = (main_stream("order", 1), main_stream("order", 2));
+    let letter = dead_letter(a, DeadLetterAt::Sequence(3), "wallet", 1);
+    put_dead_letters(&store, std::slice::from_ref(&letter)).await;
+    let key = letter.key().unwrap();
+    assert_eq!(store.dead_letter(key).await, Ok(Some(letter.clone())));
+    for other in [
+        DeadLetterKey { stream: b, ..key },
+        DeadLetterKey {
+            at: DeadLetterAt::Sequence(4),
+            ..key
+        },
+        DeadLetterKey {
+            at: DeadLetterAt::Command(command(3)),
+            ..key
+        },
+        DeadLetterKey {
+            component: "ledger",
+            ..key
+        },
+    ] {
+        assert_eq!(store.dead_letter(other).await, Ok(None), "{other:?}");
+    }
+}
+
+/// A letter written again under its key replaces the one kept: a step
+/// given up on again (a policy whose position stays) keeps one letter,
+/// the latest.
+pub async fn a_dead_letter_written_again_replaces_the_one_kept<S>(store: S)
+where
+    S: Store + DeadLetterStore,
+{
+    let s = main_stream("order", 1);
+    let first = dead_letter(s, DeadLetterAt::Sequence(3), "wallet", 1);
+    let again = dead_letter(s, DeadLetterAt::Sequence(3), "wallet", 2);
+    put_dead_letters(&store, std::slice::from_ref(&first)).await;
+    put_dead_letters(&store, std::slice::from_ref(&again)).await;
+    assert_eq!(store.dead_letters(s).await, Ok(vec![again]));
+}
+
+/// Removing by key answers how many it removed; a key with none is no
+/// error.
+pub async fn dead_letters_are_removed_by_key<S>(store: S)
+where
+    S: Store + DeadLetterStore,
+{
+    let (a, b) = (main_stream("order", 1), main_stream("order", 2));
+    let letters = [
+        dead_letter(a, DeadLetterAt::Sequence(0), "wallet", 1),
+        dead_letter(a, DeadLetterAt::Sequence(1), "wallet", 2),
+        dead_letter(b, DeadLetterAt::Sequence(0), "wallet", 3),
+    ];
+    put_dead_letters(&store, &letters).await;
+    let all = keys(&letters);
+    assert_eq!(store.remove_dead_letters(&[all[0], all[2]]).await, Ok(2));
+    assert_eq!(store.dead_letters(a).await, Ok(vec![letters[1].clone()]));
+    assert_eq!(store.dead_letters(b).await, Ok(vec![]));
+    assert_eq!(
+        store.remove_dead_letters(&[all[0]]).await,
+        Ok(0),
+        "removed twice: no error"
+    );
+}
+
+/// A drain takes a stream's letters, in key order, at once, and leaves
+/// every other stream's.
+pub async fn a_drain_takes_one_streams_dead_letters<S>(store: S)
+where
+    S: Store + DeadLetterStore,
+{
+    let (a, b) = (main_stream("order", 1), main_stream("order", 2));
+    let a_letters = [
+        dead_letter(a, DeadLetterAt::Sequence(5), "wallet", 1),
+        dead_letter(a, DeadLetterAt::Sequence(1), "wallet", 2),
+    ];
+    let b_letter = dead_letter(b, DeadLetterAt::Sequence(0), "wallet", 3);
+    put_dead_letters(&store, &a_letters).await;
+    put_dead_letters(&store, std::slice::from_ref(&b_letter)).await;
+    assert_eq!(
+        store.drain_dead_letters(a).await,
+        Ok(vec![a_letters[1].clone(), a_letters[0].clone()])
+    );
+    assert_eq!(store.dead_letters(a).await, Ok(vec![]), "drained");
+    assert_eq!(store.drain_dead_letters(a).await, Ok(vec![]), "once");
+    assert_eq!(store.dead_letters(b).await, Ok(vec![b_letter]), "kept");
+}
+
+/// The streams of a domain holding letters, in StreamRef's order, each
+/// once: how an operator finds them, with no order across their letters.
+pub async fn dead_lettered_lists_a_domains_streams_holding_letters<S>(store: S)
+where
+    S: Store + DeadLetterStore,
+{
+    let (a, b, e) = (
+        main_stream("order", 1),
+        main_stream("order", 2),
+        edition_stream("order", 1, "what-if"),
+    );
+    put_dead_letters(&store, &[dead_letter(b, DeadLetterAt::Sequence(0), "w", 1)]).await;
+    put_dead_letters(&store, &[dead_letter(e, DeadLetterAt::Sequence(0), "w", 2)]).await;
+    put_dead_letters(
+        &store,
+        &[
+            dead_letter(a, DeadLetterAt::Sequence(0), "w", 3),
+            dead_letter(a, DeadLetterAt::Sequence(1), "w", 4),
+        ],
+    )
+    .await;
+    put_dead_letters(
+        &store,
+        &[dead_letter(
+            main_stream("ledger", 1),
+            DeadLetterAt::Sequence(0),
+            "w",
+            5,
+        )],
+    )
+    .await;
+    assert_eq!(store.dead_lettered("order").await, Ok(covers(&[a, b, e])));
+    let drained = store.drain_dead_letters(b).await.unwrap();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(
+        store.dead_lettered("order").await,
+        Ok(covers(&[a, e])),
+        "a drained stream holds none"
+    );
+    assert_eq!(store.dead_lettered("nothing").await, Ok(vec![]));
+}
+
+/// A letter about a malformed stream refuses its write, and the write
+/// lands nothing.
+pub async fn a_dead_letter_on_a_malformed_stream_refuses_its_write<S>(store: S)
+where
+    S: Store + DeadLetterStore,
+{
+    let s = main_stream("order", 1);
+    let k = key("wallet", s);
+    let positions = [(k, 1)];
+    let mut letter = dead_letter(s, DeadLetterAt::Sequence(0), "wallet", 1);
+    letter.stream.edition = Some(String::new());
+    let refused = store
+        .write(Write {
+            positions: &positions,
+            dead_letters: std::slice::from_ref(&letter),
+            ..Write::default()
+        })
+        .await;
+    assert_eq!(
+        refused,
+        Err(StoreError::malformed_stream(letter.stream.clone()))
+    );
+    assert_eq!(store.position(k).await, Ok(0), "nothing landed");
+}
+
+/// A purge of a stream removes the letters about it, and only when it
+/// lands: a refused purge keeps them.
+pub async fn a_purge_removes_the_dead_letters_about_its_stream<S>(store: S)
+where
+    S: Store + Purge + DeadLetterStore,
+{
+    let (s, kept) = (main_stream("order", 1), main_stream("order", 2));
+    append(&store, s, 0, &[page(0, 1)]).await.unwrap();
+    let letter = dead_letter(s, DeadLetterAt::Sequence(0), "wallet", 1);
+    let other = dead_letter(kept, DeadLetterAt::Sequence(0), "wallet", 2);
+    put_dead_letters(&store, &[letter.clone(), other.clone()]).await;
+    assert_eq!(store.purge(s, 0).await, Err(conflict(s, 0, 1)));
+    assert_eq!(
+        store.dead_letters(s).await,
+        Ok(vec![letter]),
+        "a refused purge removes none"
+    );
+    store.purge(s, 1).await.unwrap();
+    assert_eq!(store.dead_letters(s).await, Ok(vec![]), "purged");
+    assert_eq!(
+        store.dead_letters(kept).await,
+        Ok(vec![other]),
+        "another's kept"
+    );
+}
+
+/// The removal of a deleted edition stream removes the letters about it,
+/// never main's.
+pub async fn a_removed_edition_stream_takes_its_dead_letters<S>(store: S)
+where
+    S: Store + Editions + DeadLetterStore,
+{
+    let main = main_stream("order", 1);
+    let e = edition_stream("order", 1, "what-if");
+    append(&store, main, 0, &[page(0, 1)]).await.unwrap();
+    fork(&store, e).await;
+    let in_edition = dead_letter(e, DeadLetterAt::Sequence(1), "wallet", 1);
+    let on_main = dead_letter(main, DeadLetterAt::Sequence(0), "wallet", 2);
+    put_dead_letters(&store, &[in_edition, on_main.clone()]).await;
+    append(&store, e, 2, &[deleted_page(2, "what-if")])
+        .await
+        .unwrap();
+    store.remove_deleted(e).await.unwrap();
+    assert_eq!(store.dead_letters(e).await, Ok(vec![]), "removed with it");
+    assert_eq!(
+        store.dead_letters(main).await,
+        Ok(vec![on_main]),
+        "main's kept"
+    );
+}
+
+/// Every change to the letters kept is a commit: a write of letters
+/// alone, a drain and a removal each change the change token, to a token
+/// not seen before.
+pub async fn dead_letters_written_drained_and_removed_change_the_change_token<S>(store: S)
+where
+    S: Store + DeadLetterStore + Watch,
+{
+    let s = main_stream("order", 1);
+    let letter = |n| dead_letter(s, DeadLetterAt::Sequence(n), "wallet", 1);
+    let mut seen = vec![steady(&store, "nothing").await];
+    put_dead_letters(&store, &[letter(0)]).await;
+    seen.push(steady(&store, "a write of letters").await);
+    store.drain_dead_letters(s).await.unwrap();
+    seen.push(steady(&store, "a drain").await);
+    put_dead_letters(&store, &[letter(1)]).await;
+    seen.push(steady(&store, "another write").await);
+    store
+        .remove_dead_letters(&[letter(1).key().unwrap()])
+        .await
+        .unwrap();
+    seen.push(steady(&store, "a removal").await);
+    for (i, token) in seen.iter().enumerate() {
+        assert!(
+            !seen[..i].contains(token),
+            "change {i} gave a token seen before: {seen:?}"
+        );
+    }
+}
+
 // -------------------------------------------------------------- migrations
 
 /// What every store a fixture of the migrations sections makes holds: one
@@ -3167,6 +3594,34 @@ macro_rules! store_contract {
     (outbox_watch, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             an_outbox_write_changes_the_change_token,
+        );
+    };
+    (dead_letters, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            a_dead_letter_lands_with_its_write_or_not_at_all,
+            a_dead_letter_alone_is_a_write,
+            dead_letters_are_read_per_stream_in_key_order,
+            a_dead_letter_is_read_by_its_key,
+            a_dead_letter_written_again_replaces_the_one_kept,
+            dead_letters_are_removed_by_key,
+            a_drain_takes_one_streams_dead_letters,
+            dead_lettered_lists_a_domains_streams_holding_letters,
+            a_dead_letter_on_a_malformed_stream_refuses_its_write,
+        );
+    };
+    (dead_letters_watch, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            dead_letters_written_drained_and_removed_change_the_change_token,
+        );
+    };
+    (dead_letters_purge, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            a_purge_removes_the_dead_letters_about_its_stream,
+        );
+    };
+    (dead_letters_editions, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            a_removed_edition_stream_takes_its_dead_letters,
         );
     };
     (migrations, $(#[$t:meta])+, $f:expr) => {

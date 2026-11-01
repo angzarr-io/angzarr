@@ -71,6 +71,10 @@ pub enum StoreError {
         sequence: u64,
         reason: Cause,
     },
+    /// The store holds a dead letter about `stream` but cannot give it
+    /// back: bytes that do not decode as an `AngzarrDeadLetter`, or a place
+    /// that is neither a sequence nor a command id.
+    DeadLetterUnreadable { stream: Box<Cover>, reason: Cause },
     /// A read unit was given a stream in an edition that does not exist (no
     /// fork event of it anywhere; 14.32: NOT_FOUND). Nothing was read.
     UnknownEdition { stream: Box<Cover> },
@@ -174,6 +178,13 @@ impl StoreError {
         }
     }
 
+    pub fn dead_letter_unreadable(stream: impl Into<Cover>, reason: Cause) -> StoreError {
+        StoreError::DeadLetterUnreadable {
+            stream: Box::new(stream.into()),
+            reason,
+        }
+    }
+
     pub fn edition_not_deleted(stream: impl Into<Cover>) -> StoreError {
         StoreError::EditionNotDeleted {
             stream: Box::new(stream.into()),
@@ -212,6 +223,7 @@ impl StoreError {
             | StoreError::MalformedStream { stream }
             | StoreError::MalformedCreation { stream, .. }
             | StoreError::Unreadable { stream, .. }
+            | StoreError::DeadLetterUnreadable { stream, .. }
             | StoreError::UnknownEdition { stream }
             | StoreError::EditionNotForked { stream }
             | StoreError::EditionAlreadyForked { stream }
@@ -300,6 +312,7 @@ impl StoreError {
             StoreError::MalformedCreation { .. } => "angzarr-ports-store-malformed-creation",
             StoreError::Unavailable(_) => "angzarr-ports-store-unavailable",
             StoreError::Unreadable { .. } => "angzarr-ports-store-unreadable",
+            StoreError::DeadLetterUnreadable { .. } => "angzarr-ports-store-dead-letter-unreadable",
             StoreError::UnknownEdition { .. } => "angzarr-ports-store-unknown-edition",
             StoreError::EditionNameRequired => "angzarr-ports-edition-name-required",
             StoreError::EditionNotFound { .. } => "angzarr-ports-edition-not-found",
@@ -363,6 +376,10 @@ impl StoreError {
                 ("sequence", Arg::Uint(*sequence)),
                 ("cause", Arg::Cause(reason.clone())),
             ],
+            StoreError::DeadLetterUnreadable { stream, reason } => vec![
+                ("stream", stream_arg(stream)),
+                ("cause", Arg::Cause(reason.clone())),
+            ],
             StoreError::EditionNameRequired => Vec::new(),
             StoreError::EditionNotFound { name } => vec![("name", Arg::Str(name.clone()))],
             StoreError::EditionNotForked { stream }
@@ -388,7 +405,9 @@ impl StoreError {
     pub fn recovery(&self) -> Recovery {
         match self {
             StoreError::Conflict { .. } | StoreError::Unavailable(_) => Recovery::Retry,
-            StoreError::Discontinuous { .. } | StoreError::Unreadable { .. } => Recovery::Bug,
+            StoreError::Discontinuous { .. }
+            | StoreError::Unreadable { .. }
+            | StoreError::DeadLetterUnreadable { .. } => Recovery::Bug,
             StoreError::MalformedStream { .. }
             | StoreError::MalformedCreation { .. }
             | StoreError::UnknownEdition { .. }
@@ -481,6 +500,7 @@ pub(crate) fn samples() -> Vec<StoreError> {
         StoreError::malformed_creation(stream(), 3, 5),
         StoreError::Unavailable(io()),
         StoreError::unreadable(stream(), 4, io()),
+        StoreError::dead_letter_unreadable(stream(), io()),
         StoreError::unknown_edition(stream()),
         StoreError::EditionNameRequired,
         StoreError::EditionNotFound {

@@ -8,8 +8,8 @@
 //! for the operation itself (never across an `.await`).
 //!
 //! - **A write** is checked whole, then lands under the lock at once: its
-//!   stream's pages against the expected length, its positions and its
-//!   outbox entries, all or none.
+//!   stream's pages against the expected length, its positions, its
+//!   outbox entries and its dead letters, all or none.
 //! - **Read units** read one moment: the store's data is copy-on-write
 //!   behind an `Arc`, so a read unit keeps the moment it began, and a
 //!   writer copies the data only while a read unit still holds it.
@@ -34,9 +34,10 @@ use prost_types::Timestamp;
 use crate::error::StoreError;
 use crate::migrate::{plan_run, plan_undo, AppliedMigration, Backup, Migration, Migrations};
 use crate::store::{
-    Append, ChangeToken, Editions, EventStore, ListStreams, Outbox, OutboxEntry, PositionStore,
-    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write,
-    Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
+    Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions,
+    EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, Purge, ReadByCorrelation,
+    ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write, Written,
+    EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
 use crate::stream::{PositionKey, Slice, StreamRef};
 
@@ -63,6 +64,13 @@ fn cover(key: &Key) -> Cover {
         root: key.2,
     }
     .to_cover()
+}
+
+/// A dead letter's place: its stream, where on it, its component.
+type LetterPlace = (Key, DeadLetterAt, String);
+
+fn letter_place(letter: DeadLetterKey<'_>) -> LetterPlace {
+    (key(letter.stream), letter.at, letter.component.to_string())
 }
 
 /// A position's place: the stream, then the handler.
@@ -115,6 +123,9 @@ struct Data {
     /// Pending outbox entries, oldest write first (which keeps each
     /// stream's order; the contract promises none across streams).
     outbox: Vec<Pending>,
+    /// Dead letters by their key, ordered as [`DeadLetterKey`] orders
+    /// them: by stream, then place, then component.
+    dead_letters: BTreeMap<LetterPlace, DeadLetter>,
     /// Commits of anything: the change token.
     commits: u64,
 }
@@ -164,9 +175,18 @@ impl Data {
                 .any(|k| self.own(k).iter().any(is_deletion))
     }
 
+    /// The dead letters about stream `k`, in key order.
+    fn letters_of<'d>(&'d self, k: &'d Key) -> impl Iterator<Item = &'d DeadLetter> + 'd {
+        self.dead_letters
+            .iter()
+            .filter(move |((stream, ..), _)| stream == k)
+            .map(|(_, letter)| letter)
+    }
+
     /// Remove every row of stream `k`.
     fn remove(&mut self, k: &Key) -> u64 {
         self.snapshots.remove(k);
+        self.dead_letters.retain(|(stream, ..), _| stream != k);
         self.positions.retain(|(stream, _), _| stream != k);
         self.streams.remove(k).map_or(0, |pages| pages.len() as u64)
     }
@@ -368,8 +388,17 @@ impl EventStore for MemoryStore {
                 }
             }
         }
+        let letters = write
+            .dead_letters
+            .iter()
+            .map(|letter| Ok((letter_place(letter.key()?), letter.clone())))
+            .collect::<Result<Vec<_>, StoreError>>()?;
         let lands_pages = landing.as_ref().is_some_and(|l| !l.pages.is_empty());
-        if !lands_pages && write.positions.is_empty() && write.outbox.is_empty() {
+        if !lands_pages
+            && write.positions.is_empty()
+            && write.outbox.is_empty()
+            && letters.is_empty()
+        {
             return Ok(Written { next_sequence });
         }
         let data = Arc::make_mut(&mut guard);
@@ -381,6 +410,7 @@ impl EventStore for MemoryStore {
         for (position, next) in write.positions {
             data.positions.insert(place(*position), *next);
         }
+        data.dead_letters.extend(letters);
         let mut streams: Vec<Key> = landing_key.into_iter().collect();
         streams.extend(write.positions.iter().map(|(p, _)| key(p.stream)));
         for entry in write.outbox {
@@ -712,6 +742,62 @@ impl ListStreams for MemoryStore {
             .filter(|(_, pages)| !pages.is_empty())
             .map(|(k, _)| cover(k))
             .collect())
+    }
+}
+
+impl DeadLetterStore for MemoryStore {
+    async fn dead_letters(&self, stream: StreamRef<'_>) -> Result<Vec<DeadLetter>, StoreError> {
+        let k = key(stream);
+        Ok(self.data().letters_of(&k).cloned().collect())
+    }
+
+    async fn dead_letter(&self, key: DeadLetterKey<'_>) -> Result<Option<DeadLetter>, StoreError> {
+        Ok(self.data().dead_letters.get(&letter_place(key)).cloned())
+    }
+
+    async fn dead_lettered(&self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        let data = self.data();
+        let streams: BTreeSet<&Key> = data
+            .dead_letters
+            .keys()
+            .map(|(k, ..)| k)
+            .filter(|k| k.0 == domain)
+            .collect();
+        Ok(streams.into_iter().map(cover).collect())
+    }
+
+    async fn drain_dead_letters(
+        &self,
+        stream: StreamRef<'_>,
+    ) -> Result<Vec<DeadLetter>, StoreError> {
+        let k = key(stream);
+        let mut guard = self.lock();
+        let drained: Vec<DeadLetter> = guard.letters_of(&k).cloned().collect();
+        if drained.is_empty() {
+            return Ok(drained);
+        }
+        let data = Arc::make_mut(&mut guard);
+        data.dead_letters.retain(|(s, ..), _| *s != k);
+        data.commits += 1;
+        Ok(drained)
+    }
+
+    async fn remove_dead_letters(&self, keys: &[DeadLetterKey<'_>]) -> Result<u64, StoreError> {
+        let places: BTreeSet<LetterPlace> = keys.iter().map(|k| letter_place(*k)).collect();
+        let mut guard = self.lock();
+        let held = places
+            .iter()
+            .filter(|p| guard.dead_letters.contains_key(*p))
+            .count();
+        if held == 0 {
+            return Ok(0);
+        }
+        let data = Arc::make_mut(&mut guard);
+        for place in &places {
+            data.dead_letters.remove(place);
+        }
+        data.commits += 1;
+        Ok(held as u64)
     }
 }
 

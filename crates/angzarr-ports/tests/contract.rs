@@ -103,8 +103,17 @@
 //!
 //! - **RULED(W1) The write's shape:** `write(Write { events:
 //!   Option<Append { stream, expected, pages }>, positions: &[(PositionKey,
-//!   u64)], outbox: &[OutboxEntry] }) -> Result<Written { next_sequence:
-//!   Option<u64> }>`.
+//!   u64)], outbox: &[OutboxEntry], dead_letters: &[DeadLetter] }) ->
+//!   Result<Written { next_sequence: Option<u64> }>`.
+//! - **RULED(Q5, owner 2026-10-31) Dead letters are durable, opt-in
+//!   (`DeadLetterStore`):** written only in a write, in the same atomic
+//!   write as the position the step moved past
+//!   (`a_dead_letter_lands_with_its_write_or_not_at_all`); keyed by the
+//!   stream it is about, the place on it (a sequence or a command id) and
+//!   the component, a letter written again replacing the one kept; read
+//!   and drained per stream, in key order, or by key, with no order across
+//!   streams (`dead_letters_are_read_per_stream_in_key_order`); removed
+//!   with their stream by a purge and an edition stream's removal.
 //! - **RULED(W2) Positions are written only in a write;** `PositionStore`
 //!   is reads alone.
 //! - **RULED(D3) The removal is `Editions::remove_deleted(stream)`,**
@@ -276,6 +285,26 @@ mod editions_outbox {
 mod outbox_watch {
     use super::*;
     angzarr_ports::store_contract!(outbox_watch, #[tokio::test], MemoryStore::new());
+}
+
+mod dead_letters {
+    use super::*;
+    angzarr_ports::store_contract!(dead_letters, #[tokio::test], MemoryStore::new());
+}
+
+mod dead_letters_watch {
+    use super::*;
+    angzarr_ports::store_contract!(dead_letters_watch, #[tokio::test], MemoryStore::new());
+}
+
+mod dead_letters_purge {
+    use super::*;
+    angzarr_ports::store_contract!(dead_letters_purge, #[tokio::test], MemoryStore::new());
+}
+
+mod dead_letters_editions {
+    use super::*;
+    angzarr_ports::store_contract!(dead_letters_editions, #[tokio::test], MemoryStore::new());
 }
 
 /// The backup section's fixture on `MemoryStore`: a target is a

@@ -110,6 +110,11 @@ fn every() -> Vec<(StoreError, &'static str, Recovery)> {
             Bug,
         ),
         (
+            StoreError::dead_letter_unreadable(stream(), io()),
+            "angzarr-ports-store-dead-letter-unreadable",
+            Bug,
+        ),
+        (
             StoreError::unknown_edition(stream()),
             "angzarr-ports-store-unknown-edition",
             Invalid,

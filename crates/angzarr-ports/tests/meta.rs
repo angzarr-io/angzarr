@@ -29,10 +29,10 @@ use angzarr_ports::angzarr_proto::v1::{
 use angzarr_ports::contract;
 use angzarr_ports::memory::{MemoryRead, MemoryStore};
 use angzarr_ports::{
-    Append, ChangeToken, Editions, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
-    PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
-    SnapshotStore, StoreError, StreamRef, Uuid, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
-    EDITION_DELETED_TYPE_URL,
+    Append, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore, Head,
+    ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge, ReadByCorrelation,
+    ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Uuid, Watch,
+    Write, Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -197,6 +197,47 @@ enum Bug {
     ClearedIdsRemembered,
     /// Its change token counts events only, not outbox writes.
     OutboxUnwatched,
+    // ---- dead letters
+    /// A refused write still lands its dead letters.
+    ConflictLandsLetters,
+    /// A write of a position and dead letters lands the position alone.
+    LettersDropped,
+    /// A write of dead letters alone writes nothing.
+    LetterOnlyDropped,
+    /// A letter is kept without its metadata.
+    LetterLosesMetadata,
+    /// A letter about a malformed stream is dropped, the rest landing.
+    MalformedLetterDropped,
+    /// A stream's letters are read with every stream's of its domain.
+    LettersAcrossStreams,
+    /// A stream's letters are read by component first.
+    LettersByComponent,
+    /// An edition stream's letters are read as main's.
+    LettersFallThrough,
+    /// A letter is read by its stream and place, whatever its component.
+    LetterKeyIgnoresComponent,
+    /// A letter written again keeps the first.
+    LetterKeepsFirst,
+    /// A removal answers how many keys it was given.
+    RemovalCountsKeys,
+    /// A removal removes nothing, and says it did.
+    RemovalIsANoOp,
+    /// A drain takes every stream's letters of the domain.
+    DrainTakesTheDomain,
+    /// A drain reads and removes nothing.
+    DrainKeeps,
+    /// `dead_lettered` lists a stream once per letter.
+    DeadLetteredRepeats,
+    /// `dead_lettered` ignores its domain.
+    DeadLetteredAnyDomain,
+    /// A purge keeps the stream's letters.
+    PurgeKeepsLetters,
+    /// A purge refused for a stale head removes the letters anyway.
+    RefusedPurgeTakesLetters,
+    /// An edition stream's removal keeps its letters.
+    RemovalKeepsLetters,
+    /// Its change token counts events only, not dead letters' changes.
+    LettersUnwatched,
 }
 
 /// One handle's own bookkeeping (a pair's two handles have one each).
@@ -289,6 +330,58 @@ impl Broken {
         } else {
             s
         }
+    }
+
+    /// A write's dead letters, as the bug bends them; `with_positions`,
+    /// whether the write moves a position.
+    async fn bent_letters(
+        &self,
+        given: &[DeadLetter],
+        with_positions: bool,
+    ) -> Result<Vec<DeadLetter>, StoreError> {
+        let mut letters = given.to_vec();
+        match self.bug {
+            Bug::LettersDropped if with_positions => letters.clear(),
+            Bug::LetterLosesMetadata => {
+                for letter in &mut letters {
+                    letter.letter.metadata.clear();
+                }
+            }
+            Bug::MalformedLetterDropped => letters.retain(|l| l.key().is_ok()),
+            _ => {}
+        }
+        if self.is(Bug::LetterKeepsFirst) {
+            let mut fresh = Vec::new();
+            for letter in letters {
+                if self.inner.dead_letter(letter.key()?).await?.is_none() {
+                    fresh.push(letter);
+                }
+            }
+            letters = fresh;
+        }
+        Ok(letters)
+    }
+
+    /// The letters about `stream`, as a purge or removal must leave them:
+    /// read before it, to put back after it.
+    async fn letters_kept(&self, stream: StreamRef<'_>, bug: Bug) -> Vec<DeadLetter> {
+        match self.is(bug) {
+            true => self.inner.dead_letters(stream).await.unwrap(),
+            false => Vec::new(),
+        }
+    }
+
+    /// Put `letters` back.
+    async fn put_back(&self, letters: &[DeadLetter]) -> Result<(), StoreError> {
+        if !letters.is_empty() {
+            self.inner
+                .write(Write {
+                    dead_letters: letters,
+                    ..Write::default()
+                })
+                .await?;
+        }
+        Ok(())
     }
 
     /// `slice` without the history below its fork (a forked stream's own
@@ -433,6 +526,16 @@ impl EventStore for Broken {
                 e.edition = None;
             }
         }
+        let letters = self
+            .bent_letters(write.dead_letters, !positions.is_empty())
+            .await?;
+        if self.is(Bug::LetterOnlyDropped)
+            && events.is_none()
+            && positions.is_empty()
+            && outbox.is_empty()
+        {
+            return Ok(Written::default());
+        }
         let bent = Write {
             events: events.map(|(stream, expected)| Append {
                 stream,
@@ -441,6 +544,7 @@ impl EventStore for Broken {
             }),
             positions: &positions,
             outbox: &outbox,
+            dead_letters: &letters,
         };
         let written = match self.inner.write(bent).await {
             Err(StoreError::Conflict { actual, .. }) if self.is(Bug::LastWriterWins) => {
@@ -457,11 +561,14 @@ impl EventStore for Broken {
                         }),
                         positions: &positions,
                         outbox: &outbox,
+                        dead_letters: &letters,
                     })
                     .await?
             }
             Err(refused @ StoreError::Conflict { .. })
-                if self.is(Bug::ConflictLandsPositions) || self.is(Bug::ConflictLandsOutbox) =>
+                if self.is(Bug::ConflictLandsPositions)
+                    || self.is(Bug::ConflictLandsOutbox)
+                    || self.is(Bug::ConflictLandsLetters) =>
             {
                 let landed = Write {
                     positions: if self.is(Bug::ConflictLandsPositions) {
@@ -471,6 +578,11 @@ impl EventStore for Broken {
                     },
                     outbox: if self.is(Bug::ConflictLandsOutbox) {
                         &outbox
+                    } else {
+                        &[]
+                    },
+                    dead_letters: if self.is(Bug::ConflictLandsLetters) {
+                        &letters
                     } else {
                         &[]
                     },
@@ -496,6 +608,7 @@ impl EventStore for Broken {
                         }),
                         positions: &positions,
                         outbox: &outbox,
+                        dead_letters: &letters,
                     })
                     .await?
             }
@@ -691,6 +804,7 @@ impl Purge for Broken {
             _ => expected,
         };
         let snapshot = self.inner.read_snapshot(stream).await?;
+        let letters = self.letters_kept(stream, Bug::PurgeKeepsLetters).await;
         let kept: Vec<(String, u64)> = if self.is(Bug::PurgeKeepsPositions) {
             let puts = self.shared.positions.lock().unwrap().clone();
             let mut kept = Vec::new();
@@ -706,6 +820,14 @@ impl Purge for Broken {
             Vec::new()
         };
         let deleted = match self.inner.purge(stream, expected).await {
+            Err(refused @ StoreError::Conflict { .. })
+                if self.is(Bug::RefusedPurgeTakesLetters) =>
+            {
+                let keys: Vec<DeadLetter> = self.inner.dead_letters(stream).await?;
+                let keys: Vec<DeadLetterKey<'_>> = keys.iter().map(|l| l.key().unwrap()).collect();
+                self.inner.remove_dead_letters(&keys).await?;
+                return Err(refused);
+            }
             Err(refused @ StoreError::Conflict { .. })
                 if self.is(Bug::RefusedPurgeTakesPositions) =>
             {
@@ -750,6 +872,7 @@ impl Purge for Broken {
         if let (Bug::PurgeKeepsSnapshot, Some(s)) = (self.bug, snapshot) {
             self.inner.write_snapshot(stream, &s).await?;
         }
+        self.put_back(&letters).await?;
         for (handler, next) in kept {
             let key = PositionKey {
                 handler: &handler,
@@ -781,6 +904,7 @@ impl Editions for Broken {
 
     async fn remove_deleted(&self, stream: StreamRef<'_>) -> Result<u64, StoreError> {
         let snapshot = self.inner.read_snapshot(stream).await?;
+        let letters = self.letters_kept(stream, Bug::RemovalKeepsLetters).await;
         let edition = stream.edition.unwrap_or_default().to_string();
         let others = self.edition_streams(&edition).await;
         let removed = match self.inner.remove_deleted(stream).await {
@@ -815,6 +939,7 @@ impl Editions for Broken {
         if let (Bug::RemoveKeepsSnapshot, Some(kept)) = (self.bug, snapshot) {
             self.inner.write_snapshot(stream, &kept).await?;
         }
+        self.put_back(&letters).await?;
         if self.is(Bug::RemoveTakesMain) {
             let mains = self.inner.head(main_of(stream)).await?.next_sequence;
             self.inner.purge(main_of(stream), mains).await?;
@@ -911,7 +1036,7 @@ impl Watch for Broken {
                 self.local.token_reads.fetch_add(1, Ordering::SeqCst),
                 0,
             ])),
-            Bug::OutboxUnwatched => Ok(ChangeToken::new([
+            Bug::OutboxUnwatched | Bug::LettersUnwatched => Ok(ChangeToken::new([
                 self.local.commits.load(Ordering::SeqCst),
                 0,
             ])),
@@ -995,6 +1120,100 @@ impl Outbox for Broken {
     async fn clear(&self, ids: &[Uuid]) -> Result<u64, StoreError> {
         self.shared.cleared.lock().unwrap().extend_from_slice(ids);
         self.inner.clear(ids).await
+    }
+}
+
+impl DeadLetterStore for Broken {
+    async fn dead_letters(&self, stream: StreamRef<'_>) -> Result<Vec<DeadLetter>, StoreError> {
+        let mut letters = match self.bug {
+            Bug::LettersFallThrough => self.inner.dead_letters(main_of(stream)).await?,
+            Bug::LettersAcrossStreams => {
+                let mut every = Vec::new();
+                for cover in self.inner.dead_lettered(stream.domain).await? {
+                    let s = StreamRef::try_from(&cover)?;
+                    every.extend(self.inner.dead_letters(s).await?);
+                }
+                every
+            }
+            _ => self.inner.dead_letters(stream).await?,
+        };
+        if self.is(Bug::LettersByComponent) {
+            letters.sort_by(|a, b| a.letter.source_component.cmp(&b.letter.source_component));
+        }
+        Ok(letters)
+    }
+
+    async fn dead_letter(&self, key: DeadLetterKey<'_>) -> Result<Option<DeadLetter>, StoreError> {
+        if self.is(Bug::LetterKeyIgnoresComponent) {
+            let letters = self.inner.dead_letters(key.stream).await?;
+            return Ok(letters.into_iter().find(|l| l.at == key.at));
+        }
+        self.inner.dead_letter(key).await
+    }
+
+    async fn dead_lettered(&self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        if self.is(Bug::DeadLetteredAnyDomain) {
+            let mut every = Vec::new();
+            for cover in self.inner.list_streams().await? {
+                every.extend(self.inner.dead_lettered(&cover.domain).await?);
+            }
+            for d in ["ledger", "order", "nothing"] {
+                every.extend(self.inner.dead_lettered(d).await?);
+            }
+            every.sort_by(|a, b| {
+                let (a, b) = (
+                    StreamRef::try_from(a).unwrap(),
+                    StreamRef::try_from(b).unwrap(),
+                );
+                a.cmp(&b)
+            });
+            every.dedup();
+            return Ok(every);
+        }
+        let streams = self.inner.dead_lettered(domain).await?;
+        if !self.is(Bug::DeadLetteredRepeats) {
+            return Ok(streams);
+        }
+        let mut repeated = Vec::new();
+        for cover in streams {
+            let n = self
+                .inner
+                .dead_letters(StreamRef::try_from(&cover)?)
+                .await?
+                .len();
+            repeated.extend(std::iter::repeat_n(cover, n));
+        }
+        Ok(repeated)
+    }
+
+    async fn drain_dead_letters(
+        &self,
+        stream: StreamRef<'_>,
+    ) -> Result<Vec<DeadLetter>, StoreError> {
+        match self.bug {
+            Bug::DrainKeeps => self.inner.dead_letters(stream).await,
+            Bug::DrainTakesTheDomain => {
+                let drained = self.inner.drain_dead_letters(stream).await?;
+                for cover in self.inner.dead_lettered(stream.domain).await? {
+                    self.inner
+                        .drain_dead_letters(StreamRef::try_from(&cover)?)
+                        .await?;
+                }
+                Ok(drained)
+            }
+            _ => self.inner.drain_dead_letters(stream).await,
+        }
+    }
+
+    async fn remove_dead_letters(&self, keys: &[DeadLetterKey<'_>]) -> Result<u64, StoreError> {
+        match self.bug {
+            Bug::RemovalIsANoOp => Ok(keys.len() as u64),
+            Bug::RemovalCountsKeys => {
+                self.inner.remove_dead_letters(keys).await?;
+                Ok(keys.len() as u64)
+            }
+            _ => self.inner.remove_dead_letters(keys).await,
+        }
     }
 }
 
@@ -1545,6 +1764,18 @@ fn an_honest_broken_store_passes_every_check() {
         a_cleared_id_put_again_is_a_new_pending_entry,
         an_outbox_entry_keeps_its_edition,
         an_outbox_write_changes_the_change_token,
+        a_dead_letter_lands_with_its_write_or_not_at_all,
+        a_dead_letter_alone_is_a_write,
+        dead_letters_are_read_per_stream_in_key_order,
+        a_dead_letter_is_read_by_its_key,
+        a_dead_letter_written_again_replaces_the_one_kept,
+        dead_letters_are_removed_by_key,
+        a_drain_takes_one_streams_dead_letters,
+        dead_lettered_lists_a_domains_streams_holding_letters,
+        a_dead_letter_on_a_malformed_stream_refuses_its_write,
+        a_purge_removes_the_dead_letters_about_its_stream,
+        a_removed_edition_stream_takes_its_dead_letters,
+        dead_letters_written_drained_and_removed_change_the_change_token,
     );
     passes!(broken_pair;
         two_writers_racing_on_one_stream_land_one,
@@ -2247,4 +2478,119 @@ mod migrations {
             RefusedUndoBacksUp
         );
     }
+}
+
+// ------------------------------------------- dead letters: each check catches
+
+#[test]
+fn a_dead_letter_lands_with_its_write_or_not_at_all_catches_a_split_write() {
+    catches!(
+        a_dead_letter_lands_with_its_write_or_not_at_all,
+        broken,
+        ConflictLandsLetters,
+        LettersDropped,
+        LetterLosesMetadata,
+    );
+}
+
+#[test]
+fn a_dead_letter_alone_is_a_write_catches_a_dropped_one() {
+    catches!(a_dead_letter_alone_is_a_write, broken, LetterOnlyDropped);
+}
+
+#[test]
+fn dead_letters_are_read_per_stream_in_key_order_catches_another_order_or_stream() {
+    catches!(
+        dead_letters_are_read_per_stream_in_key_order,
+        broken,
+        LettersAcrossStreams,
+        LettersByComponent,
+        LettersFallThrough,
+    );
+}
+
+#[test]
+fn a_dead_letter_is_read_by_its_key_catches_a_key_without_its_component() {
+    catches!(
+        a_dead_letter_is_read_by_its_key,
+        broken,
+        LetterKeyIgnoresComponent
+    );
+}
+
+#[test]
+fn a_dead_letter_written_again_catches_the_first_kept() {
+    catches!(
+        a_dead_letter_written_again_replaces_the_one_kept,
+        broken,
+        LetterKeepsFirst
+    );
+}
+
+#[test]
+fn dead_letters_are_removed_by_key_catches_a_wrong_count_or_no_removal() {
+    catches!(
+        dead_letters_are_removed_by_key,
+        broken,
+        RemovalCountsKeys,
+        RemovalIsANoOp,
+    );
+}
+
+#[test]
+fn a_drain_takes_one_streams_dead_letters_catches_too_much_or_nothing() {
+    catches!(
+        a_drain_takes_one_streams_dead_letters,
+        broken,
+        DrainTakesTheDomain,
+        DrainKeeps,
+    );
+}
+
+#[test]
+fn dead_lettered_catches_repeats_and_other_domains() {
+    catches!(
+        dead_lettered_lists_a_domains_streams_holding_letters,
+        broken,
+        DeadLetteredRepeats,
+        DeadLetteredAnyDomain,
+        DrainKeeps,
+    );
+}
+
+#[test]
+fn a_malformed_letter_catches_a_write_landing_without_it() {
+    catches!(
+        a_dead_letter_on_a_malformed_stream_refuses_its_write,
+        broken,
+        MalformedLetterDropped,
+    );
+}
+
+#[test]
+fn a_purge_catches_letters_kept_or_taken_when_refused() {
+    catches!(
+        a_purge_removes_the_dead_letters_about_its_stream,
+        broken,
+        PurgeKeepsLetters,
+        RefusedPurgeTakesLetters,
+    );
+}
+
+#[test]
+fn an_edition_removal_catches_letters_kept() {
+    catches!(
+        a_removed_edition_stream_takes_its_dead_letters,
+        broken,
+        RemovalKeepsLetters,
+    );
+}
+
+#[test]
+fn the_letters_change_token_check_catches_letters_unwatched() {
+    catches!(
+        dead_letters_written_drained_and_removed_change_the_change_token,
+        broken,
+        LettersUnwatched,
+    );
 }
