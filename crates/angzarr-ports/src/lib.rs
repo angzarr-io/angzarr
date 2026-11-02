@@ -22,12 +22,12 @@
 //! | [`SnapshotStore`] | the snapshot last written per stream; the caller judges it | base |
 //! | [`PositionStore`] | a handler's next sequence per stream | base |
 //! | [`EventStore::write`] | ONE handling step's atomic write: optionally one stream's events at an expected length, with the step's positions and outbox entries; there is no unit of work | base |
-//! | [`Purge`] | delete a stream | opt-in |
+//! | [`Purge`] | delete a stream, never the positions on it | opt-in |
 //! | [`Editions`] | per-stream forks' administration: `ListEditions`, and removing a stream after its deletion has propagated | opt-in |
 //! | [`ReadStore`] / [`ReadUnit`] | reads that all see one moment | opt-in |
 //! | [`Watch`] | a cheap "anything committed?" | opt-in |
 //! | [`ReadUntilTime`], [`ReadByCorrelation`], [`ListStreams`] | core's queries | opt-in |
-//! | [`ListPositions`] | every stream a handler holds a position on: what it reads when it starts | opt-in |
+//! | [`Processed`] | a driver's record of what its handler processed: every stream it holds a position on, which a purge never touches (14.68) | opt-in |
 //! | [`Outbox`] | the transactional outbox's relay side, kind-agnostic (entries are written in a [`Write`]) | opt-in |
 //! | [`DeadLetterStore`] | dead letters, read and drained per stream or by key (written in a [`Write`]) | opt-in |
 //! | [`Migrations`] | the build's migration set, the store's ledger, `info`, `validate` and `run` (every open runs it) | opt-in |
@@ -83,7 +83,7 @@ pub use migrate::{
 pub use send::{MaybeSend, MaybeSync};
 pub use store::{
     Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions,
-    EventStore, ListPositions, ListStreams, Outbox, OutboxEntry, PositionStore, Purge,
+    EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, Processed, Purge,
     ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Store, Watch, Write,
     Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };

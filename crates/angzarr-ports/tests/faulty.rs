@@ -13,8 +13,8 @@ use angzarr_ports::contract::{command, dead_letter, main_stream, page, snapshot}
 use angzarr_ports::faulty::{At, Fault, FaultyStore, WriteRecord, INJECTED};
 use angzarr_ports::memory::MemoryStore;
 use angzarr_ports::{
-    Cause, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore, ListPositions, ListStreams,
-    PositionKey, PositionStore, Purge, ReadStore, ReadUnit, SnapshotStore, StoreError, StreamRef,
+    Cause, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore, ListStreams, PositionKey,
+    PositionStore, Processed, Purge, ReadStore, ReadUnit, SnapshotStore, StoreError, StreamRef,
     Watch, Write,
 };
 
@@ -395,7 +395,7 @@ async fn every_other_port_is_the_inner_stores() {
     );
     assert_eq!(store.position(key).await.unwrap(), 4);
     assert_eq!(
-        store.list_positions("balances").await.unwrap(),
+        store.processed("balances").await.unwrap(),
         vec![(stream().to_cover(), 4)]
     );
     let mut unit = store.begin_read().await.unwrap();

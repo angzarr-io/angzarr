@@ -92,9 +92,10 @@
 //!   ones as main's.
 //! - **RULED(G) `ListStreams`** is opt-in, required of any backend serving
 //!   angzarr's `QueryService`.
-//! - **RULED `ListPositions`** is opt-in: one handler's positions above 0,
-//!   per stream, in `ListStreams`' order. Nothing orders positions across
-//!   streams beyond that listing order.
+//! - **RULED `Processed`** is opt-in: one handler's record, its positions
+//!   above 0, per stream, in `ListStreams`' order, which a purge never
+//!   touches (14.68). Nothing orders positions across streams beyond that
+//!   listing order.
 //! - **RULED(O1-O6, E2) The outbox:** the entry `{ id, origin, message,
 //!   edition }` (`an_outbox_entry_keeps_its_edition`); an id put again
 //!   while pending keeps its first message, once cleared is a new entry;
@@ -275,9 +276,9 @@ mod list_streams {
     angzarr_ports::store_contract!(list_streams, #[tokio::test], MemoryStore::new());
 }
 
-mod list_positions {
+mod processed {
     use super::*;
-    angzarr_ports::store_contract!(list_positions, #[tokio::test], MemoryStore::new());
+    angzarr_ports::store_contract!(processed, #[tokio::test], MemoryStore::new());
 }
 
 mod outbox {
