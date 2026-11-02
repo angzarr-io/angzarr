@@ -1,0 +1,52 @@
+# cargo-deny: what may enter the shared crates' dependency graph. `just
+# lint-deps` runs it.
+#
+# Every member of this workspace is a shared crate other projects build on,
+# so this file is the machine check that what enters is permissively
+# licensed, comes from crates.io, and has no open RustSec advisory.
+
+[graph]
+# Every feature, judged, not only the default build.
+all-features = true
+
+[advisories]
+version = 2
+# RustSec advisories. An ignore needs the advisory id and why it does not
+# apply here.
+ignore = []
+
+[licenses]
+version = 2
+# The shared crates are Apache-2.0 OR BSD-3-Clause and used as libraries by
+# projects under other licences, so a dependency's licence must be
+# permissive: it must not impose its terms on the shared crates or on what
+# links them. Copyleft is not on this list.
+allow = [
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-3-Clause",
+  "MIT",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# Not ignored: the shared crates are `publish = false`, and their own
+# licences are checked like any other's.
+ignore = false
+
+[bans]
+# Duplicate versions warn, not fail: they are logged by the gate, and most
+# come from upstream trees this workspace does not control.
+multiple-versions = "warn"
+wildcards = "deny"
+# A path dependency has no version; allowed for unpublished crates only.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

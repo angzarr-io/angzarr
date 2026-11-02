@@ -8,8 +8,7 @@ repository = "https://github.com/angzarr-io/angzarr"
 publish = false
 
 # A member of angzarr-core's workspace, with every package field set here:
-# the workspace's [workspace.package] is sererr's (see the root Cargo.toml),
-# not this crate's, so nothing is inherited.
+# the workspace declares no [workspace.package], so nothing is inherited.
 
 [dependencies]
 # Core's messages and its (io.angzarr.v1.reason) option, extern-pathed.

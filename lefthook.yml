@@ -33,37 +33,24 @@ pre-commit:
     check-submodules-clean:
       run: just check-submodules-clean
 
-    # Rust - fmt + clippy + test in a SINGLE container invocation.
-    # Running them as three separate `just _container ...` calls under
-    # rootless docker triggers a `.cargo-lock` permission race because
-    # each container's cargo creates/holds the lockfile on a bind mount
-    # and the next container can't reopen it cleanly. One container,
-    # one cargo lifecycle, no race.
-    rust-precommit:
-      glob: "**/*.rs"
-      # The shared crates are gated by their own checks (below), not by the
-      # root package's container precommit: a change confined to them must
-      # not be judged by an unrelated package.
-      exclude:
-        - "crates/angzarr-diagnostic/**"
-        - "crates/angzarr-proto/**"
-        - "crates/angzarr-proto-component/**"
-        - "crates/angzarr-proto-transport-embedded/**"
-        - "crates/angzarr-proto-transport-distributed/**"
-        - "crates/angzarr-ports/**"
-        - "crates/angzarr-yaml/**"
-        - "crates/angzarr-presentation/**"
-        - "crates/trivial-delegation/**"
-      run: just precommit
-
     # The shared crates' own checks, their lints denied: the root
     # Cargo.toml's [workspace.lints] and crates/clippy.toml are theirs too.
+    # The shared crates are the workspace's only members.
     shared-crates-precommit:
       glob:
-        - "crates/{angzarr-diagnostic,angzarr-proto,angzarr-proto-component,angzarr-proto-transport-embedded,angzarr-proto-transport-distributed,angzarr-ports,angzarr-yaml,angzarr-presentation,trivial-delegation}/**/*.{rs,ftl,toml}"
+        - "crates/{angzarr-diagnostic,angzarr-proto,angzarr-proto-component,angzarr-proto-transport-embedded,angzarr-proto-transport-distributed,angzarr-ports,angzarr-yaml,angzarr-presentation}/**/*.{rs,ftl,toml}"
         - "crates/clippy.toml"
         - "Cargo.toml"
+        - "Cargo.lock"
       run: just check-shared-crates
+
+    # What enters the dependency graph (deny.toml): on a change to it.
+    lint-deps:
+      glob:
+        - "**/Cargo.toml"
+        - "Cargo.lock"
+        - "deny.toml"
+      run: just lint-deps
 
     # Python - runs in container via just (scripts only, client/examples extracted)
     python-fmt:

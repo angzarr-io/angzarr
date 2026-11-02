@@ -85,8 +85,8 @@ fn dependencies(manifest: &str) -> Vec<&str> {
 }
 
 // The diagnostics are angzarr-diagnostic's, whose `Display` is a key and
-// its args, never English. Presentation renders that trait alone, and no
-// other crate of this workspace: not the root package, not a shared crate.
+// its args, never English. Presentation renders that trait alone, and
+// depends on no other crate of this workspace.
 #[test]
 fn test_it_depends_on_no_crate_of_this_workspace_but_angzarr_diagnostic() {
     let workspace = include_str!("../../../Cargo.toml");
@@ -95,7 +95,6 @@ fn test_it_depends_on_no_crate_of_this_workspace_but_angzarr_diagnostic() {
         .map(str::trim)
         .filter_map(|line| line.strip_prefix("\"crates/"))
         .filter_map(|rest| rest.split('"').next())
-        .chain(["angzarr"])
         .filter(|name| *name != "angzarr-diagnostic")
         .collect();
     assert!(

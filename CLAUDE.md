@@ -1,3 +1,22 @@
+## This Repository
+
+angzarr core is a virtual Cargo workspace of the shared crates under
+`crates/` (angzarr-proto, angzarr-proto-component, the two
+angzarr-proto-transport crates, angzarr-ports, angzarr-diagnostic,
+angzarr-yaml, angzarr-presentation), which the router, angzarr-embedded,
+the CLI and the client and example repos depend on by git rev. Each crate
+has its own justfile; the root justfile runs them all:
+
+```bash
+just check-shared-crates   # the whole gate: submodule check, then each crate's check
+just build                 # or fmt-check, lint, test: one step across every crate
+just lint-deps             # cargo-deny (deny.toml)
+```
+
+The old distributed-runtime crate (the root package `angzarr`, its
+coordinator binaries and images) was retired on 2026-11-02. `deploy/`,
+`gateway/` and `docs/` still describe that runtime.
+
 ## General Rules
 
 Correctness over speed. Second priority: reducing reviewer cognitive load.
@@ -29,39 +48,17 @@ CQRS-ES poker system. Player domain: functional aggregates. Others: object-orien
 **Run after every new test.** Tests must kill mutants to be meaningful.
 
 ```bash
-just mutants <file>           # single file
-just mutants-core             # handlers/core
-just mutants-bus              # bus module
-just mutants-orchestration    # saga/aggregate/PM
+just -f crates/<crate>/justfile mutation-test         # the whole crate
+just -f crates/<crate>/justfile mutation-diff <patch> # only the lines a diff changes
 ```
 
-**Host cargo-mutants is FORBIDDEN.** Always invoke via `just`. The host-side
-`mutants*` targets route through `_container-ephemeral`, which mounts the
-workspace read-only and runs `cargo mutants --in-place` against an rsync'd
-copy in the container's writable overlay layer. `--rm` destroys the overlay
-(and any mutated source) on every exit, so a crashed run cannot leak mutated
-files into your working tree. The only host artifact is
-`mutants.out/outcomes.json`, copied out on success.
+**Host cargo-mutants outside `just` is FORBIDDEN.** Each crate's recipes go
+through the root justfile's `shared-mutation`, which has cargo-mutants mutate
+a scratch copy of the workspace under TMPDIR (never `--in-place`), so no
+mutated source reaches the working tree. No git hook runs mutation; the full
+pass runs weekly in CI (`.github/workflows/mutation-shared-crates.yml`).
 
-**Why `--in-place` (inside the copy):** the repo has a git submodule
-(`angzarr-project`). cargo-mutants' copy mode does not init submodules; the
-maintainer recommends `--in-place` for these layouts ([issue #348][m1]). We
-preserve that, but isolate the working tree by running it inside an
-ephemeral container copy of the workspace.
-
-**Cache:** `.mutants-cache/{cargo-home,cargo-target}` (gitignored) holds the
-dep registry and compiled artifacts across runs so mutation iteration is
-fast. It contains NO mutated source — only build artifacts. Purge with
-`just mutants-purge-cache` to reclaim disk.
-
-**Workflow:** Write test → `just mutants <file>` → verify kills via
-`just mutants-summary` → improve or delete if none killed.
-
-[m1]: https://github.com/sourcefrog/cargo-mutants/issues/348
-
-**Exclusions:** Skip `src/proto/`, `*.pb.rs`. DO test `src/proto_ext/` and hand-written proto code.
-
-**Target kill rate: 90%** for all unit-testable code.
+**Target kill rate: 90%** (each crate's `MUTATION_THRESHOLD`).
 
 **Uncaught mutations:** Pure logic → add test. Needs mocking → check integration coverage. Side-effect only (logging) → accept. Framework glue → verify integration path.
 
@@ -75,9 +72,6 @@ Use enum names, not integer representations.
 | Helm | All deployments (no kustomize) |
 | Python | Support scripts, secrets, health checks |
 | Kind | Local k8s (`just kind up/down/status`) |
-| Skaffold | **ALL** image builds/deploys (prevents cache staleness) |
-
-**Skaffold is mandatory.** Kind caches images by tag. Manual `podman build` + `helm upgrade` causes stale images. Skaffold uses content-addressable tags (git SHA).
 
 ## Port Standards
 
@@ -97,9 +91,9 @@ Four levels. **Never** write blank "pass" tests.
 ### Unit Tests
 No external deps. Mock prior state (e.g., `EventBook`). Direct domain logic invocation.
 
-- Core: `.test.rs` alongside source
+- Core: each crate's tests (`crates/<crate>/tests/`, or `.test.rs` alongside source)
 - Examples: `test_*_logic.py`, `*_test.go`, `*.test.rs`
-- Run: `cargo test --lib` or `just test`
+- Run: `just test` (every crate) or `just -f crates/<crate>/justfile test`
 
 **File organization:**
 ```
@@ -114,15 +108,10 @@ src/
 **Unit test:** validation, transforms, state calculations, error formatting.
 **Skip (use integration):** gRPC wrappers, DB ops, file I/O, multi-dependency orchestration.
 
-### Trivial Delegation
-Single-line forwarding functions use `#[trivial_delegation]` to skip mutation/coverage testing. Regenerate exclusions: `cargo xtask gen-mutants-exclude`.
-
 ### Contract Tests
-**Must break the build.** Testcontainers provision real DBs/brokers. Macro-based tests (not Gherkin—framework internals don't benefit from business-readable specs).
-
-- Storage: `tests/storage_*.rs`
-- Bus: `tests/bus_*.rs`
-- Run: `cargo test --test storage_sqlite --features test-utils`
+**Must break the build.** angzarr-ports carries the conformance suite every
+store backend runs (`angzarr_ports::contract` and `store_contract!`, its
+`contract` feature).
 
 ### Acceptance Tests
 Business behavior via Gherkin. Full stack through sagas, PMs, projectors.

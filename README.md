@@ -8,6 +8,26 @@ Angzarr handles the infrastructure complexity of event-sourced systems—event p
 
 **[Full Documentation →](https://angzarr.io/)**
 
+## This Repository
+
+angzarr core holds the shared Rust crates the rest of angzarr builds on, a
+virtual Cargo workspace under `crates/`:
+
+| Crate | What it is |
+|-------|------------|
+| `angzarr-proto` | prost types for core's wire contract (`io.angzarr.v1`) |
+| `angzarr-proto-component` | the component contract: the handler-side services' tonic stubs |
+| `angzarr-proto-transport-embedded` | the local-process transport: the child launch protocol and its reason keys |
+| `angzarr-proto-transport-distributed` | the distributed transport's services, envelopes and reason keys |
+| `angzarr-ports` | the shared storage contract and the conformance suite every backend runs |
+| `angzarr-diagnostic` | localizable errors: a stable code and named data, rendered from a Fluent catalog |
+| `angzarr-yaml` | a strict subset of YAML, versioned documents migrated on read, decoded strictly |
+| `angzarr-presentation` | JSON or text at a driving edge, diagnostics rendered from Fluent catalogs |
+
+The distributed-runtime crate that used to sit at the repository root (the
+coordinator binaries and their images) is retired; `deploy/`, `gateway/` and
+the documentation below still describe it.
+
 ## Supported Languages
 
 Client libraries are provided for the top TIOBE languages:
@@ -26,10 +46,14 @@ Client libraries are provided for the top TIOBE languages:
 ## Quick Start
 
 ```bash
-git clone https://github.com/benjaminabbitt/angzarr
+git clone --recurse-submodules https://github.com/angzarr-io/angzarr
 cd angzarr
-just build && just test
+just check-shared-crates
 ```
+
+Each crate's checks need protoc, the `wasm32-unknown-unknown` target,
+wasm-bindgen-test-runner (`just -f crates/angzarr-ports/justfile tools`) and
+node.
 
 See [Getting Started](https://angzarr.io/getting-started) for full setup including Kubernetes and standalone mode.
 
