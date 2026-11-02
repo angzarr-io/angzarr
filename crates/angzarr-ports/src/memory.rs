@@ -35,7 +35,7 @@ use crate::error::StoreError;
 use crate::migrate::{plan_run, plan_undo, AppliedMigration, Backup, Migration, Migrations};
 use crate::store::{
     Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions,
-    EventStore, ListPositions, ListStreams, Outbox, OutboxEntry, PositionStore, Purge,
+    EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, Processed, Purge,
     ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write, Written,
     EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
@@ -183,12 +183,20 @@ impl Data {
             .map(|(_, letter)| letter)
     }
 
-    /// Remove every row of stream `k`.
-    fn remove(&mut self, k: &Key) -> u64 {
+    /// Remove every row of stream `k` a purge removes: its events (and
+    /// so its command ids), its snapshot and the dead letters about it,
+    /// never the positions on it (decision 14.68).
+    fn purge(&mut self, k: &Key) -> u64 {
         self.snapshots.remove(k);
         self.dead_letters.retain(|(stream, ..), _| stream != k);
-        self.positions.retain(|(stream, _), _| stream != k);
         self.streams.remove(k).map_or(0, |pages| pages.len() as u64)
+    }
+
+    /// Remove every row of stream `k`, the positions on it too: an
+    /// edition's stream removed with its edition (14.32).
+    fn remove(&mut self, k: &Key) -> u64 {
+        self.positions.retain(|(stream, _), _| stream != k);
+        self.purge(k)
     }
 }
 
@@ -484,7 +492,7 @@ impl Purge for MemoryStore {
             return Err(StoreError::conflict(stream, expected, head));
         }
         let data = Arc::make_mut(&mut guard);
-        let deleted = data.remove(&k);
+        let deleted = data.purge(&k);
         data.commits += 1;
         Ok(deleted)
     }
@@ -745,8 +753,8 @@ impl ListStreams for MemoryStore {
     }
 }
 
-impl ListPositions for MemoryStore {
-    async fn list_positions(&self, handler: &str) -> Result<Vec<(Cover, u64)>, StoreError> {
+impl Processed for MemoryStore {
+    async fn processed(&self, handler: &str) -> Result<Vec<(Cover, u64)>, StoreError> {
         Ok(self
             .data()
             .positions

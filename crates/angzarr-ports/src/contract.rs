@@ -38,7 +38,7 @@
 //! | `until_time` | [`ReadUntilTime`] | a store |
 //! | `correlation` | [`ReadByCorrelation`] | a store |
 //! | `list_streams` | [`ListStreams`] | a store |
-//! | `list_positions` | [`ListPositions`] | a store |
+//! | `processed` | [`Processed`] (and [`Purge`]) | a store |
 //! | `outbox` | [`Outbox`] | a store |
 //! | `outbox_watch` | [`Outbox`], [`Watch`] | a store |
 //! | `dead_letters` | [`DeadLetterStore`] | a store |
@@ -77,7 +77,7 @@ use crate::error::StoreError;
 use crate::migrate::{latest, AppliedMigration, Backup, Migration, MigrationStatus, Migrations};
 use crate::store::{
     Append, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions, EventStore,
-    ListPositions, ListStreams, Outbox, OutboxEntry, Purge, ReadByCorrelation, ReadStore, ReadUnit,
+    ListStreams, Outbox, OutboxEntry, Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit,
     ReadUntilTime, Store, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
     EDITION_DELETED_TYPE_URL,
 };
@@ -1155,9 +1155,10 @@ where
     );
 }
 
-/// A purged stream starts again at 0; a position on it would skip the new
-/// events, so it goes too (ruling 10).
-pub async fn a_purge_deletes_the_streams_positions<S>(store: S)
+/// A purge never touches the positions on its stream: they are its
+/// drivers' record of what their handlers processed, by which a driver
+/// finds the stream gone (decision 14.68).
+pub async fn a_purge_keeps_the_streams_positions<S>(store: S)
 where
     S: Store + Purge,
 {
@@ -1168,8 +1169,8 @@ where
     put(&store, key("b", s), 1).await.unwrap();
     put(&store, key("a", kept), 4).await.unwrap();
     store.purge(s, 1).await.unwrap();
-    assert_eq!(store.position(key("a", s)).await, Ok(0));
-    assert_eq!(store.position(key("b", s)).await, Ok(0));
+    assert_eq!(store.position(key("a", s)).await, Ok(1));
+    assert_eq!(store.position(key("b", s)).await, Ok(1));
     assert_eq!(
         store.position(key("a", kept)).await,
         Ok(4),
@@ -1251,7 +1252,8 @@ async fn purge_fixture<S: Store>(store: &S, s: StreamRef<'_>) {
     put(store, key("a", s), 2).await.unwrap();
 }
 
-/// 14.43: a purge at the head its caller read removes the stream whole.
+/// 14.43: a purge at the head its caller read removes the stream whole, but
+/// for its drivers' record of it, the positions on it (14.68).
 pub async fn a_purge_at_the_streams_head_removes_it<S>(store: S)
 where
     S: Store + Purge,
@@ -1261,7 +1263,11 @@ where
     let read = store.read(s, 0, None).await.unwrap().next_sequence;
     assert_eq!(store.purge(s, read).await, Ok(2), "at the head it read");
     assert_gone(&store, s, "purged at its head").await;
-    assert_eq!(store.position(key("a", s)).await, Ok(0), "its position");
+    assert_eq!(
+        store.position(key("a", s)).await,
+        Ok(2),
+        "its position kept"
+    );
 }
 
 /// 14.43: a purge at any head but the stream's is refused as a conflict
@@ -1337,9 +1343,9 @@ where
     assert_gone(&store, s, "purged once").await;
 }
 
-/// 14.43: the positions on a stream go with it only when its purge lands; a
-/// refused purge leaves every handler where it was.
-pub async fn a_purge_removes_positions_only_when_it_lands<S>(store: S)
+/// 14.43 and 14.68: a purge never takes the positions on its stream, refused
+/// or landed: every handler stays where it was.
+pub async fn a_purge_never_takes_the_positions_on_its_stream<S>(store: S)
 where
     S: Store + Purge,
 {
@@ -1363,8 +1369,8 @@ where
             store.position(key("a", s)).await,
             store.position(key("b", s)).await
         ),
-        (Ok(0), Ok(0)),
-        "a purge that lands removes them"
+        (Ok(2), Ok(1)),
+        "a purge that lands keeps them"
     );
     assert_eq!(
         store.position(key("a", kept)).await,
@@ -2288,12 +2294,12 @@ where
     );
 }
 
-/// A handler's positions, every stream it holds one on above 0, in
-/// `list_streams`' order; another handler's, and one put back to 0, are
-/// not among them.
-pub async fn list_positions_is_a_handlers_positions_in_stream_order<S>(store: S)
+/// A handler's record, every stream it holds a position on above 0, in
+/// `list_streams`' order; another handler's, and one put back to 0 (a
+/// stream forgotten), are not among them.
+pub async fn processed_is_a_handlers_record_in_stream_order<S>(store: S)
 where
-    S: Store + ListPositions,
+    S: Store + Processed,
 {
     let streams = [
         main_stream("ledger", 1),
@@ -2315,7 +2321,7 @@ where
         .await
         .unwrap();
     assert_eq!(
-        store.list_positions("h").await,
+        store.processed("h").await,
         Ok(vec![
             (main_stream("account", 1).to_cover(), 4),
             (main_stream("account", 2).to_cover(), 3),
@@ -2323,7 +2329,31 @@ where
             (main_stream("ledger", 1).to_cover(), 1),
         ])
     );
-    assert_eq!(store.list_positions("nobody").await, Ok(vec![]));
+    assert_eq!(store.processed("nobody").await, Ok(vec![]));
+}
+
+/// 14.68: a handler's record of a stream outlives the stream's purge, so
+/// its driver, comparing the record with the store's listing, finds the
+/// stream gone; forgotten (its position put back to 0), it is out of the
+/// record.
+pub async fn a_handlers_record_outlives_a_purge_until_forgotten<S>(store: S)
+where
+    S: Store + Purge + Processed + ListStreams,
+{
+    let s = main_stream("account", 1);
+    append(&store, s, 0, &[page(0, 1), page(1, 1)])
+        .await
+        .unwrap();
+    put(&store, key("h", s), 2).await.unwrap();
+    store.purge(s, 2).await.unwrap();
+    assert_eq!(store.processed("h").await, Ok(vec![(s.to_cover(), 2)]));
+    assert_eq!(
+        store.list_streams().await,
+        Ok(vec![]),
+        "the store lists it no more"
+    );
+    put(&store, key("h", s), 0).await.unwrap();
+    assert_eq!(store.processed("h").await, Ok(vec![]), "forgotten");
 }
 
 // ------------------------------------------------------------ outbox (opt-in)
@@ -3578,13 +3608,13 @@ macro_rules! store_contract {
     (purge, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             a_purge_deletes_a_streams_events_snapshot_and_command_ids,
-            a_purge_deletes_the_streams_positions,
+            a_purge_keeps_the_streams_positions,
             a_purge_deletes_a_snapshot_with_no_events,
             a_purged_stream_starts_again_from_nothing,
             a_purge_at_the_streams_head_removes_it,
             a_purge_at_a_stale_head_is_a_conflict_and_removes_nothing,
             a_purge_of_an_absent_stream_is_at_zero,
-            a_purge_removes_positions_only_when_it_lands,
+            a_purge_never_takes_the_positions_on_its_stream,
             a_purge_of_a_forked_stream_is_guarded_by_its_head_as_read,
         );
     };
@@ -3647,9 +3677,10 @@ macro_rules! store_contract {
             list_streams_is_every_domains_covers_in_order,
         );
     };
-    (list_positions, $(#[$t:meta])+, $f:expr) => {
+    (processed, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
-            list_positions_is_a_handlers_positions_in_stream_order,
+            processed_is_a_handlers_record_in_stream_order,
+            a_handlers_record_outlives_a_purge_until_forgotten,
         );
     };
     (outbox, $(#[$t:meta])+, $f:expr) => {

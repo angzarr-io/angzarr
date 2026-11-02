@@ -208,20 +208,23 @@ impl<T: EventStore + SnapshotStore + PositionStore + ?Sized> Store for T {}
 
 // ================================================================== purge
 
-/// Opt-in: delete a stream, its snapshot, its command ids, every
-/// handler's position on it and the dead letters about it
-/// ([`DeadLetterStore`]). It restarts at 0. Its own call.
+/// Opt-in: delete a stream, its snapshot, its command ids and the dead
+/// letters about it ([`DeadLetterStore`]). It restarts at 0. Its own call.
+/// The positions on it stay: they are its drivers' record of what their
+/// handlers processed ([`Processed`]), which a purge never touches
+/// (decision 14.68); a driver finds the stream gone by its listing and
+/// forgets it.
 ///
 /// **Guarded by the head the caller read** (14.43). A purge is a
 /// decision made on a read: the stream is deleted only if it is still at
 /// `expected`, its head as [`EventStore::read`] gives it (the same length a
 /// [`Write`]'s `expected` is checked against). Otherwise it is refused
 /// [`StoreError::Conflict`], `actual` the head it found, and NOTHING is
-/// removed: not its events, snapshot, command ids, positions or dead
-/// letters. A conflict
+/// removed: not its events, snapshot, command ids or dead letters. A
+/// conflict
 /// is retried as a write's is: re-read, decide again.
 /// - An absent stream is at 0: a purge at 0 removes whatever it still
-///   holds (a snapshot, positions) and answers 0; a purge at more is a
+///   holds (a snapshot, dead letters) and answers 0; a purge at more is a
 ///   conflict (a racing purge got there first).
 /// - An edition stream's head is its head as read (main's events below its
 ///   fork, then its own); a purge removes only its own rows, never main's,
@@ -380,15 +383,20 @@ pub trait ListStreams: MaybeSend + MaybeSync {
     fn list_streams(&self) -> impl Future<Output = Result<Vec<Cover>, StoreError>> + MaybeSend;
 }
 
-/// Opt-in: every stream one handler holds a position on, with the
-/// position. What a handler that keeps its positions in the store reads
-/// when it starts, to know the streams it was handed before: one the store
-/// no longer holds is gone (purged) since. It answers every stream whose
-/// [`PositionStore::position`] for `handler` is above 0 (0 is no position:
-/// what an unwritten one reads as), with that position, in [`ListStreams`]'
-/// order: by domain, then main first, then by edition and root.
-pub trait ListPositions: MaybeSend + MaybeSync {
-    fn list_positions(
+/// Opt-in: a driver's record of what its handler (a projector, a policy:
+/// a saga) has processed, the one capability every driver keeps it
+/// through (decision 14.68): every stream the handler has seen, with where
+/// it is on each, its [`PositionStore::position`]. The record is the
+/// driver's own. A [`Purge`] never touches it, so a driver finds a stream
+/// gone by comparing its record with [`ListStreams`], hands its handler
+/// the stream's gone book, then forgets the stream by writing its position
+/// back to 0. It answers every stream whose position for `handler` is
+/// above 0 (0 is no position: what an unwritten or forgotten one reads
+/// as), with that position, in [`ListStreams`]' order: by domain, then main
+/// first, then by edition and root. A distributed coordinator keeps it
+/// durably; a driver may hold one of its own in memory.
+pub trait Processed: MaybeSend + MaybeSync {
+    fn processed(
         &self,
         handler: &str,
     ) -> impl Future<Output = Result<Vec<(Cover, u64)>, StoreError>> + MaybeSend;

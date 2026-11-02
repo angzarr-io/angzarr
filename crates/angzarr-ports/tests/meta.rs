@@ -31,7 +31,7 @@ use angzarr_ports::contract;
 use angzarr_ports::memory::{MemoryRead, MemoryStore};
 use angzarr_ports::{
     Append, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore, Head,
-    ListPositions, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge,
+    ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge,
     ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
     StreamRef, Uuid, Watch, Write, Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
@@ -96,8 +96,8 @@ enum Bug {
     // ---- purge
     /// A purge keeps the snapshot.
     PurgeKeepsSnapshot,
-    /// A purge keeps the stream's positions.
-    PurgeKeepsPositions,
+    /// A purge takes the stream's positions.
+    PurgeTakesPositions,
     /// A purge deletes nothing, and says it did.
     PurgeIsANoOp,
     /// A purge ignores the head it expects: a stale one still deletes.
@@ -178,12 +178,12 @@ enum Bug {
     CorrelationIgnoresEdition,
     /// `list_streams` orders by root first.
     ListStreamsByRoot,
-    /// `list_positions` answers every handler's positions.
-    ListPositionsAnyHandler,
-    /// `list_positions` answers a position put back to 0.
-    ListPositionsKeepsZero,
-    /// `list_positions` answers the streams in reverse.
-    ListPositionsReversed,
+    /// `processed` answers every handler's positions.
+    ProcessedAnyHandler,
+    /// `processed` answers a position put back to 0.
+    ProcessedKeepsZero,
+    /// `processed` answers the streams in reverse.
+    ProcessedReversed,
     // ---- outbox
     /// An outbox entry loses its edition.
     OutboxDropsEdition,
@@ -999,8 +999,8 @@ impl Purge for Broken {
         let expected = self.purge_guard(stream, expected).await?;
         let snapshot = self.inner.read_snapshot(stream).await?;
         let letters = self.letters_kept(stream, Bug::PurgeKeepsLetters).await;
-        let kept = match self.bug {
-            Bug::PurgeKeepsPositions => self.positions_on(stream).await?,
+        let taken = match self.bug {
+            Bug::PurgeTakesPositions => self.positions_on(stream).await?,
             _ => Vec::new(),
         };
         let deleted = match self.inner.purge(stream, expected).await {
@@ -1014,7 +1014,8 @@ impl Purge for Broken {
             self.inner.write_snapshot(stream, &s).await?;
         }
         self.put_back(&letters).await?;
-        self.put_positions(stream, kept).await?;
+        let zeroed = taken.into_iter().map(|(handler, _)| (handler, 0));
+        self.put_positions(stream, zeroed.collect()).await?;
         Ok(deleted)
     }
 }
@@ -1195,9 +1196,9 @@ impl ListStreams for Broken {
     }
 }
 
-impl ListPositions for Broken {
-    async fn list_positions(&self, handler: &str) -> Result<Vec<(Cover, u64)>, StoreError> {
-        let mut listed = self.inner.list_positions(handler).await?;
+impl Processed for Broken {
+    async fn processed(&self, handler: &str) -> Result<Vec<(Cover, u64)>, StoreError> {
+        let mut listed = self.inner.processed(handler).await?;
         let puts = self.shared.positions.lock().unwrap().clone();
         for (of, stream) in puts {
             let key = PositionKey {
@@ -1206,15 +1207,15 @@ impl ListPositions for Broken {
             };
             let next = self.inner.position(key).await?;
             let stray = match self.bug {
-                Bug::ListPositionsAnyHandler => of != handler && next > 0,
-                Bug::ListPositionsKeepsZero => of == handler && next == 0,
+                Bug::ProcessedAnyHandler => of != handler && next > 0,
+                Bug::ProcessedKeepsZero => of == handler && next == 0,
                 _ => false,
             };
             if stray {
                 listed.push((stream.get().to_cover(), next));
             }
         }
-        if self.is(Bug::ListPositionsReversed) {
+        if self.is(Bug::ProcessedReversed) {
             listed.reverse();
         }
         Ok(listed)
@@ -1549,9 +1550,9 @@ fn the_purge_checks_catch_what_a_purge_leaves() {
         PurgeIsANoOp,
     );
     catches!(
-        a_purge_deletes_the_streams_positions,
+        a_purge_keeps_the_streams_positions,
         broken,
-        PurgeKeepsPositions
+        PurgeTakesPositions
     );
     catches!(
         a_purge_deletes_a_snapshot_with_no_events,
@@ -1572,7 +1573,7 @@ fn the_purge_head_checks_catch_an_unguarded_purge() {
         broken,
         PurgeIsANoOp,
         PurgeKeepsSnapshot,
-        PurgeKeepsPositions,
+        PurgeTakesPositions,
     );
     catches!(
         a_purge_at_a_stale_head_is_a_conflict_and_removes_nothing,
@@ -1588,10 +1589,10 @@ fn the_purge_head_checks_catch_an_unguarded_purge() {
         PurgeIsANoOp,
     );
     catches!(
-        a_purge_removes_positions_only_when_it_lands,
+        a_purge_never_takes_the_positions_on_its_stream,
         broken,
         RefusedPurgeTakesPositions,
-        PurgeKeepsPositions,
+        PurgeTakesPositions,
         PurgeIgnoresTheHead,
     );
     catches!(
@@ -1783,11 +1784,17 @@ fn the_core_read_checks_catch_a_wrong_bound_filter_or_order() {
         ListStreamsByRoot
     );
     catches!(
-        list_positions_is_a_handlers_positions_in_stream_order,
+        processed_is_a_handlers_record_in_stream_order,
         broken,
-        ListPositionsAnyHandler,
-        ListPositionsKeepsZero,
-        ListPositionsReversed,
+        ProcessedAnyHandler,
+        ProcessedKeepsZero,
+        ProcessedReversed,
+    );
+    catches!(
+        a_handlers_record_outlives_a_purge_until_forgotten,
+        broken,
+        PurgeTakesPositions,
+        ProcessedKeepsZero,
     );
 }
 
@@ -1873,13 +1880,13 @@ fn an_honest_broken_store_passes_every_check() {
         a_position_is_zero_until_put_then_the_last_put,
         positions_are_per_handler_and_per_stream,
         a_purge_deletes_a_streams_events_snapshot_and_command_ids,
-        a_purge_deletes_the_streams_positions,
+        a_purge_keeps_the_streams_positions,
         a_purge_deletes_a_snapshot_with_no_events,
         a_purged_stream_starts_again_from_nothing,
         a_purge_at_the_streams_head_removes_it,
         a_purge_at_a_stale_head_is_a_conflict_and_removes_nothing,
         a_purge_of_an_absent_stream_is_at_zero,
-        a_purge_removes_positions_only_when_it_lands,
+        a_purge_never_takes_the_positions_on_its_stream,
         a_purge_of_a_forked_stream_is_guarded_by_its_head_as_read,
         list_editions_derives_each_edition_from_its_fork_events,
         an_edition_deletion_is_recorded_like_any_event,
@@ -1894,7 +1901,8 @@ fn an_honest_broken_store_passes_every_check() {
         read_until_time_is_the_prefix_recorded_by_then,
         read_by_correlation_gives_one_book_per_stream,
         list_streams_is_every_domains_covers_in_order,
-        list_positions_is_a_handlers_positions_in_stream_order,
+        processed_is_a_handlers_record_in_stream_order,
+        a_handlers_record_outlives_a_purge_until_forgotten,
         an_outbox_entry_lands_with_its_write_or_not_at_all,
         the_outbox_drains_each_stream_in_order_and_clears,
         a_pending_entry_is_redelivered_until_cleared,
