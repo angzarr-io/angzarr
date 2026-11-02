@@ -8,9 +8,11 @@
 //! angzarr-core's proto crates' build scripts (`#[path]`).
 //!
 //! From them it writes `$OUT_DIR/reason_args.rs`, included in `v1`: an
-//! `args()` per enum, an exhaustive match on its variants (so a value the
-//! spec adds without a variant here fails to compile, never silently has no
-//! args), and the `reason_args` module, one constant per distinct arg name.
+//! `args()` and a `status()` per enum, each an exhaustive match on its
+//! variants (so a value the spec adds without a variant here fails to
+//! compile, never silently has no args or status), and the `reason_args`
+//! module, one constant per distinct arg name. The status is the option's
+//! `status` (decision 14.65), the one table a runtime raises a key under.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -25,34 +27,41 @@ const PREFIXES: [(&str, &str); 3] = [
     ("CoordinatorReason", "COORDINATOR_REASON_"),
 ];
 
+/// Core's reasons.proto, under the proto root: it declares `ReasonStatus`.
+const CORE_REASONS: &str = "io/angzarr/v1/reasons.proto";
+
 /// The `(io.angzarr.v1.reason)` extension's field number on
 /// `EnumValueOptions`.
 const REASON_OPTION: u64 = 50109;
 
-/// One enum value: its full name, its number, and its declared args
-/// (`None` where the option is absent).
+/// One enum value: its full name, its number, its declared args and its
+/// declared status's number (`None` where the option is absent; a status
+/// of 0 where the option sets none).
 struct Value {
     name: String,
     number: u64,
     args: Option<Vec<String>>,
+    status: u64,
 }
 
 /// An `EnumValueDescriptorProto`: name 1, number 2, options 3; the
-/// options' extension holds a `ReasonOptions`, whose args are field 1.
+/// options' extension holds a `ReasonOptions`, whose args are field 1 and
+/// status field 2.
 fn value(buf: &[u8]) -> Value {
     let number = varints(buf, 2).next().unwrap_or(0);
-    let args = messages(buf, 3)
+    let reason = messages(buf, 3)
         .flat_map(|options| messages(options, REASON_OPTION).collect::<Vec<_>>())
-        .last()
-        .map(|reason| {
-            messages(reason, 1)
-                .map(|arg| String::from_utf8(arg.to_vec()).expect("a UTF-8 arg name"))
-                .collect()
-        });
+        .last();
+    let args = reason.map(|reason| {
+        messages(reason, 1)
+            .map(|arg| String::from_utf8(arg.to_vec()).expect("a UTF-8 arg name"))
+            .collect()
+    });
     Value {
         name: text(buf, 1),
         number,
         args,
+        status: reason.and_then(|r| varints(r, 2).last()).unwrap_or(0),
     }
 }
 
@@ -84,8 +93,10 @@ fn variant(name: &str, prefix: &str) -> String {
         .collect()
 }
 
-/// One enum's `impl` with its `args()`.
-fn write_enum(out: &mut String, name: &str, prefix: &str, values: &[Value]) {
+/// One enum's `impl` with its `args()` and its `status()`, a status named
+/// by the path `status_type` (core's `ReasonStatus`, from the package the
+/// code is included in).
+fn write_enum(out: &mut String, name: &str, prefix: &str, values: &[Value], status_type: &str) {
     writeln!(out, "impl {name} {{").unwrap();
     writeln!(
         out,
@@ -112,7 +123,37 @@ fn write_enum(out: &mut String, name: &str, prefix: &str, values: &[Value]) {
         )
         .unwrap();
     }
-    out.push_str("        }\n    }\n}\n\n");
+    out.push_str("        }\n    }\n\n");
+    writeln!(
+        out,
+        "    /// The gRPC status the key travels with, as its\n    \
+         /// `(io.angzarr.v1.reason)` option declares it in reasons.proto\n    \
+         /// (decision 14.65); `UNSPECIFIED` for `UNSPECIFIED`, which is\n    \
+         /// never answered.\n    \
+         pub fn status(self) -> {status_type} {{\n        let number = match self {{"
+    )
+    .unwrap();
+    for v in values {
+        let status = match (v.status, v.number) {
+            (_, 0) => 0,
+            (0, _) => panic!(
+                "{} declares no status: reasons.proto's live keys each declare one (decision 14.65)",
+                v.name
+            ),
+            (status, _) => status,
+        };
+        writeln!(
+            out,
+            "            Self::{} => {status},",
+            variant(&v.name, prefix)
+        )
+        .unwrap();
+    }
+    writeln!(
+        out,
+        "        }};\n        {status_type}::try_from(number).expect(\"a ReasonStatus value\")\n    }}\n}}\n"
+    )
+    .unwrap();
 }
 
 /// The constants module: one `pub const` per distinct arg name.
@@ -135,15 +176,22 @@ fn write_names(out: &mut String, names: &BTreeSet<String>) {
 }
 
 /// `reason_args.rs` for the key enums `enums` of the reasons.proto at
-/// `path` in the encoded descriptor set `set`.
+/// `path` in the encoded descriptor set `set`. Core's statuses are in scope
+/// in core's own `v1`; a transport's code names them through its
+/// angzarr-proto dependency.
 pub fn generate(set: &[u8], path: &str, enums: &[&str]) -> String {
+    let status_type = if path == CORE_REASONS {
+        "ReasonStatus"
+    } else {
+        "::angzarr_proto::v1::ReasonStatus"
+    };
     let found = read(set, path);
     let names_found: Vec<&str> = found.iter().map(|(n, _, _)| n.as_str()).collect();
     assert_eq!(names_found, enums, "{path}'s key enums");
     let mut out = String::new();
     let mut names = BTreeSet::new();
     for (name, prefix, values) in &found {
-        write_enum(&mut out, name, prefix, values);
+        write_enum(&mut out, name, prefix, values, status_type);
         names.extend(values.iter().flat_map(|v| v.args.iter().flatten().cloned()));
     }
     write_names(&mut out, &names);

@@ -119,3 +119,19 @@ fn the_package_imports_only_core_and_declares_no_service() {
         }
     }
 }
+
+// Decision 14.65: a key's status is its option's, in core's ReasonStatus.
+#[test]
+fn a_keys_status_is_its_options() {
+    use angzarr_proto::v1::ReasonStatus;
+    assert_eq!(
+        HostReason::HandshakeMalformed.status(),
+        ReasonStatus::Internal
+    );
+    assert_eq!(HostReason::ChildNotExited.status(), ReasonStatus::Internal);
+    assert_eq!(
+        HostReason::ProbeInput.status(),
+        ReasonStatus::InvalidArgument
+    );
+    assert_eq!(HostReason::Unspecified.status(), ReasonStatus::Unspecified);
+}

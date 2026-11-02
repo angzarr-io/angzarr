@@ -186,11 +186,18 @@ fn every_enum_reserves_every_retired_key() {
     let set = descriptor();
     let file = &set.file[0];
     let enums: BTreeSet<&str> = file.enum_type.iter().map(|e| e.name()).collect();
+    // The key enums, and the statuses they declare (decision 14.65).
     assert_eq!(
         enums,
-        ["CoordinatorReason", "HostReason", "RouterReason"].into()
+        [
+            "CoordinatorReason",
+            "HostReason",
+            "ReasonStatus",
+            "RouterReason"
+        ]
+        .into()
     );
-    for e in &file.enum_type {
+    for e in file.enum_type.iter().filter(|e| e.name() != "ReasonStatus") {
         let prefix = match e.name() {
             "RouterReason" => "ROUTER_REASON_",
             "HostReason" => "HOST_REASON_",

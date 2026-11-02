@@ -69,3 +69,21 @@ fn the_catalog_is_the_specs_file_with_a_message_per_key() {
     let keys: BTreeSet<&str> = every_key().into_iter().map(|(k, _)| k).collect();
     assert_eq!(ids, keys);
 }
+
+// Decision 14.65: a key's status is its option's, in core's ReasonStatus.
+#[test]
+fn a_keys_status_is_its_options() {
+    use angzarr_proto::v1::ReasonStatus;
+    assert_eq!(
+        CoordinatorReason::ComponentNotRegistered.status(),
+        ReasonStatus::Unavailable
+    );
+    assert_eq!(
+        CoordinatorReason::CommandsNotServed.status(),
+        ReasonStatus::Unimplemented
+    );
+    assert_eq!(
+        CoordinatorReason::PayloadUnavailable.status(),
+        ReasonStatus::Unavailable
+    );
+}

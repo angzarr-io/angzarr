@@ -66,18 +66,18 @@ fn a_keys_args_are_its_options() {
     assert_eq!(HostReason::NoComponentsRegistered.args(), &[] as &[&str]);
     assert_eq!(
         CoordinatorReason::RulesVersionMismatch.args(),
-        &["component", "registered", "reported"]
+        &["stream", "component", "registered", "reported"]
     );
     assert_eq!(
         CoordinatorReason::ExpectedSequenceStale.args(),
-        &["expected", "actual"]
+        &["stream", "expected", "actual"]
     );
 }
 
 #[test]
 fn a_key_with_no_args_and_unspecified_have_none() {
     assert!(RouterReason::HandlerPanicked.args().is_empty());
-    assert!(CoordinatorReason::ConflictUnresolved.args().is_empty());
+    assert!(CoordinatorReason::RefusalFactAddressed.args().is_empty());
     assert!(RouterReason::Unspecified.args().is_empty());
     assert!(HostReason::Unspecified.args().is_empty());
     assert!(CoordinatorReason::Unspecified.args().is_empty());
@@ -123,6 +123,7 @@ fn every_declared_name_has_its_constant() {
         reason_args::DESCRIBED,
         reason_args::DOMAIN,
         reason_args::EDITION,
+        reason_args::EVENT_STREAM,
         reason_args::EXPECTED,
         reason_args::EXPECTED_DOMAIN,
         reason_args::EXPECTED_EDITION,
@@ -140,6 +141,7 @@ fn every_declared_name_has_its_constant() {
         reason_args::REPORTED,
         reason_args::SEQUENCE,
         reason_args::STATE_TYPE_URL,
+        reason_args::STREAM,
         reason_args::TYPE_URL,
         reason_args::UPCAST_TYPE_URL,
         reason_args::WINDOW_UNITS,
@@ -173,6 +175,134 @@ fn the_generator_reproduces_the_generated_code() {
     assert!(generated.contains("Self::RefusalFactNotAFact => &[],"));
     assert!(generated.contains("    pub const EXT_ERR_TXT: &str = \"ext_err_txt\";"));
     assert_eq!(generated.matches("pub const fn args").count(), 3);
+    assert_eq!(
+        generated
+            .matches("pub fn status(self) -> ReasonStatus")
+            .count(),
+        3
+    );
+    assert!(generated.contains("Self::PersistedEventCorrupt => 15,"));
+}
+
+// Decision 14.65: a key's status is its option's, read off the descriptor;
+// READINESS for a readiness refusal, which never travels as a status.
+#[test]
+fn a_keys_status_is_its_options() {
+    use angzarr_proto::v1::ReasonStatus;
+    let pinned = [
+        (
+            RouterReason::PersistedEventCorrupt.status(),
+            ReasonStatus::DataLoss,
+        ),
+        (
+            RouterReason::NoComponentOfKind.status(),
+            ReasonStatus::Unimplemented,
+        ),
+        (
+            RouterReason::CommandRefused.status(),
+            ReasonStatus::FailedPrecondition,
+        ),
+        (
+            RouterReason::UnhandledHandlerError.status(),
+            ReasonStatus::Internal,
+        ),
+        (
+            HostReason::NoComponentsRegistered.status(),
+            ReasonStatus::Internal,
+        ),
+        (
+            CoordinatorReason::ExpectedSequenceStale.status(),
+            ReasonStatus::Aborted,
+        ),
+        (
+            CoordinatorReason::ExpectedSequenceAhead.status(),
+            ReasonStatus::InvalidArgument,
+        ),
+        (
+            CoordinatorReason::HandlerUnavailable.status(),
+            ReasonStatus::Unavailable,
+        ),
+        (
+            CoordinatorReason::MissingRulesVersion.status(),
+            ReasonStatus::Readiness,
+        ),
+        (
+            CoordinatorReason::EventsNotItsStream.status(),
+            ReasonStatus::Internal,
+        ),
+        (
+            CoordinatorReason::EditionNotForked.status(),
+            ReasonStatus::FailedPrecondition,
+        ),
+        (
+            CoordinatorReason::Unspecified.status(),
+            ReasonStatus::Unspecified,
+        ),
+    ];
+    for (status, expected) in pinned {
+        assert_eq!(status, expected);
+    }
+    assert_eq!(
+        ReasonStatus::Internal as i32,
+        13,
+        "a status is its google.rpc.Code number"
+    );
+}
+
+#[test]
+fn every_live_key_declares_a_status() {
+    fn live<E: TryFrom<i32> + Copy>(
+        name: fn(E) -> &'static str,
+        status: fn(E) -> angzarr_proto::v1::ReasonStatus,
+    ) -> Vec<(&'static str, angzarr_proto::v1::ReasonStatus)> {
+        (1..=64)
+            .filter_map(|n| E::try_from(n).ok())
+            .map(|e| (name(e), status(e)))
+            .collect()
+    }
+    let mut keys = live::<RouterReason>(|r| r.as_str_name(), RouterReason::status);
+    keys.extend(live::<HostReason>(|r| r.as_str_name(), HostReason::status));
+    keys.extend(live::<CoordinatorReason>(
+        |r| r.as_str_name(),
+        CoordinatorReason::status,
+    ));
+    for (key, status) in keys {
+        assert_ne!(
+            status,
+            angzarr_proto::v1::ReasonStatus::Unspecified,
+            "{key}"
+        );
+    }
+}
+
+// Decision 14.65: the coordinator's keys that concern one stream name it
+// first.
+#[test]
+fn a_key_of_one_stream_names_it_first() {
+    for key in [
+        CoordinatorReason::ConflictUnresolved,
+        CoordinatorReason::ConflictOverlap,
+        CoordinatorReason::PmNoInstance,
+        CoordinatorReason::ExpectedSequenceStale,
+        CoordinatorReason::RetryCapExhausted,
+        CoordinatorReason::ExpectedSequenceAhead,
+        CoordinatorReason::EditionRemovalFailed,
+        CoordinatorReason::HandlerUnavailable,
+        CoordinatorReason::StoreConflict,
+        CoordinatorReason::RulesVersionMismatch,
+        CoordinatorReason::EventsNotItsStream,
+        CoordinatorReason::EditionNotForked,
+    ] {
+        assert_eq!(key.args().first(), Some(&reason_args::STREAM), "{key:?}");
+    }
+    assert_eq!(
+        CoordinatorReason::EventsNotItsStream.args(),
+        &[reason_args::STREAM, reason_args::EVENT_STREAM]
+    );
+    assert_eq!(
+        CoordinatorReason::EditionNotForked.args(),
+        &[reason_args::STREAM, reason_args::EDITION]
+    );
 }
 
 /// A descriptor set holding only `reasons.proto` with `enums`, encoded.
