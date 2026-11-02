@@ -20,6 +20,7 @@
 
 use std::fmt;
 
+use angzarr_diagnostic::code;
 use angzarr_proto::v1::Cover;
 
 /// Why a store refused or failed. A refusal it is sure of and a failure to
@@ -306,29 +307,29 @@ impl StoreError {
     /// reused.
     pub fn code(&self) -> &'static str {
         match self {
-            StoreError::Conflict { .. } => "angzarr-ports-store-conflict",
-            StoreError::Discontinuous { .. } => "angzarr-ports-store-discontinuous",
-            StoreError::MalformedStream { .. } => "angzarr-ports-store-malformed-stream",
-            StoreError::MalformedCreation { .. } => "angzarr-ports-store-malformed-creation",
-            StoreError::Unavailable(_) => "angzarr-ports-store-unavailable",
-            StoreError::Unreadable { .. } => "angzarr-ports-store-unreadable",
-            StoreError::DeadLetterUnreadable { .. } => "angzarr-ports-store-dead-letter-unreadable",
-            StoreError::UnknownEdition { .. } => "angzarr-ports-store-unknown-edition",
-            StoreError::EditionNameRequired => "angzarr-ports-edition-name-required",
-            StoreError::EditionNotFound { .. } => "angzarr-ports-edition-not-found",
-            StoreError::EditionNotForked { .. } => "angzarr-ports-store-edition-not-forked",
-            StoreError::EditionAlreadyForked { .. } => "angzarr-ports-store-edition-already-forked",
-            StoreError::EditionNotDeleted { .. } => "angzarr-ports-store-edition-not-deleted",
-            StoreError::EditionNotPropagated { .. } => "angzarr-ports-store-edition-not-propagated",
-            StoreError::NewerThanBuild { .. } => "angzarr-ports-store-newer-than-build",
-            StoreError::MigrationFailed { .. } => "angzarr-ports-store-migration-failed",
-            StoreError::MigrationChanged { .. } => "angzarr-ports-store-migration-changed",
-            StoreError::MigrationMissing { .. } => "angzarr-ports-store-migration-missing",
-            StoreError::MigrationUnknown { .. } => "angzarr-ports-store-migration-unknown",
+            StoreError::Conflict { .. } => code!("store-conflict"),
+            StoreError::Discontinuous { .. } => code!("store-discontinuous"),
+            StoreError::MalformedStream { .. } => code!("store-malformed-stream"),
+            StoreError::MalformedCreation { .. } => code!("store-malformed-creation"),
+            StoreError::Unavailable(_) => code!("store-unavailable"),
+            StoreError::Unreadable { .. } => code!("store-unreadable"),
+            StoreError::DeadLetterUnreadable { .. } => code!("store-dead-letter-unreadable"),
+            StoreError::UnknownEdition { .. } => code!("store-unknown-edition"),
+            StoreError::EditionNameRequired => code!("edition-name-required"),
+            StoreError::EditionNotFound { .. } => code!("edition-not-found"),
+            StoreError::EditionNotForked { .. } => code!("store-edition-not-forked"),
+            StoreError::EditionAlreadyForked { .. } => code!("store-edition-already-forked"),
+            StoreError::EditionNotDeleted { .. } => code!("store-edition-not-deleted"),
+            StoreError::EditionNotPropagated { .. } => code!("store-edition-not-propagated"),
+            StoreError::NewerThanBuild { .. } => code!("store-newer-than-build"),
+            StoreError::MigrationFailed { .. } => code!("store-migration-failed"),
+            StoreError::MigrationChanged { .. } => code!("store-migration-changed"),
+            StoreError::MigrationMissing { .. } => code!("store-migration-missing"),
+            StoreError::MigrationUnknown { .. } => code!("store-migration-unknown"),
             StoreError::MigrationIrreversible { .. } => {
-                "angzarr-ports-store-migration-irreversible"
+                code!("store-migration-irreversible")
             }
-            StoreError::BackupExists { .. } => "angzarr-ports-store-backup-exists",
+            StoreError::BackupExists { .. } => code!("store-backup-exists"),
         }
     }
 

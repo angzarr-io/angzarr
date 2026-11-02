@@ -94,10 +94,11 @@ pub use angzarr_diagnostic;
 
 /// This crate's en-US Fluent catalog, its name first: what a runtime that
 /// shows these errors embeds to render them. The text of
-/// `crates/angzarr-ports/locales/en-US/angzarr-ports.ftl`.
+/// `locales/en-US/messages.ftl`, its ids under the crate's package name
+/// (`angzarr_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
-    "angzarr-ports",
-    include_str!("../locales/en-US/angzarr-ports.ftl"),
+    env!("CARGO_PKG_NAME"),
+    include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
 );
 
 /// One value of every [`StoreError`] variant, each once, for the catalog

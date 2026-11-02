@@ -18,7 +18,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic, Report};
+use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 
 use crate::versioned::{LoadError, Loader};
 
@@ -122,10 +122,10 @@ impl std::error::Error for WriteBackError {}
 impl Diagnostic for WriteBackError {
     fn code(&self) -> &str {
         match self {
-            WriteBackError::Read { .. } => "angzarr-yaml-write-back-read",
+            WriteBackError::Read { .. } => code!("write-back-read"),
             WriteBackError::Load(e) => e.code(),
-            WriteBackError::Backup { .. } => "angzarr-yaml-write-back-backup",
-            WriteBackError::Write { .. } => "angzarr-yaml-write-back-write",
+            WriteBackError::Backup { .. } => code!("write-back-backup"),
+            WriteBackError::Write { .. } => code!("write-back-write"),
         }
     }
 

@@ -6,7 +6,7 @@
 use crate::edit::{Document, EditError, EditProblem};
 use crate::rng::Rng;
 use crate::{parse, write, Value};
-use angzarr_diagnostic::Diagnostic;
+use angzarr_diagnostic::{code, Diagnostic};
 
 fn s(x: &str) -> Value {
     Value::scalar(x)
@@ -348,7 +348,7 @@ fn edit_errors_name_the_path() {
     );
     let e = d.remove(&["b", "x"], 0).unwrap_err();
     assert_eq!(e.path, vec!["b".to_string(), "x".to_string()]);
-    assert_eq!(e.to_string(), "angzarr-yaml-edit-not-found path=b.x");
+    assert_eq!(e.to_string(), concat!(code!("edit-not-found"), " path=b.x"));
 }
 
 #[test]
@@ -362,7 +362,7 @@ fn a_failed_edit_changes_nothing() {
 fn edit_errors_are_diagnostics() {
     let mut d = doc("a: 1\n");
     let e = d.push(&["a"], &s("v"), 2).unwrap_err();
-    assert_eq!(e.code(), "angzarr-yaml-edit-not-a-sequence");
+    assert!(matches!(e.problem, EditProblem::NotASequence), "{e:?}");
     let names: Vec<&str> = e.args().iter().map(|(k, _)| *k).collect();
     assert_eq!(names, vec!["path"]);
 }

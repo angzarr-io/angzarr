@@ -10,8 +10,8 @@ use unic_langid::LanguageIdentifier;
 
 use crate::{CatalogError, Envelope, Unrendered, EN_US};
 
-/// A crate's catalog: its name and its `locales/<locale>/<crate>.ftl`,
-/// embedded. Each crate with diagnostics exports its en-US one as `EN_US`.
+/// A crate's catalog: its name and its text, embedded (its
+/// `locales/<locale>/messages.ftl` under its name: `angzarr_diagnostic::build`). Each crate with diagnostics exports its en-US one as `EN_US`.
 pub type Source = (&'static str, &'static str);
 
 /// The largest magnitude an `f64` holds exactly: past it, a number is

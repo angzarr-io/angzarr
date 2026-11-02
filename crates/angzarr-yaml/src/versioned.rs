@@ -43,7 +43,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic, Report};
+use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 
 use crate::{parse, write, Error, Value};
 
@@ -126,20 +126,20 @@ impl std::error::Error for MigrationError {}
 impl Diagnostic for MigrationError {
     fn code(&self) -> &str {
         match self {
-            MigrationError::RenameNotAMapping { .. } => "angzarr-yaml-rename-not-a-mapping",
-            MigrationError::RenameTargetExists { .. } => "angzarr-yaml-rename-target-exists",
-            MigrationError::MoveEmptyPath { .. } => "angzarr-yaml-move-empty-path",
-            MigrationError::MoveNotAMapping { .. } => "angzarr-yaml-move-not-a-mapping",
+            MigrationError::RenameNotAMapping { .. } => code!("rename-not-a-mapping"),
+            MigrationError::RenameTargetExists { .. } => code!("rename-target-exists"),
+            MigrationError::MoveEmptyPath { .. } => code!("move-empty-path"),
+            MigrationError::MoveNotAMapping { .. } => code!("move-not-a-mapping"),
             MigrationError::MoveThroughNotAMapping { .. } => {
-                "angzarr-yaml-move-through-not-a-mapping"
+                code!("move-through-not-a-mapping")
             }
-            MigrationError::MoveTargetExists { .. } => "angzarr-yaml-move-target-exists",
-            MigrationError::DefaultNotAMapping { .. } => "angzarr-yaml-default-not-a-mapping",
-            MigrationError::RemoveNotAMapping { .. } => "angzarr-yaml-remove-not-a-mapping",
-            MigrationError::MapNotAMapping { .. } => "angzarr-yaml-map-not-a-mapping",
-            MigrationError::MapNotASequence { .. } => "angzarr-yaml-map-not-a-sequence",
-            MigrationError::Item { .. } => "angzarr-yaml-map-item",
-            MigrationError::RootNotAMapping => "angzarr-yaml-step-root-not-a-mapping",
+            MigrationError::MoveTargetExists { .. } => code!("move-target-exists"),
+            MigrationError::DefaultNotAMapping { .. } => code!("default-not-a-mapping"),
+            MigrationError::RemoveNotAMapping { .. } => code!("remove-not-a-mapping"),
+            MigrationError::MapNotAMapping { .. } => code!("map-not-a-mapping"),
+            MigrationError::MapNotASequence { .. } => code!("map-not-a-sequence"),
+            MigrationError::Item { .. } => code!("map-item"),
+            MigrationError::RootNotAMapping => code!("step-root-not-a-mapping"),
             MigrationError::Game(report) => report.code(),
         }
     }
@@ -218,9 +218,9 @@ impl std::error::Error for ChainError {}
 impl Diagnostic for ChainError {
     fn code(&self) -> &str {
         match self.problem {
-            ChainProblem::Duplicate { .. } => "angzarr-yaml-chain-duplicate",
-            ChainProblem::BeyondCurrent { .. } => "angzarr-yaml-chain-beyond-current",
-            ChainProblem::Gap { .. } => "angzarr-yaml-chain-gap",
+            ChainProblem::Duplicate { .. } => code!("chain-duplicate"),
+            ChainProblem::BeyondCurrent { .. } => code!("chain-beyond-current"),
+            ChainProblem::Gap { .. } => code!("chain-gap"),
         }
     }
 
@@ -406,18 +406,18 @@ impl Diagnostic for LoadProblem {
     fn code(&self) -> &str {
         match self {
             LoadProblem::Yaml(e) => e.code(),
-            LoadProblem::NotAMapping => "angzarr-yaml-root-not-a-mapping",
+            LoadProblem::NotAMapping => code!("root-not-a-mapping"),
             LoadProblem::BadVersion { problem, .. } => match problem {
-                BadVersion::Empty => "angzarr-yaml-version-empty",
-                BadVersion::Sequence => "angzarr-yaml-version-sequence",
-                BadVersion::Mapping => "angzarr-yaml-version-mapping",
-                BadVersion::NotAnInteger { .. } => "angzarr-yaml-version-not-an-integer",
-                BadVersion::TooLarge { .. } => "angzarr-yaml-version-too-large",
+                BadVersion::Empty => code!("version-empty"),
+                BadVersion::Sequence => code!("version-sequence"),
+                BadVersion::Mapping => code!("version-mapping"),
+                BadVersion::NotAnInteger { .. } => code!("version-not-an-integer"),
+                BadVersion::TooLarge { .. } => code!("version-too-large"),
             },
-            LoadProblem::LegacyAndStamp { .. } => "angzarr-yaml-legacy-and-stamp",
-            LoadProblem::TooNew { .. } => "angzarr-yaml-too-new",
-            LoadProblem::TooOld { .. } => "angzarr-yaml-too-old",
-            LoadProblem::Step { .. } => "angzarr-yaml-step-failed",
+            LoadProblem::LegacyAndStamp { .. } => code!("legacy-and-stamp"),
+            LoadProblem::TooNew { .. } => code!("too-new"),
+            LoadProblem::TooOld { .. } => code!("too-old"),
+            LoadProblem::Step { .. } => code!("step-failed"),
             LoadProblem::Decode(e) => e.code(),
         }
     }
@@ -473,8 +473,8 @@ impl std::error::Error for LoadError {
 impl Diagnostic for LoadError {
     fn code(&self) -> &str {
         match self.source {
-            None => "angzarr-yaml-load-failed",
-            Some(_) => "angzarr-yaml-load-failed-at",
+            None => code!("load-failed"),
+            Some(_) => code!("load-failed-at"),
         }
     }
 

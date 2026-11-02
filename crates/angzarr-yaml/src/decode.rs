@@ -26,7 +26,7 @@
 use std::cell::Cell;
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic};
+use angzarr_diagnostic::{code, Arg, Diagnostic};
 use serde::de::{
     self, DeserializeSeed, Deserializer, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor,
 };
@@ -202,13 +202,13 @@ impl std::error::Error for DecodeError {}
 impl Diagnostic for DecodeError {
     fn code(&self) -> &str {
         match self.problem {
-            DecodeProblem::Type { .. } => "angzarr-yaml-decode-type",
-            DecodeProblem::Scalar { .. } => "angzarr-yaml-decode-scalar",
-            DecodeProblem::UnknownKey { .. } => "angzarr-yaml-decode-unknown-key",
-            DecodeProblem::MissingKey { .. } => "angzarr-yaml-decode-missing-key",
-            DecodeProblem::UnknownVariant { .. } => "angzarr-yaml-decode-unknown-variant",
-            DecodeProblem::Length { .. } => "angzarr-yaml-decode-length",
-            DecodeProblem::Invalid { .. } => "angzarr-yaml-decode-invalid",
+            DecodeProblem::Type { .. } => code!("decode-type"),
+            DecodeProblem::Scalar { .. } => code!("decode-scalar"),
+            DecodeProblem::UnknownKey { .. } => code!("decode-unknown-key"),
+            DecodeProblem::MissingKey { .. } => code!("decode-missing-key"),
+            DecodeProblem::UnknownVariant { .. } => code!("decode-unknown-variant"),
+            DecodeProblem::Length { .. } => code!("decode-length"),
+            DecodeProblem::Invalid { .. } => code!("decode-invalid"),
         }
     }
 
@@ -327,7 +327,7 @@ impl fmt::Display for Failure {
             }
             .fmt(f),
             Pending::Custom(text) => f.write_str(text),
-            Pending::Unexpected => f.write_str("angzarr-yaml-decode-type"),
+            Pending::Unexpected => f.write_str(code!("decode-type")),
             Pending::Missing(key) => DecodeError {
                 path,
                 problem: DecodeProblem::MissingKey {

@@ -7,7 +7,7 @@ use crate::versioned::{
     DEFAULT_KEY,
 };
 use crate::{parse, write, Value};
-use angzarr_diagnostic::{Arg, Diagnostic, Report};
+use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 
 fn ok(_: &mut Value) -> Result<(), MigrationError> {
     Ok(())
@@ -68,7 +68,10 @@ fn chains_must_be_whole() {
         .step(2, ok)
         .build()
         .unwrap_err();
-    assert_eq!(e.to_string(), "angzarr-yaml-chain-gap kind=toy from=1 to=2");
+    assert_eq!(
+        e.to_string(),
+        concat!(code!("chain-gap"), " kind=toy from=1 to=2")
+    );
 }
 
 // The toy schema's history:
@@ -238,8 +241,13 @@ fn a_version_the_chain_does_not_reach_fails() {
             .load(Some("new.yaml"), "schema_version: 7\n")
             .unwrap_err()
             .to_string(),
-        "angzarr-yaml-load-failed-at kind=toy source=new.yaml \
-         problem=angzarr-yaml-too-new problem.found=7 problem.current=3"
+        concat!(
+            code!("load-failed-at"),
+            " kind=toy source=new.yaml \
+         problem=",
+            code!("too-new"),
+            " problem.found=7 problem.current=3"
+        )
     );
 }
 
@@ -261,10 +269,17 @@ fn a_failing_step_names_itself_and_its_error() {
     );
     assert_eq!(
         e.to_string(),
-        "angzarr-yaml-load-failed-at kind=toy source=bad.yaml \
-         problem=angzarr-yaml-step-failed problem.from=0 problem.to=1 \
-         problem.error=angzarr-yaml-rename-target-exists problem.error.from=hp \
+        concat!(
+            code!("load-failed-at"),
+            " kind=toy source=bad.yaml \
+         problem=",
+            code!("step-failed"),
+            " problem.from=0 problem.to=1 \
+         problem.error=",
+            code!("rename-target-exists"),
+            " problem.error.from=hp \
          problem.error.to=health"
+        )
     );
     let e = toy()
         .load(
@@ -274,11 +289,20 @@ fn a_failing_step_names_itself_and_its_error() {
         .unwrap_err();
     assert_eq!(
         e.to_string(),
-        "angzarr-yaml-load-failed kind=toy problem=angzarr-yaml-step-failed \
-         problem.from=0 problem.to=1 problem.error=angzarr-yaml-map-item \
+        concat!(
+            code!("load-failed"),
+            " kind=toy problem=",
+            code!("step-failed"),
+            " \
+         problem.from=0 problem.to=1 problem.error=",
+            code!("map-item"),
+            " \
          problem.error.key=units problem.error.index=1 \
-         problem.error.error=angzarr-yaml-rename-target-exists \
+         problem.error.error=",
+            code!("rename-target-exists"),
+            " \
          problem.error.error.from=hp problem.error.error.to=health"
+        )
     );
     // A step that breaks the root.
     fn clobber(doc: &mut Value) -> Result<(), MigrationError> {
@@ -304,7 +328,6 @@ fn a_failing_decoder_fails_with_its_own_error() {
         })
         .unwrap_err();
     assert_eq!(e.problem, LoadProblem::Decode(missing()));
-    assert_eq!(e.code(), "angzarr-yaml-load-failed-at");
     match &e.args()[..] {
         [("kind", Arg::Str(kind)), ("source", Arg::Str(source)), ("problem", Arg::Nested(problem))] =>
         {
@@ -316,8 +339,11 @@ fn a_failing_decoder_fails_with_its_own_error() {
     }
     assert_eq!(
         e.to_string(),
-        "angzarr-yaml-load-failed-at kind=toy source=ogre.yaml problem=toy-missing-key \
+        concat!(
+            code!("load-failed-at"),
+            " kind=toy source=ogre.yaml problem=toy-missing-key \
          problem.key=missing"
+        )
     );
 }
 
@@ -450,7 +476,11 @@ fn fixtures_must_migrate_to_their_expected_trees() {
         "{failures:?}"
     );
     assert!(
-        named("broken.yaml problem=angzarr-yaml-too-new problem.found=9"),
+        named(concat!(
+            "broken.yaml problem=",
+            code!("too-new"),
+            " problem.found=9"
+        )),
         "{failures:?}"
     );
     assert!(loader.check_fixtures(&[]).is_err());
@@ -522,11 +552,16 @@ fn a_callers_step_raises_its_own_code() {
     assert!(matches!(&error.args()[..], [("hp", Arg::Str(hp))] if hp == "lots"));
     assert_eq!(
         e.to_string(),
-        "angzarr-yaml-load-failed kind=toy problem=angzarr-yaml-step-failed \
+        concat!(
+            code!("load-failed"),
+            " kind=toy problem=",
+            code!("step-failed"),
+            " \
          problem.from=0 problem.to=1 problem.error=toy-hp-not-a-number problem.error.hp=lots"
+        )
     );
-    assert_eq!(e.code(), "angzarr-yaml-load-failed");
-    assert_eq!(e.problem.code(), "angzarr-yaml-step-failed");
+    assert_eq!(e.source, None);
+    assert!(matches!(e.problem, LoadProblem::Step { .. }), "{e:?}");
     assert!(matches!(
         &e.problem.args()[..],
         [
@@ -639,7 +674,7 @@ fn a_load_error_gives_its_cause_as_its_source() {
     assert_eq!(yaml, crate::parse("a: [1\n").unwrap_err().to_string());
     assert_eq!(
         source("schema_version: 0\nhp: 1\nhealth: 2\n").as_deref(),
-        Some("angzarr-yaml-rename-target-exists from=hp to=health")
+        Some(concat!(code!("rename-target-exists"), " from=hp to=health"))
     );
     let decode = toy()
         .load_as(None, V0, |doc| {
@@ -796,9 +831,14 @@ fn a_legacy_stamp_is_judged_like_any_stamp_and_both_at_once_is_refused() {
     );
     assert_eq!(
         both.to_string(),
-        "angzarr-yaml-load-failed-at kind=manifest source=m.yaml \
-         problem=angzarr-yaml-legacy-and-stamp problem.key=schema_version \
+        concat!(
+            code!("load-failed-at"),
+            " kind=manifest source=m.yaml \
+         problem=",
+            code!("legacy-and-stamp"),
+            " problem.key=schema_version \
          problem.legacy=version"
+        )
     );
     assert!(l
         .upgrade(None, "version: 1\nschema_version: 1\n", 2)

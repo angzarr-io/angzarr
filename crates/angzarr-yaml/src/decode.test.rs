@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use angzarr_diagnostic::{Arg, Diagnostic};
+use angzarr_diagnostic::{code, Arg, Diagnostic};
 use serde::Deserialize;
 
 use super::*;
@@ -156,7 +156,7 @@ fn enums_are_a_scalar_or_a_one_key_mapping() {
     assert_eq!(
         keyed(&e),
         (
-            "angzarr-yaml-decode-unknown-variant".into(),
+            code!("decode-unknown-variant").into(),
             args(&[
                 ("key_path", "mode"),
                 ("expected", "fast,careful,named"),
@@ -168,7 +168,7 @@ fn enums_are_a_scalar_or_a_one_key_mapping() {
     assert_eq!(
         keyed(&e),
         (
-            "angzarr-yaml-decode-type".into(),
+            code!("decode-type").into(),
             args(&[
                 ("key_path", "mode"),
                 ("expected", "enum"),
@@ -189,7 +189,7 @@ fn enums_are_a_scalar_or_a_one_key_mapping() {
     assert_eq!(
         keyed(&e),
         (
-            "angzarr-yaml-decode-type".into(),
+            code!("decode-type").into(),
             args(&[
                 ("key_path", "mode"),
                 ("expected", "mapping"),
@@ -210,7 +210,7 @@ fn enums_are_a_scalar_or_a_one_key_mapping() {
     assert_eq!(
         keyed(&e),
         (
-            "angzarr-yaml-decode-type".into(),
+            code!("decode-type").into(),
             args(&[
                 ("key_path", "mode.fast"),
                 ("expected", "null"),
@@ -250,7 +250,7 @@ fn an_unknown_key_is_refused_with_the_keys_it_could_have_been() {
     assert_eq!(
         keyed(&e),
         (
-            "angzarr-yaml-decode-unknown-key".into(),
+            code!("decode-unknown-key").into(),
             args(&[
                 ("key_path", "colour"),
                 ("expected", "name,port,debug,ratio,tags,retry,mode,limits"),
@@ -283,7 +283,7 @@ fn an_unknown_key_is_refused_even_without_deny_unknown_fields() {
     assert_eq!(
         keyed(&e),
         (
-            "angzarr-yaml-decode-unknown-key".into(),
+            code!("decode-unknown-key").into(),
             args(&[("key_path", "b"), ("expected", ""), ("found", "b")])
         )
     );
@@ -297,7 +297,7 @@ fn a_missing_key_names_where_it_belongs() {
     assert_eq!(
         keyed(&e),
         (
-            "angzarr-yaml-decode-missing-key".into(),
+            code!("decode-missing-key").into(),
             args(&[
                 ("key_path", "port"),
                 ("expected", "port"),
@@ -326,7 +326,7 @@ fn a_scalar_that_is_not_what_the_type_asks_is_refused_as_read() {
     assert_eq!(
         keyed(&e),
         (
-            "angzarr-yaml-decode-scalar".into(),
+            code!("decode-scalar").into(),
             args(&[
                 ("key_path", "port"),
                 ("expected", "u16"),
@@ -374,7 +374,7 @@ fn a_value_of_the_wrong_shape_is_refused_with_what_it_is() {
     assert_eq!(
         keyed(&e),
         (
-            "angzarr-yaml-decode-type".into(),
+            code!("decode-type").into(),
             args(&[
                 ("key_path", "name"),
                 ("expected", "string"),
@@ -654,7 +654,7 @@ fn a_types_own_refusal_keeps_its_text_as_the_external_arg() {
     assert_eq!(
         keyed(&e),
         (
-            "angzarr-yaml-decode-invalid".into(),
+            code!("decode-invalid").into(),
             args(&[
                 ("key_path", "items[1]"),
                 ("expected", "u32"),
@@ -752,12 +752,15 @@ fn a_decode_error_is_a_diagnostic_never_english() {
     let e = decode::<Config>(&doc("name: [x]\n")).unwrap_err();
     assert_eq!(
         e.to_string(),
-        "angzarr-yaml-decode-type key_path=name expected=string found=sequence"
+        concat!(
+            code!("decode-type"),
+            " key_path=name expected=string found=sequence"
+        )
     );
     let root = decode::<u8>(&doc("x\n")).unwrap_err();
     assert_eq!(
         root.to_string(),
-        "angzarr-yaml-decode-scalar key_path=\"\" expected=u8 found=x"
+        concat!(code!("decode-scalar"), " key_path=\"\" expected=u8 found=x")
     );
     // Keys and items are written as a path: dotted keys, bracketed items.
     let deep =
@@ -799,13 +802,18 @@ fn a_loader_decodes_the_migrated_tree_strictly() {
         .load_into::<Toy>(Some("t.yaml"), "schema_version: 1\nhealth: 3\nextra: 1\n")
         .unwrap_err();
     assert!(
-        matches!(&e.problem, LoadProblem::Decode(r) if r.code() == "angzarr-yaml-decode-unknown-key")
+        matches!(&e.problem, LoadProblem::Decode(r) if r.code() == code!("decode-unknown-key"))
     );
     assert_eq!(
         e.to_string(),
-        "angzarr-yaml-load-failed-at kind=toy source=t.yaml \
-         problem=angzarr-yaml-decode-unknown-key problem.key_path=extra \
+        concat!(
+            code!("load-failed-at"),
+            " kind=toy source=t.yaml \
+         problem=",
+            code!("decode-unknown-key"),
+            " problem.key_path=extra \
          problem.expected=schema_version,health problem.found=extra"
+        )
     );
     // A load failure comes first.
     assert!(matches!(
@@ -843,7 +851,7 @@ fn a_refusal_after_the_node_was_read_names_what_was_asked_of_that_node_only() {
     assert_eq!(
         keyed(&e),
         (
-            "angzarr-yaml-decode-invalid".into(),
+            code!("decode-invalid").into(),
             args(&[
                 ("key_path", ""),
                 ("expected", "any"),
@@ -875,7 +883,12 @@ fn a_type_that_wraps_a_failure_carries_its_code_and_args() {
         DecodeProblem::Invalid {
             expected: Expected::U8,
             found: "x".into(),
-            text: "wrapped: angzarr-yaml-decode-scalar key_path=a expected=u8 found=x".into(),
+            text: concat!(
+                "wrapped: ",
+                code!("decode-scalar"),
+                " key_path=a expected=u8 found=x"
+            )
+            .into(),
         }
     );
 }

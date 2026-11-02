@@ -2,15 +2,16 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic};
+use angzarr_diagnostic::{code, Arg, Diagnostic};
 
 use crate::Source;
 
 /// This crate's en-US messages; every [`Catalog`](crate::Catalog) holds
-/// them.
+/// them. The text of `locales/en-US/messages.ftl`, its ids under the
+/// crate's package name (`angzarr_diagnostic::build`).
 pub const EN_US: Source = (
-    "presentation",
-    include_str!("../locales/en-US/presentation.ftl"),
+    env!("CARGO_PKG_NAME"),
+    include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
 );
 
 /// A `--format` that is neither `text` nor `json`.
@@ -61,7 +62,7 @@ impl std::error::Error for Unrendered {}
 
 impl Diagnostic for UnknownFormat {
     fn code(&self) -> &str {
-        "presentation-unknown-format"
+        code!("unknown-format")
     }
 
     fn args(&self) -> Vec<(&str, Arg)> {
@@ -71,7 +72,7 @@ impl Diagnostic for UnknownFormat {
 
 impl Diagnostic for CatalogError {
     fn code(&self) -> &str {
-        "presentation-catalog-invalid"
+        code!("catalog-invalid")
     }
 
     fn args(&self) -> Vec<(&str, Arg)> {
@@ -85,8 +86,8 @@ impl Diagnostic for CatalogError {
 impl Diagnostic for Unrendered {
     fn code(&self) -> &str {
         match self {
-            Unrendered::Unknown { .. } => "presentation-unknown-code",
-            Unrendered::Unformattable { .. } => "presentation-unformattable",
+            Unrendered::Unknown { .. } => code!("unknown-code"),
+            Unrendered::Unformattable { .. } => code!("unformattable"),
         }
     }
 

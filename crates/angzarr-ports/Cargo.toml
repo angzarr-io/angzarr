@@ -44,6 +44,11 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "=0.3.79"
 
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+
 # The shared crates' lints: the workspace's (the root Cargo.toml).
 [lints]
 workspace = true

@@ -30,7 +30,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic};
+use angzarr_diagnostic::{code, Arg, Diagnostic};
 
 use crate::{
     flow, inline, is_item, lines, parse, scalar_text, split_key, strip_comment, write, At, Error,
@@ -1093,14 +1093,14 @@ impl std::error::Error for EditError {}
 impl Diagnostic for EditError {
     fn code(&self) -> &str {
         match self.problem {
-            EditProblem::NotFound => "angzarr-yaml-edit-not-found",
-            EditProblem::NotAMapping => "angzarr-yaml-edit-not-a-mapping",
-            EditProblem::NotASequence => "angzarr-yaml-edit-not-a-sequence",
-            EditProblem::InsideFlow => "angzarr-yaml-edit-inside-flow",
-            EditProblem::NoSuchItem { .. } => "angzarr-yaml-edit-no-such-item",
-            EditProblem::ItemFirstKey => "angzarr-yaml-edit-item-first-key",
-            EditProblem::Unfaithful => "angzarr-yaml-edit-unfaithful",
-            EditProblem::KeyExists { .. } => "angzarr-yaml-edit-key-exists",
+            EditProblem::NotFound => code!("edit-not-found"),
+            EditProblem::NotAMapping => code!("edit-not-a-mapping"),
+            EditProblem::NotASequence => code!("edit-not-a-sequence"),
+            EditProblem::InsideFlow => code!("edit-inside-flow"),
+            EditProblem::NoSuchItem { .. } => code!("edit-no-such-item"),
+            EditProblem::ItemFirstKey => code!("edit-item-first-key"),
+            EditProblem::Unfaithful => code!("edit-unfaithful"),
+            EditProblem::KeyExists { .. } => code!("edit-key-exists"),
         }
     }
 

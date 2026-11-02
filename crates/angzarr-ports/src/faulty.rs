@@ -24,6 +24,7 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+use angzarr_diagnostic::code;
 use angzarr_proto::v1::{Cover, EventPage, Snapshot};
 
 use crate::store::{
@@ -55,7 +56,7 @@ pub enum Fault {
 
 /// The code of the cause of an injected [`StoreError::Unavailable`]: a
 /// test's failure, never rendered, so it has no message in any catalog.
-pub const INJECTED: &str = "angzarr-ports-faulty-injected";
+pub const INJECTED: &str = code!("faulty-injected");
 
 /// Where an interleaving runs: just before the next call of a kind.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]

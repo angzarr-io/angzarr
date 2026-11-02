@@ -85,3 +85,15 @@ fn test_every_error_has_a_catalog_message_with_exactly_its_args() {
         assert_eq!(used, args, "{}", sample.code());
     }
 }
+
+/// The catalog is exported under the crate's package name, and every code
+/// is under that name, with its message using exactly its args.
+#[test]
+fn test_every_code_is_under_the_crates_name_with_its_message() {
+    let (name, text) = crate::EN_US;
+    assert_eq!(name, env!("CARGO_PKG_NAME"));
+    assert_eq!(
+        angzarr_diagnostic::catalog::check(name, text, &diagnostic_samples()),
+        []
+    );
+}

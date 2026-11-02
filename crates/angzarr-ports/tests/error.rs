@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 
+use angzarr_diagnostic::code;
 use angzarr_ports::angzarr_proto::v1::{self, Cover};
 use angzarr_ports::{Arg, Cause, Recovery, StoreError};
 
@@ -85,32 +86,32 @@ fn stream_errors() -> Vec<(StoreError, &'static str, Recovery)> {
     vec![
         (
             StoreError::conflict(stream(), 1, 2),
-            "angzarr-ports-store-conflict",
+            code!("store-conflict"),
             Retry,
         ),
         (
             StoreError::discontinuous(stream(), 2, 3),
-            "angzarr-ports-store-discontinuous",
+            code!("store-discontinuous"),
             Bug,
         ),
         (
             StoreError::malformed_stream(stream()),
-            "angzarr-ports-store-malformed-stream",
+            code!("store-malformed-stream"),
             Invalid,
         ),
         (
             StoreError::Unavailable(io()),
-            "angzarr-ports-store-unavailable",
+            code!("store-unavailable"),
             Retry,
         ),
         (
             StoreError::unreadable(stream(), 4, io()),
-            "angzarr-ports-store-unreadable",
+            code!("store-unreadable"),
             Bug,
         ),
         (
             StoreError::dead_letter_unreadable(stream(), io()),
-            "angzarr-ports-store-dead-letter-unreadable",
+            code!("store-dead-letter-unreadable"),
             Bug,
         ),
     ]
@@ -123,42 +124,42 @@ fn edition_errors() -> Vec<(StoreError, &'static str, Recovery)> {
     vec![
         (
             StoreError::malformed_creation(stream_in("what-if"), 3, 5),
-            "angzarr-ports-store-malformed-creation",
+            code!("store-malformed-creation"),
             Invalid,
         ),
         (
             StoreError::unknown_edition(stream()),
-            "angzarr-ports-store-unknown-edition",
+            code!("store-unknown-edition"),
             Invalid,
         ),
         (
             StoreError::EditionNameRequired,
-            "angzarr-ports-edition-name-required",
+            code!("edition-name-required"),
             Invalid,
         ),
         (
             StoreError::EditionNotFound { name: name() },
-            "angzarr-ports-edition-not-found",
+            code!("edition-not-found"),
             Invalid,
         ),
         (
             StoreError::edition_not_deleted(stream_in("what-if")),
-            "angzarr-ports-store-edition-not-deleted",
+            code!("store-edition-not-deleted"),
             Bug,
         ),
         (
             StoreError::edition_not_propagated(stream_in("what-if")),
-            "angzarr-ports-store-edition-not-propagated",
+            code!("store-edition-not-propagated"),
             Retry,
         ),
         (
             StoreError::edition_not_forked(stream_in("what-if")),
-            "angzarr-ports-store-edition-not-forked",
+            code!("store-edition-not-forked"),
             Invalid,
         ),
         (
             StoreError::edition_already_forked(stream_in("what-if")),
-            "angzarr-ports-store-edition-already-forked",
+            code!("store-edition-already-forked"),
             Invalid,
         ),
     ]
@@ -173,52 +174,55 @@ fn migration_errors() -> Vec<(StoreError, &'static str, Recovery)> {
                 applied: 6,
                 build: 5,
             },
-            "angzarr-ports-store-newer-than-build",
+            code!("store-newer-than-build"),
             Invalid,
         ),
         (
             StoreError::MigrationFailed { version: 3 },
-            "angzarr-ports-store-migration-failed",
+            code!("store-migration-failed"),
             Bug,
         ),
         (
             StoreError::MigrationChanged { version: 2 },
-            "angzarr-ports-store-migration-changed",
+            code!("store-migration-changed"),
             Bug,
         ),
         (
             StoreError::MigrationMissing { version: 2 },
-            "angzarr-ports-store-migration-missing",
+            code!("store-migration-missing"),
             Bug,
         ),
         (
             StoreError::MigrationUnknown { version: 7 },
-            "angzarr-ports-store-migration-unknown",
+            code!("store-migration-unknown"),
             Invalid,
         ),
         (
             StoreError::MigrationIrreversible { version: 4 },
-            "angzarr-ports-store-migration-irreversible",
+            code!("store-migration-irreversible"),
             Invalid,
         ),
         (
             StoreError::BackupExists {
                 target: "/p/state.db.backup".to_string(),
             },
-            "angzarr-ports-store-backup-exists",
+            code!("store-backup-exists"),
             Invalid,
         ),
     ]
 }
 
-/// A code is stable: these exact strings, kebab-case, prefixed with the
-/// crate's name, each used once. A code whose meaning changes gets a new one.
+/// A code is stable: these exact suffixes, kebab-case, under the crate's
+/// package name, each used once. A code whose meaning changes gets a new one.
 #[test]
 fn every_error_has_its_stable_code() {
     let mut seen = BTreeSet::new();
     for (error, code, _) in every() {
         assert_eq!(error.code(), code, "{error:?}");
-        assert!(code.starts_with("angzarr-ports-"), "{code}");
+        assert!(
+            code.starts_with(concat!(env!("CARGO_PKG_NAME"), "-")),
+            "{code}"
+        );
         assert!(
             code.chars().all(|c| c.is_ascii_lowercase() || c == '-'),
             "{code} is kebab-case"
@@ -274,11 +278,11 @@ fn args_carry_the_data_by_name() {
             build: 5
         }
         .to_string(),
-        "angzarr-ports-store-newer-than-build applied=6 build=5"
+        concat!(code!("store-newer-than-build"), " applied=6 build=5")
     );
     assert_eq!(
         StoreError::MigrationFailed { version: 3 }.to_string(),
-        "angzarr-ports-store-migration-failed version=3"
+        concat!(code!("store-migration-failed"), " version=3")
     );
     assert_eq!(
         StoreError::BackupExists {
@@ -296,11 +300,14 @@ fn args_carry_the_data_by_name() {
 fn the_display_is_the_code_then_its_args() {
     assert_eq!(
         StoreError::conflict(stream(), 1, 2).to_string(),
-        "angzarr-ports-store-conflict stream=account/07070707-0707-0707-0707-070707070707 expected=1 actual=2"
+        concat!(
+            code!("store-conflict"),
+            " stream=account/07070707-0707-0707-0707-070707070707 expected=1 actual=2"
+        )
     );
     assert_eq!(
         StoreError::EditionNameRequired.to_string(),
-        "angzarr-ports-edition-name-required"
+        code!("edition-name-required")
     );
 }
 
@@ -327,11 +334,14 @@ fn a_cause_is_a_code_and_args_and_displays_flattened() {
     assert_eq!(cause.args, vec![("errno", Arg::Uint(10))]);
     assert_eq!(
         StoreError::Unavailable(io()).to_string(),
-        "angzarr-ports-store-unavailable cause=annals-store-sql-io cause.errno=10"
+        concat!(
+            code!("store-unavailable"),
+            " cause=annals-store-sql-io cause.errno=10"
+        )
     );
     assert_eq!(
         StoreError::unreadable(stream(), 4, io()).to_string(),
-        "angzarr-ports-store-unreadable stream=account/07070707-0707-0707-0707-070707070707 sequence=4 cause=annals-store-sql-io cause.errno=10"
+        concat!(code!("store-unreadable"), " stream=account/07070707-0707-0707-0707-070707070707 sequence=4 cause=annals-store-sql-io cause.errno=10")
     );
 }
 
@@ -356,10 +366,13 @@ fn a_value_that_would_not_parse_back_is_quoted() {
     );
     assert_eq!(
         StoreError::Unavailable(cause).to_string(),
-        "angzarr-ports-store-unavailable cause=annals-store-sql-io \
+        concat!(
+            code!("store-unavailable"),
+            " cause=annals-store-sql-io \
          cause.ext_err_txt=\"database is locked\" cause.empty=\"\" cause.pair=\"k=v\" \
          cause.said=\"say \\\"hi\\\"\" cause.path=\"C:\\\\dir\" cause.tab=\"a\tb\" \
          cause.bare=account/7-x_y.z"
+        )
     );
 }
 
@@ -465,19 +478,13 @@ fn every_error_is_a_diagnostic_with_its_own_code_and_args() {
     assert_eq!(cause.to_string(), "annals-store-sql-io errno=10");
 }
 
-/// The crate ships its own en-US catalog, exported as `EN_US`: a message for
-/// every code, using exactly its args, and no message without an error. The
-/// samples are one of every variant.
+/// The crate ships its own en-US catalog, exported as `EN_US` under the
+/// crate's package name: a message for every code, using exactly its args,
+/// and no message without an error. The samples are one of every variant.
 #[test]
 fn the_catalog_has_a_message_for_every_code_with_exactly_its_args() {
     let (name, text) = angzarr_ports::EN_US;
-    assert_eq!(name, "angzarr-ports");
-    let file = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/locales/en-US/angzarr-ports.ftl"
-    ))
-    .unwrap();
-    assert_eq!(text, file);
+    assert_eq!(name, env!("CARGO_PKG_NAME"));
     let samples = angzarr_ports::diagnostic_samples();
     let sampled: BTreeSet<String> = samples.iter().map(|d| d.code().to_string()).collect();
     let every: BTreeSet<String> = every().iter().map(|(_, c, _)| c.to_string()).collect();

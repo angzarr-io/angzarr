@@ -1,4 +1,5 @@
 use super::*;
+use angzarr_diagnostic::code;
 
 #[test]
 fn a_character_that_may_not_show_is_named_by_its_code_point() {
@@ -10,7 +11,7 @@ fn a_character_that_may_not_show_is_named_by_its_code_point() {
     };
     assert_eq!(
         e.to_string(),
-        "angzarr-yaml-non-ascii-indent line=2 character=U+3000"
+        concat!(code!("non-ascii-indent"), " line=2 character=U+3000")
     );
     let args = e.args();
     let character = args.iter().find(|(name, _)| *name == "character");

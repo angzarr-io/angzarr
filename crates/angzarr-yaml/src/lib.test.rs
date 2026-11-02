@@ -1,4 +1,5 @@
 use super::*;
+use angzarr_diagnostic::code;
 
 fn s(x: &str) -> Value {
     Value::scalar(x)
@@ -92,11 +93,11 @@ fn refuses_what_it_does_not_support() {
     }
     assert_eq!(
         parse("a: 1\na: 2\n").unwrap_err().to_string(),
-        "angzarr-yaml-duplicate-key line=2 key=a"
+        concat!(code!("duplicate-key"), " line=2 key=a")
     );
     assert_eq!(
         parse("a: &x 1\n").unwrap_err().to_string(),
-        "angzarr-yaml-anchor line=1"
+        concat!(code!("anchor"), " line=1")
     );
 }
 
@@ -281,7 +282,7 @@ fn double_quotes_take_unicode_cr_and_nul_escapes() {
     assert_eq!(e.problem, ParseProblem::UnknownEscape { escape: bs("^q") });
     assert_eq!(
         e.to_string(),
-        bs(r#"angzarr-yaml-unknown-escape line=1 escape="^^q""#)
+        bs(concat!(code!("unknown-escape"), r#" line=1 escape="^^q""#))
     );
     let e = parse(&bs(r#"a: "^uDDE1""#)).unwrap_err();
     assert_eq!(
@@ -758,18 +759,13 @@ fn a_sequence_in_a_sequence_is_indented_under_its_dash() {
     assert_eq!(write(&three, 2), "-\n  - [a]\n");
 }
 
-/// The crate's en-US catalog, exported as `EN_US`, has a message for every
-/// code, using exactly its args, and no message without an error.
+/// The crate's en-US catalog, exported as `EN_US` under the crate's package
+/// name, has a message for every code, using exactly its args, and no
+/// message without an error.
 #[test]
 fn the_catalog_has_a_message_for_every_code_with_exactly_its_args() {
     let (name, text) = EN_US;
-    assert_eq!(name, "angzarr-yaml");
-    let file = std::fs::read_to_string(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/locales/en-US/angzarr-yaml.ftl"
-    ))
-    .unwrap();
-    assert_eq!(text, file);
+    assert_eq!(name, env!("CARGO_PKG_NAME"));
     assert_eq!(
         angzarr_diagnostic::catalog::check(name, text, &diagnostic_samples()),
         []

@@ -2,7 +2,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic};
+use angzarr_diagnostic::{code, Arg, Diagnostic};
 
 /// What went wrong, and on which line (1-based; 0 for the end of input).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,25 +72,25 @@ impl std::error::Error for Error {}
 impl Diagnostic for Error {
     fn code(&self) -> &str {
         match self.problem {
-            ParseProblem::LoneCarriageReturn => "angzarr-yaml-lone-carriage-return",
-            ParseProblem::TabIndent => "angzarr-yaml-tab-indent",
-            ParseProblem::NonAsciiIndent { .. } => "angzarr-yaml-non-ascii-indent",
-            ParseProblem::DocumentMarker { .. } => "angzarr-yaml-document-marker",
-            ParseProblem::Anchor => "angzarr-yaml-anchor",
-            ParseProblem::Alias => "angzarr-yaml-alias",
-            ParseProblem::Tag => "angzarr-yaml-tag",
-            ParseProblem::BlockScalar => "angzarr-yaml-block-scalar",
-            ParseProblem::UnexpectedIndent => "angzarr-yaml-unexpected-indent",
-            ParseProblem::ExpectedKeyValue { .. } => "angzarr-yaml-expected-key-value",
-            ParseProblem::KeyNotScalar => "angzarr-yaml-key-not-scalar",
-            ParseProblem::DuplicateKey { .. } => "angzarr-yaml-duplicate-key",
-            ParseProblem::Unexpected { .. } => "angzarr-yaml-unexpected",
-            ParseProblem::ExpectedSeqSeparator => "angzarr-yaml-expected-seq-separator",
-            ParseProblem::ExpectedColon => "angzarr-yaml-expected-colon",
-            ParseProblem::ExpectedMapSeparator => "angzarr-yaml-expected-map-separator",
-            ParseProblem::BadUnicodeEscape { .. } => "angzarr-yaml-bad-unicode-escape",
-            ParseProblem::UnknownEscape { .. } => "angzarr-yaml-unknown-escape",
-            ParseProblem::UnterminatedQuote => "angzarr-yaml-unterminated-quote",
+            ParseProblem::LoneCarriageReturn => code!("lone-carriage-return"),
+            ParseProblem::TabIndent => code!("tab-indent"),
+            ParseProblem::NonAsciiIndent { .. } => code!("non-ascii-indent"),
+            ParseProblem::DocumentMarker { .. } => code!("document-marker"),
+            ParseProblem::Anchor => code!("anchor"),
+            ParseProblem::Alias => code!("alias"),
+            ParseProblem::Tag => code!("tag"),
+            ParseProblem::BlockScalar => code!("block-scalar"),
+            ParseProblem::UnexpectedIndent => code!("unexpected-indent"),
+            ParseProblem::ExpectedKeyValue { .. } => code!("expected-key-value"),
+            ParseProblem::KeyNotScalar => code!("key-not-scalar"),
+            ParseProblem::DuplicateKey { .. } => code!("duplicate-key"),
+            ParseProblem::Unexpected { .. } => code!("unexpected"),
+            ParseProblem::ExpectedSeqSeparator => code!("expected-seq-separator"),
+            ParseProblem::ExpectedColon => code!("expected-colon"),
+            ParseProblem::ExpectedMapSeparator => code!("expected-map-separator"),
+            ParseProblem::BadUnicodeEscape { .. } => code!("bad-unicode-escape"),
+            ParseProblem::UnknownEscape { .. } => code!("unknown-escape"),
+            ParseProblem::UnterminatedQuote => code!("unterminated-quote"),
         }
     }
 

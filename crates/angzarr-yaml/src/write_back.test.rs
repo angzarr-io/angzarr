@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use angzarr_diagnostic::{Diagnostic, Report};
+use angzarr_diagnostic::{code, Report};
 
 use super::*;
 use crate::versioned::{rename_key, Loader, MigrationError, Migrations};
@@ -139,7 +139,10 @@ fn when_the_backup_cannot_be_written_the_file_is_not_touched() {
     );
     assert_eq!(
         e.to_string(),
-        "angzarr-yaml-write-back-backup path=/cfg/toy.yaml.bak cause=memory-read-only cause.errno=30"
+        concat!(
+            code!("write-back-backup"),
+            " path=/cfg/toy.yaml.bak cause=memory-read-only cause.errno=30"
+        )
     );
     assert_eq!(fs.files[PATH], OLD);
     assert_eq!(fs.calls, ["read /cfg/toy.yaml", "write /cfg/toy.yaml.bak"]);
@@ -150,10 +153,13 @@ fn every_other_failure_is_coded_and_names_its_file() {
     // Unreadable.
     let mut fs = Memory::default();
     let e = write_back(&mut fs, &loader(), PATH, Options::default()).unwrap_err();
-    assert_eq!(e.code(), "angzarr-yaml-write-back-read");
+    assert!(matches!(e, WriteBackError::Read { .. }), "{e:?}");
     assert_eq!(
         e.to_string(),
-        "angzarr-yaml-write-back-read path=/cfg/toy.yaml cause=memory-not-found cause.errno=2"
+        concat!(
+            code!("write-back-read"),
+            " path=/cfg/toy.yaml cause=memory-not-found cause.errno=2"
+        )
     );
     // Not writable: the backup was written, the file was not replaced.
     let mut fs = Memory::with(PATH, OLD);
@@ -166,17 +172,20 @@ fn every_other_failure_is_coded_and_names_its_file() {
             cause: Report::new("memory-read-only").arg("errno", 30u32)
         }
     );
-    assert_eq!(e.code(), "angzarr-yaml-write-back-write");
     assert_eq!(fs.files[PATH], OLD);
     // A file that does not load is the loader's error, untouched.
     let mut fs = Memory::with(PATH, "schema_version: 3\n");
     let e = write_back(&mut fs, &loader(), PATH, Options::default()).unwrap_err();
     assert!(matches!(&e, WriteBackError::Load(l) if l.source.as_deref() == Some(PATH)));
-    assert_eq!(e.code(), "angzarr-yaml-load-failed-at");
     assert_eq!(
         e.to_string(),
-        "angzarr-yaml-load-failed-at kind=toy source=/cfg/toy.yaml \
-         problem=angzarr-yaml-too-new problem.found=3 problem.current=2"
+        concat!(
+            code!("load-failed-at"),
+            " kind=toy source=/cfg/toy.yaml \
+         problem=",
+            code!("too-new"),
+            " problem.found=3 problem.current=2"
+        )
     );
     assert_eq!(fs.files[PATH], "schema_version: 3\n");
 }

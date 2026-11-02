@@ -22,6 +22,11 @@ serde = { version = "1.0.228", default-features = false, features = ["std"] }
 # The decode's tests derive their types.
 serde = { version = "1.0.228", features = ["derive"] }
 
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+
 # The shared crates' lints: the workspace's (the root Cargo.toml).
 [lints]
 workspace = true

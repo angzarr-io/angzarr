@@ -53,7 +53,7 @@
 //!
 //! A document that does not parse gives an [`Error`]: the line and a
 //! [`ParseProblem`]. Every error here is an [`angzarr_diagnostic::Diagnostic`],
-//! with its en-US messages in `locales/en-US/angzarr-yaml.ftl`.
+//! with its en-US messages in `locales/en-US/messages.ftl` ([`EN_US`]).
 //!
 //! [`decode`] turns a [`Value`] into any serde type, strictly: scalars parsed
 //! only as the type asks, unknown keys refused, every failure a key path and a
@@ -1184,16 +1184,16 @@ fn block(v: &Value, indent: usize, depth: usize, flow_depth: usize, out: &mut St
 
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's diagnostics. The text of
-/// `crates/angzarr-yaml/locales/en-US/angzarr-yaml.ftl`.
+/// `locales/en-US/messages.ftl`, its ids under the crate's package name
+/// (`angzarr_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
-    "angzarr-yaml",
-    include_str!("../locales/en-US/angzarr-yaml.ftl"),
+    env!("CARGO_PKG_NAME"),
+    include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
 );
 
 /// One value of every error this crate defines, each variant once, for the
 /// catalog parity test: each one's code must have a message in every locale,
-/// using exactly its args. Its messages are in
-/// `crates/angzarr-yaml/locales/en-US/angzarr-yaml.ftl`.
+/// using exactly its args. Its messages are in [`EN_US`].
 pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
     let text = |s: &str| s.to_string();
     let parse = [
