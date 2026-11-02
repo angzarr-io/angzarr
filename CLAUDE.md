@@ -13,9 +13,14 @@ just build                 # or fmt-check, lint, test: one step across every cra
 just lint-deps             # cargo-deny (deny.toml)
 ```
 
-The old distributed-runtime crate (the root package `angzarr`, its
-coordinator binaries and images) was retired on 2026-11-02. `deploy/`,
-`gateway/` and `docs/` still describe that runtime.
+The distributed coordinator runtime (the root package `angzarr`, its
+coordinator binaries and images, `deploy/`, `gateway/`, `features/` and the
+k8s recipes) was retired on 2026-11-02 and is to be brought back. Its last
+commit is tagged `distributed-runtime-final`
+(`9745c402cefdaa317bca417934b0dc46f623973f`); it did not build there (its
+`build.rs` read `angzarr-project/proto/angzarr_client/...`, since removed).
+README.md's "Retired: the distributed runtime" has the restore recipe.
+`docs/` still describes that runtime.
 
 ## General Rules
 
@@ -69,18 +74,9 @@ Use enum names, not integer representations.
 
 | Tool | Usage |
 |------|-------|
-| Helm | All deployments (no kustomize) |
-| Python | Support scripts, secrets, health checks |
-| Kind | Local k8s (`just kind up/down/status`) |
-
-## Port Standards
-
-| Service | Port | NodePort |
-|---------|------|----------|
-| Command Handler Coordinator | 1310 | 31310 |
-| Stream gRPC | 1340 | 31340 |
-| Topology REST | 9099 | — |
-| Rust business logic | 500xx | — |
+| just | Every gate: the root justfile and each crate's |
+| buf | The spec's protos (`just buf-lint`, `buf-docs`) |
+| Python | Doc-rendering scripts (`scripts/`) |
 
 Other languages in separate repos: `angzarr-examples-{lang}`.
 
@@ -116,8 +112,7 @@ store backend runs (`angzarr_ports::contract` and `store_contract!`, its
 ### Acceptance Tests
 Business behavior via Gherkin. Full stack through sagas, PMs, projectors.
 
-- Features: `features/` (synced to client/example repos)
-- Modes: in-process or direct (deployed cluster)
+- Features: the spec's (`angzarr-project/features/`)
 
 ### Gherkin Authoring
 Business-readable spec, not test code. Describe **what/why**, never **how**.

@@ -24,9 +24,45 @@ virtual Cargo workspace under `crates/`:
 | `angzarr-yaml` | a strict subset of YAML, versioned documents migrated on read, decoded strictly |
 | `angzarr-presentation` | JSON or text at a driving edge, diagnostics rendered from Fluent catalogs |
 
-The distributed-runtime crate that used to sit at the repository root (the
-coordinator binaries and their images) is retired; `deploy/`, `gateway/` and
-the documentation below still describe it.
+## Retired: the distributed runtime
+
+The distributed coordinator runtime (the root `angzarr` crate, its
+coordinator binaries and images, the helm chart, the gRPC gateway and its
+acceptance features) was retired on 2026-11-02 and is to be brought back.
+The router is the distributed runtime meanwhile. The last commit holding all
+of it is tagged **`distributed-runtime-final`**
+(`9745c402cefdaa317bca417934b0dc46f623973f`,
+[tree](https://github.com/angzarr-io/angzarr/tree/distributed-runtime-final)).
+It holds `src/`, `build.rs`, `tests/` and `migrations/` (the crate),
+`crates/trivial-delegation` and `xtask/`, `deploy/` (helm chart, OpenTofu,
+kind), `gateway/` (the Go grpc-gateway), `features/`, the coordinator image
+builds (`Containerfile`, `skaffold.yaml`, `build.json`,
+`justfile.container`) and their release workflows.
+
+It did not build at that commit: its `build.rs` reads the spec's protos
+from `angzarr-project/proto/angzarr_client/proto/angzarr/v1/`, which no
+longer exists. To restore it:
+
+```bash
+git checkout distributed-runtime-final -- \
+    src build.rs tests migrations crates/trivial-delegation xtask \
+    deploy gateway features kind-config.yaml artifacthub-repo.yml \
+    Containerfile skaffold.yaml build.json justfile.container \
+    bacon.toml config.example.yaml mutants.toml .cargo/mutants.toml \
+    .github/workflows/release.yml .github/workflows/cleanup-images.yml \
+    scripts/configure_skaffold.py scripts/generate-identicons.mjs \
+    scripts/install-opentofu.sh scripts/manage_secrets.py \
+    scripts/reset_event_store.py scripts/sync_version.py \
+    scripts/wait-for-grpc-health.py
+```
+
+then merge by hand what the retirement edited rather than deleted:
+`Cargo.toml` (the root `[package]`, its features, bins and profiles),
+`justfile`, `.cargo/config.toml`, `lefthook.yml`, `.versionator.yaml`,
+`renovate.json`, `.github/workflows/ci.yml`, `.gitignore` and
+`.dockerignore` (`git diff distributed-runtime-final HEAD -- <file>`), and
+point `build.rs` at the spec's current protos. `docs/` still describes the
+runtime as it was.
 
 ## Supported Languages
 
