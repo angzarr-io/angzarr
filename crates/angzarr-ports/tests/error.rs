@@ -478,6 +478,16 @@ fn every_error_is_a_diagnostic_with_its_own_code_and_args() {
     assert_eq!(cause.to_string(), "annals-store-sql-io errno=10");
 }
 
+/// The crate offers its catalogs by locale under the same name, built from
+/// `locales/` with no list of its own: en-US alone, the same text as
+/// `EN_US`.
+#[test]
+fn its_locales_are_every_catalog_under_locales_en_us_alone() {
+    let (name, table) = angzarr_ports::LOCALES;
+    assert_eq!(name, angzarr_ports::EN_US.0);
+    assert_eq!(table, &[("en-US", angzarr_ports::EN_US.1)]);
+}
+
 /// The crate ships its own en-US catalog, exported as `EN_US` under the
 /// crate's package name: a message for every code, using exactly its args,
 /// and no message without an error. The samples are one of every variant.

@@ -97,3 +97,13 @@ fn test_every_code_is_under_the_crates_name_with_its_message() {
         []
     );
 }
+
+/// The crate offers its catalogs by locale under the same name, built from
+/// `locales/` with no list of its own: en-US alone, the same text as
+/// `EN_US`.
+#[test]
+fn test_its_locales_are_every_catalog_under_locales_en_us_alone() {
+    let (name, table) = crate::LOCALES;
+    assert_eq!(name, crate::EN_US.0);
+    assert_eq!(table, &[("en-US", crate::EN_US.1)]);
+}

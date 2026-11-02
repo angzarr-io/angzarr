@@ -101,6 +101,15 @@ pub const EN_US: (&str, &str) = (
     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
 );
 
+/// This crate's catalogs by locale, under the same name: every
+/// `locales/<locale>/messages.ftl`, from the table the build writes
+/// (`angzarr_diagnostic::build`), so a locale added there is offered with
+/// no other edit. en-US alone ships.
+pub const LOCALES: (&str, &[(&str, &str)]) = (
+    env!("CARGO_PKG_NAME"),
+    include!(concat!(env!("OUT_DIR"), "/locales.rs")),
+);
+
 /// One value of every [`StoreError`] variant, each once, for the catalog
 /// parity test: each one's code must have a message in every locale, using
 /// exactly its args ([`angzarr_diagnostic::catalog::check`]).

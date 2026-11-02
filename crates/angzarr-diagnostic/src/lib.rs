@@ -34,7 +34,17 @@
 //!     env!("CARGO_PKG_NAME"),
 //!     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
 //! );
+//! // Every locale's catalog, from the table the build writes beside them:
+//! pub const LOCALES: (&str, &[(&str, &str)]) = (
+//!     env!("CARGO_PKG_NAME"),
+//!     include!(concat!(env!("OUT_DIR"), "/locales.rs")),
+//! );
 //! ```
+//!
+//! `LOCALES` lists every `locales/<locale>/messages.ftl` the crate has, so
+//! a locale added there is offered with no other edit; a renderer
+//! (angzarr-presentation's `Catalog::for_locale`) takes it from there. Only
+//! en-US ships today.
 //!
 //! The rules:
 //!

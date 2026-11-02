@@ -12,8 +12,18 @@
 //! - [`Format`]: which format, from flags and whether stdout is a terminal.
 //! - [`render`] and [`write_json`]: one JSON document per call, fields in a
 //!   fixed order; [`write_json_line`], one line of a JSON Lines stream.
-//! - [`Catalog`]: a diagnostic's message from each crate's embedded en-US
-//!   catalog, and its JSON [`Envelope`] with nested causes.
+//! - [`Catalog`]: a diagnostic's message from each crate's embedded
+//!   catalogs, and its JSON [`Envelope`] with nested causes.
+//!   [`Catalog::en_us`] takes each crate's `EN_US` ([`Source`]);
+//!   [`Catalog::for_locale`] takes each crate's `LOCALES` ([`Locales`],
+//!   every `locales/<locale>/messages.ftl` it has, from the table its build
+//!   writes), serves the requested locale from the nearest one offered
+//!   (Fluent's negotiation), and falls back to en-US message by message.
+//!   Asked for en-US it is [`Catalog::en_us`]. Only en-US catalogs ship.
+//! - [`locale`]: the locale a person asked for, [`locale::detect`]ed from
+//!   `LC_ALL`, `LC_MESSAGES` and `LANG` as the binary passes them in
+//!   (`locale::detect(|name| std::env::var(name).ok())`; nothing here reads
+//!   the environment), and en-US, [`locale::fallback`].
 //! - [`text`]: display-width columns and headlines.
 //! - `english` (behind the `test-support` feature): a diagnostic's en-US
 //!   message from catalogs, for the tests that hold its English to an
@@ -27,18 +37,20 @@ pub mod english;
 mod envelope;
 mod error;
 mod format;
+pub mod locale;
 pub mod text;
 
 use std::io::{self, Write};
 
 use serde::Serialize;
 
-pub use catalog::{Catalog, Source};
+pub use catalog::{Catalog, Locales, Source};
 pub use envelope::Envelope;
 #[cfg(any(test, feature = "test-support"))]
 pub use error::diagnostic_samples;
-pub use error::{CatalogError, UnknownFormat, Unrendered, EN_US};
+pub use error::{CatalogError, UnknownFormat, Unrendered, EN_US, LOCALES};
 pub use format::Format;
+pub use unic_langid::LanguageIdentifier;
 
 /// A value a driving adapter answers with, in both formats.
 pub trait Render {

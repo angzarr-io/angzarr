@@ -4,7 +4,7 @@ use std::fmt;
 
 use angzarr_diagnostic::{code, Arg, Diagnostic};
 
-use crate::Source;
+use crate::{Locales, Source};
 
 /// This crate's en-US messages; every [`Catalog`](crate::Catalog) holds
 /// them. The text of `locales/en-US/messages.ftl`, its ids under the
@@ -12,6 +12,15 @@ use crate::Source;
 pub const EN_US: Source = (
     env!("CARGO_PKG_NAME"),
     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
+);
+
+/// This crate's catalogs by locale, under the same name: every
+/// `locales/<locale>/messages.ftl`, from the table the build writes
+/// (`angzarr_diagnostic::build`), so a locale added there is offered with no
+/// other edit. en-US alone ships.
+pub const LOCALES: Locales = (
+    env!("CARGO_PKG_NAME"),
+    include!(concat!(env!("OUT_DIR"), "/locales.rs")),
 );
 
 /// A `--format` that is neither `text` nor `json`.

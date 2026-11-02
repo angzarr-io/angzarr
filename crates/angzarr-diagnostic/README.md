@@ -34,7 +34,12 @@ each named by its code's suffix (`too-new = ...`). Its build script calls
 which writes it to `OUT_DIR` as `en-US.ftl` with every message id, and every
 reference to a message or term, prefixed with the crate's package name
 (`catalog::prefixed`), and the crate exports it as
-`EN_US = (env!("CARGO_PKG_NAME"), include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")))`. A library renders nothing: whoever shows the error
+`EN_US = (env!("CARGO_PKG_NAME"), include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")))`.
+Beside the catalogs the build writes `locales.rs`, the table of every
+`locales/<locale>/messages.ftl` the crate has, which it exports as
+`LOCALES = (env!("CARGO_PKG_NAME"), include!(concat!(env!("OUT_DIR"), "/locales.rs")))`,
+so a locale added there is offered with no other edit (angzarr-presentation's
+`Catalog::for_locale` renders from it; only en-US ships today). A library renders nothing: whoever shows the error
 looks the code up in its catalogs and passes the args by name, rendering a
 nested cause first. `catalog::render(ftl, d, f)` does that with no Fluent
 library, for a catalog whose messages are one line of text and `{ $arg }`
