@@ -48,6 +48,6 @@ AGPL-3.0 (GNU Affero General Public License v3)
 
 The shared crates `angzarr-proto`, `angzarr-proto-component`,
 `angzarr-proto-transport-embedded`, `angzarr-proto-transport-distributed`,
-`angzarr-ports`, `angzarr-diagnostic` and `angzarr-yaml`: Licensed under either
-of Apache License 2.0 or BSD 3-Clause, at your option (each crate's
-`LICENSE-APACHE` and `LICENSE-BSD`).
+`angzarr-ports`, `angzarr-diagnostic`, `angzarr-yaml` and
+`angzarr-presentation`: Licensed under either or BSD 3-Clause, at your option (each crate's `LICENSE-APACHE` and
+`LICENSE-BSD`).

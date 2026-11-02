@@ -1,7 +1,8 @@
 # The mutation full pass of the shared crates: crates/angzarr-ports (moved
 # from angzarr-project, whose weekly pass this replaces), and
 # crates/angzarr-diagnostic and crates/angzarr-yaml (moved from
-# angzarr-embedded); weekly and by hand. Each crate's `just mutation-test`
+# angzarr-embedded), and crates/angzarr-presentation (moved from taskloom);
+# weekly and by hand. Each crate's `just mutation-test`
 # (its justfile, through the root justfile's shared-mutation) mutates the
 # whole crate and judges the kill rate against its MUTATION_THRESHOLD. No git hook runs mutation. angzarr-proto is
 # generated code, not mutated. The crate needs protoc (angzarr-proto's
@@ -30,7 +31,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [angzarr-ports, angzarr-diagnostic, angzarr-yaml]
+        crate: [angzarr-ports, angzarr-diagnostic, angzarr-yaml, angzarr-presentation]
     # GitHub's cap for a hosted job; let the full pass finish rather than
     # cancel it mid-run.
     timeout-minutes: 360

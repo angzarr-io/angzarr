@@ -1,0 +1,42 @@
+[package]
+name = "angzarr-presentation"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "Presentation at the driving edge, for any domain: JSON or UTF-8 text, diagnostics rendered from Fluent catalogs, display-width text helpers"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace's [workspace.package] is sererr's (see the root Cargo.toml),
+# not this crate's, so nothing is inherited.
+
+# Domain-free: no crate of this workspace but angzarr-diagnostic, the trait
+# it renders, which lib.test.rs checks.
+[dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+# Fluent's standard runtime and its language ids: the catalogs' renderer.
+fluent-bundle = "0.15.3"
+unic-langid = "0.9.6"
+# The JSON format, and the error envelope.
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
+# Display-width columns in text output.
+unicode-width = "0.2.2"
+
+[dev-dependencies]
+# The catalog test reads this crate's catalog's messages and variables.
+fluent-syntax = "0.11.1"
+
+[features]
+# Test support other crates' tests share, behind their dev-dependency, and
+# in no build of a binary: `diagnostic_samples` (one value of every error
+# here, for a catalog test) and `english` (a diagnostic's en-US message
+# from catalogs, as an edge renders it, for the tests that hold a
+# diagnostic's English to an expected text).
+test-support = []
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true
