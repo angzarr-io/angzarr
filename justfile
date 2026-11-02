@@ -3,8 +3,8 @@
 # angzarr core is a virtual workspace of the shared crates (crates/*), each
 # checked by its own justfile on the host: `just check-shared-crates` is the
 # whole gate, and build, fmt-check, lint and test run one of its steps
-# across every crate. The rest drives the proto docs, the gRPC gateway and
-# the Kubernetes tooling under deploy/.
+# across every crate. The rest drives the proto docs and the Kubernetes
+# tooling under deploy/.
 
 set shell := ["bash", "-c"]
 
@@ -65,14 +65,6 @@ fmt-python:
     just _lang-container python black scripts/
     just _lang-container python ruff check --fix --select I scripts/
 
-# === Proto Generation ===
-
-# Generate gateway proto code
-# NOTE: Client library protos are now generated in their respective repos using buf registry
-proto: gateway-gen
-    @echo "Gateway protos generated successfully"
-    @echo "Client protos: run 'just proto' in each angzarr-client-{lang} repo"
-
 # === Buf Schema Registry ===
 
 # Run buf command in container (buf is installed in base image)
@@ -126,54 +118,6 @@ buf-docs:
     python3 "{{TOP}}/build/proto/fix_anchors.py" "{{TOP}}/docs/docs/api/proto/index.md"
     # Add frontmatter for Docusaurus
     sed -i '1i ---\ntitle: Protocol Buffer API\ndescription: Auto-generated documentation for Angzarr protobuf definitions\n---\n' "{{TOP}}/docs/docs/api/proto/index.md"
-
-# === gRPC Gateway ===
-
-# Run command in Go container (has Go, buf, protoc plugins)
-[private]
-_go +ARGS:
-    #!/usr/bin/env bash
-    if [ "${DEVCONTAINER:-}" = "true" ] || (command -v go &>/dev/null && command -v buf &>/dev/null); then
-        eval {{ARGS}}
-    else
-        {{CONTAINER_RUN}} --network=host \
-            -v "{{TOP}}:/workspace:Z" \
-            -w /workspace \
-            {{REGISTRY}}/angzarr-go:latest \
-            sh -c {{ARGS}}
-    fi
-
-# Generate gRPC-Gateway and OpenAPI code from protos
-gateway-gen:
-    just _go "cd gateway && buf generate"
-
-# Build gRPC-Gateway binary (for local testing)
-gateway-build: gateway-gen
-    just _go "cd gateway && go build -o /tmp/angzarr-grpc-gateway ."
-
-# Run gRPC-Gateway locally (connects to local coordinator)
-gateway-dev: gateway-gen
-    just _go "cd gateway && go run . --grpc-target=localhost:1310"
-
-# Build gRPC-Gateway container image
-gateway-image: gateway-gen
-    {{CONTAINER_CMD}} build -t ghcr.io/angzarr-io/angzarr-grpc-gateway:latest -f gateway/Containerfile .
-
-# Build and push gRPC-Gateway container image (for CI)
-gateway-image-push TAG="latest": gateway-gen
-    #!/usr/bin/env bash
-    set -euo pipefail
-    IMAGE="ghcr.io/angzarr-io/angzarr-grpc-gateway"
-    {{CONTAINER_CMD}} build -t "$IMAGE:{{TAG}}" -f gateway/Containerfile .
-    {{CONTAINER_CMD}} tag "$IMAGE:{{TAG}}" "$IMAGE:latest"
-    {{CONTAINER_CMD}} push "$IMAGE:{{TAG}}"
-    {{CONTAINER_CMD}} push "$IMAGE:latest"
-
-# Generate OpenAPI spec and copy to docs
-openapi: gateway-gen
-    mkdir -p "{{TOP}}/docs/static"
-    cp "{{TOP}}/gateway/api/angzarr.swagger.json" "{{TOP}}/docs/static/openapi.json"
-    @echo "OpenAPI spec generated at docs/static/openapi.json"
 
 # === Shared crates: build, lint, test ===
 # The four proto crates are the spec's four packages (decision 14.64):

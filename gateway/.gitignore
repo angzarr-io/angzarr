@@ -1,5 +1,0 @@
-# Generated protobuf code
-gen/
-
-# Generated OpenAPI spec (kept in docs/static/ instead)
-api/
