@@ -380,6 +380,20 @@ pub trait ListStreams: MaybeSend + MaybeSync {
     fn list_streams(&self) -> impl Future<Output = Result<Vec<Cover>, StoreError>> + MaybeSend;
 }
 
+/// Opt-in: every stream one handler holds a position on, with the
+/// position. What a handler that keeps its positions in the store reads
+/// when it starts, to know the streams it was handed before: one the store
+/// no longer holds is gone (purged) since. It answers every stream whose
+/// [`PositionStore::position`] for `handler` is above 0 (0 is no position:
+/// what an unwritten one reads as), with that position, in [`ListStreams`]'
+/// order: by domain, then main first, then by edition and root.
+pub trait ListPositions: MaybeSend + MaybeSync {
+    fn list_positions(
+        &self,
+        handler: &str,
+    ) -> impl Future<Output = Result<Vec<(Cover, u64)>, StoreError>> + MaybeSend;
+}
+
 // ================================================================= outbox
 
 /// One message a component sends beyond its own stream (a policy's command,

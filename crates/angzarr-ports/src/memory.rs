@@ -35,8 +35,8 @@ use crate::error::StoreError;
 use crate::migrate::{plan_run, plan_undo, AppliedMigration, Backup, Migration, Migrations};
 use crate::store::{
     Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions,
-    EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, Purge, ReadByCorrelation,
-    ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write, Written,
+    EventStore, ListPositions, ListStreams, Outbox, OutboxEntry, PositionStore, Purge,
+    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write, Written,
     EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
 use crate::stream::{PositionKey, Slice, StreamRef};
@@ -741,6 +741,18 @@ impl ListStreams for MemoryStore {
             .iter()
             .filter(|(_, pages)| !pages.is_empty())
             .map(|(k, _)| cover(k))
+            .collect())
+    }
+}
+
+impl ListPositions for MemoryStore {
+    async fn list_positions(&self, handler: &str) -> Result<Vec<(Cover, u64)>, StoreError> {
+        Ok(self
+            .data()
+            .positions
+            .iter()
+            .filter(|((_, of), next)| of == handler && **next > 0)
+            .map(|((k, _), next)| (cover(k), *next))
             .collect())
     }
 }

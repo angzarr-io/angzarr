@@ -38,6 +38,7 @@
 //! | `until_time` | [`ReadUntilTime`] | a store |
 //! | `correlation` | [`ReadByCorrelation`] | a store |
 //! | `list_streams` | [`ListStreams`] | a store |
+//! | `list_positions` | [`ListPositions`] | a store |
 //! | `outbox` | [`Outbox`] | a store |
 //! | `outbox_watch` | [`Outbox`], [`Watch`] | a store |
 //! | `dead_letters` | [`DeadLetterStore`] | a store |
@@ -76,8 +77,9 @@ use crate::error::StoreError;
 use crate::migrate::{latest, AppliedMigration, Backup, Migration, MigrationStatus, Migrations};
 use crate::store::{
     Append, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions, EventStore,
-    ListStreams, Outbox, OutboxEntry, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime,
-    Store, Watch, Write, Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
+    ListPositions, ListStreams, Outbox, OutboxEntry, Purge, ReadByCorrelation, ReadStore, ReadUnit,
+    ReadUntilTime, Store, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
+    EDITION_DELETED_TYPE_URL,
 };
 use crate::stream::{PositionKey, StreamRef};
 
@@ -2286,6 +2288,44 @@ where
     );
 }
 
+/// A handler's positions, every stream it holds one on above 0, in
+/// `list_streams`' order; another handler's, and one put back to 0, are
+/// not among them.
+pub async fn list_positions_is_a_handlers_positions_in_stream_order<S>(store: S)
+where
+    S: Store + ListPositions,
+{
+    let streams = [
+        main_stream("ledger", 1),
+        edition_stream("account", 1, "a"),
+        main_stream("account", 2),
+        main_stream("account", 1),
+    ];
+    fork(&store, edition_stream("account", 1, "a")).await;
+    for (n, s) in (1..).zip(streams) {
+        put(&store, key("h", s), n).await.unwrap();
+    }
+    put(&store, key("other", main_stream("order", 1)), 4)
+        .await
+        .unwrap();
+    put(&store, key("h", main_stream("order", 1)), 4)
+        .await
+        .unwrap();
+    put(&store, key("h", main_stream("order", 1)), 0)
+        .await
+        .unwrap();
+    assert_eq!(
+        store.list_positions("h").await,
+        Ok(vec![
+            (main_stream("account", 1).to_cover(), 4),
+            (main_stream("account", 2).to_cover(), 3),
+            (edition_stream("account", 1, "a").to_cover(), 2),
+            (main_stream("ledger", 1).to_cover(), 1),
+        ])
+    );
+    assert_eq!(store.list_positions("nobody").await, Ok(vec![]));
+}
+
 // ------------------------------------------------------------ outbox (opt-in)
 
 /// 5.6: the outbox lands with the step's events and positions, in one
@@ -3604,6 +3644,11 @@ macro_rules! store_contract {
     (list_streams, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             list_streams_is_every_domains_covers_in_order,
+        );
+    };
+    (list_positions, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            list_positions_is_a_handlers_positions_in_stream_order,
         );
     };
     (outbox, $(#[$t:meta])+, $f:expr) => {

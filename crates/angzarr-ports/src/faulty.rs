@@ -27,8 +27,9 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use angzarr_proto::v1::{Cover, EventPage, Snapshot};
 
 use crate::store::{
-    ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore, ListStreams,
-    PositionStore, Purge, ReadStore, ReadUnit, SnapshotStore, Watch, Write, Written,
+    ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore,
+    ListPositions, ListStreams, PositionStore, Purge, ReadStore, ReadUnit, SnapshotStore, Watch,
+    Write, Written,
 };
 use crate::stream::{PositionKey, Slice, StreamRef};
 use crate::{Cause, StoreError, Uuid};
@@ -423,6 +424,12 @@ impl<S: Watch> Watch for FaultyStore<S> {
 impl<S: ListStreams> ListStreams for FaultyStore<S> {
     async fn list_streams(&self) -> Result<Vec<Cover>, StoreError> {
         self.inner.list_streams().await
+    }
+}
+
+impl<S: ListPositions> ListPositions for FaultyStore<S> {
+    async fn list_positions(&self, handler: &str) -> Result<Vec<(Cover, u64)>, StoreError> {
+        self.inner.list_positions(handler).await
     }
 }
 

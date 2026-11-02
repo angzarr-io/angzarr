@@ -31,9 +31,9 @@ use angzarr_ports::contract;
 use angzarr_ports::memory::{MemoryRead, MemoryStore};
 use angzarr_ports::{
     Append, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore, Head,
-    ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge, ReadByCorrelation,
-    ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Uuid, Watch,
-    Write, Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
+    ListPositions, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Purge,
+    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
+    StreamRef, Uuid, Watch, Write, Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -178,6 +178,12 @@ enum Bug {
     CorrelationIgnoresEdition,
     /// `list_streams` orders by root first.
     ListStreamsByRoot,
+    /// `list_positions` answers every handler's positions.
+    ListPositionsAnyHandler,
+    /// `list_positions` answers a position put back to 0.
+    ListPositionsKeepsZero,
+    /// `list_positions` answers the streams in reverse.
+    ListPositionsReversed,
     // ---- outbox
     /// An outbox entry loses its edition.
     OutboxDropsEdition,
@@ -1189,6 +1195,32 @@ impl ListStreams for Broken {
     }
 }
 
+impl ListPositions for Broken {
+    async fn list_positions(&self, handler: &str) -> Result<Vec<(Cover, u64)>, StoreError> {
+        let mut listed = self.inner.list_positions(handler).await?;
+        let puts = self.shared.positions.lock().unwrap().clone();
+        for (of, stream) in puts {
+            let key = PositionKey {
+                handler: &of,
+                stream: stream.get(),
+            };
+            let next = self.inner.position(key).await?;
+            let stray = match self.bug {
+                Bug::ListPositionsAnyHandler => of != handler && next > 0,
+                Bug::ListPositionsKeepsZero => of == handler && next == 0,
+                _ => false,
+            };
+            if stray {
+                listed.push((stream.get().to_cover(), next));
+            }
+        }
+        if self.is(Bug::ListPositionsReversed) {
+            listed.reverse();
+        }
+        Ok(listed)
+    }
+}
+
 impl Outbox for Broken {
     async fn pending(&self, limit: usize) -> Result<Vec<OutboxEntry>, StoreError> {
         let mut pending = self.inner.pending(usize::MAX).await?;
@@ -1750,6 +1782,13 @@ fn the_core_read_checks_catch_a_wrong_bound_filter_or_order() {
         broken,
         ListStreamsByRoot
     );
+    catches!(
+        list_positions_is_a_handlers_positions_in_stream_order,
+        broken,
+        ListPositionsAnyHandler,
+        ListPositionsKeepsZero,
+        ListPositionsReversed,
+    );
 }
 
 /// Ruled 2026-10-31: the outbox promises order within a stream and none
@@ -1855,6 +1894,7 @@ fn an_honest_broken_store_passes_every_check() {
         read_until_time_is_the_prefix_recorded_by_then,
         read_by_correlation_gives_one_book_per_stream,
         list_streams_is_every_domains_covers_in_order,
+        list_positions_is_a_handlers_positions_in_stream_order,
         an_outbox_entry_lands_with_its_write_or_not_at_all,
         the_outbox_drains_each_stream_in_order_and_clears,
         a_pending_entry_is_redelivered_until_cleared,
