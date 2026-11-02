@@ -5,20 +5,43 @@
 //! message, and the [`args`] the message fills in. Whoever shows the error
 //! renders it in the reader's language by looking the code up in a Fluent
 //! catalog and passing the args by name. A library renders nothing; it ships
-//! an en-US catalog per crate (`crates/<crate>/locales/en-US/<crate>.ftl`),
-//! which each crate with codes exports, embedded, as `EN_US`: the crate's
-//! name and the catalog's text (`angzarr_ports::EN_US`,
-//! `angzarr_yaml::EN_US`, ...). A dependent adds those to its own catalog to
-//! render their diagnostics; [`catalog::check`] is each crate's test that its
-//! catalog and its errors agree. An error's `Display` is its code then its args, never English
-//! (angzarr decision 14.37): [`display`] writes it, for logs; English is
-//! rendered only where the error is shown, from a catalog keyed by the code.
+//! an en-US catalog per crate, which each crate with codes exports, embedded,
+//! as `EN_US`: the crate's name and the catalog's text
+//! (`angzarr_ports::EN_US`, `angzarr_yaml::EN_US`, ...). A dependent adds
+//! those to its own catalog to render their diagnostics; [`catalog::check`]
+//! is each crate's test that its catalog and its errors agree. An error's
+//! `Display` is its code then its args, never English (angzarr decision
+//! 14.37): [`display`] writes it, for logs; English is rendered only where
+//! the error is shown, from a catalog keyed by the code.
+//!
+//! No crate writes its own name in its codes or its catalog: the build reads
+//! it from the package (`CARGO_PKG_NAME`), so a renamed crate's codes and
+//! catalog follow with no other edit. A code is written [`code!`]`("too-new")`,
+//! the crate's name and a dash prefixed at compile time. The catalog's
+//! source, `crates/<crate>/locales/en-US/messages.ftl`, names each message by
+//! that suffix alone; the crate's build script (`build::catalogs`, behind the
+//! `build` feature) writes it to `OUT_DIR` as `en-US.ftl` with every id, and
+//! every reference to one, prefixed ([`catalog::prefixed`]):
+//!
+//! ```ignore
+//! // build.rs, angzarr-diagnostic a build-dependency with feature "build":
+//! fn main() {
+//!     angzarr_diagnostic::build::catalogs();
+//! }
+//!
+//! // lib.rs:
+//! pub const EN_US: (&str, &str) = (
+//!     env!("CARGO_PKG_NAME"),
+//!     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
+//! );
+//! ```
 //!
 //! The rules:
 //!
 //! - **A code is stable and never reused.** It is kebab-case, starts with the
-//!   crate's name (`angzarr-yaml-too-new`), and is a valid Fluent message id.
-//!   A code whose meaning changes gets a new code.
+//!   crate's name (`angzarr-yaml-too-new`, written `code!("too-new")` in
+//!   angzarr-yaml), and is a valid Fluent message id. A code whose meaning
+//!   changes gets a new code.
 //! - **Args carry data, never English.** Numbers, ids, paths and the text
 //!   that was read are args; a phrase a person reads is the catalog's. A
 //!   wrapped cause is [`Arg::Nested`], rendered by the renderer in its turn.
@@ -47,7 +70,30 @@
 use std::borrow::Cow;
 use std::fmt;
 
+#[cfg(feature = "build")]
+pub mod build;
 pub mod catalog;
+mod prefix;
+
+/// A code of the crate this is written in: its package name
+/// (`CARGO_PKG_NAME`), a dash and `suffix`, as one `&'static str` literal,
+/// so it serves in a `const` and in `concat!`. The name is read when the
+/// calling crate compiles: a renamed crate's codes follow it, and no code
+/// spells its crate's name.
+///
+/// ```
+/// use angzarr_diagnostic::code;
+///
+/// const TOO_NEW: &str = code!("too-new");
+/// assert_eq!(TOO_NEW, concat!(env!("CARGO_PKG_NAME"), "-too-new"));
+/// assert_eq!(concat!(code!("gap"), " from=1"), format!("{}-gap from=1", env!("CARGO_PKG_NAME")));
+/// ```
+#[macro_export]
+macro_rules! code {
+    ($suffix:literal) => {
+        concat!(env!("CARGO_PKG_NAME"), "-", $suffix)
+    };
+}
 
 /// An error a person may read: a stable code and its named data. `Display`
 /// is the code then the args ([`display`]), never English.

@@ -112,3 +112,20 @@ fn a_value_that_would_not_parse_back_is_quoted() {
          cause.ext_err_txt=\"database is locked\""
     );
 }
+
+/// A code is the calling crate's package name, a dash and the suffix, read
+/// when that crate compiles: nothing spells the name, so a renamed crate's
+/// codes follow it. One literal, so it serves in a `const` and `concat!`.
+#[test]
+fn a_code_is_its_crates_package_name_a_dash_and_its_suffix() {
+    const CODE: &str = crate::code!("too-new");
+    assert_eq!(
+        CODE.strip_prefix(env!("CARGO_PKG_NAME")),
+        Some("-too-new"),
+        "{CODE}"
+    );
+    assert_eq!(
+        concat!(crate::code!("gap"), " from=1"),
+        format!("{}-gap from=1", env!("CARGO_PKG_NAME"))
+    );
+}

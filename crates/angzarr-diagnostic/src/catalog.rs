@@ -1,8 +1,10 @@
 //! A crate's Fluent catalog checked against its errors, and an error
 //! rendered through one, with no Fluent library.
 //!
-//! A crate that has codes ships `locales/en-US/<crate>.ftl` and exports it as
-//! `EN_US`, and its tests call [`check`] with one value of every error it
+//! A crate that has codes ships `locales/en-US/messages.ftl`, its ids the
+//! codes' suffixes, which its build writes under the crate's name
+//! ([`prefixed`]) and it exports as `EN_US`; its tests call [`check`] with
+//! the crate's name (`EN_US.0`) and one value of every error it
 //! defines (its `diagnostic_samples()`): every code needs a message using
 //! exactly the error's args, every message needs an error, a code is
 //! kebab-case under the crate's name, and an error displays as its code and
@@ -26,6 +28,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use crate::{Arg, Diagnostic};
+
+pub use crate::prefix::prefixed;
 
 /// What is wrong with a catalog, or with an error against it.
 #[derive(Clone, Debug, PartialEq, Eq)]

@@ -14,6 +14,16 @@ publish = false
 # Deliberately zero dependencies, and nothing from any program that uses it.
 [dependencies]
 
+[features]
+# `build::catalogs`, for a build script: a crate's catalog sources, their
+# ids suffixes, written to OUT_DIR under the crate's name. std alone.
+build = []
+
+[dev-dependencies]
+# Fluent's own parser and serializer hold `catalog::prefixed` to the
+# grammar (the presentation crate's renderer already depends on it).
+fluent-syntax = "0.11.1"
+
 # The shared crates' lints: the workspace's (the root Cargo.toml).
 [lints]
 workspace = true

@@ -14,6 +14,9 @@ dependencies = [
 [[package]]
 name = "angzarr-diagnostic"
 version = "0.1.0"
+dependencies = [
+ "fluent-syntax",
+]
 
 [[package]]
 name = "angzarr-ports"

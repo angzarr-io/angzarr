@@ -15,7 +15,10 @@ pub enum Arg { Int(i64), Uint(u64), Str(String), Nested(Box<dyn Diagnostic>) }
 ```
 
 - **The code** is stable, kebab-case and starts with the crate's name:
-  `angzarr-yaml-too-new`. A code is never reused for another meaning.
+  `angzarr-yaml-too-new`. A code is never reused for another meaning. It is
+  written `code!("too-new")`: the macro prefixes the calling crate's package
+  name (`CARGO_PKG_NAME`) at compile time, so no code spells its crate's
+  name and a renamed crate's codes follow it.
 - **The args** are data: numbers, ids, paths, the text that was read.
   Never English. A wrapped cause is `Arg::Nested`.
 - **`Display`** is the code, then ` name=value` for each arg, a nested
@@ -25,8 +28,13 @@ pub enum Arg { Int(i64), Uint(u64), Str(String), Nested(Box<dyn Diagnostic>) }
   line parses back (`quote`). `display(d, f)` writes it.
 
 Each crate ships an en-US Fluent catalog,
-`crates/<crate>/locales/en-US/<crate>.ftl`, with a message for every code,
-and exports it as `EN_US`. A library renders nothing: whoever shows the error
+`crates/<crate>/locales/en-US/messages.ftl`, with a message for every code,
+each named by its code's suffix (`too-new = ...`). Its build script calls
+`angzarr_diagnostic::build::catalogs()` (the `build` feature, std alone),
+which writes it to `OUT_DIR` as `en-US.ftl` with every message id, and every
+reference to a message or term, prefixed with the crate's package name
+(`catalog::prefixed`), and the crate exports it as
+`EN_US = (env!("CARGO_PKG_NAME"), include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")))`. A library renders nothing: whoever shows the error
 looks the code up in its catalogs and passes the args by name, rendering a
 nested cause first. `catalog::render(ftl, d, f)` does that with no Fluent
 library, for a catalog whose messages are one line of text and `{ $arg }`

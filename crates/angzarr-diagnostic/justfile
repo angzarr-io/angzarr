@@ -13,13 +13,13 @@ fmt-check:
     cargo fmt -p angzarr-diagnostic --check
 
 build:
-    cargo build --locked -p angzarr-diagnostic
+    cargo build --locked -p angzarr-diagnostic --all-features
 
 lint:
-    cargo clippy --locked -p angzarr-diagnostic --all-targets -- -D warnings
+    cargo clippy --locked -p angzarr-diagnostic --all-targets --all-features -- -D warnings
 
 test:
-    cargo test --locked -p angzarr-diagnostic
+    cargo test --locked -p angzarr-diagnostic --all-features
 
 # The crate must stay a dependency leaf that builds for the browser
 wasm:
