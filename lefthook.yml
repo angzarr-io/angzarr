@@ -3,27 +3,43 @@
 #
 # Pre-commit hooks ensure code quality (format, lint, test).
 #
-# Setup: lefthook install
-# Bypass: git commit --no-verify (or LEFTHOOK=0 git commit)
+# Setup: lefthook install (again after a hook is added or removed here:
+# pre-merge-commit and pre-push were)
+# Bypass: none; a failing hook is a finding: fix the cause and commit again.
+#
+# Red tests are allowed on branches and never merged red: a commit off the
+# default branch may carry failing tests (`just test-commit`, warned), a
+# commit or merge commit on it may not, and a push to it is refused unless
+# the pushed commit's tests pass (`just push-check`).
 
 # NOTE: Post-commit deploy removed - examples extracted to angzarr-examples-* repos
 # To auto-deploy, add post-commit hooks in those repos instead.
 
 # Plant the in-submodule pre-commit guard in .git/modules/<name>/hooks/.
-# The hook source is tracked in angzarr-project/scripts/ — this step copies
-# it into the per-submodule hooks dir so an editor inside the submodule
-# can't sneak a commit past us.
+# The hook source is angzarr-project/submodule.just (imported by the
+# justfile) — this step copies it into the per-submodule hooks dir so an
+# editor inside the submodule can't sneak a commit past us.
+#
+# A fresh clone or `git worktree add` runs post-checkout before any
+# submodule is checked out: angzarr-project/submodule.just is not there, so
+# the justfile's `import?` brings no `install-submodule-hooks`, and there is
+# no submodule checkout to guard either. The step says so, and how to
+# install the guard once the submodules are checked out; with
+# submodule.just there, the recipe runs and its failure fails the hook.
 post-checkout:
   commands:
     install-submodule-hooks:
-      run: just install-submodule-hooks
+      run: &install-submodule-hooks >-
+        if [ -f angzarr-project/submodule.just ]; then just install-submodule-hooks;
+        else echo "no submodule guard installed: angzarr-project is not checked out (git submodule update --init, then just install-submodule-hooks)";
+        fi
 
 # Same trigger for `git merge` (e.g. pulling tip changes that bumped the
 # angzarr-project submodule). post-checkout alone does not fire on merge.
 post-merge:
   commands:
     install-submodule-hooks:
-      run: just install-submodule-hooks
+      run: *install-submodule-hooks
 
 pre-commit:
   parallel: false
@@ -35,14 +51,17 @@ pre-commit:
 
     # The shared crates' own checks, their lints denied: the root
     # Cargo.toml's [workspace.lints] and crates/clippy.toml are theirs too.
-    # The shared crates are the workspace's only members.
+    # The shared crates are the workspace's only members. Red tests are
+    # committed off the default branch and refused on it; every other check
+    # is refused everywhere (`just check-shared-crates-commit`).
     shared-crates-precommit:
-      glob:
+      glob: &shared-crates
         - "crates/{angzarr-diagnostic,angzarr-proto,angzarr-proto-component,angzarr-proto-transport-embedded,angzarr-proto-transport-distributed,angzarr-ports,angzarr-yaml,angzarr-presentation}/**/*.{rs,ftl,toml}"
+        - "crates/{angzarr-diagnostic,angzarr-proto,angzarr-proto-component,angzarr-proto-transport-embedded,angzarr-proto-transport-distributed,angzarr-ports,angzarr-yaml,angzarr-presentation}/justfile"
         - "crates/clippy.toml"
         - "Cargo.toml"
         - "Cargo.lock"
-      run: just check-shared-crates
+      run: just check-shared-crates-commit
 
     # What enters the dependency graph (deny.toml): on a change to it.
     lint-deps:
@@ -60,3 +79,26 @@ pre-commit:
 
     # NOTE: Go, C#, Java, C++ hooks removed - code extracted to separate repos
     # See: angzarr-client-{go,csharp,java,cpp} and angzarr-examples-{go,csharp,java,cpp}
+
+# A merge commit is checked as a commit is: one bringing red tests onto the
+# default branch is refused, one onto another branch is warned.
+pre-merge-commit:
+  commands:
+    shared-crates-precommit:
+      glob: *shared-crates
+      run: just check-shared-crates-commit
+
+# Red tests never reach the default branch: `just push-check` runs every test
+# in each pushed commit's own tree (the justfile says how), refusing a push
+# to the default branch whose tests fail and warning on any other branch.
+# git's pushed refs are on stdin, and {1} is the remote's name. lefthook
+# skips a pre-push command when it finds no files changed between HEAD and
+# the remote, which says nothing of the refs pushed; a `{files}` in `run`
+# turns that off, so `files` names one that is always there, and push-check
+# ignores it. No mutation testing in any hook.
+pre-push:
+  commands:
+    push-check:
+      use_stdin: true
+      files: echo justfile
+      run: just push-check {1} {files}

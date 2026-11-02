@@ -6,7 +6,14 @@
 # Runs on the host (`just -f crates/angzarr-proto-component/justfile check`).
 
 # Format check, build, lint and test
-check: fmt-check build lint test
+check: check-untested tests
+
+# Every check but running the tests, the tests' build included: a failure
+# here is never a red test (the root justfile's `check-shared-crates-commit`)
+check-untested: fmt-check build lint build-tests
+
+# Run the tests: a failure here is a red test
+tests: test
 
 fmt:
     cargo fmt -p angzarr-proto-component
@@ -22,3 +29,7 @@ lint:
 
 test:
     cargo test --locked -p angzarr-proto-component
+
+# Build the tests without running them
+build-tests:
+    cargo test --locked -p angzarr-proto-component --no-run

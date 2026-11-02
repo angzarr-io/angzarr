@@ -4,7 +4,14 @@
 # not in core's toolchain container (`just -f crates/angzarr-diagnostic/justfile check`).
 
 # Format check, build, lint and test natively, then the wasm32 build
-check: fmt-check build lint test wasm
+check: check-untested tests
+
+# Every check but running the tests, the tests' build included: a failure
+# here is never a red test (the root justfile's `check-shared-crates-commit`)
+check-untested: fmt-check build lint wasm build-tests
+
+# Run the tests: a failure here is a red test
+tests: test
 
 fmt:
     cargo fmt -p angzarr-diagnostic
@@ -20,6 +27,10 @@ lint:
 
 test:
     cargo test --locked -p angzarr-diagnostic --all-features
+
+# Build the tests without running them
+build-tests:
+    cargo test --locked -p angzarr-diagnostic --all-features --no-run
 
 # The crate must stay a dependency leaf that builds for the browser
 wasm:

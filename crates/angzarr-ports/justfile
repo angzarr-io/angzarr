@@ -8,7 +8,14 @@
 
 # Format check, build, lint and test natively, then the wasm32 builds and
 # the wasm32 run of the suite on a store that is not Send
-check: fmt-check build lint test wasm wasm-test
+check: check-untested tests
+
+# Every check but running the tests, the tests' build included: a failure
+# here is never a red test (the root justfile's `check-shared-crates-commit`)
+check-untested: fmt-check build lint wasm build-tests
+
+# Run the tests, the wasm ones too: a failure here is a red test
+tests: test wasm-test
 
 # The wasm test runner, pinned to the wasm-bindgen in the workspace Cargo.lock (the CLI
 # and the library must match exactly). Installs into ~/.cargo/bin.
@@ -40,6 +47,10 @@ lint:
 # The tests are the suite run against the reference backend: they need it
 test:
     cargo test --locked -p angzarr-ports --all-features
+
+# Build the tests without running them
+build-tests:
+    cargo test --locked -p angzarr-ports --all-features --no-run
 
 # The contract must build for the browser, suite and memory store included,
 # and so must the suite's run on a store that is not Send (tests/wasm.rs).

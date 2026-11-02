@@ -6,7 +6,14 @@
 # container (`just -f crates/angzarr-presentation/justfile check`).
 
 # Format check, build, lint and test natively, the test support too
-check: fmt-check build lint test
+check: check-untested tests
+
+# Every check but running the tests, the tests' build included: a failure
+# here is never a red test (the root justfile's `check-shared-crates-commit`)
+check-untested: fmt-check build lint build-tests
+
+# Run the tests: a failure here is a red test
+tests: test
 
 fmt:
     cargo fmt -p angzarr-presentation
@@ -25,6 +32,10 @@ lint:
 
 test:
     cargo test --locked -p angzarr-presentation
+
+# Build the tests without running them
+build-tests:
+    cargo test --locked -p angzarr-presentation --no-run
 
 # Mutation kill-rate threshold, percent, over viable mutants; 90 is the
 # org's bar. No git hook runs mutation; the full pass runs weekly in CI
