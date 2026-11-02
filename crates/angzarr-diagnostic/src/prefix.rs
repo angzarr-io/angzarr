@@ -94,99 +94,98 @@ fn named(krate: &str, id: &str, out: &mut String) {
 
 /// `s`, read where `at` says, onto `out`.
 fn read(krate: &str, s: &str, at: &mut Vec<At>, out: &mut String) {
-    let mut i = 0;
-    while i < s.len() {
-        let rest = &s[i..];
+    let mut rest = s;
+    while !rest.is_empty() {
         let used = match at.last() {
-            // Text is kept to the placeable that opens in it.
-            Some(At::Text | At::Variant) => match rest.find('{') {
-                Some(n) => {
-                    at.push(At::Expr);
-                    n + 1
-                }
-                None => rest.len(),
-            },
-            Some(At::Variants) => variants(rest, at),
+            Some(At::Text | At::Variant) => text(rest, at, out),
+            Some(At::Variants) => variants(rest, at, out),
             Some(At::Expr) => expression(krate, rest, at, out),
-            None => rest.len(),
+            None => keep(rest, rest.len(), out),
         };
-        // An expression writes what it rewrites; the rest is kept.
-        if at.last() != Some(&At::Expr)
-            || !rest.starts_with(|c: char| c.is_ascii_alphabetic() || c == '-')
-        {
-            out.push_str(&rest[..used]);
-        }
-        i += used;
+        rest = &rest[used..];
     }
 }
 
-/// A select's variants: a key in `[ ]` is kept, and starts its variant's
-/// pattern; a `}` closes the select. How much of `s` that was.
-fn variants(s: &str, at: &mut Vec<At>) -> usize {
+/// The first `n` bytes of `s`, kept as they are.
+fn keep(s: &str, n: usize, out: &mut String) -> usize {
+    out.push_str(&s[..n]);
+    n
+}
+
+/// `s`'s first character, kept.
+fn keep_char(s: &str, out: &mut String) -> usize {
+    keep(s, s.chars().next().map_or(0, char::len_utf8), out)
+}
+
+/// Text, kept to the placeable that opens in it.
+fn text(s: &str, at: &mut Vec<At>, out: &mut String) -> usize {
+    match s.find('{') {
+        Some(n) => {
+            at.push(At::Expr);
+            keep(s, n + 1, out)
+        }
+        None => keep(s, s.len(), out),
+    }
+}
+
+/// A select's variants: a `[` starts a variant, its key read as its text
+/// is (a key holds no placeable); a `}` closes the select.
+fn variants(s: &str, at: &mut Vec<At>, out: &mut String) -> usize {
     match s.as_bytes()[0] {
         b'[' => {
             at.push(At::Variant);
-            s.find(']').map_or(s.len(), |n| n + 1)
+            keep(s, 1, out)
         }
         b'}' => {
             at.pop();
-            1
+            keep(s, 1, out)
         }
-        _ => char_len(s),
+        _ => keep_char(s, out),
     }
 }
 
-fn char_len(s: &str) -> usize {
-    s.chars().next().map_or(0, char::len_utf8)
-}
-
-/// One token of an expression at the start of `s`, how much of `s` it was.
-/// A message or term reference is written to `out`, prefixed; anything else
-/// the caller keeps.
+/// One token of an expression at the start of `s`: a reference to a
+/// message or a term prefixed, anything else kept.
 fn expression(krate: &str, s: &str, at: &mut Vec<At>, out: &mut String) -> usize {
     let b = s.as_bytes();
     match b[0] {
         b'{' => {
             at.push(At::Expr);
-            1
+            keep(s, 1, out)
         }
         b'}' => {
             at.pop();
-            1
+            keep(s, 1, out)
         }
-        b'"' => {
-            let mut i = 1;
-            while i < b.len() && b[i] != b'"' {
-                i += if b[i] == b'\\' { 2 } else { 1 };
-            }
-            (i + 1).min(b.len())
-        }
-        b'$' => 1 + id_len(&s[1..]),
+        b'"' => keep(s, string_len(b), out),
+        b'$' => keep(s, 1 + id_len(&s[1..]), out),
         b'-' if s[1..].starts_with('>') => {
             at.pop();
             at.push(At::Variants);
-            2
+            keep(s, 2, out)
         }
-        b'-' if id_len(&s[1..]) > 0 => {
-            out.push('-');
-            1 + reference(krate, &s[1..], out)
-        }
-        b'-' => {
-            out.push('-');
-            1
-        }
+        b'-' if id_len(&s[1..]) > 0 => keep(s, 1, out) + reference(krate, &s[1..], out),
         c if c.is_ascii_alphabetic() => {
             let n = id_len(s);
-            let after = s[n..].trim_start_matches(' ');
             // A function's name, or the name of a named argument.
-            if after.starts_with(['(', ':']) {
-                out.push_str(&s[..n]);
-                return n;
+            if s[n..].trim_start_matches(' ').starts_with(['(', ':']) {
+                keep(s, n, out)
+            } else {
+                reference(krate, s, out)
             }
-            reference(krate, s, out)
         }
-        _ => char_len(s),
+        _ => keep_char(s, out),
     }
+}
+
+/// The length of the string literal `b` starts with, its quotes included:
+/// to its closing `"`, an escaped one (`\"`) inside it, or to the end.
+fn string_len(b: &[u8]) -> usize {
+    let mut i = 1;
+    while i < b.len() && b[i] != b'"' {
+        i += if b[i] == b'\\' { 2 } else { 1 };
+    }
+    (i + 1).min(b.len())
 }
 
 /// A reference to a message or a term at the start of `s` (after a term's
@@ -199,8 +198,7 @@ fn reference(krate: &str, s: &str, out: &mut String) -> usize {
         0 => 0,
         len => 1 + len,
     });
-    out.push_str(&s[n..n + attribute]);
-    n + attribute
+    n + keep(&s[n..], attribute, out)
 }
 
 #[cfg(test)]

@@ -74,3 +74,34 @@ fn a_missing_or_unparsable_source_fails_the_build() {
     assert!(!out.join("en-US.ftl").exists());
     fs::remove_dir_all(&dir).unwrap();
 }
+
+/// A build script's call reads the crate's name, its directory and
+/// `OUT_DIR` from cargo's environment, and fails the build (panics) on a
+/// source that does not parse. The one test that sets that environment.
+#[test]
+fn a_build_scripts_call_writes_the_crates_catalogs_from_cargos_environment() {
+    let dir = scratch("environment");
+    let out = dir.join("out");
+    fs::create_dir_all(dir.join("locales/en-US")).unwrap();
+    fs::create_dir_all(&out).unwrap();
+    let source = dir.join("locales/en-US").join(SOURCE);
+    fs::write(&source, "too-new = newer\n").unwrap();
+    env::set_var("CARGO_MANIFEST_DIR", &dir);
+    env::set_var("CARGO_PKG_NAME", "my-crate");
+    env::set_var("OUT_DIR", &out);
+
+    catalogs();
+    assert_eq!(
+        fs::read_to_string(out.join("en-US.ftl")).unwrap(),
+        "my-crate-too-new = newer\n"
+    );
+
+    fs::write(&source, "not an entry\n").unwrap();
+    let failed = std::panic::catch_unwind(catalogs).unwrap_err();
+    let message = failed.downcast_ref::<String>().unwrap();
+    assert_eq!(
+        *message,
+        format!("{}: [Syntax {{ line: 1 }}]", source.display())
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}

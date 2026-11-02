@@ -39,8 +39,12 @@ fn a_message_reference_is_prefixed_and_nothing_else_in_a_placeable() {
         prefixed("k", "a = { \"{ \\\" }\" } { b }\n"),
         "k-a = { \"{ \\\" }\" } { k-b }\n"
     );
-    // A placeable in a placeable.
+    // A placeable in a placeable, and as a call's argument.
     assert_eq!(prefixed("k", "a = { { b } }\n"), "k-a = { { k-b } }\n");
+    assert_eq!(
+        prefixed("k", "a = { F({ b }, c) }\n"),
+        "k-a = { F({ k-b }, k-c) }\n"
+    );
 }
 
 /// A term's id and every reference to one are prefixed too, so catalogs of
@@ -95,6 +99,13 @@ fn a_line_that_is_no_entry_is_kept() {
         "not an entry\n= x\nk-a = b\n"
     );
     assert_eq!(prefixed("k", ""), "");
+    // A string left open, a character no expression holds.
+    assert_eq!(prefixed("k", "a = { \"open"), "k-a = { \"open");
+    assert_eq!(prefixed("k", "a = { \"x\\"), "k-a = { \"x\\");
+    assert_eq!(
+        prefixed("k", "a = { \u{e9} b }\nc = d\n"),
+        "k-a = { \u{e9} k-b }\nk-c = d\n"
+    );
     assert_eq!(prefixed("k", "a = no newline"), "k-a = no newline");
 }
 
@@ -164,6 +175,7 @@ fn fluents_parser_reads_the_source_with_every_id_and_reference_prefixed() {
         refs = { other } {other.attr} { -term } { -term(case: \"gen\") }\n\
         vars = { $v } { \"lit { b }\" } { 12 } { -3.5 }\n\
         call = { NUMBER($n, minimumFractionDigits: 2) } { DATETIME(other, month: \"long\") }\n\
+        nested = { F({ other }, other) }\n\
         select = { $n ->\n    [one] one { other }\n    [few] { -term.attr ->\n        \
         [a] a { other.attr }\n       *[b] b\n    }\n   *[many] many\n}\n\
         attrs =\n    .label = { other }\n    .hint = see { $v }\n\
