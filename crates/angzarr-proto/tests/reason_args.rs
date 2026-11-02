@@ -47,6 +47,11 @@ fn a_keys_args_are_its_options() {
         &["component", "component_kind", "registered", "refused"]
     );
     assert_eq!(HostReason::HandshakeMalformed.args(), &["line"]);
+    assert_eq!(HostReason::HandshakeClosed.args(), &[] as &[&str]);
+    assert_eq!(
+        HostReason::ChildNotServing.args(),
+        &[reason_args::COMPONENT, reason_args::STATUS]
+    );
     assert_eq!(
         CoordinatorReason::RulesVersionMismatch.args(),
         &["component", "registered", "reported"]
@@ -103,6 +108,8 @@ fn every_declared_name_has_its_constant() {
         reason_args::DESCRIBED,
         reason_args::DOMAIN,
         reason_args::EDITION,
+        reason_args::ENDED,
+        reason_args::EXIT_CODE,
         reason_args::EXPECTED,
         reason_args::EXPECTED_DOMAIN,
         reason_args::EXPECTED_EDITION,
@@ -111,6 +118,7 @@ fn every_declared_name_has_its_constant() {
         reason_args::FIRST_SEQUENCE,
         reason_args::HEAD,
         reason_args::INPUT_COUNT,
+        reason_args::KIND,
         reason_args::LAST_SEQUENCE,
         reason_args::LIMIT,
         reason_args::LINE,
@@ -121,6 +129,8 @@ fn every_declared_name_has_its_constant() {
         reason_args::REPORTED,
         reason_args::SEQUENCE,
         reason_args::STATE_TYPE_URL,
+        reason_args::STATUS,
+        reason_args::TIMEOUT_MS,
         reason_args::TYPE_URL,
         reason_args::UPCAST_TYPE_URL,
         reason_args::URI,

@@ -108,7 +108,14 @@ fn the_owners_keys_are_these() {
             // Decision 14.55.
             "HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN",
             // Decision 14.59.
-            "HOST_REASON_HANDSHAKE_MALFORMED"
+            "HOST_REASON_HANDSHAKE_MALFORMED",
+            // Decision 14.62.
+            "HOST_REASON_HANDSHAKE_TIMEOUT",
+            "HOST_REASON_HANDSHAKE_CLOSED",
+            "HOST_REASON_CHILD_NOT_SERVING",
+            "HOST_REASON_CHILD_EXIT_STATUS",
+            "HOST_REASON_CHILD_NOT_EXITED",
+            "HOST_REASON_PROBE_INPUT"
         ]
     );
     assert!(router().contains(&"ROUTER_REASON_DUPLICATE_COMPONENT"));
