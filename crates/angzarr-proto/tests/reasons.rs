@@ -131,6 +131,7 @@ fn the_owners_keys_are_these() {
             "HOST_REASON_UPCASTER_OTHER_DOMAIN",
             "HOST_REASON_RESOLUTION_UNSUPPORTED",
             "HOST_REASON_REMOTE_SOURCE",
+            "HOST_REASON_STATE_TYPE_MISMATCH",
         ]
     );
     assert!(router().contains(&"ROUTER_REASON_DUPLICATE_COMPONENT"));
