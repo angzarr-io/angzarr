@@ -2574,13 +2574,14 @@ pub fn dead_letter(
                     failure: Some(reason),
                     retry_count: u32::from(body),
                     is_transient: true,
-                    ..ProcessingFailedDetails::default()
                 },
             )),
             source_component: component.to_string(),
             source_component_kind: 2,
-            metadata: [("n".to_string(), body.to_string())].into(),
-            ..AngzarrDeadLetter::default()
+            occurred_at: Some(Timestamp {
+                seconds: i64::from(body),
+                nanos: 0,
+            }),
         },
     }
 }

@@ -1,14 +1,15 @@
 //! Errors carry a key and an argument map, never rendered English
 //! (decision 14.37): `Diagnostic { code, args }` and the fields that
 //! replaced the text ones, with their numbers. The removed text fields
-//! (`RefusalResponse.message` 2, `ProjectorFailure.message` 3,
-//! `AngzarrDeadLetter.rejection_reason` 3, the DLQ details' `error`) stay
-//! unreserved (6.6), so their old bytes decode to nothing.
+//! (`RefusalResponse.message` 2, `AngzarrDeadLetter.rejection_reason` 3,
+//! the DLQ details' `error`) stay unreserved (6.6), so their old bytes
+//! decode to nothing. `ProjectorFailure` and `PayloadRetrievalFailedDetails`
+//! are the distributed transport's (decision 14.64), tested in
+//! angzarr-proto-transport-distributed.
 
 use angzarr_proto::v1::{
     angzarr_dead_letter, refusal_response, AngzarrDeadLetter, CommandRefusedDetails,
-    ContextualCommand, Diagnostic, EventBook, PayloadRetrievalFailedDetails,
-    ProcessingFailedDetails, ProjectorFailure, RefusalResponse,
+    ContextualCommand, Diagnostic, EventBook, ProcessingFailedDetails, RefusalResponse,
 };
 use prost::{Message, Name};
 
@@ -100,28 +101,6 @@ fn a_refusal_response_is_a_typed_refusal_or_a_diagnostic_never_text() {
 }
 
 #[test]
-fn a_projector_failure_carries_its_code_and_a_diagnostic_in_field_4() {
-    let failure = ProjectorFailure {
-        projector: "order-summary".into(),
-        code: 14,
-        diagnostic: Some(Diagnostic {
-            code: "VIEW_STORE_UNAVAILABLE".into(),
-            ..Default::default()
-        }),
-    };
-    assert_eq!(round_trip(&failure), failure);
-    assert_eq!(
-        first_tag(&ProjectorFailure {
-            diagnostic: Some(Diagnostic::default()),
-            ..Default::default()
-        }),
-        (4 << 3) | 2
-    );
-    let old = ProjectorFailure::decode(&*text_field(3, "view store unavailable")).unwrap();
-    assert_eq!(old, ProjectorFailure::default());
-}
-
-#[test]
 fn a_dead_letter_gives_its_reason_as_a_diagnostic_in_field_16() {
     let letter = AngzarrDeadLetter {
         payload: Some(angzarr_dead_letter::Payload::RejectedEvents(
@@ -136,7 +115,6 @@ fn a_dead_letter_gives_its_reason_as_a_diagnostic_in_field_16() {
                 }),
                 retry_count: 3,
                 is_transient: true,
-                ..Default::default()
             },
         )),
         ..Default::default()
@@ -163,15 +141,6 @@ fn the_dlq_details_carry_their_failure_as_a_diagnostic() {
     assert_eq!(
         ProcessingFailedDetails::decode(&*text_field(1, "inventory service down")).unwrap(),
         ProcessingFailedDetails::default()
-    );
-    let retrieval = PayloadRetrievalFailedDetails {
-        failure: Some(Diagnostic::default()),
-        ..Default::default()
-    };
-    assert_eq!(first_tag(&retrieval), (6 << 3) | 2);
-    assert_eq!(
-        PayloadRetrievalFailedDetails::decode(&*text_field(5, "no such key")).unwrap(),
-        PayloadRetrievalFailedDetails::default()
     );
 }
 

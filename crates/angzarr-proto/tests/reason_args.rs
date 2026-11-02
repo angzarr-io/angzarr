@@ -1,7 +1,8 @@
 //! Each reason key's args and the spec's en-US catalog of the keys come from
 //! the spec (decision 14.60): `args()` is generated from each value's
 //! `(io.angzarr.v1.reason)` option, `reason_args` holds one constant per
-//! name, and `REASONS_EN_US` is the spec's `reasons.en-US.ftl`.
+//! name, and `REASONS_EN_US` is the spec's `reasons.en-US.ftl`: core's
+//! keys and catalog (decision 14.64; each transport's are its crate's).
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -11,19 +12,27 @@ use angzarr_proto::{reason_key_args, FILE_DESCRIPTOR_SET, REASONS_EN_US};
 use prost::Message;
 use prost_types::{EnumDescriptorProto, EnumValueDescriptorProto, FileDescriptorProto};
 
-/// The generator itself, as build.rs runs it.
 #[path = "../build_reasons.rs"]
-#[allow(dead_code)]
 mod build_reasons;
+/// The generator itself, as build.rs runs it, with the descriptor reader it
+/// reads through (`super::descriptor`).
+#[path = "../build_descriptor.rs"]
+mod descriptor;
 
-/// Every live key, with its args, of all three enums.
+/// Core's reasons.proto and its key enums, as build.rs names them.
+const CORE: &str = "io/angzarr/v1/reasons.proto";
+const ENUMS: &[&str] = &["RouterReason", "HostReason", "CoordinatorReason"];
+
+/// Every live key, with its args, of all three enums: every value from 1
+/// up to the highest number any enum uses, since an enum may reserve the
+/// numbers of keys that moved to a transport (decision 14.64).
 fn every_key() -> Vec<(&'static str, &'static [&'static str])> {
     fn live<E: TryFrom<i32> + Copy>(
         name: fn(E) -> &'static str,
         args: fn(E) -> &'static [&'static str],
     ) -> Vec<(&'static str, &'static [&'static str])> {
-        (1..)
-            .map_while(|n| E::try_from(n).ok())
+        (1..=64)
+            .filter_map(|n| E::try_from(n).ok())
             .map(|e| (name(e), args(e)))
             .collect()
     }
@@ -46,12 +55,15 @@ fn a_keys_args_are_its_options() {
         RouterReason::DuplicateComponent.args(),
         &["component", "component_kind", "registered", "refused"]
     );
-    assert_eq!(HostReason::HandshakeMalformed.args(), &["line"]);
-    assert_eq!(HostReason::HandshakeClosed.args(), &[] as &[&str]);
     assert_eq!(
-        HostReason::ChildNotServing.args(),
-        &[reason_args::COMPONENT, reason_args::STATUS]
+        HostReason::DescriptorRulesVersionMismatch.args(),
+        &[
+            reason_args::COMPONENT,
+            reason_args::DESCRIBED,
+            reason_args::REPORTED
+        ]
     );
+    assert_eq!(HostReason::NoComponentsRegistered.args(), &[] as &[&str]);
     assert_eq!(
         CoordinatorReason::RulesVersionMismatch.args(),
         &["component", "registered", "reported"]
@@ -81,6 +93,9 @@ fn a_keys_args_are_found_by_its_name() {
         "HOST_REASON_UNSPECIFIED",
         "COORDINATOR_REASON_UNSPECIFIED",
         "ROUTER_REASON_NO_HANDLER_REGISTERED",
+        // A transport's key is its own crate's (decision 14.64).
+        "HOST_REASON_HANDSHAKE_MALFORMED",
+        "COORDINATOR_REASON_PAYLOAD_UNAVAILABLE",
         "ALREADY_BET",
         "",
     ] {
@@ -108,8 +123,6 @@ fn every_declared_name_has_its_constant() {
         reason_args::DESCRIBED,
         reason_args::DOMAIN,
         reason_args::EDITION,
-        reason_args::ENDED,
-        reason_args::EXIT_CODE,
         reason_args::EXPECTED,
         reason_args::EXPECTED_DOMAIN,
         reason_args::EXPECTED_EDITION,
@@ -118,10 +131,8 @@ fn every_declared_name_has_its_constant() {
         reason_args::FIRST_SEQUENCE,
         reason_args::HEAD,
         reason_args::INPUT_COUNT,
-        reason_args::KIND,
         reason_args::LAST_SEQUENCE,
         reason_args::LIMIT,
-        reason_args::LINE,
         reason_args::MESSAGE_TYPE,
         reason_args::REFUSAL_TYPE,
         reason_args::REFUSED,
@@ -129,11 +140,8 @@ fn every_declared_name_has_its_constant() {
         reason_args::REPORTED,
         reason_args::SEQUENCE,
         reason_args::STATE_TYPE_URL,
-        reason_args::STATUS,
-        reason_args::TIMEOUT_MS,
         reason_args::TYPE_URL,
         reason_args::UPCAST_TYPE_URL,
-        reason_args::URI,
         reason_args::WINDOW_UNITS,
     ];
     assert_eq!(names, constants.into_iter().collect::<BTreeSet<_>>());
@@ -160,7 +168,7 @@ fn the_catalog_has_a_message_for_every_key_and_no_other() {
 
 #[test]
 fn the_generator_reproduces_the_generated_code() {
-    let generated = build_reasons::generate(FILE_DESCRIPTOR_SET);
+    let generated = build_reasons::generate(FILE_DESCRIPTOR_SET, CORE, ENUMS);
     assert!(generated.contains("Self::AnyDecodeFailed => &[\"message_type\", \"ext_err_txt\"],"));
     assert!(generated.contains("Self::RefusalFactNotAFact => &[],"));
     assert!(generated.contains("    pub const EXT_ERR_TXT: &str = \"ext_err_txt\";"));
@@ -211,7 +219,7 @@ fn unspecified_needs_no_option() {
         ),
         enum_of("OtherEnum", &[("OTHER_X", 1)]),
     ]);
-    let generated = build_reasons::generate(&set);
+    let generated = build_reasons::generate(&set, CORE, ENUMS);
     assert_eq!(generated.matches("Self::Unspecified => &[],").count(), 3);
     assert!(!generated.contains("OtherEnum"));
 }
@@ -230,16 +238,41 @@ fn a_live_key_without_its_option_fails_the_build() {
             &[("COORDINATOR_REASON_UNSPECIFIED", 0)],
         ),
     ]);
-    build_reasons::generate(&set);
+    build_reasons::generate(&set, CORE, ENUMS);
 }
 
 #[test]
-#[should_panic(expected = "lacks one of")]
+#[should_panic(expected = "io/angzarr/v1/reasons.proto's key enums")]
 fn a_missing_enum_fails_the_build() {
-    build_reasons::generate(&set_of(vec![enum_of(
-        "RouterReason",
-        &[("ROUTER_REASON_UNSPECIFIED", 0)],
-    )]));
+    build_reasons::generate(
+        &set_of(vec![enum_of(
+            "RouterReason",
+            &[("ROUTER_REASON_UNSPECIFIED", 0)],
+        )]),
+        CORE,
+        ENUMS,
+    );
+}
+
+#[test]
+fn a_transports_enum_is_generated_from_its_own_file() {
+    // Each transport's reasons.proto is generated alone (decision 14.64):
+    // the one enum it declares, from its own path.
+    let set = prost_types::FileDescriptorSet {
+        file: vec![FileDescriptorProto {
+            name: Some("io/angzarr/transport/embedded/v1/reasons.proto".into()),
+            enum_type: vec![enum_of("HostReason", &[("HOST_REASON_UNSPECIFIED", 0)])],
+            ..Default::default()
+        }],
+    }
+    .encode_to_vec();
+    let generated = build_reasons::generate(
+        &set,
+        "io/angzarr/transport/embedded/v1/reasons.proto",
+        &["HostReason"],
+    );
+    assert_eq!(generated.matches("pub const fn args").count(), 1);
+    assert!(generated.contains("impl HostReason {"));
 }
 
 #[test]
@@ -253,5 +286,42 @@ fn a_set_without_reasons_proto_fails_the_build() {
             }],
         }
         .encode_to_vec(),
+        CORE,
+        ENUMS,
+    );
+}
+
+#[test]
+fn a_packages_reason_keys_are_its_args_and_its_catalog_copied() {
+    // What build.rs runs for a package with keys: its reasons.proto's args
+    // to reason_args.rs, and the catalog beside it copied out unchanged.
+    let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("reason_keys");
+    let package = "io/angzarr/v1";
+    let (root, out) = (scratch.join("proto"), scratch.join("out"));
+    std::fs::create_dir_all(root.join(package)).unwrap();
+    std::fs::create_dir_all(&out).unwrap();
+    std::fs::write(root.join(package).join("reasons.en-US.ftl"), "KEY = text\n").unwrap();
+    build_reasons::reason_keys(&root, &out, FILE_DESCRIPTOR_SET, package, ENUMS);
+    assert_eq!(
+        std::fs::read_to_string(out.join("reason_args.rs")).unwrap(),
+        build_reasons::generate(FILE_DESCRIPTOR_SET, CORE, ENUMS)
+    );
+    assert_eq!(
+        std::fs::read_to_string(out.join("reasons.en-US.ftl")).unwrap(),
+        "KEY = text\n"
+    );
+}
+
+#[test]
+#[should_panic(expected = "before decision 14.64?")]
+fn a_package_without_its_catalog_fails_the_build() {
+    let scratch = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("reason_keys_missing");
+    std::fs::create_dir_all(&scratch).unwrap();
+    build_reasons::reason_keys(
+        &scratch,
+        &scratch,
+        FILE_DESCRIPTOR_SET,
+        "io/angzarr/v1",
+        ENUMS,
     );
 }

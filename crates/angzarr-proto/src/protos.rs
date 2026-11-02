@@ -13,8 +13,7 @@
 //! ```
 //!
 //! The files are the ones this crate's types were generated from, byte for
-//! byte, under their import paths, with the `google/api` files the service
-//! protos import for their HTTP bindings; `google/protobuf/*` comes from protoc's
+//! byte, under their import paths; `google/protobuf/*` comes from protoc's
 //! own include directory, as usual. Generate only your own files: angzarr's
 //! messages are this crate's (map them with prost-build's `extern_path` if
 //! your messages embed any).
@@ -30,10 +29,10 @@ pub struct ProtoFile {
     pub contents: &'static str,
 }
 
-/// Every proto this crate was generated from (every file under
-/// `io/angzarr/v1/`, and `sererr/v1/sererr.proto`), and the vendored
-/// `google/api` files the service protos import (embedded, not generated).
-/// build.rs lists them.
+/// Every proto this crate was generated from: every file under
+/// `io/angzarr/v1/`, core's package, which imports nothing else of
+/// angzarr's, no sererr and no `google/api` (decision 14.64). build.rs
+/// lists them.
 pub const FILES: &[ProtoFile] = include!(concat!(env!("OUT_DIR"), "/proto_files.rs"));
 
 /// Write [`FILES`] under `dir` (created if needed), each at its import

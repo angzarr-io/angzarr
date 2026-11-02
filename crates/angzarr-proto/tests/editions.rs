@@ -1,14 +1,12 @@
 //! Editions as per-stream forks (decision 14.32): the meta-events
 //! EditionCreated and EditionDeleted in the reserved `io.angzarr.v1.meta`
-//! namespace (meta/events.proto), and meta.proto's EditionAdminService
-//! messages (generated; messages only, no service).
+//! namespace (meta/events.proto), and meta.proto's `EditionSummary`, core's
+//! because every store lists editions. EditionAdminService and its requests
+//! are the distributed transport's (decision 14.64).
 
 use angzarr_proto::protos::FILES;
 use angzarr_proto::v1::meta::{EditionCreated, EditionDeleted};
-use angzarr_proto::v1::{
-    Cover, DeleteEditionRequest, EditionSummary, EventRef, ForkStreamRequest, ListEditionsResponse,
-    Uuid,
-};
+use angzarr_proto::v1::{Cover, EditionSummary, EventRef, Uuid};
 use prost::{Message, Name};
 
 /// The first byte of an encoding: the first field's tag, as
@@ -76,67 +74,21 @@ fn the_edition_creation_meta_event_round_trips_with_its_field_numbers() {
 }
 
 #[test]
-fn fork_stream_request_names_the_stream_as_field_one() {
-    let request = ForkStreamRequest {
-        stream: Some(stream("what-if")),
-        parent_sequence: 5,
-    };
-    assert_eq!(
-        ForkStreamRequest::decode(&*request.encode_to_vec()).unwrap(),
-        request
-    );
-    assert_eq!(first_tag(&request), (1 << 3) | 2);
-}
-
-/// 14.36: an origin fork always states its sequence, as field 3, a plain
-/// `uint64`: 0 (a fork at the start) is its default and encodes as nothing.
-#[test]
-fn fork_stream_request_states_its_parent_sequence_as_field_three() {
-    let at_three = ForkStreamRequest {
-        stream: None,
-        parent_sequence: 3,
-    };
-    assert_eq!(at_three.encode_to_vec(), [3 << 3, 3]);
-    assert_eq!(
-        ForkStreamRequest::decode(&*at_three.encode_to_vec()).unwrap(),
-        at_three
-    );
-    let at_start = ForkStreamRequest {
-        stream: None,
-        parent_sequence: 0,
-    };
-    assert!(at_start.encode_to_vec().is_empty());
-    assert_eq!(ForkStreamRequest::decode(&[][..]).unwrap(), at_start);
-}
-
-#[test]
-fn editions_are_listed_as_summaries_derived_from_fork_events() {
-    let response = ListEditionsResponse {
-        editions: vec![EditionSummary {
-            name: "what-if".into(),
-            origins: vec![EventRef {
-                stream: Some(stream("what-if")),
-                sequence: 12,
-            }],
-            forked_streams: 4,
-        }],
-    };
-    assert_eq!(
-        ListEditionsResponse::decode(&*response.encode_to_vec()).unwrap(),
-        response
-    );
-}
-
-#[test]
-fn delete_edition_request_carries_the_name_as_field_one() {
-    let request = DeleteEditionRequest {
+fn an_edition_summary_round_trips_with_its_field_numbers() {
+    let summary = EditionSummary {
         name: "what-if".into(),
+        origins: vec![EventRef {
+            stream: Some(stream("what-if")),
+            sequence: 12,
+        }],
+        forked_streams: 4,
     };
-    assert_eq!(first_tag(&request), (1 << 3) | 2);
     assert_eq!(
-        DeleteEditionRequest::decode(&*request.encode_to_vec()).unwrap(),
-        request
+        EditionSummary::decode(&*summary.encode_to_vec()).unwrap(),
+        summary
     );
+    assert_eq!(first_tag(&summary), (1 << 3) | 2);
+    assert_eq!(EditionSummary::type_url(), "/io.angzarr.v1.EditionSummary");
 }
 
 #[test]
@@ -150,24 +102,14 @@ fn edition_messages_have_angzarr_type_urls() {
         EditionDeleted::type_url(),
         "/io.angzarr.v1.meta.EditionDeleted"
     );
-    assert_eq!(
-        ForkStreamRequest::type_url(),
-        "/io.angzarr.v1.ForkStreamRequest"
-    );
-    assert_eq!(
-        DeleteEditionRequest::type_url(),
-        "/io.angzarr.v1.DeleteEditionRequest"
-    );
 }
 
 #[test]
-fn meta_proto_and_its_google_api_imports_are_embedded() {
+fn meta_proto_and_the_meta_events_are_embedded() {
     let paths: Vec<_> = FILES.iter().map(|f| f.path).collect();
     for path in [
         "io/angzarr/v1/meta.proto",
         "io/angzarr/v1/meta/events.proto",
-        "google/api/annotations.proto",
-        "google/api/http.proto",
     ] {
         assert!(paths.contains(&path), "{path} not embedded");
     }

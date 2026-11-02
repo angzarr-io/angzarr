@@ -38,14 +38,33 @@ const RETIRED: &[&str] = &[
     "NULL_ABI_POINTER",
 ];
 
-/// Every live key of an enum, by name: its values from 1 up, until a
-/// number has none (the numbers are dense).
+/// Every live key of an enum, by name: its values from 1 up. The numbers
+/// with the ones reserved for moved keys are dense (decision 14.64), so a
+/// gap is only a moved key's.
 fn names<E>(name: fn(E) -> &'static str) -> Vec<&'static str>
 where
     E: TryFrom<i32>,
 {
-    (1..).map_while(|n| E::try_from(n).ok()).map(name).collect()
+    (1..=64)
+        .filter_map(|n| E::try_from(n).ok())
+        .map(name)
+        .collect()
 }
+
+/// The keys decision 14.64 moved from core to a transport: reserved here,
+/// by name and number, live in the transport's crate.
+const MOVED: &[&str] = &[
+    "HOST_REASON_HANDSHAKE_MALFORMED",
+    "HOST_REASON_HANDSHAKE_TIMEOUT",
+    "HOST_REASON_HANDSHAKE_CLOSED",
+    "HOST_REASON_CHILD_NOT_SERVING",
+    "HOST_REASON_CHILD_EXIT_STATUS",
+    "HOST_REASON_CHILD_NOT_EXITED",
+    "HOST_REASON_PROBE_INPUT",
+    "COORDINATOR_REASON_COMPONENT_NOT_REGISTERED",
+    "COORDINATOR_REASON_COMMANDS_NOT_SERVED",
+    "COORDINATOR_REASON_PAYLOAD_UNAVAILABLE",
+];
 
 fn router() -> Vec<&'static str> {
     names::<RouterReason>(|r| r.as_str_name())
@@ -107,15 +126,6 @@ fn the_owners_keys_are_these() {
             "HOST_REASON_DESCRIPTOR_RULES_VERSION_MISMATCH",
             // Decision 14.55.
             "HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN",
-            // Decision 14.59.
-            "HOST_REASON_HANDSHAKE_MALFORMED",
-            // Decision 14.62.
-            "HOST_REASON_HANDSHAKE_TIMEOUT",
-            "HOST_REASON_HANDSHAKE_CLOSED",
-            "HOST_REASON_CHILD_NOT_SERVING",
-            "HOST_REASON_CHILD_EXIT_STATUS",
-            "HOST_REASON_CHILD_NOT_EXITED",
-            "HOST_REASON_PROBE_INPUT"
         ]
     );
     assert!(router().contains(&"ROUTER_REASON_DUPLICATE_COMPONENT"));
@@ -132,16 +142,20 @@ fn the_owners_keys_are_these() {
     assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY"));
     assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_IS_FACT"));
     assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN"));
-    // Decision 14.51: every retryable failure carries a key.
+    // Decision 14.51: every retryable failure carries a key (the
+    // distribution-only ones are the distributed transport's, 14.64).
     for key in [
         "COORDINATOR_REASON_STORE_CONFLICT",
         "COORDINATOR_REASON_STORE_UNAVAILABLE",
         "COORDINATOR_REASON_UPCASTER_UNAVAILABLE",
-        "COORDINATOR_REASON_COMPONENT_NOT_REGISTERED",
-        "COORDINATOR_REASON_COMMANDS_NOT_SERVED",
-        "COORDINATOR_REASON_PAYLOAD_UNAVAILABLE",
     ] {
         assert!(coordinator().contains(&key), "{key}");
+    }
+    for key in MOVED {
+        assert!(
+            !host().contains(key) && !coordinator().contains(key),
+            "{key} moved"
+        );
     }
     // Decision 14.56.
     assert!(coordinator().contains(&"COORDINATOR_REASON_RULES_VERSION_MISMATCH"));
@@ -183,11 +197,29 @@ fn every_enum_reserves_every_retired_key() {
             _ => "COORDINATOR_REASON_",
         };
         let retired: BTreeSet<String> = RETIRED.iter().map(|k| format!("{prefix}{k}")).collect();
+        let moved: BTreeSet<String> = MOVED
+            .iter()
+            .filter(|k| k.starts_with(prefix))
+            .map(|k| (*k).to_string())
+            .collect();
         let reserved: BTreeSet<String> = e.reserved_name.iter().cloned().collect();
-        assert_eq!(reserved, retired, "{}", e.name());
-        assert!(
-            e.reserved_range.is_empty(),
-            "{}: numbers are bookkeeping",
+        assert_eq!(
+            reserved,
+            &retired | &moved,
+            "{}: the retired keys and the moved ones",
+            e.name()
+        );
+        // A number is reserved only for a moved key (numbers are
+        // bookkeeping): one per moved key, an enum's ranges inclusive.
+        let numbers: i32 = e
+            .reserved_range
+            .iter()
+            .map(|r| r.end() - r.start() + 1)
+            .sum();
+        assert_eq!(
+            usize::try_from(numbers).unwrap(),
+            moved.len(),
+            "{}",
             e.name()
         );
         for v in &e.value {

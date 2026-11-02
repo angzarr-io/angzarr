@@ -1,9 +1,11 @@
 //! The reason keys' args, read from the compiled descriptors (decision
-//! 14.60): each live value of `RouterReason`, `HostReason` and
-//! `CoordinatorReason` names its args in its `(io.angzarr.v1.reason)`
-//! option, which prost does not generate (it skips `extend`), so the
-//! option is read off the raw `FileDescriptorSet` bytes, the way
-//! `tests/conflict_units.rs` reads the conflict-unit options.
+//! 14.60): each live value of a reasons.proto's `RouterReason`,
+//! `HostReason` and `CoordinatorReason` (core's, and each transport's;
+//! decision 14.64) names its args in its `(io.angzarr.v1.reason)` option,
+//! which prost does not generate (it skips `extend`), so the option is
+//! read off the raw `FileDescriptorSet` bytes (`build_descriptor.rs`), the
+//! way `tests/conflict_units.rs` reads the conflict-unit options. Shared by
+//! angzarr-core's proto crates' build scripts (`#[path]`).
 //!
 //! From them it writes `$OUT_DIR/reason_args.rs`, included in `v1`: an
 //! `args()` per enum, an exhaustive match on its variants (so a value the
@@ -13,11 +15,11 @@
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-/// The file the enums are in, as the descriptor set names it.
-const REASONS_PROTO: &str = "io/angzarr/v1/reasons.proto";
+use super::descriptor::{file, messages, text, varints};
 
-/// The enums whose values are keys, and each one's value-name prefix.
-const ENUMS: [(&str, &str); 3] = [
+/// Each key enum's value-name prefix, by enum name: the same in core's
+/// reasons.proto and in each transport's (decision 14.64).
+const PREFIXES: [(&str, &str); 3] = [
     ("RouterReason", "ROUTER_REASON_"),
     ("HostReason", "HOST_REASON_"),
     ("CoordinatorReason", "COORDINATOR_REASON_"),
@@ -35,66 +37,10 @@ struct Value {
     args: Option<Vec<String>>,
 }
 
-/// Each wire field: its number, its bytes if length-delimited, and its
-/// value if a varint. A compiled descriptor holds no fixed-width field (an
-/// uninterpreted option's double never survives compilation), so one is
-/// refused rather than skipped unread.
-fn fields(mut buf: &[u8]) -> Vec<(u64, Option<&[u8]>, u64)> {
-    let mut out = Vec::new();
-    while !buf.is_empty() {
-        let key = varint(&mut buf);
-        match key & 7 {
-            0 => {
-                let v = varint(&mut buf);
-                out.push((key >> 3, None, v));
-            }
-            2 => {
-                let len = usize::try_from(varint(&mut buf)).expect("a length");
-                let (body, rest) = buf.split_at(len);
-                out.push((key >> 3, Some(body), 0));
-                buf = rest;
-            }
-            wire => panic!("descriptor wire type {wire}: not a varint or length-delimited field"),
-        }
-    }
-    out
-}
-
-fn varint(buf: &mut &[u8]) -> u64 {
-    let mut value = 0u64;
-    for shift in (0..64).step_by(7) {
-        let byte = buf[0];
-        *buf = &buf[1..];
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return value;
-        }
-    }
-    panic!("a varint longer than 64 bits in the descriptor set")
-}
-
-/// The length-delimited fields of `buf` numbered `number`.
-fn messages(buf: &[u8], number: u64) -> impl Iterator<Item = &[u8]> {
-    fields(buf)
-        .into_iter()
-        .filter(move |(n, _, _)| *n == number)
-        .filter_map(|(_, body, _)| body)
-}
-
-fn text(buf: &[u8], number: u64) -> String {
-    messages(buf, number)
-        .last()
-        .map(|b| String::from_utf8(b.to_vec()).expect("a UTF-8 name"))
-        .unwrap_or_default()
-}
-
 /// An `EnumValueDescriptorProto`: name 1, number 2, options 3; the
 /// options' extension holds a `ReasonOptions`, whose args are field 1.
 fn value(buf: &[u8]) -> Value {
-    let number = fields(buf)
-        .into_iter()
-        .find(|(n, _, _)| *n == 2)
-        .map_or(0, |(_, _, v)| v);
+    let number = varints(buf, 2).next().unwrap_or(0);
     let args = messages(buf, 3)
         .flat_map(|options| messages(options, REASON_OPTION).collect::<Vec<_>>())
         .last()
@@ -110,14 +56,15 @@ fn value(buf: &[u8]) -> Value {
     }
 }
 
-/// Each key enum's values, by enum name, read from the encoded set.
-fn read(set: &[u8]) -> Vec<(String, Vec<Value>)> {
-    let file = messages(set, 1)
-        .find(|file| text(file, 1) == REASONS_PROTO)
-        .unwrap_or_else(|| panic!("{REASONS_PROTO} is not in the descriptor set"));
-    messages(file, 5)
-        .map(|e| (text(e, 1), messages(e, 2).map(value).collect()))
-        .filter(|(name, _)| ENUMS.iter().any(|(n, _)| n == name))
+/// Each key enum of the file `path`, by enum name, with its prefix and its
+/// values, read from the encoded set.
+fn read(set: &[u8], path: &str) -> Vec<(String, &'static str, Vec<Value>)> {
+    messages(file(set, path), 5)
+        .filter_map(|e| {
+            let name = text(e, 1);
+            let prefix = PREFIXES.iter().find(|(n, _)| *n == name)?.1;
+            Some((name, prefix, messages(e, 2).map(value).collect()))
+        })
         .collect()
 }
 
@@ -187,21 +134,42 @@ fn write_names(out: &mut String, names: &BTreeSet<String>) {
     out.push_str("}\n");
 }
 
-/// `reason_args.rs` for the encoded descriptor set `set`.
-pub fn generate(set: &[u8]) -> String {
-    let enums = read(set);
-    assert_eq!(
-        enums.len(),
-        ENUMS.len(),
-        "{REASONS_PROTO} lacks one of {ENUMS:?}"
-    );
+/// `reason_args.rs` for the key enums `enums` of the reasons.proto at
+/// `path` in the encoded descriptor set `set`.
+pub fn generate(set: &[u8], path: &str, enums: &[&str]) -> String {
+    let found = read(set, path);
+    let names_found: Vec<&str> = found.iter().map(|(n, _, _)| n.as_str()).collect();
+    assert_eq!(names_found, enums, "{path}'s key enums");
     let mut out = String::new();
     let mut names = BTreeSet::new();
-    for (name, values) in &enums {
-        let prefix = ENUMS.iter().find(|(n, _)| n == name).expect("listed").1;
+    for (name, prefix, values) in &found {
         write_enum(&mut out, name, prefix, values);
         names.extend(values.iter().flat_map(|v| v.args.iter().flatten().cloned()));
     }
     write_names(&mut out, &names);
     out
+}
+
+/// A package's reason keys: its `reasons.proto`'s key enums' args, written
+/// to `$OUT_DIR/reason_args.rs` from the encoded descriptor set `set`, and
+/// the `reasons.en-US.ftl` beside it copied to `$OUT_DIR` (decisions 14.60
+/// and 14.64), for the library to include and embed.
+pub fn reason_keys(
+    root: &std::path::Path,
+    out: &std::path::Path,
+    set: &[u8],
+    package: &str,
+    enums: &[&str],
+) {
+    let catalog = root.join(package).join("reasons.en-US.ftl");
+    println!("cargo:rerun-if-changed={}", catalog.display());
+    let path = format!("{package}/reasons.proto");
+    std::fs::write(out.join("reason_args.rs"), generate(set, &path, enums))
+        .expect("write reason_args.rs");
+    std::fs::copy(&catalog, out.join("reasons.en-US.ftl")).unwrap_or_else(|e| {
+        panic!(
+            "copy {} (an angzarr-project revision before decision 14.64?): {e}",
+            catalog.display()
+        )
+    });
 }

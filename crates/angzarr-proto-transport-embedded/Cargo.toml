@@ -1,0 +1,32 @@
+[package]
+name = "angzarr-proto-transport-embedded"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "angzarr's local-process transport, io.angzarr.transport.embedded.v1: the child launch protocol's declared constants and the reason keys of whatever runs a child, prost only, on angzarr-proto"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace's [workspace.package] is sererr's (see the root Cargo.toml),
+# not this crate's, so nothing is inherited.
+
+[dependencies]
+# Core's messages and its (io.angzarr.v1.reason) option, extern-pathed.
+angzarr-proto = { path = "../angzarr-proto" }
+# The component contract a child serves over its socket: this transport
+# imports component and core (decision 14.64), so a host takes both through
+# this crate (`angzarr_proto_transport_embedded::angzarr_proto_component`).
+angzarr-proto-component = { path = "../angzarr-proto-component" }
+prost = "0.14"
+
+[dev-dependencies]
+# The tests read the descriptor set.
+prost-types = "0.14"
+
+[build-dependencies]
+prost-build = "0.14"
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

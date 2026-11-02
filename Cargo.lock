@@ -213,10 +213,47 @@ dependencies = [
  "prost",
  "prost-build",
  "prost-types",
+ "uuid",
+]
+
+[[package]]
+name = "angzarr-proto-component"
+version = "0.1.0"
+dependencies = [
+ "angzarr-proto",
+ "bytes",
+ "prost",
+ "prost-build",
+ "prost-types",
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
- "uuid",
+]
+
+[[package]]
+name = "angzarr-proto-transport-distributed"
+version = "0.1.0"
+dependencies = [
+ "angzarr-proto",
+ "angzarr-proto-component",
+ "bytes",
+ "prost",
+ "prost-build",
+ "prost-types",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
+name = "angzarr-proto-transport-embedded"
+version = "0.1.0"
+dependencies = [
+ "angzarr-proto",
+ "angzarr-proto-component",
+ "prost",
+ "prost-build",
+ "prost-types",
 ]
 
 [[package]]

@@ -211,8 +211,8 @@ enum Bug {
     LettersDropped,
     /// A write of dead letters alone writes nothing.
     LetterOnlyDropped,
-    /// A letter is kept without its metadata.
-    LetterLosesMetadata,
+    /// A letter is kept without when it occurred.
+    LetterLosesOccurredAt,
     /// A letter about a malformed stream is dropped, the rest landing.
     MalformedLetterDropped,
     /// A stream's letters are read with every stream's of its domain.
@@ -349,9 +349,9 @@ impl Broken {
         let mut letters = given.to_vec();
         match self.bug {
             Bug::LettersDropped if with_positions => letters.clear(),
-            Bug::LetterLosesMetadata => {
+            Bug::LetterLosesOccurredAt => {
                 for letter in &mut letters {
-                    letter.letter.metadata.clear();
+                    letter.letter.occurred_at = None;
                 }
             }
             Bug::MalformedLetterDropped => letters.retain(|l| l.key().is_ok()),
@@ -2627,7 +2627,7 @@ fn a_dead_letter_lands_with_its_write_or_not_at_all_catches_a_split_write() {
         broken,
         ConflictLandsLetters,
         LettersDropped,
-        LetterLosesMetadata,
+        LetterLosesOccurredAt,
     );
 }
 

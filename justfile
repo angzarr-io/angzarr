@@ -422,7 +422,10 @@ test:
 precommit:
     just _container precommit
 
-# === Shared crates (crates/angzarr-proto, crates/angzarr-ports, crates/angzarr-diagnostic, crates/angzarr-yaml, crates/trivial-delegation) ===
+# === Shared crates (crates/angzarr-proto, crates/angzarr-proto-component, crates/angzarr-proto-transport-embedded, crates/angzarr-proto-transport-distributed, crates/angzarr-ports, crates/angzarr-diagnostic, crates/angzarr-yaml, crates/trivial-delegation) ===
+# The four proto crates are the spec's four packages (decision 14.64):
+# angzarr-proto core's messages (prost only, wasm32), angzarr-proto-component
+# the handler-side services' tonic stubs, and one crate per transport.
 # Moved from angzarr-project's rust/. They run on the host, not in the
 # toolchain container (its image lacks the wasm32 target and
 # wasm-bindgen-test-runner): protoc, the wasm32-unknown-unknown target,
@@ -437,6 +440,9 @@ precommit:
 check-shared-crates: check-proto-submodule
     just -f '{{TOP}}/crates/angzarr-diagnostic/justfile' check
     just -f '{{TOP}}/crates/angzarr-proto/justfile' check
+    just -f '{{TOP}}/crates/angzarr-proto-component/justfile' check
+    just -f '{{TOP}}/crates/angzarr-proto-transport-embedded/justfile' check
+    just -f '{{TOP}}/crates/angzarr-proto-transport-distributed/justfile' check
     just -f '{{TOP}}/crates/angzarr-ports/justfile' check
     just -f '{{TOP}}/crates/angzarr-yaml/justfile' check
     just -f '{{TOP}}/crates/trivial-delegation/justfile' check

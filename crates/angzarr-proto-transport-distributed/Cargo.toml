@@ -1,0 +1,36 @@
+[package]
+name = "angzarr-proto-transport-distributed"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "angzarr's distributed transport, io.angzarr.transport.distributed.v1: the coordinator, query, stream, edition-admin and DLQ-admin services as tonic stubs, the bus and dead-letter envelopes, CloudEvents and the distribution-only reason keys, on angzarr-proto's messages"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace's [workspace.package] is sererr's (see the root Cargo.toml),
+# not this crate's, so nothing is inherited.
+
+[dependencies]
+# Core's messages, extern-pathed: every envelope here wraps them unchanged.
+angzarr-proto = { path = "../angzarr-proto" }
+# The component contract the distributed layer calls remote handlers by:
+# this transport imports component and core (decision 14.64).
+angzarr-proto-component = { path = "../angzarr-proto-component" }
+bytes = "1"
+prost = "0.14"
+prost-types = "0.14"
+# The services' stubs, always (the transport is its services): tonic's
+# codegen only, no transport chosen for the caller, and its prost codec.
+tonic = { version = "0.14", default-features = false, features = ["codegen"] }
+tonic-prost = "0.14"
+
+[build-dependencies]
+prost-build = "0.14"
+# No default features: neither tonic-build's transport (build_transport(false))
+# nor prost-build's markdown clean-up of doc comments.
+tonic-prost-build = { version = "0.14", default-features = false }
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

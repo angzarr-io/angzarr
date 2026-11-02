@@ -3,7 +3,7 @@ name = "angzarr-proto"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0 OR BSD-3-Clause"
-description = "prost types for angzarr's wire contract: every io.angzarr.v1 message and reason key, with tonic client and server stubs for every service behind the grpc feature"
+description = "prost types for angzarr's core wire contract: every io.angzarr.v1 message and core reason key, prost only, a dependency leaf that builds for wasm32"
 repository = "https://github.com/angzarr-io/angzarr"
 publish = false
 
@@ -19,23 +19,11 @@ prost-types = "0.14"
 # UUID text form and v5 derivation for the generated `UUID` type. No default
 # features (no std, no RNG), so it stays wasm32-safe; `v5` adds sha1_smol.
 uuid = { version = "1", default-features = false, features = ["v5"] }
-# The `grpc` feature's stubs: tonic's codegen (no transport, so no runtime
-# or connector is chosen for the caller) and its prost codec.
-tonic = { version = "0.14", default-features = false, features = ["codegen"], optional = true }
-tonic-prost = { version = "0.14", optional = true }
 
-[features]
-# tonic client and server stubs for every io.angzarr.v1 service, on this
-# crate's messages (`v1::<service>_client`, `v1::<service>_server`). Off by
-# default: the messages alone stay a dependency leaf that builds for
-# wasm32-unknown-unknown.
-grpc = ["dep:tonic", "dep:tonic-prost", "dep:tonic-prost-build"]
-
+# No features, and no tonic (decision 1.12, restored by 14.64): the services
+# are angzarr-proto-component's and the transports' crates', beside this one.
 [build-dependencies]
 prost-build = "0.14"
-# No default features: neither tonic-build's transport (build_transport(false))
-# nor prost-build's markdown clean-up of doc comments.
-tonic-prost-build = { version = "0.14", default-features = false, optional = true }
 
 # The shared crates' lints: the workspace's (the root Cargo.toml).
 [lints]

@@ -5,10 +5,9 @@ use angzarr_proto::ids::{fact_command_id, policy_command_id};
 use angzarr_proto::v1::{
     angzarr_dead_letter, command_page, event_meta, refusal_response, AngzarrDeadLetter, Command,
     CommandBook, CommandPage, CommandRefused, ComponentDescriptor, ComponentKind,
-    ConflictResolution, ConflictUnit, ContextualCommand, CorrelationQuery, Cover, DeliveryOutcome,
-    Diagnostic, EventBook, EventMeta, EventPage, EventRef, Fact, FactOrigin, Handling, Outcome,
-    Projection, ProjectorFailure, RefusalResponse, Snapshot, StateDescriptor, StateOptions, Target,
-    UpcastRequest, Uuid,
+    ConflictResolution, ConflictUnit, ContextualCommand, Cover, DeliveryOutcome, EventBook,
+    EventMeta, EventPage, EventRef, Fact, FactOrigin, Handling, Outcome, RefusalResponse, Snapshot,
+    StateDescriptor, StateOptions, Target, UpcastRequest, Uuid,
 };
 use prost::{Message, Name};
 
@@ -488,27 +487,6 @@ fn edition_unset_is_main_and_a_set_empty_string_is_distinguishable() {
     let named = cover(Some("what-if"));
     assert_eq!(round_trip(&named), named);
     assert_eq!(round_trip(&named).edition.as_deref(), Some("what-if"));
-
-    // CorrelationQuery.edition follows the same convention.
-    for edition in [None, Some(String::new()), Some("what-if".to_string())] {
-        let q = CorrelationQuery {
-            correlation_id: Some(uuid(0xc0)),
-            edition: edition.clone(),
-        };
-        assert_eq!(round_trip(&q).edition, edition);
-    }
-    assert_ne!(
-        CorrelationQuery {
-            correlation_id: Some(uuid(0xc0)),
-            edition: None,
-        }
-        .encode_to_vec(),
-        CorrelationQuery {
-            correlation_id: Some(uuid(0xc0)),
-            edition: Some(String::new()),
-        }
-        .encode_to_vec()
-    );
 }
 
 #[test]
@@ -524,28 +502,10 @@ fn event_meta_is_field_8_and_appended_after_the_page_body() {
 }
 
 #[test]
-fn outcome_round_trips_each_delivery_with_projections_and_failures() {
-    let projection = Projection {
-        cover: Some(Cover {
-            domain: "draws".into(),
-            root: Some(uuid(0xcd)),
-            edition: None,
-        }),
-        projector: "draw-history".into(),
-        // The stream's next_sequence after the projected events.
-        next_sequence: u64::from(u32::MAX) + 2,
-        projection: Some(any("/draws.v1.DrawHistory", &[4])),
-    };
-    // HandleSync answers OK with the successful projections beside the
-    // failed ones; a failure never replaces the events.
-    let failure = ProjectorFailure {
-        projector: "draw-stats".into(),
-        code: 14, // UNAVAILABLE
-        diagnostic: Some(Diagnostic {
-            code: "STATS_STORE_UNAVAILABLE".into(),
-            args: [("store".to_string(), "draw-stats".to_string())].into(),
-        }),
-    };
+fn outcome_round_trips_each_delivery() {
+    // Core's Outcome is the delivery alone (decision 14.64): a sync
+    // projector's results are the distributed transport's SyncOutcome,
+    // which wraps it.
     for delivery in [
         DeliveryOutcome::Unspecified,
         DeliveryOutcome::Applied,
@@ -554,14 +514,10 @@ fn outcome_round_trips_each_delivery_with_projections_and_failures() {
     ] {
         let original = Outcome {
             delivery: delivery as i32,
-            projections: vec![projection.clone()],
-            projector_failures: vec![failure.clone()],
         };
         let decoded = round_trip(&original);
         assert_eq!(decoded, original);
         assert_eq!(decoded.delivery(), delivery);
-        assert_eq!(decoded.projections, vec![projection.clone()]);
-        assert_eq!(decoded.projector_failures, vec![failure.clone()]);
     }
     assert_eq!(
         DeliveryOutcome::Duplicate.as_str_name(),
@@ -700,10 +656,6 @@ fn type_names_are_io_angzarr_v1() {
     assert_eq!(EventPage::type_url(), "/io.angzarr.v1.EventPage");
     assert_eq!(CommandBook::type_url(), "/io.angzarr.v1.CommandBook");
     assert_eq!(Fact::type_url(), "/io.angzarr.v1.Fact");
-    assert_eq!(
-        angzarr_proto::sererr::v1::CapturedError::full_name(),
-        "sererr.v1.CapturedError"
-    );
 
     let p = page(Kind::Policy);
     let packed = prost_types::Any::from_msg(&p).expect("pack");

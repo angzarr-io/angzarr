@@ -1,0 +1,24 @@
+# angzarr-proto-transport-distributed: the distributed transport
+# (io.angzarr.transport.distributed.v1): services, envelopes, keys. Needs protoc on
+# PATH (or PROTOC set) and the angzarr-project submodule checked out
+# (build.rs reads its proto/). A member of angzarr-core's workspace: every
+# recipe names this package, and --locked means the workspace's Cargo.lock.
+# Runs on the host (`just -f crates/angzarr-proto-transport-distributed/justfile check`).
+
+# Format check, build, lint and test
+check: fmt-check build lint test
+
+fmt:
+    cargo fmt -p angzarr-proto-transport-distributed
+
+fmt-check:
+    cargo fmt -p angzarr-proto-transport-distributed --check
+
+build:
+    cargo build --locked -p angzarr-proto-transport-distributed
+
+lint:
+    cargo clippy --locked -p angzarr-proto-transport-distributed --all-targets -- -D warnings
+
+test:
+    cargo test --locked -p angzarr-proto-transport-distributed

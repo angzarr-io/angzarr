@@ -1,0 +1,24 @@
+# angzarr-proto-component: the component contract's tonic stubs
+# (io.angzarr.component.v1), on angzarr-proto's messages. Needs protoc on
+# PATH (or PROTOC set) and the angzarr-project submodule checked out
+# (build.rs reads its proto/). A member of angzarr-core's workspace: every
+# recipe names this package, and --locked means the workspace's Cargo.lock.
+# Runs on the host (`just -f crates/angzarr-proto-component/justfile check`).
+
+# Format check, build, lint and test
+check: fmt-check build lint test
+
+fmt:
+    cargo fmt -p angzarr-proto-component
+
+fmt-check:
+    cargo fmt -p angzarr-proto-component --check
+
+build:
+    cargo build --locked -p angzarr-proto-component
+
+lint:
+    cargo clippy --locked -p angzarr-proto-component --all-targets -- -D warnings
+
+test:
+    cargo test --locked -p angzarr-proto-component
