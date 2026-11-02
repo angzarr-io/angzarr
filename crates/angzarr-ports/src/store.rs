@@ -594,3 +594,18 @@ impl<T: PositionStore + ?Sized> PositionStore for Arc<T> {
         (**self).position(key)
     }
 }
+
+impl<T: ListStreams + ?Sized> ListStreams for Arc<T> {
+    fn list_streams(&self) -> impl Future<Output = Result<Vec<Cover>, StoreError>> + MaybeSend {
+        (**self).list_streams()
+    }
+}
+
+impl<T: Processed + ?Sized> Processed for Arc<T> {
+    fn processed(
+        &self,
+        handler: &str,
+    ) -> impl Future<Output = Result<Vec<(Cover, u64)>, StoreError>> + MaybeSend {
+        (**self).processed(handler)
+    }
+}

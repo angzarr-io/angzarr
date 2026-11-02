@@ -67,3 +67,24 @@ async fn a_generic_step_spawns_on_a_multi_threaded_runtime() {
         Ok(1)
     );
 }
+
+/// A store shared behind an `Arc` answers its drivers' record and its
+/// listing of streams through it, as the store itself does (decision
+/// 14.68).
+#[tokio::test]
+async fn a_shared_store_answers_its_record_and_its_listing() {
+    use angzarr_ports::{ListStreams, Processed};
+    let store = Arc::new(MemoryStore::new());
+    let stream = main_stream("account", 1);
+    store
+        .write(Write::append(stream, 0, &[page(0, 1)]))
+        .await
+        .unwrap();
+    let key = PositionKey {
+        handler: "h",
+        stream,
+    };
+    store.write(Write::positions(&[(key, 1)])).await.unwrap();
+    assert_eq!(store.processed("h").await, Ok(vec![(stream.to_cover(), 1)]));
+    assert_eq!(store.list_streams().await, Ok(vec![stream.to_cover()]));
+}
