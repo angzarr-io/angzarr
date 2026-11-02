@@ -3,6 +3,7 @@ members = [
     ".",
     "crates/angzarr-diagnostic",
     "crates/angzarr-ports",
+    "crates/angzarr-presentation",
     "crates/angzarr-proto",
     "crates/angzarr-proto-component",
     "crates/angzarr-proto-transport-distributed",

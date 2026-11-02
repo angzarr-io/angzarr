@@ -136,13 +136,14 @@ jobs:
 
   # The shared crates (crates/angzarr-proto and crates/angzarr-ports, moved
   # from angzarr-project; crates/angzarr-diagnostic and crates/angzarr-yaml,
-  # moved from angzarr-embedded). The jobs above run only the root package (and in
+  # moved from angzarr-embedded; crates/angzarr-presentation, moved from
+  # taskloom). The jobs above run only the root package (and in
   # the toolchain image, which lacks wasm32 and wasm-bindgen-test-runner),
   # so this job runs every check of the new members on the runner itself.
   # All logic lives in justfile recipes; this job only installs tools and
   # invokes them.
   shared-crates:
-    name: Shared crates (angzarr-diagnostic, angzarr-proto, angzarr-ports, angzarr-yaml)
+    name: Shared crates (angzarr-diagnostic, angzarr-proto, angzarr-ports, angzarr-yaml, angzarr-presentation)
     runs-on: ubuntu-latest
     needs: [submodules]
     steps:
@@ -194,6 +195,9 @@ jobs:
 
       - name: angzarr-yaml (fmt-check, build, lint, test, wasm)
         run: just -f crates/angzarr-yaml/justfile check
+
+      - name: angzarr-presentation (fmt-check, build, lint, test)
+        run: just -f crates/angzarr-presentation/justfile check
 
   integration:
     name: Integration Tests

@@ -52,6 +52,7 @@ pre-commit:
         - "crates/angzarr-proto-transport-distributed/**"
         - "crates/angzarr-ports/**"
         - "crates/angzarr-yaml/**"
+        - "crates/angzarr-presentation/**"
         - "crates/trivial-delegation/**"
       run: just precommit
 
@@ -59,7 +60,7 @@ pre-commit:
     # Cargo.toml's [workspace.lints] and crates/clippy.toml are theirs too.
     shared-crates-precommit:
       glob:
-        - "crates/{angzarr-diagnostic,angzarr-proto,angzarr-proto-component,angzarr-proto-transport-embedded,angzarr-proto-transport-distributed,angzarr-ports,angzarr-yaml,trivial-delegation}/**/*.{rs,ftl,toml}"
+        - "crates/{angzarr-diagnostic,angzarr-proto,angzarr-proto-component,angzarr-proto-transport-embedded,angzarr-proto-transport-distributed,angzarr-ports,angzarr-yaml,angzarr-presentation,trivial-delegation}/**/*.{rs,ftl,toml}"
         - "crates/clippy.toml"
         - "Cargo.toml"
       run: just check-shared-crates
