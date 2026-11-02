@@ -51,3 +51,7 @@ The shared crates `angzarr-proto`, `angzarr-proto-component`,
 `angzarr-ports`, `angzarr-diagnostic` and `angzarr-yaml`: Licensed under either
 of Apache License 2.0 or BSD 3-Clause, at your option (each crate's
 `LICENSE-APACHE` and `LICENSE-BSD`).
+
+Commercial licensing: the AGPL-3.0 parts of this project (not the
+dual-licensed shared crates above) are also available under a commercial
+licence. The author is open to it; contact Benjamin Abbitt.
