@@ -455,7 +455,8 @@ check-shared-crates: check-proto-submodule
 # Each shared crate's justfile calls this (`mutation-test`, `mutation-diff`).
 # cargo-mutants copies the workspace to a scratch directory under TMPDIR and
 # mutates the copy (never --in-place), so no mutated source reaches this
-# tree; no git hook runs it. Exits 4 when the tests fail unmutated.
+# tree; no git hook runs it. Exits 4 when the tests fail unmutated, and
+# fails when it found mutants and tested fewer.
 # --no-config: .cargo/mutants.toml is the root package's (its examine_globs
 # name only src/, so a shared crate would have no mutants at all).
 [positional-arguments]
@@ -481,7 +482,19 @@ shared-mutation crate min timeout out patch="":
         4) echo "FAIL mutation: the tests fail unmutated (cargo-mutants baseline; log: $out/cargo-mutants.log)" >&2; exit 4 ;;
         *) echo "FAIL mutation: cargo mutants failed before a verdict (exit $rc; log: $out/cargo-mutants.log)" >&2; exit 1 ;;
     esac
+    # Every mutant found must have been tested: a run that found some and
+    # judged fewer (its baseline failing under an exit code that did not say
+    # so, or cut short) has not shown the tests catch them, so it fails
+    # rather than passing on the ones it never ran.
+    found=0
+    [ -f "$out/mutants.out/mutants.json" ] && found=$(jq length "$out/mutants.out/mutants.json")
     outcomes="$out/mutants.out/outcomes.json"
+    tested=0
+    [ -f "$outcomes" ] && tested=$(jq '[.outcomes[] | select(.scenario | type == "object")] | length' "$outcomes")
+    if [ "$tested" -ne "$found" ]; then
+        echo "FAIL mutation: $crate: $found mutants found but $tested tested (cargo mutants exit $rc; log: $out/cargo-mutants.log); nothing is judged until every one is" >&2
+        exit 1
+    fi
     counts=$(jq -r '[.outcomes[] | select(.scenario | type == "object") | .summary]
         | "\(map(select(. == "CaughtMutant" or . == "Timeout")) | length) \(map(select(. == "MissedMutant")) | length) \(map(select(. == "Unviable")) | length)"' \
         "$outcomes" 2>/dev/null || echo "0 0 0")
