@@ -360,3 +360,8 @@ impl Diagnostic for Report {
 #[cfg(test)]
 #[path = "lib.test.rs"]
 mod tests;
+
+// A test's scratch directory, removed when it drops, on a panic too.
+#[cfg(test)]
+#[path = "test_dir.test.rs"]
+mod test_dir;
