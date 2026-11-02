@@ -1790,6 +1790,12 @@ fn the_core_read_checks_catch_a_wrong_bound_filter_or_order() {
         ProcessedKeepsZero,
         ProcessedReversed,
     );
+    catches!(
+        a_handlers_record_outlives_a_purge_until_forgotten,
+        broken,
+        PurgeTakesPositions,
+        ProcessedKeepsZero,
+    );
 }
 
 /// Ruled 2026-10-31: the outbox promises order within a stream and none
