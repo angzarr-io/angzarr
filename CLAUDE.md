@@ -13,6 +13,23 @@ just build                 # or fmt-check, lint, test: one step across every cra
 just lint-deps             # cargo-deny (deny.toml)
 ```
 
+### Diagnostics in a locale
+
+A crate with diagnostics ships its Fluent catalogs as
+`locales/<locale>/messages.ftl`; its build script
+(`angzarr_diagnostic::build::catalogs()`) writes each to `OUT_DIR` under the
+crate's name, and beside them `locales.rs`, the table of every locale. The
+crate exports `EN_US` (its en-US catalog) and `LOCALES` (the table, via
+`include!`), so adding `locales/de-DE/messages.ftl` offers de-DE with no
+other edit. A binary picks the locale with
+`angzarr_presentation::locale::detect(|name| std::env::var(name).ok())`
+(`LC_ALL`, `LC_MESSAGES`, `LANG`; `C`, `POSIX`, unset or unparseable are
+en-US) and builds `Catalog::for_locale(&locale, &[a::LOCALES, ...])`, which
+negotiates the locale against what the catalogs offer and falls back to
+en-US message by message. `Catalog::en_us(&[a::EN_US, ...])` is the same
+as asking for en-US. Only en-US catalogs ship; every code has a message in
+en-US.
+
 The distributed coordinator runtime (the root package `angzarr`, its
 coordinator binaries and images, `deploy/`, `gateway/`, `features/` and the
 k8s recipes) was retired on 2026-11-02 and is to be brought back. Its last

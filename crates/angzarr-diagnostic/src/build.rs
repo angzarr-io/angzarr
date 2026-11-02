@@ -11,18 +11,30 @@ use crate::catalog::{prefixed, Catalog};
 /// catalog is `locales/en-US/messages.ftl`.
 pub const SOURCE: &str = "messages.ftl";
 
+/// The table of a crate's catalogs by locale, written to `OUT_DIR` beside
+/// them: a Rust expression of type `&[(&str, &str)]`, each locale's name
+/// (its directory's) and its catalog's text, sorted by locale.
+pub const TABLE: &str = "locales.rs";
+
 /// Call from a crate's build script (`build.rs`'s `main`): each
 /// `locales/<locale>/messages.ftl` of the crate being built, written to
 /// `OUT_DIR` as `<locale>.ftl` with every message and term id, and every
 /// reference to one, prefixed with the crate's package name and a dash
-/// ([`prefixed`]). The crate exports its en-US catalog as
+/// ([`prefixed`]), and beside them their [`TABLE`]. The crate exports its
+/// en-US catalog, and every locale's, as
 ///
 /// ```ignore
 /// pub const EN_US: (&str, &str) = (
 ///     env!("CARGO_PKG_NAME"),
 ///     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
 /// );
+/// pub const LOCALES: (&str, &[(&str, &str)]) = (
+///     env!("CARGO_PKG_NAME"),
+///     include!(concat!(env!("OUT_DIR"), "/locales.rs")),
+/// );
 /// ```
+///
+/// so a locale added under `locales` is exported with no other edit.
 ///
 /// Rebuilt when anything under `locales` changes. Panics, failing the
 /// build, on a source that cannot be read or does not parse
@@ -37,8 +49,8 @@ pub fn catalogs() {
 }
 
 /// Each locale's source under `locales`, prefixed with `krate`, written to
-/// `out` as `<locale>.ftl`: the locales written, sorted, or what went
-/// wrong.
+/// `out` as `<locale>.ftl`, then their [`TABLE`]: the locales written,
+/// sorted, or what went wrong.
 fn write(krate: &str, locales: &Path, out: &Path) -> Result<Vec<String>, String> {
     let at = |path: &Path, e: &dyn std::fmt::Debug| format!("{}: {e:?}", path.display());
     let mut written = Vec::new();
@@ -54,7 +66,23 @@ fn write(krate: &str, locales: &Path, out: &Path) -> Result<Vec<String>, String>
         written.push(locale.into_owned());
     }
     written.sort();
+    let target = out.join(TABLE);
+    fs::write(&target, table(&written)).map_err(|e| at(&target, &e))?;
     Ok(written)
+}
+
+/// The [`TABLE`] of `locales`, each with its catalog in `OUT_DIR` embedded.
+fn table(locales: &[String]) -> String {
+    let mut table =
+        String::from("// Each locale's catalog (angzarr_diagnostic::build), sorted.\n&[\n");
+    for locale in locales {
+        let file = format!("/{locale}.ftl");
+        table.push_str(&format!(
+            "    ({locale:?}, include_str!(concat!(env!(\"OUT_DIR\"), {file:?}))),\n"
+        ));
+    }
+    table.push_str("]\n");
+    table
 }
 
 #[cfg(test)]

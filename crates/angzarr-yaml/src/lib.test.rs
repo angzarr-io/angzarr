@@ -759,6 +759,16 @@ fn a_sequence_in_a_sequence_is_indented_under_its_dash() {
     assert_eq!(write(&three, 2), "-\n  - [a]\n");
 }
 
+/// The crate offers its catalogs by locale under the same name, built from
+/// `locales/` with no list of its own: en-US alone, the same text as
+/// `EN_US`.
+#[test]
+fn its_locales_are_every_catalog_under_locales_en_us_alone() {
+    let (name, table) = LOCALES;
+    assert_eq!(name, EN_US.0);
+    assert_eq!(table, &[("en-US", EN_US.1)]);
+}
+
 /// The crate's en-US catalog, exported as `EN_US` under the crate's package
 /// name, has a message for every code, using exactly its args, and no
 /// message without an error.

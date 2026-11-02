@@ -18,6 +18,9 @@ angzarr-diagnostic = { path = "../angzarr-diagnostic" }
 # Fluent's standard runtime and its language ids: the catalogs' renderer.
 fluent-bundle = "0.15.3"
 unic-langid = "0.9.6"
+# Fluent's language negotiation, already fluent-bundle's: which of the
+# locales the catalogs offer serve a requested one, en-US last.
+fluent-langneg = "0.13.1"
 # The JSON format, and the error envelope.
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"

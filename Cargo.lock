@@ -36,6 +36,7 @@ version = "0.1.0"
 dependencies = [
  "angzarr-diagnostic",
  "fluent-bundle",
+ "fluent-langneg",
  "fluent-syntax",
  "serde",
  "serde_json",

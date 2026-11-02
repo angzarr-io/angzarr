@@ -44,6 +44,32 @@ fn every_locales_source_is_written_under_the_crates_name() {
     fs::remove_dir_all(&dir).unwrap();
 }
 
+/// Beside the catalogs, `out` gets their table: a Rust expression, each
+/// locale with its catalog's text embedded, sorted, so a crate exports every
+/// locale under `locales` with no edit of its own when one is added.
+#[test]
+fn the_locales_table_embeds_every_locales_catalog_sorted() {
+    let dir = scratch("table");
+    let (locales, out) = (dir.join("locales"), dir.join("out"));
+    for locale in ["en-US", "de-DE"] {
+        fs::create_dir_all(locales.join(locale)).unwrap();
+        fs::write(locales.join(locale).join(SOURCE), "x = y\n").unwrap();
+    }
+    fs::create_dir_all(&out).unwrap();
+
+    write("my-crate", &locales, &out).unwrap();
+    assert_eq!(
+        fs::read_to_string(out.join(TABLE)).unwrap(),
+        r#"// Each locale's catalog (angzarr_diagnostic::build), sorted.
+&[
+    ("de-DE", include_str!(concat!(env!("OUT_DIR"), "/de-DE.ftl"))),
+    ("en-US", include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl"))),
+]
+"#
+    );
+    fs::remove_dir_all(&dir).unwrap();
+}
+
 /// A locale without the source, a source that does not parse, and no
 /// `locales` at all each fail the build, naming the source and, for a
 /// syntax error, its line.
@@ -72,6 +98,7 @@ fn a_missing_or_unparsable_source_fails_the_build() {
         Err(format!("{}: [Syntax {{ line: 2 }}]", source.display()))
     );
     assert!(!out.join("en-US.ftl").exists());
+    assert!(!out.join(TABLE).exists());
     fs::remove_dir_all(&dir).unwrap();
 }
 
@@ -95,6 +122,7 @@ fn a_build_scripts_call_writes_the_crates_catalogs_from_cargos_environment() {
         fs::read_to_string(out.join("en-US.ftl")).unwrap(),
         "my-crate-too-new = newer\n"
     );
+    assert!(out.join(TABLE).exists(), "the locales table is written too");
 
     fs::write(&source, "not an entry\n").unwrap();
     let failed = std::panic::catch_unwind(catalogs).unwrap_err();
