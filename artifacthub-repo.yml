@@ -1,8 +1,0 @@
-# Artifact Hub repository metadata
-# This file is used by Artifact Hub to verify repository ownership
-# See: https://artifacthub.io/docs/topics/repositories/
-
-repositoryID: angzarr-helm
-owners:
-  - name: Benjamin Abbitt
-    email: benjamin.abbitt@gmail.com

@@ -22,12 +22,6 @@ logging:
 
 # Keep manifest files in sync with VERSION on release
 updates:
-  - file: deploy/k8s/helm/angzarr/Chart.yaml
-    path: version
-    template: "{{MajorMinorPatch}}"
-  - file: deploy/k8s/helm/angzarr/Chart.yaml
-    path: appVersion
-    template: "{{MajorMinorPatch}}"
   - file: proto/buf_version.yaml
     path: version
     template: "{{MajorMinorPatch}}"

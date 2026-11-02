@@ -3,8 +3,8 @@
 # angzarr core is a virtual workspace of the shared crates (crates/*), each
 # checked by its own justfile on the host: `just check-shared-crates` is the
 # whole gate, and build, fmt-check, lint and test run one of its steps
-# across every crate. The rest drives the proto docs and the Kubernetes
-# tooling under deploy/.
+# across every crate. The rest drives the protos (buf) and their docs, the
+# toolchain images under build/images, and editor tooling.
 
 set shell := ["bash", "-c"]
 
@@ -33,8 +33,6 @@ CONTAINER_RUN := CONTAINER_CMD + " run --rm " + CONTAINER_USER_ARG
 # See: https://github.com/angzarr-io/
 
 mod images "build/images/justfile"
-mod kind "deploy/kind/justfile"
-mod tofu "deploy/tofu/justfile"
 
 default:
     @just --list
@@ -267,187 +265,6 @@ check-proto-submodule:
     fi
     echo "ok   check-proto-submodule ($sm@${pinned:0:12}: protos present, no angzarr-proto or angzarr-ports package)"
 
-# === K8s Cluster ===
-
-# Create Kind cluster
-cluster-create:
-    #!/usr/bin/env bash
-    if kind get clusters 2>/dev/null | grep -q "^angzarr$"; then
-        echo "Cluster 'angzarr' already exists"
-    else
-        kind create cluster --config "{{TOP}}/kind-config.yaml" --name angzarr
-    fi
-
-# Show cluster status
-cluster-status:
-    @kubectl cluster-info --context kind-angzarr 2>/dev/null || echo "Cluster not running"
-    @echo ""
-    @kubectl get nodes -o wide 2>/dev/null || true
-
-# Delete Kind cluster
-cluster-delete:
-    kind delete cluster --name angzarr
-
-# === Port Forwarding ===
-
-# Kill all angzarr-related port-forwards
-port-forward-cleanup:
-    @pkill -f "kubectl.*port-forward.*angzarr" || true
-
-# Start gateway port-forward (9084)
-port-forward-gateway: port-forward-cleanup
-    @kubectl port-forward --address 127.0.0.1 -n angzarr svc/angzarr-gateway 9084:9084 &
-    @echo "Gateway available at localhost:9084"
-
-# Start Grafana port-forward (3000)
-port-forward-grafana:
-    @pkill -f "kubectl.*port-forward.*grafana" || true
-    @kubectl port-forward --address 127.0.0.1 -n observability svc/observability-grafana 3000:80 &
-    @echo "Grafana available at localhost:3000"
-
-# === Operators ===
-
-# Internal: install operators without cluster-ready dependency (used by _cluster-ready)
-[private]
-_operators-impl:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "=== Installing operators ==="
-    # Helm-based operators (CloudNativePG, Strimzi)
-    helm dependency update "{{HELM_K8S}}/operators"
-    helm upgrade --install angzarr-operators "{{HELM_K8S}}/operators" \
-        -n operators --create-namespace --wait
-    # RabbitMQ operator (no official Helm chart)
-    just operators-rabbitmq
-    echo "=== Operators installed ==="
-    kubectl get pods -n operators
-    kubectl get pods -n rabbitmq-system
-
-# Install all Kubernetes operators (CloudNativePG, Strimzi, RabbitMQ)
-operators: _cluster-ready _operators-impl
-
-# Install RabbitMQ Cluster Operator (no official Helm chart)
-operators-rabbitmq:
-    kubectl apply -f https://github.com/rabbitmq/cluster-operator/releases/download/v2.12.0/cluster-operator.yml
-
-# Uninstall all operators
-operators-delete:
-    kubectl delete -f https://github.com/rabbitmq/cluster-operator/releases/download/v2.12.0/cluster-operator.yml || true
-    helm uninstall angzarr-operators -n operators || true
-
-# === Infrastructure ===
-
-HELM_K8S := TOP + "/deploy/k8s/helm"
-
-# Deploy lightweight infrastructure for CI (no operators, single-replica)
-infra-ci:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "=== Deploying CI infrastructure ==="
-    kubectl create namespace angzarr --dry-run=client -o yaml | kubectl apply -f -
-    # PostgreSQL (simple, no operator)
-    helm upgrade --install angzarr-db "{{HELM_K8S}}/postgres-simple" \
-        -n angzarr --set auth.password=angzarr --wait --timeout 2m
-    # Redis (simple)
-    helm upgrade --install angzarr-redis "{{HELM_K8S}}/redis" \
-        -n angzarr --set auth.password=angzarr --wait --timeout 2m
-    # RabbitMQ (simple, no operator)
-    helm upgrade --install angzarr-mq "{{HELM_K8S}}/rabbitmq-simple" \
-        -n angzarr --set auth.password=angzarr --wait --timeout 2m
-    echo "=== CI Infrastructure deployed ==="
-    kubectl get pods -n angzarr
-
-# Internal: deploy infrastructure without cluster-ready dependency (used by _cluster-ready)
-[private]
-_infra-impl:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "=== Deploying infrastructure ==="
-    # PostgreSQL (CloudNativePG)
-    helm upgrade --install angzarr-db "{{HELM_K8S}}/postgres" \
-        -n angzarr --create-namespace \
-        --set auth.password=angzarr --wait
-    # RabbitMQ
-    helm upgrade --install angzarr-mq "{{HELM_K8S}}/rabbitmq" \
-        -n angzarr \
-        --set auth.password=angzarr --wait
-    echo "=== Infrastructure deployed ==="
-    kubectl get pods -n angzarr
-
-# Deploy infrastructure to angzarr namespace (requires operators installed first)
-infra: _cluster-ready _infra-impl
-
-# Deploy infrastructure with Kafka (alternative to RabbitMQ)
-infra-kafka: _cluster-ready
-    #!/usr/bin/env bash
-    set -euo pipefail
-    echo "=== Deploying infrastructure (Kafka) ==="
-    # PostgreSQL (CloudNativePG)
-    helm upgrade --install angzarr-db "{{HELM_K8S}}/postgres" \
-        -n angzarr --create-namespace \
-        --set auth.password=angzarr --wait
-    # Kafka (Strimzi)
-    helm upgrade --install angzarr-kafka "{{HELM_K8S}}/kafka" \
-        -n angzarr --wait --timeout 5m
-    echo "=== Infrastructure deployed ==="
-    kubectl get pods -n angzarr
-
-# Deploy Redis (optional - for snapshot store)
-infra-redis:
-    helm upgrade --install angzarr-redis "{{HELM_K8S}}/redis" \
-        -n angzarr --create-namespace \
-        --set auth.password=angzarr --wait
-
-# Deploy NATS (optional - alternative event bus)
-infra-nats:
-    helm dependency update "{{HELM_K8S}}/nats"
-    helm upgrade --install angzarr-nats "{{HELM_K8S}}/nats" \
-        -n angzarr --create-namespace --wait
-
-# Deploy Floci (AWS emulator - LocalStack alternative)
-infra-floci:
-    helm upgrade --install angzarr-floci "{{HELM_K8S}}/floci" \
-        -n angzarr --create-namespace \
-        --set service.type=NodePort --wait
-
-# Run Floci locally (no cluster required, for quick local testing)
-floci:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if {{CONTAINER_CMD}} ps -a --format '{{{{.Names}}}}' | grep -q '^floci$'; then
-        echo "Floci container already exists. Use 'just floci-stop' to remove it."
-        exit 1
-    fi
-    {{CONTAINER_CMD}} run -d --name floci -p 4566:4566 \
-        -e FLOCI_DEFAULT_REGION=us-east-1 \
-        hectorvent/floci:latest
-    echo "Floci available at http://localhost:4566"
-    echo ""
-    echo "Configure AWS CLI:"
-    echo "  export AWS_ACCESS_KEY_ID=test"
-    echo "  export AWS_SECRET_ACCESS_KEY=test"
-    echo "  export AWS_DEFAULT_REGION=us-east-1"
-    echo ""
-    echo "Test with:"
-    echo "  aws --endpoint-url=http://localhost:4566 s3 ls"
-
-# Stop Floci container
-floci-stop:
-    {{CONTAINER_CMD}} stop floci && {{CONTAINER_CMD}} rm floci
-
-# Destroy infrastructure
-infra-destroy:
-    helm uninstall angzarr-floci -n angzarr || true
-    helm uninstall angzarr-nats -n angzarr || true
-    helm uninstall angzarr-redis -n angzarr || true
-    helm uninstall angzarr-kafka -n angzarr || true
-    helm uninstall angzarr-mq -n angzarr || true
-    helm uninstall angzarr-db -n angzarr || true
-
-# Initialize secrets
-secrets-init:
-    uv run "{{TOP}}/scripts/manage_secrets.py" init
-
 # === Claude Code LSP Setup ===
 
 # Check LSP configuration and server availability
@@ -595,11 +412,3 @@ lsp-csharp:
     echo "=== Installing Claude Code plugin ==="
     claude mcp add-from-claude-marketplace csharp-lsp || \
         echo "Plugin may already be installed or claude CLI not available"
-
-# === Internal Helpers ===
-
-_cluster-ready:
-    just cluster-create
-    just secrets-init
-    just _operators-impl
-    just _infra-impl

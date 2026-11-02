@@ -18,13 +18,9 @@
 
 # Secrets - never commit
 .env
-*.tfvars
-!*.tfvars.example
 secrets/
 *-secrets.yaml
 *-credentials.yaml
-deploy/helm/angzarr/values-secrets.yaml
-**/k8s/secrets.yaml
 
 # Python
 __pycache__/
@@ -76,12 +72,6 @@ build/images/build.json
 # C# - protoc output goes to obj/ (already ignored via **/obj/)
 
 # Generated proto outputs (examples moved to separate repos)
-
-# Terraform
-.terraform/
-*.tfstate
-*.tfstate.backup
-*.tfstate.*
 
 # IDE
 .vscode/

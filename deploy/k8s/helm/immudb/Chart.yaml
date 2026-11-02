@@ -1,6 +1,0 @@
-apiVersion: v2
-name: angzarr-db-immudb
-description: ImmuDB for Angzarr event store (tamper-proof)
-type: application
-version: 0.1.0
-appVersion: "1.9.5"

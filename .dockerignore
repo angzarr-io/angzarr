@@ -50,10 +50,3 @@ htmlcov/
 .env
 .env.*
 secrets/
-
-# Kubernetes manifests (not needed for container builds)
-k8s/
-
-# Kind config
-kind-config.yaml
-.kind-registry-config/

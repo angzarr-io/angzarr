@@ -1,9 +1,0 @@
-dependencies:
-- name: cloudnative-pg
-  repository: https://cloudnative-pg.github.io/charts
-  version: 0.27.1
-- name: strimzi-kafka-operator
-  repository: https://strimzi.io/charts/
-  version: 0.50.1
-digest: sha256:155f8dc9626808639b590c1058306cf2fb1dfc3a54db977ad18d3f583ac3bc73
-generated: "2026-03-03T20:15:48.18540409-06:00"

@@ -60,9 +60,3 @@ pre-commit:
 
     # NOTE: Go, C#, Java, C++ hooks removed - code extracted to separate repos
     # See: angzarr-client-{go,csharp,java,cpp} and angzarr-examples-{go,csharp,java,cpp}
-
-    # OpenTofu
-    tofu-fmt:
-      glob: "deploy/tofu/**/*.tf"
-      run: tofu fmt -recursive deploy/tofu/
-      stage_fixed: true
