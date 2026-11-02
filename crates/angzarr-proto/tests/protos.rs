@@ -5,6 +5,13 @@ use std::path::PathBuf;
 
 use angzarr_proto::protos::{write_include_dir, FILES};
 
+// A test's scratch directory, removed when it drops, on a panic too: the
+// workspace's one guard, angzarr-diagnostic's, mounted by path.
+#[path = "../../angzarr-diagnostic/src/test_dir.test.rs"]
+mod test_dir;
+
+use test_dir::TestDir;
+
 /// The proto root build.rs generated the library from (exported by it).
 fn repo_proto() -> PathBuf {
     PathBuf::from(env!("ANGZARR_PROTO_ROOT"))
@@ -23,9 +30,9 @@ fn every_embedded_proto_is_the_repositorys() {
 
 #[test]
 fn written_out_they_are_an_include_directory() {
-    let dir = std::env::temp_dir().join(format!("angzarr-protos-{}", std::process::id()));
+    let dir = TestDir::new(env!("CARGO_PKG_NAME"));
     let include = write_include_dir(&dir).unwrap();
-    assert_eq!(include, dir);
+    assert_eq!(include, *dir);
     for file in FILES {
         assert_eq!(
             std::fs::read_to_string(include.join(file.path)).unwrap(),
@@ -50,5 +57,4 @@ fn written_out_they_are_an_include_directory() {
             }
         }
     }
-    std::fs::remove_dir_all(&dir).unwrap();
 }

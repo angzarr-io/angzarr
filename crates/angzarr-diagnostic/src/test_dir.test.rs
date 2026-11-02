@@ -62,9 +62,12 @@ impl TestDir {
 }
 
 impl Drop for TestDir {
-    // Red: nothing is removed yet.
     fn drop(&mut self) {
-        let _ = self.keep_on_panic;
+        if self.keep_on_panic && std::thread::panicking() {
+            eprintln!("{KEEP}: kept {}", self.path.display());
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 

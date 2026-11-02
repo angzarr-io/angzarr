@@ -1,23 +1,18 @@
 use super::*;
 
-use std::path::PathBuf;
+use crate::test_dir::TestDir;
 
-/// A fresh directory of this test's own under the system's temporary one.
-fn scratch(name: &str) -> PathBuf {
-    let dir = env::temp_dir().join(format!(
-        "angzarr-diagnostic-build-{}-{name}",
-        std::process::id()
-    ));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
+/// A fresh directory of this test's own under the system's temporary one,
+/// removed when it drops, the test passing or failing.
+fn scratch() -> TestDir {
+    TestDir::new(concat!(env!("CARGO_PKG_NAME"), "-build"))
 }
 
 /// Each locale's source is written to `out` as `<locale>.ftl`, under the
 /// crate's name, its references too.
 #[test]
 fn every_locales_source_is_written_under_the_crates_name() {
-    let dir = scratch("written");
+    let dir = scratch();
     let (locales, out) = (dir.join("locales"), dir.join("out"));
     fs::create_dir_all(locales.join("en-US")).unwrap();
     fs::create_dir_all(locales.join("de")).unwrap();
@@ -41,7 +36,6 @@ fn every_locales_source_is_written_under_the_crates_name() {
         fs::read_to_string(out.join("de.ftl")).unwrap(),
         "my-crate-too-new = neuer\n"
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// Beside the catalogs, `out` gets their table: a Rust expression, each
@@ -49,7 +43,7 @@ fn every_locales_source_is_written_under_the_crates_name() {
 /// locale under `locales` with no edit of its own when one is added.
 #[test]
 fn the_locales_table_embeds_every_locales_catalog_sorted() {
-    let dir = scratch("table");
+    let dir = scratch();
     let (locales, out) = (dir.join("locales"), dir.join("out"));
     for locale in ["en-US", "de-DE"] {
         fs::create_dir_all(locales.join(locale)).unwrap();
@@ -67,7 +61,6 @@ fn the_locales_table_embeds_every_locales_catalog_sorted() {
 ]
 "#
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A locale without the source, a source that does not parse, and no
@@ -75,7 +68,7 @@ fn the_locales_table_embeds_every_locales_catalog_sorted() {
 /// syntax error, its line.
 #[test]
 fn a_missing_or_unparsable_source_fails_the_build() {
-    let dir = scratch("failing");
+    let dir = scratch();
     let (locales, out) = (dir.join("locales"), dir.join("out"));
     fs::create_dir_all(&out).unwrap();
     let missing = write("k", &locales, &out).unwrap_err();
@@ -99,7 +92,6 @@ fn a_missing_or_unparsable_source_fails_the_build() {
     );
     assert!(!out.join("en-US.ftl").exists());
     assert!(!out.join(TABLE).exists());
-    fs::remove_dir_all(&dir).unwrap();
 }
 
 /// A build script's call reads the crate's name, its directory and
@@ -107,7 +99,7 @@ fn a_missing_or_unparsable_source_fails_the_build() {
 /// source that does not parse. The one test that sets that environment.
 #[test]
 fn a_build_scripts_call_writes_the_crates_catalogs_from_cargos_environment() {
-    let dir = scratch("environment");
+    let dir = scratch();
     let out = dir.join("out");
     fs::create_dir_all(dir.join("locales/en-US")).unwrap();
     fs::create_dir_all(&out).unwrap();
@@ -131,5 +123,4 @@ fn a_build_scripts_call_writes_the_crates_catalogs_from_cargos_environment() {
         *message,
         format!("{}: [Syntax {{ line: 1 }}]", source.display())
     );
-    fs::remove_dir_all(&dir).unwrap();
 }
