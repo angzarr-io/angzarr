@@ -1,20 +1,10 @@
-# Angzarr development commands
-
+# angzarr core development commands
 #
-# Container Overlay Pattern:
-# --------------------------
-# This justfile uses an overlay pattern for container execution:
-#
-# 1. `justfile` (this file) - runs on the host, delegates to container
-# 2. `justfile.container` - mounted over this file inside the container
-#
-# When running outside a devcontainer:
-#   - Builds/uses local devcontainer image with `just` pre-installed
-#   - Docker mounts justfile.container as /workspace/justfile
-#
-# When running inside a devcontainer (DEVCONTAINER=true):
-#   - Commands execute directly via `just <target>`
-#   - No container nesting
+# angzarr core is a virtual workspace of the shared crates (crates/*), each
+# checked by its own justfile on the host: `just check-shared-crates` is the
+# whole gate, and build, fmt-check, lint and test run one of its steps
+# across every crate. The rest drives the proto docs, the gRPC gateway and
+# the Kubernetes tooling under deploy/.
 
 set shell := ["bash", "-c"]
 
@@ -45,210 +35,6 @@ CONTAINER_RUN := CONTAINER_CMD + " run --rm " + CONTAINER_USER_ARG
 mod images "build/images/justfile"
 mod kind "deploy/kind/justfile"
 mod tofu "deploy/tofu/justfile"
-
-# Build images with skaffold (content-addressable tags)
-# Outputs built image tags to build/images/build.json
-#
-# Docker Hub rate-limit strategy:
-#   1. Ensure `debian:trixie-slim` is locally cached (one-time pull;
-#      subsequent invocations skip the pull and pay no registry cost).
-#      skaffold's ONBUILD-parsing/manifest-fetch goes through the local
-#      Docker daemon cache instead of querying Docker Hub.
-#   2. If both `angzarr-base:latest` and `angzarr-rust:latest` already
-#      exist locally, skip skaffold entirely and synthesize a build.json
-#      pointing at the cached tags. skaffold can't avoid a registry call
-#      during cache-check even with `tryImportMissing`, so this short-
-#      circuit lets every run after the first one be 100% local.
-[private]
-_build-images:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # Skip when already in a devcontainer - no image building needed
-    if [ "${DEVCONTAINER:-}" = "true" ]; then
-        exit 0
-    fi
-    # Fast path: if the commit-tagged images for HEAD (or any recent
-    # commit-tagged image, whichever is newer locally) exist, write a
-    # synthetic build.json and skip skaffold entirely. We avoid `:latest`
-    # because that tag may pre-date a base-image bump (e.g. bookworm→trixie)
-    # and trigger glibc mismatches inside the ephemeral mutants container.
-    EXPECTED_TAG=$(git describe --tags --abbrev=8 --always 2>/dev/null || echo "")
-    BASE_TAG=""
-    RUST_TAG=""
-    if [ -n "$EXPECTED_TAG" ] \
-       && docker image inspect "ghcr.io/angzarr-io/angzarr-base:$EXPECTED_TAG" >/dev/null 2>&1 \
-       && docker image inspect "ghcr.io/angzarr-io/angzarr-rust:$EXPECTED_TAG" >/dev/null 2>&1; then
-        BASE_TAG="ghcr.io/angzarr-io/angzarr-base:$EXPECTED_TAG"
-        RUST_TAG="ghcr.io/angzarr-io/angzarr-rust:$EXPECTED_TAG"
-    else
-        # Fall back to the most-recently-created commit-tagged image of
-        # each kind. If both exist we still skip skaffold; otherwise we
-        # take the slow path below.
-        BASE_TAG=$(docker images --format "{{ "{{.Repository}}:{{.Tag}}" }} {{ "{{.CreatedAt}}" }}" ghcr.io/angzarr-io/angzarr-base 2>/dev/null \
-            | grep -E ":v[0-9]" | sort -k2 -r | head -1 | awk '{print $1}')
-        RUST_TAG=$(docker images --format "{{ "{{.Repository}}:{{.Tag}}" }} {{ "{{.CreatedAt}}" }}" ghcr.io/angzarr-io/angzarr-rust 2>/dev/null \
-            | grep -E ":v[0-9]" | sort -k2 -r | head -1 | awk '{print $1}')
-    fi
-    if [ -n "$BASE_TAG" ] && [ -n "$RUST_TAG" ]; then
-        printf '{"builds":[{"imageName":"ghcr.io/angzarr-io/angzarr-base","tag":"%s"},{"imageName":"ghcr.io/angzarr-io/angzarr-rust","tag":"%s"}]}\n' \
-            "$BASE_TAG" "$RUST_TAG" \
-            > "{{TOP}}/build/images/build.json"
-        echo "Built images (cached, no registry hit):"
-        jq -r '.builds[].tag' "{{TOP}}/build/images/build.json"
-        exit 0
-    fi
-    # Slow path: pre-pull the upstream base ONCE so skaffold's manifest
-    # resolution finds it locally and doesn't trigger Docker Hub rate
-    # limits when parsing ONBUILD instructions.
-    if ! docker image inspect docker.io/library/debian:trixie-slim >/dev/null 2>&1; then
-        echo "Pre-pulling docker.io/library/debian:trixie-slim (one-time; subsequent runs are cached)..."
-        docker pull docker.io/library/debian:trixie-slim
-    fi
-    cd "{{TOP}}/build/images"
-    skaffold build --file-output=build.json
-    echo "Built images:"
-    jq -r '.builds[].tag' build.json
-
-# Get image tag from skaffold build output
-[private]
-_image-tag IMAGE:
-    #!/usr/bin/env bash
-    BUILD_JSON="{{TOP}}/build/images/build.json"
-    if [ ! -f "$BUILD_JSON" ]; then
-        echo "Error: Build output not found. Run 'just _build-images' first." >&2
-        exit 1
-    fi
-    jq -r ".builds[] | select(.imageName | contains(\"{{IMAGE}}\")) | .tag" "$BUILD_JSON"
-
-# Run just target in container (or directly if already in devcontainer)
-[private]
-_container +ARGS: _build-images
-    #!/usr/bin/env bash
-    if [ "${DEVCONTAINER:-}" = "true" ]; then
-        just --justfile "{{TOP}}/justfile.container" {{ARGS}}
-    else
-        IMAGE=$(just _image-tag angzarr-rust)
-        {{CONTAINER_RUN}} --network=host \
-            -v "{{TOP}}:/workspace:Z" \
-            -v "{{TOP}}/justfile.container:/workspace/justfile:ro" \
-            -w /workspace \
-            -e CARGO_HOME=/workspace/.cargo-container \
-            "$IMAGE" just {{ARGS}}
-    fi
-
-# Run just target in container with container socket access (for testcontainers)
-[private]
-_container-dind +ARGS: _build-images
-    #!/usr/bin/env bash
-    if [ "${DEVCONTAINER:-}" = "true" ]; then
-        just --justfile "{{TOP}}/justfile.container" {{ARGS}}
-    else
-        IMAGE=$(just _image-tag angzarr-rust)
-        # Find docker socket: rootless (per-user) takes precedence over rootful
-        ROOTLESS_SOCK="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/docker.sock"
-        if [ -S "$ROOTLESS_SOCK" ]; then
-            SOCK="$ROOTLESS_SOCK"
-            SOCK_MSG="Ensure rootless docker is running: systemctl --user start docker"
-        elif [ -S "/var/run/docker.sock" ]; then
-            SOCK="/var/run/docker.sock"
-            SOCK_MSG="Ensure Docker daemon is running: sudo systemctl start docker"
-        else
-            SOCK="$ROOTLESS_SOCK"
-            SOCK_MSG="No docker socket found. Start rootless docker: systemctl --user start docker"
-        fi
-        if [ ! -S "$SOCK" ]; then
-            echo "Error: Container socket not found at $SOCK"
-            echo "$SOCK_MSG"
-            exit 1
-        fi
-        {{CONTAINER_RUN}} --network=host \
-            -v "{{TOP}}:/workspace:Z" \
-            -v "{{TOP}}/justfile.container:/workspace/justfile:ro" \
-            -v "$SOCK:/var/run/docker.sock:Z" \
-            -w /workspace \
-            -e CARGO_HOME=/workspace/.cargo-container \
-            -e DOCKER_HOST=unix:///var/run/docker.sock \
-            -e TESTCONTAINERS_RYUK_DISABLED=true \
-            "$IMAGE" just {{ARGS}}
-    fi
-
-# Run a mutation-testing target with the workspace mounted READ-ONLY.
-#
-# WHY:
-#   cargo-mutants --in-place writes mutated source into the working tree. If
-#   the workspace is bind-mounted RW (as `_container` does) and the container
-#   dies mid-run, the mutated files are left on the host. This helper closes
-#   that hole: source is mounted at /src:ro, an rsync copy lands in /work
-#   inside the container's WRITABLE OVERLAY LAYER, and `--rm` destroys the
-#   overlay (and the mutated copy) on every exit.
-#
-# WHAT TOUCHES THE HOST:
-#   - {{TOP}}/.mutants-cache/cargo-{home,target} — compiled artifacts and
-#     dep registry only. NEVER contains mutated source files. Gitignored.
-#     Delete the dir to purge the cache.
-#   - {{TOP}}/mutants.out/outcomes.json — copied out at the end of a
-#     successful run so `mutants-summary` / `mutants-survivors` work.
-#
-# WHAT NEVER TOUCHES THE HOST:
-#   - Mutated source trees (live in /work, container overlay, --rm wipes).
-#   - cargo-mutants's intermediate working dirs.
-[private]
-_container-ephemeral +ARGS: _build-images
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if [ "${DEVCONTAINER:-}" = "true" ]; then
-        # Already inside a devcontainer — that container IS the ephemeral
-        # boundary. Run directly; the outer just wrapper ensures --rm.
-        just --justfile "{{TOP}}/justfile.container" {{ARGS}}
-        exit 0
-    fi
-    IMAGE=$(just _image-tag angzarr-rust)
-    mkdir -p "{{TOP}}/mutants.out" \
-             "{{TOP}}/.mutants-cache/cargo-home" \
-             "{{TOP}}/.mutants-cache/cargo-target"
-    {{CONTAINER_RUN}} --network=host \
-        -v "{{TOP}}:/src:ro,Z" \
-        -v "{{TOP}}/mutants.out:/out:Z" \
-        -v "{{TOP}}/.mutants-cache/cargo-home:/cargo-home:Z" \
-        -v "{{TOP}}/.mutants-cache/cargo-target:/cargo-target:Z" \
-        -v "{{TOP}}/justfile.container:/etc/angzarr-justfile:ro" \
-        -e CARGO_HOME=/cargo-home \
-        -e CARGO_TARGET_DIR=/cargo-target \
-        -e MUTANTS_EPHEMERAL=1 \
-        -e MUTANTS_OUT_DIR=/out \
-        -w /work \
-        "$IMAGE" bash -eu -o pipefail -c '
-            # Self-heal: image should ship cargo-mutants, but install on
-            # demand (cached in /cargo-home) if the image is older.
-            if ! command -v cargo-mutants >/dev/null; then
-                echo "[ephemeral] cargo-mutants missing from image; installing to cached CARGO_HOME"
-                cargo install cargo-mutants --locked
-            fi
-            echo "[ephemeral] copying /src -> /work (container overlay)"
-            mkdir -p /work
-            # tar|tar: rsync is not in the base image. Excludes mirror what
-            # rsync would skip — build artifacts, prior mutation output,
-            # host-side cargo caches, and the new mutants cache itself.
-            tar -C /src \
-                --exclude=./target \
-                --exclude=./.cargo-container \
-                --exclude=./.mutants-cache \
-                --exclude=./mutants.out \
-                --exclude=./mutants.out.old \
-                -cf - . \
-                | tar -C /work -xf -
-            # Mount the container-side justfile into the copy so `just` finds
-            # it (the original /src is read-only, but /work is writable).
-            cp /etc/angzarr-justfile /work/justfile
-            cd /work
-            just {{ARGS}}
-            # Persist ONLY outcomes.json back to host. Mutated source trees
-            # and intermediate working dirs die with the container.
-            if [ -f /work/mutants.out/outcomes.json ]; then
-                cp /work/mutants.out/outcomes.json /out/outcomes.json
-                echo "[ephemeral] outcomes.json copied to host mutants.out/"
-            fi
-        '
 
 default:
     @just --list
@@ -389,64 +175,59 @@ openapi: gateway-gen
     cp "{{TOP}}/gateway/api/angzarr.swagger.json" "{{TOP}}/docs/static/openapi.json"
     @echo "OpenAPI spec generated at docs/static/openapi.json"
 
-# === Build ===
-
-# Build the project (debug)
-build:
-    just _container build
-
-# Build release binaries
-build-release:
-    just _container build-release
-
-# Check code compiles
-check:
-    just _container check
-
-# Format code
-fmt:
-    just _container fmt
-
-# Lint code
-lint:
-    just _container lint
-
-# Run unit tests
-test:
-    just _container test
-
-# Pre-commit gate: fmt + lint + test in a SINGLE container invocation.
-# Avoids the inter-container `.cargo-lock` race that bites when lefthook
-# runs `just fmt`, `just lint`, `just test` as three separate host
-# invocations under rootless docker bind-mounts.
-precommit:
-    just _container precommit
-
-# === Shared crates (crates/angzarr-proto, crates/angzarr-proto-component, crates/angzarr-proto-transport-embedded, crates/angzarr-proto-transport-distributed, crates/angzarr-ports, crates/angzarr-diagnostic, crates/angzarr-yaml, crates/angzarr-presentation, crates/trivial-delegation) ===
+# === Shared crates: build, lint, test ===
 # The four proto crates are the spec's four packages (decision 14.64):
 # angzarr-proto core's messages (prost only, wasm32), angzarr-proto-component
 # the handler-side services' tonic stubs, and one crate per transport.
-# Moved from angzarr-project's rust/. They run on the host, not in the
-# toolchain container (its image lacks the wasm32 target and
-# wasm-bindgen-test-runner): protoc, the wasm32-unknown-unknown target,
+# Moved from angzarr-project's rust/. They run on the host, not in a
+# toolchain container: protoc, the wasm32-unknown-unknown target,
 # wasm-bindgen-test-runner (`just -f crates/angzarr-ports/justfile tools`)
 # and node. build.rs reads the protos from the angzarr-project submodule.
+
+# Every shared crate, in dependency order. Each has a justfile with check,
+# fmt, fmt-check, build, lint and test (crates/<crate>/justfile).
+SHARED_CRATES := "angzarr-diagnostic angzarr-proto angzarr-proto-component angzarr-proto-transport-embedded angzarr-proto-transport-distributed angzarr-ports angzarr-yaml angzarr-presentation"
+
+# Run one recipe of every shared crate's justfile, stopping at the first
+# that fails.
+[private]
+_each-crate recipe:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for crate in {{SHARED_CRATES}}; do
+        just -f '{{TOP}}/crates/'"$crate"'/justfile' '{{recipe}}'
+    done
+
+# Build every shared crate, its test support too
+build: (_each-crate "build")
+
+# Format every shared crate
+fmt: (_each-crate "fmt")
+
+# Check every shared crate's formatting
+fmt-check: (_each-crate "fmt-check")
+
+# Lint every shared crate, warnings denied
+lint: (_each-crate "lint")
+
+# Test every shared crate
+test: (_each-crate "test")
+
+# What may enter the dependency graph: licences, sources, advisories
+# (deny.toml, every feature)
+lint-deps:
+    cargo deny --locked check
+
+# Remove build artifacts
+clean:
+    cargo clean
 
 # Every check of the shared crates: fmt-check, build, lint, test, wasm, and
 # angzarr-ports' wasm-test; first, that the submodule cannot clash with them.
 # Each crate's lint denies warnings, so the complexity lints the crates
 # inherit from the root Cargo.toml's [workspace.lints] (threshold in
 # crates/clippy.toml) are a gate here and in the pre-commit hook.
-check-shared-crates: check-proto-submodule
-    just -f '{{TOP}}/crates/angzarr-diagnostic/justfile' check
-    just -f '{{TOP}}/crates/angzarr-proto/justfile' check
-    just -f '{{TOP}}/crates/angzarr-proto-component/justfile' check
-    just -f '{{TOP}}/crates/angzarr-proto-transport-embedded/justfile' check
-    just -f '{{TOP}}/crates/angzarr-proto-transport-distributed/justfile' check
-    just -f '{{TOP}}/crates/angzarr-ports/justfile' check
-    just -f '{{TOP}}/crates/angzarr-yaml/justfile' check
-    just -f '{{TOP}}/crates/angzarr-presentation/justfile' check
-    just -f '{{TOP}}/crates/trivial-delegation/justfile' check
+check-shared-crates: check-proto-submodule (_each-crate "check")
 
 # Mutation-test a shared crate, judged by MIN, its kill-rate threshold in
 # percent over viable mutants (caught or timed out = killed; unviable count
@@ -458,8 +239,8 @@ check-shared-crates: check-proto-submodule
 # mutates the copy (never --in-place), so no mutated source reaches this
 # tree; no git hook runs it. Exits 4 when the tests fail unmutated, and
 # fails when it found mutants and tested fewer.
-# --no-config: .cargo/mutants.toml is the root package's (its examine_globs
-# name only src/, so a shared crate would have no mutants at all).
+# --no-config: a shared crate's run is configured here and by its justfile,
+# never by a mutants.toml.
 [positional-arguments]
 shared-mutation crate min timeout out patch="":
     #!/usr/bin/env bash
@@ -541,267 +322,6 @@ check-proto-submodule:
         exit 1
     fi
     echo "ok   check-proto-submodule ($sm@${pinned:0:12}: protos present, no angzarr-proto or angzarr-ports package)"
-
-# Regenerate mutation test exclusions from #[trivial_delegation] attributes
-gen-mutants-exclude:
-    just _container gen-mutants-exclude
-
-# === Mutation Testing ===
-# =============================================================================
-# All cargo-mutants runs go through `_container-ephemeral` so the mutated
-# source lives in the container's writable overlay layer and is destroyed
-# with `--rm`. Running cargo-mutants on the host is FORBIDDEN — see
-# CLAUDE.md "Mutation Testing".
-#
-# The `mutants-summary` / `mutants-survivors` targets only READ outcomes.json
-# and so are routed through the regular `_container` (no source mutation).
-# =============================================================================
-
-# Run mutation tests on a specific file (ephemeral; no source touches host)
-mutants FILE:
-    just _container-ephemeral mutants {{FILE}}
-
-# Run mutation tests on handlers/core (aggregate, projector, saga, PM)
-mutants-core:
-    just _container-ephemeral mutants-core
-
-# Run mutation tests on bus module (event routing)
-mutants-bus:
-    just _container-ephemeral mutants-bus
-
-# Run mutation tests on orchestration (saga, aggregate, PM)
-mutants-orchestration:
-    just _container-ephemeral mutants-orchestration
-
-# Run mutation tests on changed code (CI uses git.diff file)
-mutants-ci:
-    just _container-ephemeral mutants-ci
-
-# Show mutation testing summary from last run's outcomes.json
-mutants-summary:
-    just _container mutants-summary
-
-# List surviving mutants from last run's outcomes.json
-mutants-survivors:
-    just _container mutants-survivors
-
-# Purge the local mutation build cache (.mutants-cache/) — compiled
-# artifacts and dep registry only; never holds mutated source.
-mutants-purge-cache:
-    rm -rf "{{TOP}}/.mutants-cache"
-    @echo "Removed {{TOP}}/.mutants-cache"
-
-# === Storage Contract Tests ===
-# =============================================================================
-# Storage contract tests verify that storage implementations correctly fulfill
-# their trait contracts (EventStore, SnapshotStore, PositionStore).
-#
-# WHY: Each backend has different consistency models, failure modes, and APIs.
-# A passing contract test means the backend can be swapped transparently.
-#
-# Usage:
-#   just storage test              # All backends
-#   just storage sqlite test       # SQLite only (no containers)
-#   just storage postgres test     # PostgreSQL only (testcontainers)
-#   just storage redis test        # Redis only (testcontainers)
-#   just storage immudb test       # ImmuDB only (testcontainers)
-#   just storage nats test         # NATS JetStream only (testcontainers)
-# =============================================================================
-
-# Storage contract tests - run all backends or a specific one
-storage *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    args="{{ARGS}}"
-    if [[ "$args" == "test" ]] || [[ -z "$args" ]]; then
-        # All backends - needs dind for testcontainers
-        just _container-dind storage test
-    elif [[ "$args" == "sqlite test" ]]; then
-        # SQLite doesn't need containers
-        just _container storage sqlite test
-    else
-        # Other backends need testcontainers
-        just _container-dind storage $args
-    fi
-
-# === Bus Contract Tests ===
-# =============================================================================
-# Bus contract tests verify that event bus implementations correctly fulfill
-# the EventBus trait contract: publish, subscribe, acknowledge, nack, and DLQ.
-#
-# WHY: Event buses are the nervous system of the distributed architecture.
-# Different backends have wildly different delivery semantics and failure modes.
-# A passing contract test means the backend can be swapped transparently.
-#
-# Usage:
-#   just bus test                  # All backends
-#   just bus channel test          # Channel only (no containers)
-#   just bus amqp test             # RabbitMQ only (testcontainers)
-#   just bus kafka test            # Kafka only (testcontainers)
-#   just bus pubsub test           # GCP Pub/Sub only (testcontainers)
-#   just bus sns-sqs test          # AWS SNS/SQS only (testcontainers)
-#   just bus nats test             # NATS JetStream only (testcontainers)
-# =============================================================================
-
-# Bus contract tests - run all backends or a specific one
-bus *ARGS:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    args="{{ARGS}}"
-    if [[ "$args" == "test" ]] || [[ -z "$args" ]]; then
-        # All backends - needs dind for testcontainers
-        just _container-dind bus test
-    elif [[ "$args" == "channel test" ]]; then
-        # Channel doesn't need containers
-        just _container bus channel test
-    else
-        # Other backends need testcontainers
-        just _container-dind bus $args
-    fi
-
-# === Aggregate Contract Tests ===
-
-# Run all contract tests (storage + bus)
-# WHY: Complete validation before release. The "did we break anything?" check.
-test-contract:
-    just _container-dind test-contract
-
-# Run all local tests (no running K8s cluster required)
-# =============================================================================
-# Fast validation suite using in-memory backends (no containers needed).
-# Includes: unit tests, storage (SQLite), bus (channel).
-#
-# NOTE: Client and example tests are now in their respective repos:
-#   - angzarr-client-{lang}: just test
-#   - angzarr-examples-{lang}: just test
-#
-# WHY: Quick feedback loop during development. Run this before committing.
-# =============================================================================
-test-local:
-    @echo "═══════════════════════════════════════════════════════════════════"
-    @echo "=== Core Unit Tests ==="
-    @echo "═══════════════════════════════════════════════════════════════════"
-    just test
-    @echo ""
-    @echo "═══════════════════════════════════════════════════════════════════"
-    @echo "=== Storage Contract Tests (SQLite) ==="
-    @echo "═══════════════════════════════════════════════════════════════════"
-    just storage sqlite test
-    @echo ""
-    @echo "═══════════════════════════════════════════════════════════════════"
-    @echo "=== Bus Contract Tests (Channel) ==="
-    @echo "═══════════════════════════════════════════════════════════════════"
-    just bus channel test
-    @echo ""
-    @echo "═══════════════════════════════════════════════════════════════════"
-    @echo "=== All Local Tests Complete ==="
-    @echo "═══════════════════════════════════════════════════════════════════"
-
-# Run all local tests including testcontainers (requires docker socket)
-# =============================================================================
-# Complete validation suite testing ALL storage and bus backends.
-#
-# WHY: Pre-merge validation. Ensures changes haven't broken any backend.
-# Takes longer but provides confidence across all deployment targets.
-#
-# Storage: SQLite, PostgreSQL, Redis, ImmuDB, NATS
-# Bus: Channel, AMQP, Kafka, Pub/Sub, SNS/SQS, NATS
-# =============================================================================
-test-full: test-local
-    @echo ""
-    @echo "═══════════════════════════════════════════════════════════════════"
-    @echo "=== All Contract Tests (testcontainers) ==="
-    @echo "═══════════════════════════════════════════════════════════════════"
-    just test-contract
-    @echo ""
-    @echo "═══════════════════════════════════════════════════════════════════"
-    @echo "=== All Tests Complete ==="
-    @echo "═══════════════════════════════════════════════════════════════════"
-
-# === Cross-Language Client Tests ===
-# NOTE: Client libraries have been extracted to separate repos.
-# Test them in their respective repos: angzarr-client-{lang}
-#
-# Example:
-#   cd ../angzarr-client-python && just test
-#   cd ../angzarr-client-go && just test
-
-# Clean build artifacts
-clean:
-    just _container clean
-
-# Thorough clean - all artifacts, caches, stale directories, container images
-clean-all:
-    just _container clean-all
-
-# === Coverage ===
-# Uses cargo-llvm-cov for accurate line/branch coverage.
-# Local tests (cov-*) run without docker socket.
-# Contract tests (cov-contract-*, cov-full-*) require docker socket for testcontainers.
-
-# Run unit tests with coverage
-cov-unit:
-    just _container cov-unit
-
-# Run interface/Gherkin tests with coverage
-cov-gherkin:
-    just _container cov-gherkin
-
-# Run all local tests with coverage (unit + integration + gherkin)
-cov:
-    just _container cov
-
-# Quick terminal summary of coverage (all local tests)
-cov-summary:
-    just _container cov-summary
-
-# Generate HTML coverage report (all local tests)
-cov-html:
-    just _container cov-html
-
-# Generate LCOV format for CI integration
-cov-lcov:
-    just _container cov-lcov
-
-# --- Contract Test Coverage (requires docker socket for testcontainers) ---
-
-# Run PostgreSQL contract tests with coverage
-cov-contract-postgres:
-    just _container-dind cov-contract-postgres
-
-# Run Redis contract tests with coverage
-cov-contract-redis:
-    just _container-dind cov-contract-redis
-
-# Run AMQP bus contract tests with coverage
-cov-contract-amqp:
-    just _container-dind cov-contract-amqp
-
-# Run Kafka bus contract tests with coverage
-cov-contract-kafka:
-    just _container-dind cov-contract-kafka
-
-# Run all contract tests with combined coverage
-cov-contracts:
-    just _container-dind cov-contracts
-
-# --- Full Coverage (all test types, requires docker socket) ---
-
-# Run all tests with combined coverage (local + contracts)
-cov-full:
-    just _container-dind cov-full
-
-# Full coverage with HTML report
-cov-full-html:
-    just _container-dind cov-full-html
-
-# Full coverage summary
-cov-full-summary:
-    just _container-dind cov-full-summary
-
-# Watch and check on save (host only - requires bacon)
-watch:
-    bacon
 
 # === K8s Cluster ===
 
@@ -984,34 +504,6 @@ infra-destroy:
 secrets-init:
     uv run "{{TOP}}/scripts/manage_secrets.py" init
 
-# === Skaffold ===
-
-# One-time setup: configure Skaffold for local registry
-skaffold-init:
-    @uv run "{{TOP}}/scripts/configure_skaffold.py"
-
-# Build framework images (angzarr sidecars)
-framework-build: _skaffold-ready
-    skaffold build
-
-# Watch and rebuild framework images on change
-framework-dev: _cluster-ready
-    skaffold dev
-
-# === Deploy (Orchestration) ===
-# NOTE: Examples have been extracted to angzarr-examples-{lang} repos.
-# Deploy from those repos directly:
-#   cd ../angzarr-examples-rust && skaffold run
-
-# Deploy framework images only (no examples)
-deploy: _cluster-ready
-    skaffold run
-    @echo "Framework deployed. Deploy examples from angzarr-examples-{lang} repos."
-
-# Watch and rebuild framework on change
-dev: _cluster-ready
-    skaffold dev
-
 # === Claude Code LSP Setup ===
 
 # Check LSP configuration and server availability
@@ -1167,7 +659,3 @@ _cluster-ready:
     just secrets-init
     just _operators-impl
     just _infra-impl
-
-_skaffold-ready:
-    just skaffold-init
-    just cluster-create

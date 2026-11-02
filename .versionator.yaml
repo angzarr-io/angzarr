@@ -22,9 +22,6 @@ logging:
 
 # Keep manifest files in sync with VERSION on release
 updates:
-  - file: Cargo.toml
-    path: package.version
-    template: "{{MajorMinorPatch}}"
   - file: deploy/k8s/helm/angzarr/Chart.yaml
     path: version
     template: "{{MajorMinorPatch}}"

@@ -1,18 +1,18 @@
 name: CI
 
+# angzarr core is a virtual workspace of the shared crates (crates/*). All
+# logic lives in justfile recipes; these jobs only install tools and invoke
+# them.
+
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_PREFIX: ghcr.io/angzarr-io
-
 permissions:
   contents: read
-  packages: write
+  packages: read
 
 jobs:
   # Unbypassable guard against `--no-verify` / `LEFTHOOK=0` locally. Mirrors
@@ -31,119 +31,13 @@ jobs:
       - name: Verify submodules are clean
         run: just check-submodules-clean
 
-  # =============================================================================
-  # STAGE 1: TESTS (parallel)
-  # =============================================================================
-  #
-  # Toolchain images (angzarr-base, angzarr-rust, ...) are built and
-  # published from angzarr-io/angzarr-project's build-images workflow.
-  # Test jobs below pull `ghcr.io/angzarr-io/angzarr-rust:latest` directly.
-
-  format:
-    name: Format
-    runs-on: ubuntu-latest
-    needs: [submodules]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Check Rust formatting
-        run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            ghcr.io/angzarr-io/angzarr-rust:latest \
-            just -f justfile.container fmt
-
-  lint:
-    name: Lint
-    runs-on: ubuntu-latest
-    needs: [submodules]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Clippy
-        run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            ghcr.io/angzarr-io/angzarr-rust:latest \
-            just -f justfile.container lint
-
-      - name: Buf lint
-        run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace/angzarr-project/proto \
-            ghcr.io/angzarr-io/angzarr-rust:latest \
-            buf lint
-
-      - name: Buf breaking changes
-        if: github.event_name == 'pull_request'
-        run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace/angzarr-project/proto \
-            ghcr.io/angzarr-io/angzarr-rust:latest \
-            buf breaking --against 'https://github.com/${{ github.repository }}.git#branch=main'
-        continue-on-error: true
-
-  test:
-    name: Unit Tests
-    runs-on: ubuntu-latest
-    needs: [submodules]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run unit tests
-        run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            ghcr.io/angzarr-io/angzarr-rust:latest \
-            just -f justfile.container test
-
-  # The shared crates (crates/angzarr-proto and crates/angzarr-ports, moved
-  # from angzarr-project; crates/angzarr-diagnostic and crates/angzarr-yaml,
-  # moved from angzarr-embedded; crates/angzarr-presentation, moved from
-  # taskloom). The jobs above run only the root package (and in
-  # the toolchain image, which lacks wasm32 and wasm-bindgen-test-runner),
-  # so this job runs every check of the new members on the runner itself.
-  # All logic lives in justfile recipes; this job only installs tools and
-  # invokes them.
+  # Every check of every shared crate (`just check-shared-crates`: the
+  # submodule cannot clash with them, then each crate's fmt-check, build,
+  # lint, test and, where it has them, wasm and wasm-test), on the runner
+  # itself: the crates need protoc, the wasm32 target,
+  # wasm-bindgen-test-runner and node.
   shared-crates:
-    name: Shared crates (angzarr-diagnostic, angzarr-proto, angzarr-ports, angzarr-yaml, angzarr-presentation)
+    name: Shared crates
     runs-on: ubuntu-latest
     needs: [submodules]
     steps:
@@ -181,26 +75,31 @@ jobs:
       - name: wasm-bindgen-test-runner
         run: just -f crates/angzarr-ports/justfile tools
 
-      - name: The submodule carries no clashing package
-        run: just check-proto-submodule
+      - name: Every shared crate's checks
+        run: just check-shared-crates
 
-      - name: angzarr-diagnostic (fmt-check, build, lint, test, wasm)
-        run: just -f crates/angzarr-diagnostic/justfile check
+  # What may enter the shared crates' dependency graph (deny.toml).
+  lint-deps:
+    name: Dependencies (cargo-deny)
+    runs-on: ubuntu-latest
+    needs: [submodules]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
 
-      - name: angzarr-proto (fmt-check, build, lint, test, wasm)
-        run: just -f crates/angzarr-proto/justfile check
+      - name: Install just
+        uses: extractions/setup-just@v2
 
-      - name: angzarr-ports (fmt-check, build, lint, test, wasm, wasm-test)
-        run: just -f crates/angzarr-ports/justfile check
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
 
-      - name: angzarr-yaml (fmt-check, build, lint, test, wasm)
-        run: just -f crates/angzarr-yaml/justfile check
+      - name: cargo-deny
+        run: just lint-deps
 
-      - name: angzarr-presentation (fmt-check, build, lint, test)
-        run: just -f crates/angzarr-presentation/justfile check
-
-  integration:
-    name: Integration Tests
+  # The spec's protos, as the angzarr-project submodule pins them.
+  protos:
+    name: Protos (buf)
     runs-on: ubuntu-latest
     needs: [submodules]
     steps:
@@ -211,347 +110,26 @@ jobs:
       - name: Log in to Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Note: Binary integration tests require binaries built first, run separately
-      - name: Run SQLite storage contract tests
+      - name: Buf lint
         run: |
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
+            -w /workspace/angzarr-project/proto \
             ghcr.io/angzarr-io/angzarr-rust:latest \
-            just -f justfile.container test-storage-sqlite
+            buf lint
 
-      - name: Run config integration tests
+      - name: Buf breaking changes
+        if: github.event_name == 'pull_request'
         run: |
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
+            -w /workspace/angzarr-project/proto \
             ghcr.io/angzarr-io/angzarr-rust:latest \
-            just -f justfile.container test-config
-
-      - name: Run gRPC connection tests
-        run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            ghcr.io/angzarr-io/angzarr-rust:latest \
-            just -f justfile.container test-grpc
-
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-    needs: [submodules]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run coverage (unit + contract tests)
-        run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            ghcr.io/angzarr-io/angzarr-rust:latest \
-            just -f justfile.container cov-ci
-
-      - name: Upload coverage report
-        uses: actions/upload-artifact@v4
-        with:
-          name: coverage-report
-          path: codecov.json
-          retention-days: 30
-
-  mutation:
-    name: Mutation Tests (Changed Code)
-    runs-on: ubuntu-latest
-    needs: test
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          submodules: true
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Generate diff
-        run: |
-          git diff origin/${{ github.base_ref }}..HEAD > git.diff
-          echo "Diff stats:"
-          wc -l git.diff
-
-      - name: Run mutation tests
-        run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            ghcr.io/angzarr-io/angzarr-rust:latest \
-            just -f justfile.container mutants-ci
+            buf breaking --against 'https://github.com/${{ github.repository }}.git#branch=main'
         continue-on-error: true
-
-      - name: Upload mutation results
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: mutation-results
-          path: mutants.out/
-          retention-days: 7
-
-  # =============================================================================
-  # TEST GATE
-  # =============================================================================
-
-  test-gate:
-    name: Test Gate
-    runs-on: ubuntu-latest
-    needs: [format, lint, test, shared-crates, integration, coverage]
-    if: always()
-    outputs:
-      passed: ${{ steps.check.outputs.passed }}
-    steps:
-      - name: Check test results
-        id: check
-        run: |
-          echo "Format: ${{ needs.format.result }}"
-          echo "Lint: ${{ needs.lint.result }}"
-          echo "Test: ${{ needs.test.result }}"
-          echo "Shared crates: ${{ needs.shared-crates.result }}"
-          echo "Integration: ${{ needs.integration.result }}"
-          echo "Coverage: ${{ needs.coverage.result }}"
-
-          if [ "${{ needs.format.result }}" != "success" ] || \
-             [ "${{ needs.lint.result }}" != "success" ] || \
-             [ "${{ needs.test.result }}" != "success" ] || \
-             [ "${{ needs.shared-crates.result }}" != "success" ] || \
-             [ "${{ needs.integration.result }}" != "success" ] || \
-             [ "${{ needs.coverage.result }}" != "success" ]; then
-            echo "passed=false" >> $GITHUB_OUTPUT
-            echo "::error::One or more tests failed"
-            exit 1
-          fi
-          echo "passed=true" >> $GITHUB_OUTPUT
-          echo "All tests passed"
-
-  # =============================================================================
-  # STAGE 3: BUILD & PUSH COORDINATOR IMAGES
-  # =============================================================================
-
-  build-push-images:
-    name: Build & Push Coordinator Images
-    runs-on: ubuntu-latest
-    needs: test-gate
-    if: needs.test-gate.outputs.passed == 'true'
-    outputs:
-      tag: ${{ steps.tag.outputs.tag }}
-      images-json: ${{ steps.images-json.outputs.json }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-
-      - name: Install Skaffold
-        run: |
-          curl -Lo skaffold https://storage.googleapis.com/skaffold/releases/latest/skaffold-linux-amd64
-          chmod +x skaffold
-          sudo mv skaffold /usr/local/bin/
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Calculate image tag
-        id: tag
-        run: |
-          SHORT_SHA=$(echo "${{ github.sha }}" | cut -c1-7)
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
-            TAG="pr-${{ github.event.pull_request.number }}-${SHORT_SHA}"
-          else
-            TAG="${SHORT_SHA}"
-          fi
-          echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "Image tag: $TAG"
-
-      - name: Build coordinator images with skaffold
-        run: |
-          skaffold build --push --file-output=build.json
-
-      - name: Tag images with PR/main tag
-        run: |
-          TAG="${{ steps.tag.outputs.tag }}"
-          IMAGES=$(jq -r '.builds[].tag' build.json)
-
-          for FULL_TAG in $IMAGES; do
-            IMAGE_NAME=$(echo "$FULL_TAG" | cut -d: -f1)
-            # Toolchain images (angzarr-base, -rust, -python, -go, -java,
-            # -csharp) are published from angzarr-io/angzarr-project's
-            # build-images workflow. Skip retag here to avoid racing
-            # :latest pointers between the two repos.
-            case "$IMAGE_NAME" in
-              *angzarr-base|*angzarr-rust|*angzarr-python|*angzarr-go|*angzarr-java|*angzarr-csharp)
-                echo "Skipping $IMAGE_NAME (toolchain — published from angzarr-project)"
-                continue
-                ;;
-            esac
-            echo "Tagging $IMAGE_NAME:$TAG"
-            docker pull "$FULL_TAG"
-            docker tag "$FULL_TAG" "$IMAGE_NAME:$TAG"
-            docker push "$IMAGE_NAME:$TAG"
-
-            # Also tag as latest on main
-            if [ "${{ github.ref }}" == "refs/heads/main" ]; then
-              docker tag "$FULL_TAG" "$IMAGE_NAME:latest"
-              docker push "$IMAGE_NAME:latest"
-            fi
-          done
-
-      - name: Generate images JSON for acceptance tests
-        id: images-json
-        run: |
-          TAG="${{ steps.tag.outputs.tag }}"
-          JSON=$(cat <<EOF
-          {
-            "aggregate": "${{ env.IMAGE_PREFIX }}/angzarr-aggregate:${TAG}",
-            "saga": "${{ env.IMAGE_PREFIX }}/angzarr-saga:${TAG}",
-            "projector": "${{ env.IMAGE_PREFIX }}/angzarr-projector:${TAG}",
-            "process-manager": "${{ env.IMAGE_PREFIX }}/angzarr-process-manager:${TAG}",
-            "stream": "${{ env.IMAGE_PREFIX }}/angzarr-stream:${TAG}",
-            "gateway": "${{ env.IMAGE_PREFIX }}/angzarr-grpc-gateway:${TAG}",
-            "log": "${{ env.IMAGE_PREFIX }}/angzarr-log:${TAG}"
-          }
-          EOF
-          )
-          echo "json=$(echo "$JSON" | jq -c '.')" >> $GITHUB_OUTPUT
-
-      - name: Output built images
-        run: |
-          echo "## Built Images" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Image | Tag |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------|-----|" >> $GITHUB_STEP_SUMMARY
-          TAG="${{ steps.tag.outputs.tag }}"
-          jq -r '.builds[].imageName' build.json | while read IMAGE; do
-            echo "| $IMAGE | $TAG |" >> $GITHUB_STEP_SUMMARY
-          done
-
-      # On main: notify consumer repos that fresh coordinator images are
-      # published. Each consumer's `bump-coordinator-digests.yml` workflow
-      # listens for `repository_dispatch: types: [coordinator-images-published]`
-      # and opens a PR rotating its pinned digests. The daily schedule in
-      # those bumpers is a backstop in case this dispatch fails or the
-      # token isn't configured.
-      #
-      # Requires repo secret `CROSS_REPO_DISPATCH_TOKEN` — a PAT (or app
-      # token) with `repo` scope (or fine-grained: `actions: write` on each
-      # consumer repo). Without the secret the step is a no-op (logs warning).
-      - name: Notify consumer repos to bump pinned digests
-        if: github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ secrets.CROSS_REPO_DISPATCH_TOKEN }}
-        run: |
-          if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::warning::CROSS_REPO_DISPATCH_TOKEN secret not set; consumer bumpers will rely on their daily schedule instead."
-            exit 0
-          fi
-          for repo in \
-            angzarr-examples-rust \
-            angzarr-examples-cpp \
-            angzarr-examples-go \
-            angzarr-examples-java \
-            angzarr-examples-csharp \
-            angzarr-examples-python; do
-            echo "Dispatching coordinator-images-published to angzarr-io/$repo..."
-            gh api "/repos/angzarr-io/$repo/dispatches" -X POST \
-              -f event_type=coordinator-images-published \
-              || echo "::warning::Dispatch to $repo failed (continuing)"
-          done
-
-  # =============================================================================
-  # NOTE: Acceptance tests live in each consumer repo (examples-{lang}),
-  # which depend on core's published coordinator images. Core does NOT
-  # call into a consumer repo as its own gate — the dependency arrow runs
-  # one way: consumers depend on core, never the other direction. A core
-  # change that breaks consumers surfaces as a red bumper PR in each
-  # consumer repo, which is reviewed before merging the new digests.
-  # =============================================================================
-
-  # =============================================================================
-  # STAGE 4: PUBLISH HELM CHARTS (main branch only)
-  # =============================================================================
-
-  publish-charts:
-    name: Publish Helm Charts
-    runs-on: ubuntu-latest
-    needs: [test-gate]
-    if: github.ref == 'refs/heads/main' && needs.test-gate.outputs.passed == 'true'
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Helm
-        uses: azure/setup-helm@v4
-
-      - name: Log in to GHCR
-        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
-
-      - name: Package and push charts
-        run: |
-          cd deploy/k8s/helm
-          for dir in angzarr postgres-simple rabbitmq-simple; do
-            echo "Packaging $dir..."
-            # helm package outputs: "Successfully packaged chart and saved it to: /path/to/chart-x.y.z.tgz"
-            output=$(helm package "$dir")
-            tgz=$(echo "$output" | grep -oP '(?<=saved it to: ).*\.tgz')
-            echo "Pushing $tgz to OCI registry..."
-            helm push "$tgz" oci://ghcr.io/angzarr-io/charts
-          done
-
-      - name: Summary
-        run: |
-          echo "## Published Helm Charts" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "Charts published to \`oci://ghcr.io/angzarr-io/charts/\`:" >> $GITHUB_STEP_SUMMARY
-          echo "- angzarr" >> $GITHUB_STEP_SUMMARY
-          echo "- angzarr-db-postgres-simple" >> $GITHUB_STEP_SUMMARY
-          echo "- angzarr-mq-rabbitmq-simple" >> $GITHUB_STEP_SUMMARY
-
-  # =============================================================================
-  # SUMMARY
-  # =============================================================================
-
-  summary:
-    name: CI Summary
-    runs-on: ubuntu-latest
-    needs: [build-push-images, mutation, publish-charts]
-    if: always()
-    steps:
-      - name: Summary
-        run: |
-          echo "## CI Results" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "| Stage | Result |" >> $GITHUB_STEP_SUMMARY
-          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
-          echo "| Build & Push Images | ${{ needs.build-push-images.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Mutation Tests | ${{ needs.mutation.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| Publish Charts | ${{ needs.publish-charts.result }} |" >> $GITHUB_STEP_SUMMARY
