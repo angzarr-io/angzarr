@@ -38,6 +38,13 @@ const RETIRED: &[&str] = &[
     "NULL_ABI_POINTER",
 ];
 
+/// The keys retired after the prefix, each answered under its full name
+/// and a number: reserved here by both, never answered again.
+const RETIRED_NUMBERED: &[&str] = &[
+    // 14.69: a policy emits the facts its destination declares.
+    "COORDINATOR_REASON_POLICY_COMMAND_IS_FACT",
+];
+
 /// Every live key of an enum, by name: its values from 1 up. The numbers
 /// with the ones reserved for moved keys are dense (decision 14.64), so a
 /// gap is only a moved key's.
@@ -146,8 +153,14 @@ fn the_owners_keys_are_these() {
     assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING"));
     assert!(coordinator().contains(&"COORDINATOR_REASON_EDITION_REMOVAL_FAILED"));
     assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY"));
-    assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_IS_FACT"));
     assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN"));
+    // Decision 14.69.
+    for key in RETIRED_NUMBERED {
+        assert!(
+            !router().contains(key) && !host().contains(key) && !coordinator().contains(key),
+            "{key} retired"
+        );
+    }
     // Decision 14.51: every retryable failure carries a key (the
     // distribution-only ones are the distributed transport's, 14.64).
     for key in [
@@ -210,20 +223,24 @@ fn every_enum_reserves_every_retired_key() {
             _ => "COORDINATOR_REASON_",
         };
         let retired: BTreeSet<String> = RETIRED.iter().map(|k| format!("{prefix}{k}")).collect();
-        let moved: BTreeSet<String> = MOVED
-            .iter()
-            .filter(|k| k.starts_with(prefix))
-            .map(|k| (*k).to_string())
-            .collect();
+        let of_prefix = |keys: &[&str]| -> BTreeSet<String> {
+            keys.iter()
+                .filter(|k| k.starts_with(prefix))
+                .map(|k| (*k).to_string())
+                .collect()
+        };
+        let moved = of_prefix(MOVED);
+        let numbered = of_prefix(RETIRED_NUMBERED);
         let reserved: BTreeSet<String> = e.reserved_name.iter().cloned().collect();
         assert_eq!(
             reserved,
-            &retired | &moved,
+            &(&retired | &moved) | &numbered,
             "{}: the retired keys and the moved ones",
             e.name()
         );
-        // A number is reserved only for a moved key (numbers are
-        // bookkeeping): one per moved key, an enum's ranges inclusive.
+        // A number is reserved only for a moved key or a key retired by
+        // number (numbers are bookkeeping): one each, an enum's ranges
+        // inclusive.
         let numbers: i32 = e
             .reserved_range
             .iter()
@@ -231,7 +248,7 @@ fn every_enum_reserves_every_retired_key() {
             .sum();
         assert_eq!(
             usize::try_from(numbers).unwrap(),
-            moved.len(),
+            moved.len() + numbered.len(),
             "{}",
             e.name()
         );
