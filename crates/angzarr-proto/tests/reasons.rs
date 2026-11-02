@@ -126,6 +126,11 @@ fn the_owners_keys_are_these() {
             "HOST_REASON_DESCRIPTOR_RULES_VERSION_MISMATCH",
             // Decision 14.55.
             "HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN",
+            // Decision 14.65: one misconfiguration validator's gaps.
+            "HOST_REASON_UPCASTER_UNKNOWN_DOMAIN",
+            "HOST_REASON_UPCASTER_OTHER_DOMAIN",
+            "HOST_REASON_RESOLUTION_UNSUPPORTED",
+            "HOST_REASON_REMOTE_SOURCE",
         ]
     );
     assert!(router().contains(&"ROUTER_REASON_DUPLICATE_COMPONENT"));

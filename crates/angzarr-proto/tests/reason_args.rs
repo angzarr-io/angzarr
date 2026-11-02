@@ -139,11 +139,13 @@ fn every_declared_name_has_its_constant() {
         reason_args::REFUSED,
         reason_args::REGISTERED,
         reason_args::REPORTED,
+        reason_args::RESOLUTION,
         reason_args::SEQUENCE,
         reason_args::STATE_TYPE_URL,
         reason_args::STREAM,
         reason_args::TYPE_URL,
         reason_args::UPCAST_TYPE_URL,
+        reason_args::UPCASTER,
         reason_args::WINDOW_UNITS,
     ];
     assert_eq!(names, constants.into_iter().collect::<BTreeSet<_>>());
