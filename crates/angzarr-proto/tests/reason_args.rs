@@ -455,3 +455,70 @@ fn a_package_without_its_catalog_fails_the_build() {
         ENUMS,
     );
 }
+
+/// `bytes` as the length-delimited field `field`, on the wire.
+fn delimited(field: u32, bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    prost::encoding::encode_key(field, prost::encoding::WireType::LengthDelimited, &mut out);
+    prost::encoding::encode_varint(bytes.len() as u64, &mut out);
+    out.extend_from_slice(bytes);
+    out
+}
+
+/// A descriptor set whose core reasons.proto holds one live key,
+/// `HOST_REASON_EXTRA`, whose `(reason)` option (`ReasonOptions` on the
+/// wire, extension 50109) is `reason`, with the other two key enums empty.
+fn set_with_option(reason: &[u8]) -> Vec<u8> {
+    let value = |name: &str, number: u8, options: Option<&[u8]>| {
+        let mut v = delimited(1, name.as_bytes());
+        v.extend([0x10, number]);
+        if let Some(options) = options {
+            v.extend(delimited(3, &delimited(50109, options)));
+        }
+        v
+    };
+    let key_enum = |name: &str, values: &[Vec<u8>]| {
+        let mut e = delimited(1, name.as_bytes());
+        for v in values {
+            e.extend(delimited(2, v));
+        }
+        e
+    };
+    let mut file = delimited(1, CORE.as_bytes());
+    for e in [
+        key_enum(
+            "RouterReason",
+            &[value("ROUTER_REASON_UNSPECIFIED", 0, None)],
+        ),
+        key_enum(
+            "HostReason",
+            &[
+                value("HOST_REASON_UNSPECIFIED", 0, None),
+                value("HOST_REASON_EXTRA", 1, Some(reason)),
+            ],
+        ),
+        key_enum(
+            "CoordinatorReason",
+            &[value("COORDINATOR_REASON_UNSPECIFIED", 0, None)],
+        ),
+    ] {
+        file.extend(delimited(5, &e));
+    }
+    delimited(1, &file)
+}
+
+#[test]
+fn a_live_keys_declared_status_is_generated() {
+    // args ["line"], status 13 (INTERNAL).
+    let mut reason = delimited(1, b"line");
+    reason.extend([0x10, 13]);
+    let generated = build_reasons::generate(&set_with_option(&reason), CORE, ENUMS);
+    assert!(generated.contains("Self::Extra => &[\"line\"],"));
+    assert!(generated.contains("Self::Extra => 13,"));
+}
+
+#[test]
+#[should_panic(expected = "HOST_REASON_EXTRA declares no status")]
+fn a_live_key_without_its_status_fails_the_build() {
+    build_reasons::generate(&set_with_option(&delimited(1, b"line")), CORE, ENUMS);
+}
