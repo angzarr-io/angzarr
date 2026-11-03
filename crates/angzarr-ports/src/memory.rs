@@ -183,6 +183,71 @@ impl Data {
             .map(|(_, letter)| letter)
     }
 
+    /// Every row, as [`Export`] orders it: each stream holding any row,
+    /// in key order, then the pending outbox.
+    fn export(&self) -> Vec<ExportRow> {
+        let mut streams: BTreeSet<&Key> = self
+            .streams
+            .iter()
+            .filter(|(_, own)| !own.is_empty())
+            .map(|(k, _)| k)
+            .collect();
+        streams.extend(self.snapshots.keys());
+        streams.extend(
+            self.positions
+                .iter()
+                .filter(|(_, next)| **next > 0)
+                .map(|((k, _), _)| k),
+        );
+        streams.extend(self.dead_letters.keys().map(|(k, ..)| k));
+        let mut rows: Vec<ExportRow> = streams
+            .into_iter()
+            .flat_map(|k| self.export_stream(k))
+            .collect();
+        rows.extend(
+            self.outbox
+                .iter()
+                .map(|p| ExportRow::Outbox(p.entry.clone())),
+        );
+        rows
+    }
+
+    /// Stream `k`'s rows: its own pages, its snapshot, the positions on
+    /// it by handler, the letters about it in key order.
+    fn export_stream(&self, k: &Key) -> Vec<ExportRow> {
+        let stream = cover(k);
+        let mut rows: Vec<ExportRow> = self
+            .own(k)
+            .iter()
+            .map(|page| ExportRow::Page {
+                stream: stream.clone(),
+                sequence: page.sequence,
+                stored: page.encode_to_vec(),
+            })
+            .collect();
+        rows.extend(self.snapshots.get(k).map(|snapshot| ExportRow::Snapshot {
+            stream: stream.clone(),
+            stored: snapshot.encode_to_vec(),
+        }));
+        rows.extend(
+            self.positions
+                .iter()
+                .filter(|((on, _), next)| on == k && **next > 0)
+                .map(|((_, handler), next)| ExportRow::Position {
+                    stream: stream.clone(),
+                    handler: handler.clone(),
+                    next: *next,
+                }),
+        );
+        rows.extend(self.letters_of(k).map(|letter| ExportRow::DeadLetter {
+            stream: stream.clone(),
+            at: letter.at,
+            component: letter.letter.source_component.clone(),
+            stored: letter.letter.encode_to_vec(),
+        }));
+        rows
+    }
+
     /// Remove every row of stream `k` a purge removes: its events (and
     /// so its command ids), its snapshot and the dead letters about it,
     /// never the positions on it (decision 14.68).
@@ -850,7 +915,8 @@ impl Export for MemoryStore {
         env!("CARGO_PKG_NAME")
     }
 
+    /// The data as it stands under the lock: one moment.
     async fn export(&self) -> Result<Vec<ExportRow>, StoreError> {
-        todo!("the export of a MemoryStore")
+        Ok(self.data().export())
     }
 }
