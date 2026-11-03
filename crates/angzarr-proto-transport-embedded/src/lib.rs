@@ -5,10 +5,10 @@
 //!
 //! - [`child_protocol`]: the launch protocol's constants, generated from the
 //!   spec's `(child_protocol)` option, so no host or child types them.
-//! - `v1::HostReason`: the keys whatever runs a child answers (its
-//!   handshake, its health, its exit, a conformance probe's input), each
-//!   with its `args()` and the `v1::reason_args` name constants; the enum
-//!   keeps core's name and prefix, so every key kept its string.
+//! - `v1::EmbeddedReason`: the keys whatever runs a child answers (its
+//!   health, its exit, a conformance probe's input), each with its `args()`
+//!   and `surface()` and the `v1::reason_args` name constants; named by
+//!   layer, `EMBEDDED_REASON_*` (decision 14.104).
 //! - [`REASONS_EN_US`]: their en-US catalog; [`reason_key_args`] a key's
 //!   args by its name.
 //!
@@ -28,7 +28,8 @@ pub mod v1 {
         env!("OUT_DIR"),
         "/io.angzarr.transport.embedded.v1.rs"
     ));
-    // `HostReason::args` and the `reason_args` name constants, from
+    // `EmbeddedReason::args` and `::surface` and the `reason_args` name
+    // constants, from
     // reasons.proto's `(reason)` options (build.rs).
     include!(concat!(env!("OUT_DIR"), "/reason_args.rs"));
 }
@@ -55,11 +56,11 @@ pub const REASONS_EN_US: (&str, &str) = (
 );
 
 /// The args a key of this transport declares (decision 14.60), by the
-/// key's full name (`HOST_REASON_HANDSHAKE_MALFORMED`): `None` for any
+/// key's full name (`EMBEDDED_REASON_CHILD_NOT_SERVING`): `None` for any
 /// other name, core's keys included (angzarr-proto's `reason_key_args`
 /// has those).
 pub fn reason_key_args(key: &str) -> Option<&'static [&'static str]> {
-    v1::HostReason::from_str_name(key)
-        .filter(|r| *r != v1::HostReason::Unspecified)
-        .map(v1::HostReason::args)
+    v1::EmbeddedReason::from_str_name(key)
+        .filter(|r| *r != v1::EmbeddedReason::Unspecified)
+        .map(v1::EmbeddedReason::args)
 }

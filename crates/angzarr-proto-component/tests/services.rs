@@ -42,10 +42,10 @@ fn every_component_service_has_a_generated_client_and_server() {
             describe => "Describe",
         }
         PolicyService, policy_service_server::PolicyServiceServer, policy_service_client::PolicyServiceClient {
-            handle => "Handle", on_refused => "OnRefused",
+            react => "React", translate => "Translate",
         }
         ProjectorService, projector_service_server::ProjectorServiceServer, projector_service_client::ProjectorServiceClient {
-            handle => "Handle",
+            project => "Project",
         }
         UpcasterService, upcaster_service_server::UpcasterServiceServer, upcaster_service_client::UpcasterServiceClient {
             upcast => "Upcast",
@@ -91,7 +91,61 @@ fn describe_takes_the_packages_empty_request_and_core_answers() {
 }
 
 #[test]
-fn the_contract_imports_only_core() {
+fn the_rpcs_take_and_answer_the_handler_layers_messages() {
+    // Decision 14.78: the services are retyped onto the handler layer;
+    // Describe alone answers core's descriptor.
+    let set = prost_types::FileDescriptorSet::decode(angzarr_proto_component::FILE_DESCRIPTOR_SET)
+        .unwrap();
+    let mut found = BTreeMap::new();
+    for file in set
+        .file
+        .iter()
+        .filter(|f| f.package() == "io.angzarr.component.v1")
+    {
+        for service in &file.service {
+            for m in &service.method {
+                found.insert(
+                    format!("{}.{}", service.name(), m.name()),
+                    (m.input_type().to_string(), m.output_type().to_string()),
+                );
+            }
+        }
+    }
+    let h = |m: &str| format!(".io.angzarr.handler.v1.{m}");
+    let expected = BTreeMap::from([
+        (
+            "CommandHandlerService.Handle".to_string(),
+            (h("HandleRequest"), h("HandleResponse")),
+        ),
+        (
+            "ComponentService.Describe".to_string(),
+            (
+                ".io.angzarr.component.v1.DescribeRequest".to_string(),
+                ".io.angzarr.v1.ComponentDescriptor".to_string(),
+            ),
+        ),
+        (
+            "PolicyService.React".to_string(),
+            (h("ReactRequest"), h("ReactResponse")),
+        ),
+        (
+            "PolicyService.Translate".to_string(),
+            (h("TranslateRequest"), h("TranslateResponse")),
+        ),
+        (
+            "ProjectorService.Project".to_string(),
+            (h("ProjectRequest"), h("ProjectResponse")),
+        ),
+        (
+            "UpcasterService.Upcast".to_string(),
+            (h("UpcastRequest"), h("UpcastResponse")),
+        ),
+    ]);
+    assert_eq!(found, expected);
+}
+
+#[test]
+fn the_contract_imports_only_the_handler_layer_and_core() {
     let set = prost_types::FileDescriptorSet::decode(angzarr_proto_component::FILE_DESCRIPTOR_SET)
         .unwrap();
     let ours: Vec<_> = set
@@ -103,7 +157,9 @@ fn the_contract_imports_only_core() {
     for file in ours {
         for import in &file.dependency {
             assert!(
-                import.starts_with("io/angzarr/v1/") || import.starts_with("google/protobuf/"),
+                import.starts_with("io/angzarr/handler/v1/")
+                    || import.starts_with("io/angzarr/v1/")
+                    || import.starts_with("google/protobuf/"),
                 "{} imports {import}",
                 file.name()
             );

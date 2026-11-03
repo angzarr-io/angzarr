@@ -16,6 +16,7 @@ virtual Cargo workspace under `crates/`:
 | Crate | What it is |
 |-------|------------|
 | `angzarr-proto` | prost types for core's wire contract (`io.angzarr.v1`) |
+| `angzarr-proto-handler` | the handler layer (`io.angzarr.handler.v1`): what each kind of business logic takes and returns |
 | `angzarr-proto-component` | the component contract: the handler-side services' tonic stubs |
 | `angzarr-proto-transport-embedded` | the local-process transport: the child launch protocol and its reason keys |
 | `angzarr-proto-transport-distributed` | the distributed transport's services, envelopes and reason keys |
@@ -107,7 +108,8 @@ See [Getting Started](https://angzarr.io/getting-started) for full setup includi
 
 AGPL-3.0 (GNU Affero General Public License v3)
 
-The shared crates `angzarr-proto`, `angzarr-proto-component`,
+The shared crates `angzarr-proto`, `angzarr-proto-handler`,
+`angzarr-proto-component`,
 `angzarr-proto-transport-embedded`, `angzarr-proto-transport-distributed`,
 `angzarr-ports`, `angzarr-diagnostic`, `angzarr-yaml`,
 `angzarr-presentation` and `angzarr-test-dir`: Licensed under either

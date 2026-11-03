@@ -1,6 +1,6 @@
 //! angzarr's `.proto` sources, embedded, for dependents that compile protos
-//! of their own against angzarr's: a domain whose state message carries the
-//! `(io.angzarr.v1.state)` option and `(io.angzarr.v1.conflict)` markers
+//! of their own against angzarr's: a domain whose messages carry the
+//! `(io.angzarr.v1.component)`, `(command)`, `(fact)` or `(event)` options
 //! must let protoc import `io/angzarr/v1/options.proto`.
 //!
 //! Use it from a build script, with this crate as a build-dependency:

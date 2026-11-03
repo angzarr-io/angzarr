@@ -36,8 +36,8 @@ fn written_out_they_are_an_include_directory() {
         );
     }
     // Every import between them resolves inside the directory
-    // (google/protobuf/* aside, which protoc supplies; google/api/* is
-    // embedded, for meta.proto).
+    // (google/protobuf/* aside, which protoc supplies; google/rpc/code.proto
+    // is embedded, for reasons.proto).
     for file in FILES {
         for line in file.contents.lines() {
             let Some(rest) = line.trim().strip_prefix("import \"") else {

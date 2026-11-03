@@ -40,30 +40,34 @@
 //! - **RULED(9) No commit position.** angzarr has no global or
 //!   store-wide position: ordering is per stream (decision 14.35).
 //! - **RULED(10) Purge** is opt-in, its own call, and deletes positions too.
-//! - **RULED(11, B, C, E1) Editions are per-stream forks (14.32), their
-//!   lifecycle framework META-EVENTS** in the reserved namespace
-//!   `io.angzarr.v1.meta`, which a store recognises by type: an uncreated
-//!   edition stream reads as main's; its first own event is its
-//!   `EditionCreated` (else `EditionNotForked`); a created stream reads main
-//!   below ITS OWN fork sequence, then its own; main is never written
+//! - **RULED(11, B, C, E1) Editions are per-stream forks (14.32), each
+//!   fork a framework META-EVENT**: an `EditionCreated` in the page's
+//!   `meta_event` arm (14.106), which a store recognises by that arm
+//!   (`is_fork`), never by a type URL: an unforked edition stream reads as
+//!   main's; its first own event is its fork (else `EditionNotForked`;
+//!   14.107: every stream is forked explicitly, nothing propagates); a
+//!   forked stream reads main below ITS OWN fork sequence, then its own;
+//!   main is never written
 //!   (`an_unforked_edition_stream_reads_as_main`,
 //!   `an_edition_stream_takes_only_a_fork_as_its_first_own_event`,
-//!   `a_forked_stream_reads_main_below_its_fork_then_its_own`). Creation is
+//!   `a_forked_stream_reads_main_below_its_fork_then_its_own`). A fork is
 //!   an ordinary write (E1).
-//! - **RULED(14.36) A fork is where it says:** a creation stated at or
-//!   below main's head lands at its stated sequence, never moved to the
+//! - **RULED(14.36, 14.86) A fork is where it says:** its own page's
+//!   sequence; one at or below main's head lands there, never moved to the
 //!   head; one above main's head is a conflict
 //!   (`a_fork_below_mains_head_lands_at_its_stated_sequence`,
 //!   `a_fork_above_mains_head_is_a_conflict`).
-//! - **RULED(D2) Deletion is an event that exists in its domains:** per
-//!   stream, `EditionDeleted` is RECORDED like any event
-//!   (`an_edition_deletion_is_recorded_like_any_event`), PROPAGATED onward
-//!   through the policy flows, and only then is the stream REMOVED
-//!   (`a_deleted_stream_is_removed_only_after_its_deletion_has_propagated`,
-//!   `a_deleted_stream_is_removed_with_every_row_of_it`,
-//!   `a_deletion_is_recorded_and_removed_stream_by_stream`, which also pins
-//!   the limitation: a stream the deletion has not reached keeps its rows
-//!   and the edition stays listed).
+//! - **RULED(14.107) Deletion is by enumeration:** `DeleteEdition` lists
+//!   an edition's forked streams by their forks and removes each stream's
+//!   rows directly (`Editions::remove_edition_stream`): its events, the
+//!   fork included, snapshot, positions, dead letters and the outbox
+//!   entries of its edition written with it; nothing is appended, nothing
+//!   propagates (`a_removed_edition_stream_loses_every_row_of_it`,
+//!   `an_edition_is_deleted_by_removing_each_forked_stream`,
+//!   `a_removed_edition_stream_takes_the_outbox_entries_written_with_it`).
+//!   Afterwards a step's position on a removed stream is refused
+//!   `EditionNotFound`, an input `EditionNotForked`, and only a fork brings
+//!   the name back (`after_deletion_only_a_fork_brings_the_edition_back`).
 //! - **RULED(12) One trait set,** `Send` except on `wasm32`
 //!   (`MaybeSend`/`MaybeSync`); native non-`Send` backends unsupported
 //!   (tests/send.rs, tests/wasm.rs).
@@ -120,27 +124,9 @@
 //!   with their stream by a purge and an edition stream's removal.
 //! - **RULED(W2) Positions are written only in a write;** `PositionStore`
 //!   is reads alone.
-//! - **RULED(D3) The removal is `Editions::remove_deleted(stream)`,**
-//!   refused while the stream's edition outbox entries are pending
-//!   (`EditionNotPropagated`) and before its deletion is recorded
-//!   (`EditionNotDeleted`); writing `EditionDeleted` to the origins is the
-//!   runtime's job.
-//! - **RULED(D4) A deletion reaching a stream with no rows of its edition
-//!   writes nothing.**
-//! - **RULED(D6), revised by the owner: after deletion, a later arrival is
-//!   refused** (`after_deletion_a_later_arrival_in_the_edition_is_refused`):
-//!   it re-creates neither the stream nor the edition; only an explicit
-//!   creation brings the name back.
-//!
+
 //! # Still flagged for the owner
 //!
-//! - **FLAG(D7) How a store knows an edition is deleted, from its rows
-//!   alone:** being deleted while any stream of it holds an
-//!   `EditionDeleted`; gone once no `EditionCreated` of it remains. The
-//!   refusal is `EditionNotFound` (NOT_FOUND), not a code of its own. Gap:
-//!   if every recorded deletion is removed while an unreachable stream
-//!   still holds a creation, the edition reads as live again, and an
-//!   arrival at a removed stream would be taken.
 //! - **FLAG(W3) A store that keeps no outbox** refuses a write that carries
 //!   entries (proposed; not pinned, since `MemoryStore` keeps one).
 //! - **FLAG(O7) Which stream orders a write that appends to none.** The

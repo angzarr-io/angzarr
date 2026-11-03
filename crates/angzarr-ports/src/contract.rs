@@ -7,7 +7,7 @@
 //! - Each check is a `pub async fn` taking a fresh, EMPTY store (or, in a
 //!   pair section, two handles `(a, b)` on one fresh store) and panicking,
 //!   naming what failed. Pages are opaque to a store (but for a fork's
-//!   `EditionCreated`, a framework event): the checks write their own.
+//!   `EditionCreated`, a framework meta-event): the checks write their own.
 //! - The checks are generic over the one trait set, so they run on any
 //!   backend, `Arc<dyn DynStore>` included, under the caller's runtime.
 //! - [`store_contract!`](crate::store_contract) stamps one test per check of
@@ -17,10 +17,11 @@
 //!
 //! **Sections** (a backend runs those whose capabilities it has).
 //!
-//! Editions are per-stream forks (14.32): the base section holds every
-//! store to the fork rule (an unforked stream reads as main's, outside
-//! input to it is refused, a forked stream reads main below its fork, main
-//! is never written); `editions` adds the administration and the what-if
+//! Editions are per-stream forks (14.32), each forked explicitly (14.107):
+//! the base section holds every store to the fork rule (an unforked stream
+//! reads as main's, any other input to it is refused, a forked stream reads
+//! main below its fork, main is never written); `editions` adds the
+//! administration (listing, deletion by enumeration) and the what-if
 //! scenario.
 //!
 //! | Section | Needs | Takes |
@@ -65,12 +66,10 @@ use std::future::Future;
 use angzarr_proto::ids::fact_command_id;
 use angzarr_proto::uuid::Uuid;
 use angzarr_proto::v1::event_meta::Causation;
-use angzarr_proto::v1::meta::{EditionCreated, EditionDeleted};
 use angzarr_proto::v1::{
-    AngzarrDeadLetter, Cover, EditionSummary, EventBook, EventMeta, EventPage, EventRef,
-    FactOrigin, Snapshot,
+    event_page, meta_event, AngzarrDeadLetter, CommandCause, Cover, EditionCreated, EditionSummary,
+    EventBook, EventMeta, EventPage, EventRef, FactCause, FactOrigin, MetaEvent, Snapshot,
 };
-use prost::Message;
 use prost_types::{Any, Timestamp};
 
 use crate::error::StoreError;
@@ -78,8 +77,7 @@ use crate::migrate::{latest, AppliedMigration, Backup, Migration, MigrationStatu
 use crate::store::{
     Append, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions, EventStore,
     ListStreams, Outbox, OutboxEntry, Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit,
-    ReadUntilTime, Store, Watch, Write, Written, EDITION_CREATED_TYPE_URL,
-    EDITION_DELETED_TYPE_URL,
+    ReadUntilTime, Store, Watch, Write, Written,
 };
 use crate::stream::{PositionKey, StreamRef};
 
@@ -108,14 +106,32 @@ pub fn edition_stream(domain: &'static str, n: u8, edition: &'static str) -> Str
     StreamRef::in_edition(domain, edition, Uuid::from_bytes([n; 16]))
 }
 
+/// An event's cause when command `id` produced it.
+fn by_command(id: Uuid) -> Causation {
+    Causation::Command(CommandCause {
+        command_id: Some(id.into()),
+    })
+}
+
+/// An event's cause when the fact `id` from `external_id` produced it.
+fn by_fact(id: Uuid, external_id: &str, description: &str) -> Causation {
+    Causation::Fact(FactCause {
+        command_id: Some(id.into()),
+        origin: Some(FactOrigin {
+            external_id: external_id.to_string(),
+            description: description.to_string(),
+        }),
+    })
+}
+
 /// The event at `sequence`, produced by command `n`.
 pub fn page(sequence: u64, n: u8) -> EventPage {
-    stamped(sequence, Causation::CommandId(command(n).into()), 0xC0)
+    stamped(sequence, by_command(command(n)), 0xC0)
 }
 
 /// The event at `sequence`, produced by command `n`, in correlation `c`.
 pub fn correlated(sequence: u64, n: u8, c: u8) -> EventPage {
-    stamped(sequence, Causation::CommandId(command(n).into()), c)
+    stamped(sequence, by_command(command(n)), c)
 }
 
 /// A snapshot after event `sequence`, under `rules`.
@@ -137,38 +153,29 @@ pub fn fact_id(external_id: &str) -> Uuid {
 }
 
 /// The event at `sequence` produced by the fact `external_id`: caused by
-/// the fact's id, and carrying its origin.
+/// the fact's id, its origin copied (decision 14.102).
 pub fn fact_page(sequence: u64, external_id: &str) -> EventPage {
-    let mut page = stamped(
+    stamped(
         sequence,
-        Causation::CommandId(fact_id(external_id).into()),
+        by_fact(fact_id(external_id), external_id, "contract"),
         0xC0,
-    );
-    if let Some(meta) = page.meta.as_mut() {
-        meta.fact = Some(FactOrigin {
-            external_id: external_id.to_string(),
-            description: "contract".to_string(),
-        });
-    }
-    page
+    )
 }
 
-/// The event at `sequence` recording a refusal (14.31): a refusal fact,
-/// whose id IS the refused command's `command_id` (no derivation), its
-/// `fact_origin.external_id` that id's canonical text, addressed to the
+/// The event at `sequence` recording a refusal fact (14.31): its id IS
+/// the refused command's `command_id` (no derivation), the origin its
+/// destination derives naming that id's canonical text, addressed to the
 /// exact stream of the policy's triggering event.
 pub fn refusal_page(sequence: u64, refused: Uuid) -> EventPage {
-    let mut page = stamped(sequence, Causation::CommandId(refused.into()), 0xC0);
-    page.payload = Some(Any {
-        type_url: "/io.angzarr.v1.CommandRefused".to_string(),
+    let mut page = stamped(
+        sequence,
+        by_fact(refused, &refused.to_string(), "refusal"),
+        0xC0,
+    );
+    page.body = Some(event_page::Body::Event(Any {
+        type_url: "/angzarr.contract.v1.RefusalFact".to_string(),
         value: Vec::new(),
-    });
-    if let Some(meta) = page.meta.as_mut() {
-        meta.fact = Some(FactOrigin {
-            external_id: refused.to_string(),
-            description: "refusal".to_string(),
-        });
-    }
+    }));
     page
 }
 
@@ -206,16 +213,15 @@ pub async fn put_outbox<S: EventStore>(store: &S, entries: &[OutboxEntry]) {
 
 fn stamped(sequence: u64, causation: Causation, correlation: u8) -> EventPage {
     EventPage {
-        payload: Some(Any {
+        body: Some(event_page::Body::Event(Any {
             type_url: "/angzarr.contract.v1.Page".to_string(),
             value: sequence.to_be_bytes().to_vec(),
-        }),
+        })),
         meta: Some(EventMeta {
             causation: Some(causation),
             correlation_id: Some(command(correlation).into()),
             recorded_at: Some(at(sequence)),
             rules_version: "v1".to_string(),
-            ..EventMeta::default()
         }),
         sequence,
     }
@@ -233,83 +239,14 @@ fn key<'a>(handler: &'a str, stream: StreamRef<'a>) -> PositionKey<'a> {
     PositionKey { handler, stream }
 }
 
-/// The fork of a stream into `edition` at `sequence` (its fork sequence):
-/// an origin fork, per-stream (14.32).
-pub fn created_page(sequence: u64, edition: &str) -> EventPage {
-    forked(
-        sequence,
-        EditionCreated {
-            edition: edition.to_string(),
-            parent_sequence: sequence,
-            ..EditionCreated::default()
-        },
-    )
-}
-
-/// A fork made by a policy command's arrival: propagated from the fork
-/// `from`, by the command `by`.
-pub fn propagated_created_page(
-    sequence: u64,
-    edition: &str,
-    from: EventRef,
-    by: Uuid,
-) -> EventPage {
-    forked(
-        sequence,
-        EditionCreated {
-            edition: edition.to_string(),
-            parent_sequence: sequence,
-            propagated_from: Some(from),
-            forked_by: Some(by.into()),
-        },
-    )
-}
-
-fn forked(sequence: u64, fork: EditionCreated) -> EventPage {
-    let mut page = stamped(sequence, Causation::CommandId(command(0xF0).into()), 0xC0);
-    page.payload = Some(Any {
-        type_url: EDITION_CREATED_TYPE_URL.to_string(),
-        value: fork.encode_to_vec(),
-    });
-    page
-}
-
-/// The deletion of a stream from `edition`, recorded at `sequence`, at an
-/// origin (`DeleteEdition`).
-pub fn deleted_page(sequence: u64, edition: &str) -> EventPage {
-    deleted(
-        sequence,
-        EditionDeleted {
-            edition: edition.to_string(),
-            ..EditionDeleted::default()
-        },
-    )
-}
-
-/// A deletion carried by a policy command's arrival: propagated from the
-/// deletion `from`, by the command `by`.
-pub fn propagated_deleted_page(
-    sequence: u64,
-    edition: &str,
-    from: EventRef,
-    by: Uuid,
-) -> EventPage {
-    deleted(
-        sequence,
-        EditionDeleted {
-            edition: edition.to_string(),
-            propagated_from: Some(from),
-            deleted_by: Some(by.into()),
-        },
-    )
-}
-
-fn deleted(sequence: u64, deletion: EditionDeleted) -> EventPage {
-    let mut page = stamped(sequence, Causation::CommandId(command(0xFD).into()), 0xC0);
-    page.payload = Some(Any {
-        type_url: EDITION_DELETED_TYPE_URL.to_string(),
-        value: deletion.encode_to_vec(),
-    });
+/// A stream's fork into its edition at `sequence`, its fork sequence
+/// (decision 14.86): the meta-event `EditionCreated`, empty (decision
+/// 14.107), as ForkStream appends it; the page's cover names the edition.
+pub fn created_page(sequence: u64) -> EventPage {
+    let mut page = stamped(sequence, by_command(command(0xF0)), 0xC0);
+    page.body = Some(event_page::Body::MetaEvent(MetaEvent {
+        kind: Some(meta_event::Kind::Created(EditionCreated {})),
+    }));
     page
 }
 
@@ -347,11 +284,11 @@ pub fn event_ref(stream: StreamRef<'_>, sequence: u64) -> EventRef {
 }
 
 /// Fork edition stream `stream` at its current head (main's, while it is
-/// unforked): an origin fork. Returns the fork sequence.
+/// unforked), as ForkStream does. Returns the fork sequence.
 pub async fn fork<S: Store>(store: &S, stream: StreamRef<'_>) -> u64 {
-    let edition = stream.edition.expect("an edition stream");
+    assert!(stream.edition.is_some(), "an edition stream");
     let at = store.head(stream).await.unwrap().next_sequence;
-    append(store, stream, at, &[created_page(at, edition)])
+    append(store, stream, at, &[created_page(at)])
         .await
         .unwrap();
     at
@@ -494,17 +431,14 @@ pub async fn a_stream_is_domain_edition_and_root<S: Store>(store: S) {
     append(&store, main1, 0, &[page(0, 0)]).await.unwrap();
     append(&store, ledger1, 0, &[page(0, 1)]).await.unwrap();
     append(&store, main2, 0, &[page(0, 3)]).await.unwrap();
-    append(&store, fork1, 1, &[created_page(1, "what-if"), page(2, 2)])
+    append(&store, fork1, 1, &[created_page(1), page(2, 2)])
         .await
         .unwrap();
     for (s, pages) in [
         (main1, vec![page(0, 0)]),
         (ledger1, vec![page(0, 1)]),
         (main2, vec![page(0, 3)]),
-        (
-            fork1,
-            vec![page(0, 0), created_page(1, "what-if"), page(2, 2)],
-        ),
+        (fork1, vec![page(0, 0), created_page(1), page(2, 2)]),
     ] {
         assert_eq!(
             store.read(s, 0, None).await.unwrap().pages,
@@ -682,11 +616,11 @@ pub async fn an_unforked_edition_stream_reads_as_main<S: Store>(store: S) {
     );
 }
 
-/// 14.32: an edition stream's first own event is its fork. Outside input
-/// to an unforked stream is refused `EditionNotForked` and writes nothing;
-/// a second fork is `EditionAlreadyForked`; main is never forked into; a
-/// fork above main's head is a conflict; a fork and the arriving command's
-/// events may land in one write.
+/// 14.32: an edition stream's first own event is its fork. Any other input
+/// to an unforked stream is refused `EditionNotForked` and writes nothing
+/// (decision 14.107: nothing propagates, every stream is forked); a second
+/// fork is `EditionAlreadyForked`; main is never forked into; a fork above
+/// main's head is a conflict.
 pub async fn an_edition_stream_takes_only_a_fork_as_its_first_own_event<S: Store>(store: S) {
     let main = main_stream("account", 1);
     let e = edition_stream("account", 1, "what-if");
@@ -694,7 +628,7 @@ pub async fn an_edition_stream_takes_only_a_fork_as_its_first_own_event<S: Store
     assert_eq!(
         append(&store, e, 1, &[page(1, 2)]).await,
         Err(StoreError::edition_not_forked(e)),
-        "outside input, unforked"
+        "input to an unforked stream"
     );
     assert_eq!(
         store.covers("account").await,
@@ -703,30 +637,21 @@ pub async fn an_edition_stream_takes_only_a_fork_as_its_first_own_event<S: Store
     );
     assert_eq!(store.read(e, 0, None).await.unwrap().pages, [page(0, 1)]);
     assert_eq!(
-        append(&store, main, 1, &[created_page(1, "what-if")]).await,
+        append(&store, main, 1, &[created_page(1)]).await,
         Err(StoreError::EditionNameRequired),
         "main is never forked into"
     );
+    assert_eq!(append(&store, e, 1, &[created_page(1)]).await, Ok(2));
     assert_eq!(
-        append(&store, e, 1, &[created_page(1, "what-if")]).await,
-        Ok(2)
-    );
-    assert_eq!(
-        append(&store, e, 2, &[created_page(2, "what-if")]).await,
+        append(&store, e, 2, &[created_page(2)]).await,
         Err(StoreError::edition_already_forked(e)),
         "forked already"
     );
     let above = edition_stream("account", 1, "other");
     assert_eq!(
-        append(&store, above, 5, &[created_page(5, "other")]).await,
+        append(&store, above, 5, &[created_page(5)]).await,
         Err(conflict(above, 5, 1)),
         "a fork above main's head"
-    );
-    let arrival = edition_stream("account", 1, "third");
-    assert_eq!(
-        append(&store, arrival, 1, &[created_page(1, "third"), page(2, 3)]).await,
-        Ok(3),
-        "a fork and its arriving command's events, in one write"
     );
     assert_eq!(
         store.read(main, 0, None).await.unwrap().pages,
@@ -751,20 +676,12 @@ pub async fn a_forked_stream_reads_main_below_its_fork_then_its_own<S: Store>(st
     assert_eq!(fork(&store, e).await, 2, "at main's head");
     append(&store, main, 2, &[page(2, 3)]).await.unwrap();
     let history = store.read(e, 0, None).await.unwrap();
-    assert_eq!(
-        history.pages,
-        [page(0, 1), page(1, 1), created_page(2, "what-if")]
-    );
+    assert_eq!(history.pages, [page(0, 1), page(1, 1), created_page(2)]);
     assert_eq!(history.next_sequence, 3);
     assert_eq!(append(&store, e, 3, &[page(3, 5)]).await, Ok(4));
     assert_eq!(
         store.read(e, 0, None).await.unwrap().pages,
-        [
-            page(0, 1),
-            page(1, 1),
-            created_page(2, "what-if"),
-            page(3, 5)
-        ]
+        [page(0, 1), page(1, 1), created_page(2), page(3, 5)]
     );
     assert_eq!(
         store.read(main, 0, None).await.unwrap().pages,
@@ -794,7 +711,7 @@ pub async fn a_forked_stream_reads_main_below_its_fork_then_its_own<S: Store>(st
     );
 }
 
-/// 14.36: a fork is where it says. A creation stated below main's head
+/// 14.36: a fork is where it says. A fork stated below main's head
 /// lands at its stated sequence, never moved to the head: the stream reads
 /// main's events below it, then its own, numbered on from it.
 pub async fn a_fork_below_mains_head_lands_at_its_stated_sequence<S: Store>(store: S) {
@@ -803,19 +720,14 @@ pub async fn a_fork_below_mains_head_lands_at_its_stated_sequence<S: Store>(stor
     let mains = [page(0, 1), page(1, 2), page(2, 3), page(3, 4), page(4, 5)];
     append(&store, main, 0, &mains).await.unwrap();
     assert_eq!(
-        append(&store, e, 3, &[created_page(3, "what-if")]).await,
+        append(&store, e, 3, &[created_page(3)]).await,
         Ok(4),
         "a fork stated at 3, below main's head of 5, is taken there"
     );
     let history = store.read(e, 0, None).await.unwrap();
     assert_eq!(
         history.pages,
-        [
-            page(0, 1),
-            page(1, 2),
-            page(2, 3),
-            created_page(3, "what-if")
-        ],
+        [page(0, 1), page(1, 2), page(2, 3), created_page(3)],
         "main's events below the stated fork, then the fork"
     );
     assert_eq!(history.next_sequence, 4);
@@ -837,9 +749,8 @@ pub async fn a_fork_below_mains_head_lands_at_its_stated_sequence<S: Store>(stor
     );
 }
 
-/// 14.36: a creation stated above main's head is a conflict, and writes
-/// nothing (a fork and its arriving command's events alike); at the head
-/// it is taken.
+/// 14.36: a fork stated above main's head is a conflict, and writes
+/// nothing; at the head it is taken.
 pub async fn a_fork_above_mains_head_is_a_conflict<S: Store>(store: S) {
     let main = main_stream("account", 1);
     let e = edition_stream("account", 1, "what-if");
@@ -847,14 +758,9 @@ pub async fn a_fork_above_mains_head_is_a_conflict<S: Store>(store: S) {
         .await
         .unwrap();
     assert_eq!(
-        append(&store, e, 3, &[created_page(3, "what-if")]).await,
+        append(&store, e, 3, &[created_page(3)]).await,
         Err(conflict(e, 3, 2)),
         "a fork stated at 3, above main's head of 2"
-    );
-    assert_eq!(
-        append(&store, e, 3, &[created_page(3, "what-if"), page(4, 2)]).await,
-        Err(conflict(e, 3, 2)),
-        "a fork above the head with its arriving command's events"
     );
     assert_eq!(
         store.covers("account").await,
@@ -867,66 +773,9 @@ pub async fn a_fork_above_mains_head_is_a_conflict<S: Store>(store: S) {
         "still main's version"
     );
     assert_eq!(
-        append(&store, e, 2, &[created_page(2, "what-if")]).await,
+        append(&store, e, 2, &[created_page(2)]).await,
         Ok(3),
         "at main's head it is taken"
-    );
-}
-
-/// 14.36: a creation whose `parent_sequence` is not its own page's
-/// sequence is malformed, an origin's and an arrival's alike, and writes
-/// nothing: the fork is where it says, so the two must agree.
-pub async fn a_creation_stating_another_parent_sequence_is_malformed<S: Store>(store: S) {
-    let main = main_stream("account", 1);
-    let e = edition_stream("account", 1, "what-if");
-    let mains = [page(0, 1), page(1, 2), page(2, 3), page(3, 4), page(4, 5)];
-    append(&store, main, 0, &mains).await.unwrap();
-    let stating = |parent_sequence: u64| {
-        forked(
-            3,
-            EditionCreated {
-                edition: "what-if".to_string(),
-                parent_sequence,
-                ..EditionCreated::default()
-            },
-        )
-    };
-    assert_eq!(
-        append(&store, e, 3, &[stating(5)]).await,
-        Err(StoreError::malformed_creation(e, 3, 5)),
-        "a creation at 3 stating parent_sequence 5"
-    );
-    assert_eq!(
-        append(&store, e, 3, &[stating(0)]).await,
-        Err(StoreError::malformed_creation(e, 3, 0)),
-        "a creation at 3 stating parent_sequence 0"
-    );
-    let source = edition_stream("account", 2, "what-if");
-    fork(&store, source).await;
-    let mut arrival = propagated_created_page(3, "what-if", event_ref(source, 0), command(7));
-    let mut fork_event =
-        EditionCreated::decode(arrival.payload.as_ref().unwrap().value.as_slice()).unwrap();
-    fork_event.parent_sequence = 4;
-    arrival.payload.as_mut().unwrap().value = fork_event.encode_to_vec();
-    assert_eq!(
-        append(&store, e, 3, &[arrival, page(4, 9)]).await,
-        Err(StoreError::malformed_creation(e, 3, 4)),
-        "an arrival's creation stating another sequence, with its command's events"
-    );
-    assert_eq!(
-        store.covers("account").await,
-        Ok(covers(&[main, source])),
-        "nothing written"
-    );
-    assert_eq!(
-        store.read(e, 0, None).await.unwrap().pages,
-        mains,
-        "still main's version"
-    );
-    assert_eq!(
-        append(&store, e, 3, &[stating(3)]).await,
-        Ok(4),
-        "agreeing, it is taken"
     );
 }
 
@@ -1426,47 +1275,34 @@ where
 // --------------------------------------------------------- editions (opt-in)
 
 /// `ListEditions`: derived from the fork events on each call, one summary
-/// per edition, by name: its origin forks (no `propagated_from`), how many
-/// streams it forked.
+/// per edition, by name, listing every stream's fork (decision 14.107: no
+/// origin to tell apart; the stream count is the list's length).
 pub async fn list_editions_derives_each_edition_from_its_fork_events<S>(store: S)
 where
     S: Store + Editions,
 {
     assert_eq!(store.list_editions().await, Ok(vec![]));
-    let (o1, o2) = (main_stream("order", 1), main_stream("wallet", 2));
-    append(&store, o1, 0, &[page(0, 1)]).await.unwrap();
+    append(&store, main_stream("order", 1), 0, &[page(0, 1)])
+        .await
+        .unwrap();
     let (w1, w2) = (
         edition_stream("order", 1, "what-if"),
         edition_stream("wallet", 2, "what-if"),
     );
     fork(&store, w1).await;
     append(&store, w1, 2, &[page(2, 4)]).await.unwrap();
-    append(
-        &store,
-        w2,
-        0,
-        &[propagated_created_page(
-            0,
-            "what-if",
-            event_ref(w1, 1),
-            command(9),
-        )],
-    )
-    .await
-    .unwrap();
+    fork(&store, w2).await;
     let b = edition_stream("wallet", 2, "b-test");
     fork(&store, b).await;
-    let summary = |name: &str, origins: Vec<EventRef>, forked: u64| EditionSummary {
+    let summary = |name: &str, forks: Vec<EventRef>| EditionSummary {
         name: name.to_string(),
-        origins,
-        forked_streams: forked,
+        forks,
     };
-    let _ = o2;
     assert_eq!(
         store.list_editions().await,
         Ok(vec![
-            summary("b-test", vec![event_ref(b, 0)], 1),
-            summary("what-if", vec![event_ref(w1, 1)], 2),
+            summary("b-test", vec![event_ref(b, 0)]),
+            summary("what-if", vec![event_ref(w1, 1), event_ref(w2, 0)]),
         ])
     );
 }
@@ -1512,15 +1348,19 @@ async fn forked_with_rows<S: Store>(store: &S, s: StreamRef<'_>) -> u64 {
     at
 }
 
-/// Record edition stream `s`'s deletion at its head, then remove it: what
-/// the removal counts.
-async fn delete_and_remove<S: Store + Editions>(store: &S, s: StreamRef<'_>) -> u64 {
-    let edition = s.edition.expect("an edition stream");
-    let at = store.head(s).await.unwrap().next_sequence;
-    append(store, s, at, &[deleted_page(at, edition)])
-        .await
-        .unwrap();
-    store.remove_deleted(s).await.unwrap()
+/// `DeleteEdition` as a runtime runs it on the store (decision 14.107):
+/// enumerate `edition`'s forked streams by `ListEditions`, and remove each.
+async fn delete_edition<S: Store + Editions>(store: &S, edition: &str) {
+    let listed = store.list_editions().await.unwrap();
+    for fork in listed
+        .iter()
+        .filter(|e| e.name == edition)
+        .flat_map(|e| &e.forks)
+    {
+        let cover = fork.stream.as_ref().expect("a fork names its stream");
+        let s = StreamRef::try_from(cover).expect("a listed stream is one");
+        store.remove_edition_stream(s).await.unwrap();
+    }
 }
 
 /// The names of the editions the store lists.
@@ -1529,47 +1369,13 @@ async fn edition_names<S: Editions>(store: &S) -> Vec<String> {
     listed.into_iter().map(|s| s.name).collect()
 }
 
-/// 14.32, deletion, step 1: a stream's deletion is RECORDED like any
-/// event, in sequence after its earlier work; nothing is removed yet, and
-/// the edition is still listed.
-pub async fn an_edition_deletion_is_recorded_like_any_event<S>(store: S)
-where
-    S: Store + Editions,
-{
-    let main = main_stream("account", 1);
-    let e = edition_stream("account", 1, "what-if");
-    append(&store, main, 0, &[page(0, 1)]).await.unwrap();
-    assert_eq!(forked_with_rows(&store, e).await, 2);
-    assert_eq!(
-        append(&store, e, 3, &[deleted_page(3, "what-if")]).await,
-        Ok(4)
-    );
-    assert_eq!(
-        store.read(e, 0, None).await.unwrap().pages,
-        [
-            page(0, 1),
-            created_page(1, "what-if"),
-            page(2, 2),
-            deleted_page(3, "what-if")
-        ],
-        "recorded, after its earlier work"
-    );
-    assert_eq!(store.read_snapshot(e).await, Ok(Some(snapshot(2, "v2"))));
-    assert_eq!(store.position(key("h", e)).await, Ok(3));
-    assert_eq!(
-        edition_names(&store).await,
-        ["what-if"],
-        "still listed until removed"
-    );
-    assert_eq!(store.read(main, 0, None).await.unwrap().pages, [page(0, 1)]);
-}
-
-/// 14.32, deletion, step 3: once its deletion is recorded (and has
-/// propagated), a stream's rows of the edition are removed: its events,
-/// the creation and deletion included, its snapshot, the positions on it.
-/// It reads as main's again; main and other editions are untouched.
-/// Removing a stream not deleted is refused; one with no row left, 0.
-pub async fn a_deleted_stream_is_removed_with_every_row_of_it<S>(store: S)
+/// Decision 14.107, deletion by enumeration: removing an edition stream
+/// removes every row of it directly (its events, the fork included, its
+/// snapshot, the positions on it), with nothing appended. It reads as
+/// main's again, and a later input to it is refused `EditionNotForked`;
+/// main and other editions are untouched. Main is never removed; a stream
+/// with no row left answers 0.
+pub async fn a_removed_edition_stream_loses_every_row_of_it<S>(store: S)
 where
     S: Store + Editions,
 {
@@ -1585,22 +1391,15 @@ where
     let mains = rows(&store, main, key("h", main)).await;
     let kepts = rows(&store, kept, key("h", kept)).await;
     assert_eq!(
-        store.remove_deleted(e).await,
-        Err(StoreError::edition_not_deleted(e)),
-        "not deleted: nothing removed"
-    );
-    assert_eq!(
-        store.remove_deleted(main).await,
+        store.remove_edition_stream(main).await,
         Err(StoreError::EditionNameRequired),
         "main is never removed"
     );
-    append(&store, e, 3, &[deleted_page(3, "what-if")])
-        .await
-        .unwrap();
+    assert_rows(&store, main, key("h", main), &mains, "nothing removed").await;
     assert_eq!(
-        store.remove_deleted(e).await,
-        Ok(3),
-        "its three events: the creation, its own, the deletion"
+        store.remove_edition_stream(e).await,
+        Ok(2),
+        "its two events: the fork and its own"
     );
     assert_rows(
         &store,
@@ -1613,10 +1412,10 @@ where
     assert_eq!(
         append(&store, e, 1, &[page(1, 3)]).await,
         Err(StoreError::edition_not_forked(e)),
-        "uncreated again"
+        "unforked again"
     );
     assert_eq!(
-        store.remove_deleted(e).await,
+        store.remove_edition_stream(e).await,
         Ok(0),
         "removed already: nothing left"
     );
@@ -1626,160 +1425,81 @@ where
     assert_rows(&store, kept, key("h", kept), &kepts, "another untouched").await;
 }
 
-/// A deletion reaching a stream with no event in the edition writes
-/// nothing: there is nothing to delete.
-pub async fn a_deletion_reaching_an_uncreated_stream_writes_nothing<S>(store: S)
+/// Decision 14.107: an edition is deleted stream by stream, by
+/// enumeration of its forks. Removing one stream leaves the others with
+/// their rows and the edition listed; once every forked stream is removed,
+/// the edition is gone.
+pub async fn an_edition_is_deleted_by_removing_each_forked_stream<S>(store: S)
 where
     S: Store + Editions,
 {
-    let main = main_stream("account", 1);
-    let e = edition_stream("account", 1, "what-if");
-    append(&store, main, 0, &[page(0, 1)]).await.unwrap();
-    assert_eq!(
-        store
-            .write(Write::append(e, 1, &[deleted_page(1, "what-if")]))
-            .await,
-        Ok(Written {
-            next_sequence: Some(1)
-        }),
-        "answered, as the stream stands"
-    );
-    assert_eq!(store.read(e, 0, None).await.unwrap().pages, [page(0, 1)]);
-    assert_eq!(store.list_editions().await, Ok(vec![]));
-}
-
-/// The deletion travels stream by stream: removing the origin leaves a
-/// stream the deletion has not reached with its rows, and the edition
-/// listed (the limitation, plainly); once that stream records its own
-/// deletion, propagated, and is removed, the edition is gone.
-pub async fn a_deletion_is_recorded_and_removed_stream_by_stream<S>(store: S)
-where
-    S: Store + Editions,
-{
-    let (origin, reached) = (
+    let (first, second) = (
         edition_stream("player", 1, "what-if"),
         edition_stream("table", 1, "what-if"),
     );
-    fork(&store, origin).await;
-    append(
-        &store,
-        reached,
-        0,
-        &[propagated_created_page(
-            0,
-            "what-if",
-            event_ref(origin, 0),
-            command(9),
-        )],
-    )
-    .await
-    .unwrap();
-    delete_and_remove(&store, origin).await;
-    assert_eq!(store.head(origin).await.unwrap().next_sequence, 0);
+    fork(&store, first).await;
+    forked_with_rows(&store, second).await;
+    assert_eq!(store.remove_edition_stream(first).await, Ok(1));
+    assert_eq!(store.head(first).await.unwrap().next_sequence, 0);
     assert_eq!(
-        store.head(reached).await.unwrap().next_sequence,
-        1,
-        "a stream not yet reached keeps its rows"
+        store.head(second).await.unwrap().next_sequence,
+        2,
+        "a stream not yet removed keeps its rows"
     );
     let listed = store.list_editions().await.unwrap();
     assert_eq!(listed.len(), 1, "and the edition stays listed");
-    assert_eq!(listed[0].forked_streams, 1);
-    append(
-        &store,
-        reached,
-        1,
-        &[propagated_deleted_page(
-            1,
-            "what-if",
-            event_ref(origin, 1),
-            command(10),
-        )],
-    )
-    .await
-    .unwrap();
-    store.remove_deleted(reached).await.unwrap();
+    assert_eq!(listed[0].forks, [event_ref(second, 0)]);
+    delete_edition(&store, "what-if").await;
     assert_eq!(store.list_editions().await, Ok(vec![]), "nothing remains");
+    assert_eq!(store.head(second).await.unwrap().next_sequence, 0);
 }
 
-/// The owner's ruling (revising D6): once an edition is deleted, a later
-/// arrival in it is REFUSED, because the edition does not exist, and it
-/// re-creates neither the stream nor the edition. While any stream of it
-/// holds a recorded deletion, it is being deleted; once no creation of it
-/// remains, it does not exist. Either way, an arrival's creation (one with
-/// `propagated_from`) and a position on a stream with no rows of it are
-/// refused `EditionNotFound`. Only an explicit (origin) creation brings
-/// the name back.
-pub async fn after_deletion_a_later_arrival_in_the_edition_is_refused<S>(store: S)
+/// Decision 14.107: once an edition is deleted, work in flight in it is
+/// refused: a step's position on a removed stream of it is refused
+/// `EditionNotFound` (it would leave a row of the edition behind), and an
+/// input to the stream `EditionNotForked`. Only a fork brings the name
+/// back.
+pub async fn after_deletion_only_a_fork_brings_the_edition_back<S>(store: S)
 where
     S: Store + Editions,
 {
-    let (origin, reached) = (
+    let (origin, other) = (
         edition_stream("player", 1, "what-if"),
         edition_stream("table", 1, "what-if"),
     );
     fork(&store, origin).await;
-    append(
-        &store,
-        reached,
-        0,
-        &[propagated_created_page(
-            0,
-            "what-if",
-            event_ref(origin, 0),
-            command(9),
-        )],
-    )
-    .await
-    .unwrap();
-    append(&store, origin, 1, &[deleted_page(1, "what-if")])
-        .await
-        .unwrap();
-    append(
-        &store,
-        reached,
-        1,
-        &[propagated_deleted_page(
-            1,
-            "what-if",
-            event_ref(origin, 1),
-            command(10),
-        )],
-    )
-    .await
-    .unwrap();
-    store.remove_deleted(origin).await.unwrap();
-    let gone = || StoreError::EditionNotFound {
-        name: "what-if".to_string(),
-    };
-    let arrival = [propagated_created_page(
-        0,
-        "what-if",
-        event_ref(reached, 0),
-        command(11),
-    )];
-    assert_eq!(
-        store.write(Write::append(origin, 0, &arrival)).await,
-        Err(gone()),
-        "being deleted: an arrival at the removed stream re-creates nothing"
-    );
+    fork(&store, other).await;
+    delete_edition(&store, "what-if").await;
     let positions = [(key("table-player", origin), 2)];
     assert_eq!(
         store.write(Write::positions(&positions)).await,
-        Err(gone()),
-        "nor does a step's position on it"
+        Err(StoreError::EditionNotFound {
+            name: "what-if".to_string(),
+        }),
+        "a step's position on a removed stream re-creates nothing"
     );
-    assert_eq!(store.head(origin).await.unwrap().next_sequence, 0);
-    store.remove_deleted(reached).await.unwrap();
     assert_eq!(
-        store.write(Write::append(origin, 0, &arrival)).await,
-        Err(gone()),
-        "deleted: the edition does not exist"
+        store.position(key("table-player", origin)).await,
+        Ok(0),
+        "nothing landed"
     );
-    assert_eq!(store.list_editions().await, Ok(vec![]), "and is not listed");
     assert_eq!(
-        append(&store, origin, 0, &[created_page(0, "what-if")]).await,
+        append(&store, origin, 0, &[page(0, 3)]).await,
+        Err(StoreError::edition_not_forked(origin)),
+        "an input to a removed stream"
+    );
+    assert_eq!(store.list_editions().await, Ok(vec![]), "not listed");
+    assert_eq!(
+        append(&store, origin, 0, &[created_page(0)]).await,
         Ok(1),
-        "only an explicit creation brings the name back"
+        "a fork brings the name back"
+    );
+    assert_eq!(
+        store.write(Write::positions(&positions)).await,
+        Ok(Written {
+            next_sequence: None
+        }),
+        "and a position in it lands again"
     );
 }
 
@@ -1801,8 +1521,8 @@ async fn step_at_head<S: Store>(store: &S, s: StreamRef<'_>, k: PositionKey<'_>,
 }
 
 /// The reference what-if (the owner's use: games and AI experimentation):
-/// create a stream in an edition, run several steps there, read both
-/// timelines, delete the edition (recorded, then removed), and main is
+/// fork a stream into an edition, run several steps there, read both
+/// timelines, delete the edition (by enumeration), and main is
 /// byte-for-byte as main alone made it.
 pub async fn a_what_if_edition_runs_beside_main_and_leaves_main_untouched<S>(store: S)
 where
@@ -1840,18 +1560,18 @@ where
             page(0, 1),
             page(1, 2),
             page(2, 3),
-            created_page(3, "what-if"),
+            created_page(3),
             page(4, 10),
             page(5, 11),
             page(6, 12),
         ],
-        "the edition's timeline: main's history, its creation, its own steps"
+        "the edition's timeline: main's history, its fork, its own steps"
     );
     assert_eq!(snapshotted, Some(snapshot(6, "v1")));
     assert_eq!(position, 7);
     let main_alone = rows(&store, main, projector(main)).await;
     assert_eq!(main_alone.0.pages.len(), 4, "main's timeline: its own four");
-    delete_and_remove(&store, e).await;
+    delete_edition(&store, "what-if").await;
     assert_rows(
         &store,
         main,
@@ -1868,51 +1588,64 @@ where
     );
 }
 
-/// 14.32, deletion, step 2 before 3: a stream's rows are never removed
-/// before its deletion has propagated onward. While an outbox entry of the
-/// edition, written by the step that carries the deletion onward (its
-/// position on the stream), is pending, the removal is refused and removes
-/// nothing; once the relay has delivered it, the removal goes ahead.
-pub async fn a_deleted_stream_is_removed_only_after_its_deletion_has_propagated<S>(store: S)
+/// Decision 14.107: an edition's outbox entries are its rows. Removing an
+/// edition stream removes the entries of its edition written with it (its
+/// events, or a position on it), undelivered; another stream's entries,
+/// and main's, stay pending.
+pub async fn a_removed_edition_stream_takes_the_outbox_entries_written_with_it<S>(store: S)
 where
     S: Store + Editions + Outbox,
 {
-    let e = edition_stream("player", 1, "what-if");
+    let (e, other) = (
+        edition_stream("player", 1, "what-if"),
+        edition_stream("table", 1, "what-if"),
+    );
     fork(&store, e).await;
-    append(&store, e, 1, &[deleted_page(1, "what-if")])
-        .await
-        .unwrap();
-    // The policy's step carrying the deletion onward: its position past the
-    // deletion, and its command to the next domain, in the edition.
-    let carry = [entry_in(1, "player-table", 1, "what-if")];
-    let positions = [(key("player-table", e), 2)];
+    fork(&store, other).await;
+    // A policy's step on e: its position past e's fork and its command to
+    // the next domain, in the edition; and one with e's own events.
+    let carried = [entry_in(1, "player-table", 1, "what-if")];
+    let positions = [(key("player-table", e), 1)];
     store
         .write(Write {
             positions: &positions,
-            outbox: &carry,
+            outbox: &carried,
             ..Write::default()
         })
         .await
         .unwrap();
+    let with_events = [entry_in(2, "player", 2, "what-if")];
+    let pages = [page(1, 5)];
+    store
+        .write(Write {
+            outbox: &with_events,
+            ..Write::append(e, 1, &pages)
+        })
+        .await
+        .unwrap();
+    let others = [entry_in(3, "table-player", 3, "what-if")];
+    let positions = [(key("table-player", other), 1)];
+    store
+        .write(Write {
+            positions: &positions,
+            outbox: &others,
+            ..Write::default()
+        })
+        .await
+        .unwrap();
+    let mains = [entry(4, "player-table", 4)];
+    put_outbox(&store, &mains).await;
+    assert_eq!(store.remove_edition_stream(e).await, Ok(2));
     assert_eq!(
-        store.remove_deleted(e).await,
-        Err(StoreError::edition_not_propagated(e)),
-        "its onward step is still in the outbox"
+        store.pending(10).await,
+        Ok(vec![others[0].clone(), mains[0].clone()]),
+        "its entries gone, undelivered; another stream's and main's kept"
     );
-    assert_eq!(
-        store.head(e).await.unwrap().next_sequence,
-        2,
-        "nothing removed"
-    );
-    assert_eq!(store.pending(10).await, Ok(carry.to_vec()));
-    assert_eq!(store.clear(&[command(1)]).await, Ok(1), "delivered");
-    assert_eq!(store.remove_deleted(e).await, Ok(2));
     assert_eq!(
         store.position(key("player-table", e)).await,
         Ok(0),
         "its positions too"
     );
-    assert_eq!(store.list_editions().await, Ok(vec![]));
 }
 
 // --------------------------------------------------- read units (opt-in)
@@ -2087,7 +1820,7 @@ where
         let mut reads = store.begin_read().await.unwrap();
         assert_eq!(
             reads.read(e, 0, None).await.unwrap().pages,
-            [page(0, 1), page(1, 1), created_page(2, "what-if")]
+            [page(0, 1), page(1, 1), created_page(2)]
         );
         let head = reads.head(e).await.unwrap();
         assert_eq!(head.next_sequence, 3);
@@ -2574,19 +2307,19 @@ where
 // ------------------------------------------------------- dead letters (opt-in)
 
 /// Dead letter `body` from `component` about `stream` at `at`: a whole
-/// `AngzarrDeadLetter` (its payload the stream's one page, a reason, the
-/// one rejection detail its reason chooses), so a store that keeps less
-/// than all of it is caught.
+/// `AngzarrDeadLetter` (its payload the stream's one page, its why a
+/// reason, a retry count), so a store that keeps less than all of it is
+/// caught.
 pub fn dead_letter(
     stream: StreamRef<'_>,
     at: DeadLetterAt,
     component: &str,
     body: u8,
 ) -> DeadLetter {
-    use angzarr_proto::v1::angzarr_dead_letter::{Payload, RejectionDetails};
-    use angzarr_proto::v1::{Diagnostic, ProcessingFailedDetails};
+    use angzarr_proto::v1::angzarr_dead_letter::{Payload, Why};
+    use angzarr_proto::v1::Diagnostic;
     let reason = Diagnostic {
-        code: "ROUTER_REASON_UNHANDLED_HANDLER_ERROR".to_string(),
+        code: "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR".to_string(),
         args: [("body".to_string(), body.to_string())].into(),
     };
     DeadLetter {
@@ -2598,14 +2331,8 @@ pub fn dead_letter(
                 pages: vec![page(0, body)],
                 ..EventBook::default()
             })),
-            reason: Some(reason.clone()),
-            rejection_details: Some(RejectionDetails::ProcessingFailed(
-                ProcessingFailedDetails {
-                    failure: Some(reason),
-                    retry_count: u32::from(body),
-                    is_transient: true,
-                },
-            )),
+            why: Some(Why::Reason(reason)),
+            retry_count: u32::from(body),
             source_component: component.to_string(),
             source_component_kind: 2,
             occurred_at: Some(Timestamp {
@@ -2953,7 +2680,7 @@ where
     let in_edition = dead_letter(e, DeadLetterAt::Sequence(1), "wallet", 1);
     let on_main = dead_letter(main, DeadLetterAt::Sequence(0), "wallet", 2);
     put_dead_letters(&store, &[in_edition, on_main.clone()]).await;
-    delete_and_remove(&store, e).await;
+    store.remove_edition_stream(e).await.unwrap();
     assert_eq!(store.dead_letters(e).await, Ok(vec![]), "removed with it");
     assert_eq!(
         store.dead_letters(main).await,
@@ -3621,17 +3348,15 @@ macro_rules! store_contract {
     (editions, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             list_editions_derives_each_edition_from_its_fork_events,
-            an_edition_deletion_is_recorded_like_any_event,
-            a_deleted_stream_is_removed_with_every_row_of_it,
-            a_deletion_reaching_an_uncreated_stream_writes_nothing,
-            a_deletion_is_recorded_and_removed_stream_by_stream,
-            after_deletion_a_later_arrival_in_the_edition_is_refused,
+            a_removed_edition_stream_loses_every_row_of_it,
+            an_edition_is_deleted_by_removing_each_forked_stream,
+            after_deletion_only_a_fork_brings_the_edition_back,
             a_what_if_edition_runs_beside_main_and_leaves_main_untouched,
         );
     };
     (editions_outbox, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
-            a_deleted_stream_is_removed_only_after_its_deletion_has_propagated,
+            a_removed_edition_stream_takes_the_outbox_entries_written_with_it,
         );
     };
     (read, $(#[$t:meta])+, $f:expr) => {
@@ -3778,7 +3503,6 @@ macro_rules! store_contract {
             a_forked_stream_reads_main_below_its_fork_then_its_own,
             a_fork_below_mains_head_lands_at_its_stated_sequence,
             a_fork_above_mains_head_is_a_conflict,
-            a_creation_stating_another_parent_sequence_is_malformed,
             find_command_finds_a_commands_events_on_its_stream,
             find_command_finds_a_retried_facts_events_by_its_id,
             find_command_finds_a_refusal_fact_on_the_trigger_stream_by_the_refused_id,

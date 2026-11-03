@@ -52,14 +52,6 @@ pub enum StoreError {
     /// A wire `Cover` that is no stream: no root, a root not 16 bytes, or an
     /// edition set to the empty string (INVALID_ARGUMENT).
     MalformedStream { stream: Box<Cover> },
-    /// An edition creation whose `EditionCreated.parent_sequence` is not
-    /// its own page's sequence (14.36: the fork is where it says, so the
-    /// two must agree; INVALID_ARGUMENT). Nothing was written.
-    MalformedCreation {
-        stream: Box<Cover>,
-        sequence: u64,
-        parent_sequence: u64,
-    },
     /// The store failed: I/O, a timeout, a dropped connection, a schema this
     /// build cannot read. A write may or may not have landed.
     Unavailable(Cause),
@@ -80,27 +72,22 @@ pub enum StoreError {
     /// fork event of it anywhere; 14.32: NOT_FOUND). Nothing was read.
     UnknownEdition { stream: Box<Cover> },
     /// A write to an edition stream with no fork in that edition, other
-    /// than its fork: input from outside is refused until the fork reaches
-    /// the stream (14.32: FAILED_PRECONDITION, `EDITION_NOT_FORKED`).
-    /// Nothing was written.
+    /// than its fork: every stream of an edition is forked explicitly, by
+    /// ForkStream, and nothing propagates (decision 14.107: the not-forked
+    /// rule, FAILED_PRECONDITION `ANGZARR_REASON_EDITION_NOT_FORKED` at the
+    /// coordinator). Nothing was written.
     EditionNotForked { stream: Box<Cover> },
     /// A fork of a stream already forked in its edition (14.32:
     /// ALREADY_EXISTS), or of main, which is never forked into. Nothing
     /// was written.
     EditionAlreadyForked { stream: Box<Cover> },
-    /// A removal of an edition stream whose last event is not its deletion
-    /// (14.32: a stream is removed only after recording its deletion).
-    /// Nothing was removed.
-    EditionNotDeleted { stream: Box<Cover> },
-    /// A removal of an edition stream whose deletion has not yet propagated
-    /// onward: an outbox entry of the edition, written with the stream or a
-    /// position on it, is still pending (14.32). Nothing was removed; remove
-    /// it once the entry is delivered.
-    EditionNotPropagated { stream: Box<Cover> },
     /// An edition operation with no edition: main is unnamed, and is
     /// neither forked into nor deleted (INVALID_ARGUMENT).
     EditionNameRequired,
-    /// The edition does not exist: no fork event of it (NOT_FOUND).
+    /// The edition does not exist: no fork event of it remains (NOT_FOUND).
+    /// A step's position on a stream of it with no rows is refused so:
+    /// work in flight after a deletion leaves no row of the edition behind,
+    /// and only a fork brings the name back (decision 14.107).
     EditionNotFound { name: String },
     /// A store a newer build migrated: its ledger's highest version,
     /// `applied`, is beyond the build's highest, `build` (a
@@ -159,18 +146,6 @@ impl StoreError {
         }
     }
 
-    pub fn malformed_creation(
-        stream: impl Into<Cover>,
-        sequence: u64,
-        parent_sequence: u64,
-    ) -> StoreError {
-        StoreError::MalformedCreation {
-            stream: Box::new(stream.into()),
-            sequence,
-            parent_sequence,
-        }
-    }
-
     pub fn unreadable(stream: impl Into<Cover>, sequence: u64, reason: Cause) -> StoreError {
         StoreError::Unreadable {
             stream: Box::new(stream.into()),
@@ -183,18 +158,6 @@ impl StoreError {
         StoreError::DeadLetterUnreadable {
             stream: Box::new(stream.into()),
             reason,
-        }
-    }
-
-    pub fn edition_not_deleted(stream: impl Into<Cover>) -> StoreError {
-        StoreError::EditionNotDeleted {
-            stream: Box::new(stream.into()),
-        }
-    }
-
-    pub fn edition_not_propagated(stream: impl Into<Cover>) -> StoreError {
-        StoreError::EditionNotPropagated {
-            stream: Box::new(stream.into()),
         }
     }
 
@@ -222,14 +185,11 @@ impl StoreError {
             StoreError::Conflict { stream, .. }
             | StoreError::Discontinuous { stream, .. }
             | StoreError::MalformedStream { stream }
-            | StoreError::MalformedCreation { stream, .. }
             | StoreError::Unreadable { stream, .. }
             | StoreError::DeadLetterUnreadable { stream, .. }
             | StoreError::UnknownEdition { stream }
             | StoreError::EditionNotForked { stream }
-            | StoreError::EditionAlreadyForked { stream }
-            | StoreError::EditionNotDeleted { stream }
-            | StoreError::EditionNotPropagated { stream } => Some(stream),
+            | StoreError::EditionAlreadyForked { stream } => Some(stream),
             StoreError::Unavailable(_)
             | StoreError::EditionNameRequired
             | StoreError::EditionNotFound { .. }
@@ -310,7 +270,6 @@ impl StoreError {
             StoreError::Conflict { .. } => code!("store-conflict"),
             StoreError::Discontinuous { .. } => code!("store-discontinuous"),
             StoreError::MalformedStream { .. } => code!("store-malformed-stream"),
-            StoreError::MalformedCreation { .. } => code!("store-malformed-creation"),
             StoreError::Unavailable(_) => code!("store-unavailable"),
             StoreError::Unreadable { .. } => code!("store-unreadable"),
             StoreError::DeadLetterUnreadable { .. } => code!("store-dead-letter-unreadable"),
@@ -319,8 +278,6 @@ impl StoreError {
             StoreError::EditionNotFound { .. } => code!("edition-not-found"),
             StoreError::EditionNotForked { .. } => code!("store-edition-not-forked"),
             StoreError::EditionAlreadyForked { .. } => code!("store-edition-already-forked"),
-            StoreError::EditionNotDeleted { .. } => code!("store-edition-not-deleted"),
-            StoreError::EditionNotPropagated { .. } => code!("store-edition-not-propagated"),
             StoreError::NewerThanBuild { .. } => code!("store-newer-than-build"),
             StoreError::MigrationFailed { .. } => code!("store-migration-failed"),
             StoreError::MigrationChanged { .. } => code!("store-migration-changed"),
@@ -358,15 +315,6 @@ impl StoreError {
             StoreError::MalformedStream { stream } | StoreError::UnknownEdition { stream } => {
                 vec![("stream", stream_arg(stream))]
             }
-            StoreError::MalformedCreation {
-                stream,
-                sequence,
-                parent_sequence,
-            } => vec![
-                ("stream", stream_arg(stream)),
-                ("sequence", Arg::Uint(*sequence)),
-                ("parent_sequence", Arg::Uint(*parent_sequence)),
-            ],
             StoreError::Unavailable(cause) => vec![("cause", Arg::Cause(cause.clone()))],
             StoreError::Unreadable {
                 stream,
@@ -384,9 +332,9 @@ impl StoreError {
             StoreError::EditionNameRequired => Vec::new(),
             StoreError::EditionNotFound { name } => vec![("name", Arg::Str(name.clone()))],
             StoreError::EditionNotForked { stream }
-            | StoreError::EditionAlreadyForked { stream }
-            | StoreError::EditionNotDeleted { stream }
-            | StoreError::EditionNotPropagated { stream } => vec![("stream", stream_arg(stream))],
+            | StoreError::EditionAlreadyForked { stream } => {
+                vec![("stream", stream_arg(stream))]
+            }
             StoreError::NewerThanBuild { applied, build } => vec![
                 ("applied", Arg::Uint(*applied)),
                 ("build", Arg::Uint(*build)),
@@ -410,15 +358,12 @@ impl StoreError {
             | StoreError::Unreadable { .. }
             | StoreError::DeadLetterUnreadable { .. } => Recovery::Bug,
             StoreError::MalformedStream { .. }
-            | StoreError::MalformedCreation { .. }
             | StoreError::UnknownEdition { .. }
             | StoreError::EditionNameRequired
             | StoreError::EditionNotFound { .. } => Recovery::Invalid,
             StoreError::EditionNotForked { .. } | StoreError::EditionAlreadyForked { .. } => {
                 Recovery::Invalid
             }
-            StoreError::EditionNotDeleted { .. } => Recovery::Bug,
-            StoreError::EditionNotPropagated { .. } => Recovery::Retry,
             StoreError::NewerThanBuild { .. }
             | StoreError::BackupExists { .. }
             | StoreError::MigrationUnknown { .. }
@@ -498,7 +443,6 @@ pub(crate) fn samples() -> Vec<StoreError> {
         StoreError::conflict(stream(), 1, 2),
         StoreError::discontinuous(stream(), 2, 3),
         StoreError::malformed_stream(stream()),
-        StoreError::malformed_creation(stream(), 3, 5),
         StoreError::Unavailable(io()),
         StoreError::unreadable(stream(), 4, io()),
         StoreError::dead_letter_unreadable(stream(), io()),
@@ -509,8 +453,6 @@ pub(crate) fn samples() -> Vec<StoreError> {
         },
         StoreError::edition_not_forked(stream()),
         StoreError::edition_already_forked(stream()),
-        StoreError::edition_not_deleted(stream()),
-        StoreError::edition_not_propagated(stream()),
         StoreError::NewerThanBuild {
             applied: 6,
             build: 5,

@@ -1,0 +1,29 @@
+[package]
+name = "angzarr-proto-handler"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "prost types for angzarr's handler layer, io.angzarr.handler.v1: what each kind of business logic takes and returns, on angzarr-proto's messages, prost only, builds for wasm32"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace declares no [workspace.package], so nothing is inherited.
+
+[dependencies]
+# Core's messages (io.angzarr.v1), which the handler layer's requests carry
+# (decision 14.78: the books, read-only): extern-pathed, never generated
+# twice (decision 14.64).
+angzarr-proto = { path = "../angzarr-proto" }
+bytes = "1"
+prost = "0.14"
+prost-types = "0.14"
+
+# No features and no tonic: the services on these messages are
+# angzarr-proto-component's.
+[build-dependencies]
+prost-build = "0.14"
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

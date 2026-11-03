@@ -21,7 +21,10 @@ use std::future::Future;
 use std::sync::Arc;
 
 use angzarr_proto::uuid::Uuid;
-use angzarr_proto::v1::{AngzarrDeadLetter, Cover, EditionSummary, EventBook, EventPage, Snapshot};
+use angzarr_proto::v1::{
+    event_page, meta_event, AngzarrDeadLetter, Cover, EditionSummary, EventBook, EventPage,
+    MetaEvent, Snapshot,
+};
 use prost_types::{Any, Timestamp};
 
 use crate::error::StoreError;
@@ -98,37 +101,33 @@ pub struct Written {
 /// it indexes into columns. It never decodes a business payload, never
 /// assigns or rewrites a sequence; upcasting is the reader's.
 ///
-/// **Editions are per-stream forks (14.32), their lifecycle framework
-/// meta-events** (`io.angzarr.v1.meta`), which a store recognises by type:
+/// **Editions are per-stream forks (14.32), each made explicitly**
+/// (decision 14.107): a stream's fork is a framework meta-event, an
+/// `EditionCreated` in its page's `meta_event` arm (decision 14.106), which a
+/// store recognises by that arm ([`is_fork`]), never by a type URL:
 /// - An edition stream (D, X, R) with no event of its own reads as main's
 ///   (D, R), and is not listed by [`covers`](EventStore::covers).
-/// - Its first own event must be its CREATION
-///   ([`EDITION_CREATED_TYPE_URL`]), written with `expected` = its fork
-///   sequence, the sequence it states (14.36): any at or below main's head
-///   for that stream (main's next sequence) is taken, one above it is a
-///   [`StoreError::Conflict`]. A store never moves a fork to the head: a
-///   creation lands where it says even if main has grown since its writer
-///   read the head. The fork point is per stream; nothing relates two
-///   streams' fork points. A creation whose `parent_sequence` is not its
-///   own page's sequence is [`StoreError::MalformedCreation`]. Any other
-///   first write is refused
-///   [`StoreError::EditionNotForked`], a second creation
-///   [`StoreError::EditionAlreadyForked`], and a creation of main
+/// - Its first own event must be its FORK, written with `expected` = its
+///   fork sequence, the page's own sequence (decision 14.86): any at or
+///   below main's head for that stream (main's next sequence) is taken, one
+///   above it is a [`StoreError::Conflict`]. A store never moves a fork to
+///   the head: a fork lands where it says even if main has grown since its
+///   writer read the head. The fork point is per stream; nothing relates two
+///   streams' fork points. Any other first write is refused
+///   [`StoreError::EditionNotForked`] (nothing propagates: every stream of an
+///   edition is forked by ForkStream), a second fork
+///   [`StoreError::EditionAlreadyForked`], and a fork of main
 ///   [`StoreError::EditionNameRequired`].
-/// - A created stream reads main's events below its own fork sequence,
+/// - A forked stream reads main's events below its own fork sequence,
 ///   then its own, numbered on; main's later events never reach it. Every
 ///   read, lookup and write sees that history. Snapshots and positions
 ///   never fall through.
-/// - Its DELETION ([`EDITION_DELETED_TYPE_URL`]) is recorded like any
-///   event; the stream's rows of the edition are removed later, by
-///   [`Editions::remove_deleted`], once the deletion has propagated onward.
-///   A deletion written to a stream with no event in the edition writes
-///   nothing (there is nothing to delete).
-/// - An edition is being deleted while any stream of it holds a recorded
-///   deletion, and does not exist once no creation of it remains. Then an
-///   arrival's creation (one with `propagated_from`) and a position on a
-///   stream with no rows of it are refused [`StoreError::EditionNotFound`]:
-///   nothing re-creates a deleted edition but an origin creation.
+/// - An edition exists while a fork of it remains. Its deletion is by
+///   enumeration: each forked stream's rows are removed directly
+///   ([`Editions::remove_edition_stream`]), and nothing is appended for it.
+///   A step's position on a stream of an edition that no longer exists,
+///   with no rows of it, is refused [`StoreError::EditionNotFound`], so
+///   nothing re-creates a deleted edition but a fork.
 /// - Main is never written by any of it.
 pub trait EventStore: MaybeSend + MaybeSync {
     /// Land `write` at once, or none of it. Refused, writing nothing: its
@@ -243,38 +242,39 @@ pub trait Purge: MaybeSend + MaybeSync {
 
 // =============================================================== editions
 
-/// The type URL of an `io.angzarr.v1.meta.EditionCreated`: what marks a
-/// page as a stream's creation in its edition.
-pub const EDITION_CREATED_TYPE_URL: &str = "/io.angzarr.v1.meta.EditionCreated";
-
-/// The type URL of an `io.angzarr.v1.meta.EditionDeleted`: what marks a
-/// page as a stream's deletion from its edition.
-pub const EDITION_DELETED_TYPE_URL: &str = "/io.angzarr.v1.meta.EditionDeleted";
+/// Whether `page` is a stream's fork into its edition: its body is the
+/// framework meta-event `EditionCreated` (decisions 14.106 and 14.107), the
+/// one page a store reads beyond its columns.
+pub fn is_fork(page: &EventPage) -> bool {
+    matches!(
+        &page.body,
+        Some(event_page::Body::MetaEvent(MetaEvent {
+            kind: Some(meta_event::Kind::Created(_)),
+        }))
+    )
+}
 
 /// Opt-in: the administration of editions as per-stream forks (14.32).
-/// There is no registry: an edition is known while a creation event of it
-/// exists. Creation and deletion are writes (see [`EventStore`]); main is
-/// never written.
+/// There is no registry: an edition is known while a fork event of it
+/// exists. A fork is a write (see [`EventStore`]); main is never written.
 pub trait Editions: MaybeSend + MaybeSync {
-    /// `ListEditions`: one summary per edition holding a creation event, by
-    /// name, derived on each call: its origins (creations with no
-    /// `propagated_from`) and how many streams it holds. A stream that has recorded its deletion
-    /// but is not yet removed still counts.
+    /// `ListEditions`: one summary per edition holding a fork event, by
+    /// name, derived on each call: every stream's fork, as the reference of
+    /// its `EditionCreated`, in [`StreamRef`]'s order (decision 14.107).
     fn list_editions(
         &self,
     ) -> impl Future<Output = Result<Vec<EditionSummary>, StoreError>> + MaybeSend;
 
-    /// The third step of a stream's deletion (14.32: recorded, propagated,
-    /// then removed): remove every row of edition stream `stream` (its
-    /// events, the creation and deletion included, its snapshot, the
-    /// positions on it, the dead letters about it). Refused, removing nothing: a stream whose last
-    /// event is not its deletion ([`StoreError::EditionNotDeleted`]); one
-    /// whose deletion has not propagated onward, an outbox entry of its
-    /// edition written with the stream or a position on it still pending
-    /// ([`StoreError::EditionNotPropagated`]); main
-    /// ([`StoreError::EditionNameRequired`]). A stream with no row left
-    /// answers 0. Returns how many events it removed.
-    fn remove_deleted(
+    /// `DeleteEdition`'s step for one stream (decision 14.107: deletion by
+    /// enumeration, nothing appended, nothing propagated): remove every row
+    /// of edition stream `stream` directly: its events, the fork included,
+    /// its snapshot, the positions on it, the dead letters about it, and the
+    /// outbox entries of its edition written with it. It then reads as
+    /// main's again, and a later input to it is refused
+    /// [`StoreError::EditionNotForked`]. Refused for main
+    /// ([`StoreError::EditionNameRequired`]), removing nothing. A stream with
+    /// no row left answers 0. Returns how many events it removed.
+    fn remove_edition_stream(
         &self,
         stream: StreamRef<'_>,
     ) -> impl Future<Output = Result<u64, StoreError>> + MaybeSend;
@@ -418,7 +418,8 @@ pub struct OutboxEntry {
     /// The message, opaque: a `CommandBook` today.
     pub message: Any,
     /// The edition whose processing wrote it (`None`: main's). An edition's
-    /// entries are its rows: its deletion waits for them (14.32).
+    /// entries are its rows: removing an edition stream removes those
+    /// written with it (decision 14.107).
     pub edition: Option<String>,
 }
 
@@ -494,8 +495,8 @@ impl DeadLetter {
 /// per stream or by key. Ordering is per stream only: a stream's letters
 /// in key order ([`DeadLetterKey`]), and nothing orders one stream's
 /// against another's. A letter about an edition stream is that stream's,
-/// never main's. A [`Purge`] of a stream, and the removal of a deleted
-/// edition stream ([`Editions::remove_deleted`]), remove its letters with
+/// never main's. A [`Purge`] of a stream, and the removal of an edition
+/// stream ([`Editions::remove_edition_stream`]), remove its letters with
 /// its other rows.
 pub trait DeadLetterStore: MaybeSend + MaybeSync {
     /// Every letter about `stream`, in key order.

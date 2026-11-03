@@ -23,19 +23,15 @@ use std::sync::{Arc, Mutex};
 
 use angzarr_ports::angzarr_proto::ids::fact_command_id;
 use angzarr_ports::angzarr_proto::v1::event_meta::Causation;
-use angzarr_ports::angzarr_proto::v1::meta::EditionCreated;
-use angzarr_ports::angzarr_proto::v1::{
-    Cover, EditionSummary, EventBook, EventPage, EventRef, Snapshot,
-};
+use angzarr_ports::angzarr_proto::v1::{Cover, EditionSummary, EventBook, EventPage, Snapshot};
 use angzarr_ports::contract;
 use angzarr_ports::memory::{MemoryRead, MemoryStore};
 use angzarr_ports::{
     Append, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore, Head,
     ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge,
     ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
-    StreamRef, Uuid, Watch, Write, Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
+    StreamRef, Uuid, Watch, Write, Written,
 };
-use prost::Message;
 use prost_types::Timestamp;
 
 /// What a [`Broken`] store gets wrong: one bug each.
@@ -126,31 +122,27 @@ enum Bug {
     ForkMovedToHead,
     /// A fork stated above main's head is taken, moved down to the head.
     ForkAboveHeadAccepted,
-    /// A creation stating another parent_sequence than its sequence is
-    /// taken, its parent_sequence rewritten to agree.
-    MismatchedCreationAccepted,
     // ---- editions (the administration)
-    /// `ListEditions` counts propagated forks among the origins.
-    OriginsIncludePropagated,
-    /// A recorded deletion removes the stream at once.
-    RemovedOnRecording,
-    /// The removal ignores a pending onward step: removed before it
-    /// propagated.
-    RemovesBeforePropagation,
+    /// `ListEditions` lists one fork per edition, its first stream's.
+    ListsOneForkPerEdition,
     /// The removal keeps the stream's snapshot.
     RemoveKeepsSnapshot,
+    /// The removal keeps the positions on the stream.
+    RemoveKeepsPositions,
     /// The removal deletes main's stream too.
     RemoveTakesMain,
     /// The removal of one stream removes every stream of the edition.
     RemoveSpreads,
-    /// The removal of a stream not deleted goes ahead.
-    RemovesUndeleted,
-    /// A deletion reaching an uncreated stream is refused.
-    DeletionToUncreatedRefused,
-    /// After deletion, an arrival re-creates the stream (as an origin).
-    ArrivalRecreates,
+    /// The removal keeps the outbox entries written with the stream.
+    RemoveKeepsOutbox,
+    /// The removal takes every pending entry of the edition, another
+    /// stream's too.
+    RemoveTakesEditionOutbox,
     /// After deletion, a position on a removed stream is taken (and lost).
     PositionOnRemovedAccepted,
+    /// After deletion, the edition's name is remembered and a fork of it
+    /// refused.
+    ForkAfterDeletionRefused,
     // ---- read units
     /// Its read units read the live store.
     ReadUnitIsLive,
@@ -265,6 +257,8 @@ struct Shared {
     positions: Mutex<Vec<(String, Owned)>>,
     /// Every outbox id ever cleared.
     cleared: Mutex<Vec<Uuid>>,
+    /// Every edition a stream was removed from.
+    removed_from: Mutex<Vec<String>>,
 }
 
 /// A stream key that owns its strings.
@@ -311,15 +305,7 @@ fn broken_pair(bug: Bug) -> (Broken, Broken) {
 }
 
 fn is_fork(page: &EventPage) -> bool {
-    page.payload
-        .as_ref()
-        .is_some_and(|p| p.type_url == EDITION_CREATED_TYPE_URL)
-}
-
-fn is_deletion(page: &EventPage) -> bool {
-    page.payload
-        .as_ref()
-        .is_some_and(|p| p.type_url == EDITION_DELETED_TYPE_URL)
+    angzarr_ports::is_fork(page)
 }
 
 fn main_of(s: StreamRef<'_>) -> StreamRef<'_> {
@@ -464,14 +450,6 @@ fn renumber(pages: &mut [EventPage], from: u64) {
     }
 }
 
-/// A creation page restated to name its own sequence as its parent's.
-fn restate_parent(creation: &mut EventPage) {
-    let payload = creation.payload.as_mut().unwrap();
-    let mut fork = EditionCreated::decode(payload.value.as_slice()).unwrap();
-    fork.parent_sequence = creation.sequence;
-    payload.value = fork.encode_to_vec();
-}
-
 impl Broken {
     /// A write's stream part, as the bug bends it: the stream, the length
     /// expected and the pages to write, or the answer the bug gives at once.
@@ -504,11 +482,20 @@ impl Broken {
         if self.is(Bug::AcceptsAGap) {
             renumber(&mut pages, expected);
         }
-        if self.is(Bug::DeletionToUncreatedRefused)
-            && pages.iter().any(is_deletion)
-            && !self.is_forked(stream).await?
-        {
-            return Err(StoreError::edition_not_forked(stream));
+        if self.is(Bug::ForkAfterDeletionRefused) && pages.first().is_some_and(is_fork) {
+            let edition = stream.edition.unwrap_or_default();
+            if self
+                .shared
+                .removed_from
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e == edition)
+            {
+                return Err(StoreError::EditionNotFound {
+                    name: edition.to_string(),
+                });
+            }
         }
         Ok(ControlFlow::Continue((stream, expected, pages)))
     }
@@ -535,16 +522,7 @@ impl Broken {
         } else {
             expected
         };
-        if self.is(Bug::MismatchedCreationAccepted) {
-            restate_parent(&mut pages[0]);
-        }
         Ok(expected)
-    }
-
-    /// Whether `stream` holds its fork.
-    async fn is_forked(&self, stream: StreamRef<'_>) -> Result<bool, StoreError> {
-        let pages = self.inner.read(stream, 0, None).await?.pages;
-        Ok(pages.iter().any(is_fork))
     }
 
     /// The position key `key` is kept under, as the bug bends it.
@@ -624,13 +602,6 @@ impl Broken {
                 }
                 Err(refused)
             }
-            StoreError::EditionNotFound { .. } if self.is(Bug::ArrivalRecreates) => {
-                // Write the arrival as an origin creation.
-                let (stream, _) = bent.stream.ok_or(refused)?;
-                let first = &mut bent.pages[0];
-                *first = contract::created_page(first.sequence, stream.edition.unwrap_or_default());
-                Ok(ControlFlow::Continue(self.inner.write(bent.write()).await?))
-            }
             StoreError::EditionNotFound { .. }
                 if self.is(Bug::PositionOnRemovedAccepted) && bent.stream.is_none() =>
             {
@@ -663,7 +634,7 @@ impl Broken {
     }
 
     /// The bookkeeping after `bent` landed: its positions put, its commit
-    /// counted, and the removal a bug runs on recording a deletion.
+    /// counted.
     async fn landed(&self, bent: &Bent<'_>) {
         for (key, _) in &bent.positions {
             self.shared
@@ -672,14 +643,8 @@ impl Broken {
                 .unwrap()
                 .push((key.handler.to_string(), Owned::of(key.stream)));
         }
-        let Some((stream, _)) = bent.stream else {
-            return;
-        };
-        if !bent.pages.is_empty() {
+        if bent.stream.is_some() && !bent.pages.is_empty() {
             self.local.commits.fetch_add(1, Ordering::SeqCst);
-        }
-        if self.is(Bug::RemovedOnRecording) && bent.pages.iter().any(is_deletion) {
-            let _ = self.inner.remove_deleted(stream).await;
         }
     }
 }
@@ -784,22 +749,11 @@ impl EventStore for Broken {
             return Ok(all
                 .pages
                 .into_iter()
-                .filter(|p| match p.meta.as_ref() {
-                    Some(m) => match &m.fact {
-                        Some(f) => {
-                            Uuid::try_from(&fact_command_id(&f.external_id)).ok() == Some(command_id)
-                        }
-                        None => matches!(
-                            &m.causation,
-                            Some(Causation::CommandId(id)) if Uuid::try_from(id).ok() == Some(command_id)
-                        ),
-                    },
-                    None => false,
-                })
+                .filter(|p| key_derived(p) == Some(command_id))
                 .collect());
         }
         if self.is(Bug::FactsUnindexed) {
-            found.retain(|p| p.meta.as_ref().is_none_or(|m| m.fact.is_none()));
+            found.retain(|p| !by_fact(p));
         }
         Ok(found)
     }
@@ -937,57 +891,34 @@ impl Broken {
         Ok(())
     }
 
-    /// A removal of `stream`, refused with `refused`, as the bug bends it:
-    /// the refusal, or the removal the bug makes anyway.
-    async fn removed_despite_refusal(
-        &self,
-        stream: StreamRef<'_>,
-        edition: &str,
-        refused: StoreError,
-    ) -> Result<u64, StoreError> {
-        match refused {
-            StoreError::EditionNotPropagated { .. } if self.is(Bug::RemovesBeforePropagation) => {
-                // Clear the edition's pending entries, undelivered, and go.
-                let pending = self.inner.pending(usize::MAX).await?;
+    /// Remove each of `others`, the edition's other streams, but `stream`:
+    /// a removal that spreads.
+    async fn spread_removal(&self, stream: StreamRef<'_>, others: &[(Owned, u64)]) {
+        for (other, _) in others {
+            let other = other.get();
+            if other != stream {
+                let _ = self.inner.remove_edition_stream(other).await;
+            }
+        }
+    }
+
+    /// What the removal of `stream` must take of the outbox, as the bug
+    /// bends it: the entries to put back after it, or to clear.
+    async fn bent_outbox_removal(&self, edition: &str) -> Result<Vec<OutboxEntry>, StoreError> {
+        let pending = self.inner.pending(usize::MAX).await?;
+        Ok(match self.bug {
+            Bug::RemoveKeepsOutbox => pending,
+            Bug::RemoveTakesEditionOutbox => {
                 let ids: Vec<Uuid> = pending
                     .iter()
                     .filter(|e| e.edition.as_deref() == Some(edition))
                     .map(|e| e.id)
                     .collect();
                 self.inner.clear(&ids).await?;
+                Vec::new()
             }
-            StoreError::EditionNotDeleted { .. } if self.is(Bug::RemovesUndeleted) => {
-                self.record_deletion(stream, edition).await?;
-            }
-            refused => return Err(refused),
-        }
-        self.inner.remove_deleted(stream).await
-    }
-
-    /// Record `stream`'s deletion from `edition` at its head.
-    async fn record_deletion(
-        &self,
-        stream: StreamRef<'_>,
-        edition: &str,
-    ) -> Result<(), StoreError> {
-        let at = self.inner.head(stream).await?.next_sequence;
-        let deletion = [contract::deleted_page(at, edition)];
-        self.inner
-            .write(Write::append(stream, at, &deletion))
-            .await?;
-        Ok(())
-    }
-
-    /// Delete and remove each of `others`, the edition's other streams,
-    /// but `stream`: a removal that spreads.
-    async fn spread_removal(&self, stream: StreamRef<'_>, edition: &str, others: &[(Owned, u64)]) {
-        for (other, _) in others {
-            let other = other.get();
-            if other != stream {
-                let _ = self.record_deletion(other, edition).await;
-                let _ = self.inner.remove_deleted(other).await;
-            }
-        }
+            _ => Vec::new(),
+        })
     }
 }
 
@@ -1023,43 +954,50 @@ impl Purge for Broken {
 impl Editions for Broken {
     async fn list_editions(&self) -> Result<Vec<EditionSummary>, StoreError> {
         let mut listed = self.inner.list_editions().await?;
-        if self.is(Bug::OriginsIncludePropagated) {
+        if self.is(Bug::ListsOneForkPerEdition) {
             for summary in &mut listed {
-                let mut all = Vec::new();
-                for (s, at) in self.edition_streams(&summary.name).await {
-                    all.push(EventRef {
-                        stream: Some(s.get().to_cover()),
-                        sequence: at,
-                    });
-                }
-                summary.origins = all;
+                summary.forks.truncate(1);
             }
         }
         Ok(listed)
     }
 
-    async fn remove_deleted(&self, stream: StreamRef<'_>) -> Result<u64, StoreError> {
+    async fn remove_edition_stream(&self, stream: StreamRef<'_>) -> Result<u64, StoreError> {
         let snapshot = self.inner.read_snapshot(stream).await?;
         let letters = self.letters_kept(stream, Bug::RemovalKeepsLetters).await;
+        let positions = match self.bug {
+            Bug::RemoveKeepsPositions => self.positions_on(stream).await?,
+            _ => Vec::new(),
+        };
         let edition = stream.edition.unwrap_or_default().to_string();
         let others = self.edition_streams(&edition).await;
-        let removed = match self.inner.remove_deleted(stream).await {
-            Err(refused) => {
-                self.removed_despite_refusal(stream, &edition, refused)
-                    .await?
-            }
-            Ok(removed) => removed,
-        };
+        let outbox = self.bent_outbox_removal(&edition).await?;
+        let removed = self.inner.remove_edition_stream(stream).await?;
+        self.shared.removed_from.lock().unwrap().push(edition);
         if let (Bug::RemoveKeepsSnapshot, Some(kept)) = (self.bug, snapshot) {
             self.inner.write_snapshot(stream, &kept).await?;
         }
         self.put_back(&letters).await?;
+        self.put_positions(stream, positions).await?;
+        if !outbox.is_empty() {
+            let pending = self.inner.pending(usize::MAX).await?;
+            let lost: Vec<OutboxEntry> = outbox
+                .into_iter()
+                .filter(|e| !pending.iter().any(|p| p.id == e.id))
+                .collect();
+            self.inner
+                .write(Write {
+                    outbox: &lost,
+                    ..Write::default()
+                })
+                .await?;
+        }
         if self.is(Bug::RemoveTakesMain) {
             let mains = self.inner.head(main_of(stream)).await?.next_sequence;
             self.inner.purge(main_of(stream), mains).await?;
         }
         if self.is(Bug::RemoveSpreads) {
-            self.spread_removal(stream, &edition, &others).await;
+            self.spread_removal(stream, &others).await;
         }
         Ok(removed)
     }
@@ -1341,6 +1279,26 @@ impl DeadLetterStore for Broken {
             _ => self.inner.remove_dead_letters(keys).await,
         }
     }
+}
+
+/// The id a store with [`Bug::FactKeyDerived`] keys `page` by: a fact's
+/// derivation from its origin's external id, a command's own id.
+fn key_derived(page: &EventPage) -> Option<Uuid> {
+    match page.meta.as_ref()?.causation.as_ref()? {
+        Causation::Fact(cause) => {
+            let origin = cause.origin.as_ref()?;
+            Uuid::try_from(&fact_command_id(&origin.external_id)).ok()
+        }
+        Causation::Command(cause) => Uuid::try_from(cause.command_id.as_ref()?).ok(),
+    }
+}
+
+/// Whether a fact produced `page` (its causation's fact arm).
+fn by_fact(page: &EventPage) -> bool {
+    matches!(
+        page.meta.as_ref().and_then(|m| m.causation.as_ref()),
+        Some(Causation::Fact(_))
+    )
 }
 
 // ------------------------------------------------------------------ harness
@@ -1673,48 +1631,32 @@ fn the_fork_point_checks_catch_a_store_that_moves_or_refuses_a_stated_fork() {
 }
 
 #[test]
-fn the_creation_check_catches_a_store_that_takes_a_creation_stating_another_sequence() {
-    catches!(
-        a_creation_stating_another_parent_sequence_is_malformed,
-        broken,
-        MismatchedCreationAccepted,
-    );
-}
-
-#[test]
 fn the_edition_checks_catch_a_wrong_list_or_removal() {
     catches!(
         list_editions_derives_each_edition_from_its_fork_events,
         broken,
-        OriginsIncludePropagated
+        ListsOneForkPerEdition
     );
     catches!(
-        an_edition_deletion_is_recorded_like_any_event,
-        broken,
-        RemovedOnRecording
-    );
-    catches!(
-        a_deleted_stream_is_removed_with_every_row_of_it,
+        a_removed_edition_stream_loses_every_row_of_it,
         broken,
         RemoveKeepsSnapshot,
+        RemoveKeepsPositions,
         RemoveTakesMain,
-        RemovesUndeleted,
+        RemoveSpreads,
     );
     catches!(
-        a_deletion_reaching_an_uncreated_stream_writes_nothing,
+        an_edition_is_deleted_by_removing_each_forked_stream,
         broken,
-        DeletionToUncreatedRefused
+        RemoveSpreads,
+        ListsOneForkPerEdition,
     );
     catches!(
-        a_deletion_is_recorded_and_removed_stream_by_stream,
+        after_deletion_only_a_fork_brings_the_edition_back,
         broken,
-        RemoveSpreads
-    );
-    catches!(
-        after_deletion_a_later_arrival_in_the_edition_is_refused,
-        broken,
-        ArrivalRecreates,
         PositionOnRemovedAccepted,
+        AcceptsUnforkedInput,
+        ForkAfterDeletionRefused,
     );
     catches!(
         a_what_if_edition_runs_beside_main_and_leaves_main_untouched,
@@ -1724,15 +1666,16 @@ fn the_edition_checks_catch_a_wrong_list_or_removal() {
     );
 }
 
-/// A removal before its deletion has propagated onward is a bug the suite
-/// catches (the owner's ruling).
+/// An edition's outbox entries are its rows: a removal that keeps them, or
+/// takes another stream's, is a bug the suite catches (decision 14.107).
 #[test]
-fn the_propagation_check_catches_a_removal_before_propagation() {
+fn the_edition_outbox_check_catches_a_removal_that_keeps_or_spreads() {
     catches!(
-        a_deleted_stream_is_removed_only_after_its_deletion_has_propagated,
+        a_removed_edition_stream_takes_the_outbox_entries_written_with_it,
         broken,
-        RemovesBeforePropagation,
-        RemovedOnRecording,
+        RemoveKeepsOutbox,
+        RemoveTakesEditionOutbox,
+        RemoveKeepsPositions,
     );
 }
 
@@ -1869,7 +1812,6 @@ fn an_honest_broken_store_passes_every_check() {
         a_forked_stream_reads_main_below_its_fork_then_its_own,
         a_fork_below_mains_head_lands_at_its_stated_sequence,
         a_fork_above_mains_head_is_a_conflict,
-        a_creation_stating_another_parent_sequence_is_malformed,
         find_command_finds_a_commands_events_on_its_stream,
         find_command_finds_a_retried_facts_events_by_its_id,
         find_command_finds_a_refusal_fact_on_the_trigger_stream_by_the_refused_id,
@@ -1889,13 +1831,11 @@ fn an_honest_broken_store_passes_every_check() {
         a_purge_never_takes_the_positions_on_its_stream,
         a_purge_of_a_forked_stream_is_guarded_by_its_head_as_read,
         list_editions_derives_each_edition_from_its_fork_events,
-        an_edition_deletion_is_recorded_like_any_event,
-        a_deleted_stream_is_removed_with_every_row_of_it,
-        a_deletion_reaching_an_uncreated_stream_writes_nothing,
-        a_deletion_is_recorded_and_removed_stream_by_stream,
-        after_deletion_a_later_arrival_in_the_edition_is_refused,
+        a_removed_edition_stream_loses_every_row_of_it,
+        an_edition_is_deleted_by_removing_each_forked_stream,
+        after_deletion_only_a_fork_brings_the_edition_back,
         a_what_if_edition_runs_beside_main_and_leaves_main_untouched,
-        a_deleted_stream_is_removed_only_after_its_deletion_has_propagated,
+        a_removed_edition_stream_takes_the_outbox_entries_written_with_it,
         a_read_unit_reads_a_forked_stream_through_to_main,
         a_change_token_changes_when_its_own_store_commits,
         read_until_time_is_the_prefix_recorded_by_then,

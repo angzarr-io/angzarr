@@ -70,7 +70,7 @@ pub trait DynPositionStore: MaybeSend + MaybeSync {
 /// [`Editions`], object-safe: core's edition admin.
 pub trait DynEditions: MaybeSend + MaybeSync {
     fn list_editions(&self) -> BoxFuture<'_, Result<Vec<EditionSummary>, StoreError>>;
-    fn remove_deleted<'a>(
+    fn remove_edition_stream<'a>(
         &'a self,
         stream: StreamRef<'a>,
     ) -> BoxFuture<'a, Result<u64, StoreError>>;
@@ -166,11 +166,11 @@ impl<T: Editions> DynEditions for T {
     fn list_editions(&self) -> BoxFuture<'_, Result<Vec<EditionSummary>, StoreError>> {
         Box::pin(Editions::list_editions(self))
     }
-    fn remove_deleted<'a>(
+    fn remove_edition_stream<'a>(
         &'a self,
         stream: StreamRef<'a>,
     ) -> BoxFuture<'a, Result<u64, StoreError>> {
-        Box::pin(Editions::remove_deleted(self, stream))
+        Box::pin(Editions::remove_edition_stream(self, stream))
     }
 }
 

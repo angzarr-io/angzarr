@@ -7,9 +7,12 @@
 //! CommandHandlerServiceServer}` and its client, and so on for
 //! `PolicyService`, `ProjectorService`, `UpcasterService` and
 //! `ComponentService` (with its `DescribeRequest`). Every request and
-//! response is core's message, from angzarr-proto (`angzarr_proto::v1`,
-//! re-exported as [`angzarr_proto`]), so one set of types serves the kernel
-//! in process and a child or a coordinator over gRPC. angzarr-embedded's host
+//! response is the handler layer's message (decision 14.78), from
+//! angzarr-proto-handler (`angzarr_proto_handler::v1`, re-exported as
+//! [`angzarr_proto_handler`]), on core's (`angzarr_proto::v1`, re-exported
+//! as [`angzarr_proto`]); `Describe` answers core's `ComponentDescriptor`.
+//! So one set of types serves the kernel in process and a child or a
+//! coordinator over gRPC. angzarr-embedded's host
 //! uses it to reach its non-Rust children; the distributed transport uses it
 //! to call remote handlers. No `connect` is generated: hand a client the
 //! channel your transport made (`XClient::new(channel)`).
@@ -18,13 +21,14 @@
 //! `/io.angzarr.component.v1.CommandHandlerService/Handle`.
 
 pub use angzarr_proto;
+pub use angzarr_proto_handler;
 
 // The spec's proto comments are prose, not rustdoc lists; and
 // tonic-prost-build's code, not ours, whose routers' long, deeply nested
 // `call` arms trip the shared crates' complexity lints (the root
 // Cargo.toml's [workspace.lints]). The one stated exemption, at its include
 // site, as angzarr-proto's `grpc` feature had it before decision 14.64 moved
-// the stubs here. Core's messages are extern-pathed to `::angzarr_proto::v1`,
+// the stubs here. The handler layer's and core's messages are extern-pathed,
 // so the module needs no nesting by package.
 #[allow(
     clippy::doc_overindented_list_items,

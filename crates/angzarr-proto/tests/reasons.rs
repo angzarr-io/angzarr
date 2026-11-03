@@ -1,186 +1,106 @@
-//! The framework's reason keys are the enums of `reasons.proto` (decision
-//! 14.44): a key travels as its value's full name, its enum's prefix
-//! included, and every enum reserves every retired key under its prefix,
-//! so none is answered or reused again.
+//! Core's reason keys are one enum, `AngzarrReason` (decision 14.104):
+//! keys are named by layer, never by role, so the router's, the component
+//! host's and the coordinator's keys share the `ANGZARR_REASON_` prefix
+//! (the transports' are `EmbeddedReason` and `DistributedReason`, beside
+//! their packages). A key travels as its value's full name. The rewrite
+//! holds no reservations (decision 14.100): the live keys are numbered
+//! densely from 1, and a removed key is simply absent.
 
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::Command;
 
-use angzarr_proto::v1::{CoordinatorReason, HostReason, RouterReason};
+use angzarr_proto::v1::AngzarrReason;
 use prost::Message;
 use prost_types::FileDescriptorSet;
 
-/// The keys decisions 14.37, 14.39 and 14.42 retired, as they were
-/// answered: bare, before the prefix.
-const RETIRED: &[&str] = &[
-    // 14.37
-    "MALFORMED_REFUSAL_FACT",
-    "DUPLICATE_REGISTRATION",
-    "NO_HANDLER_REGISTERED",
-    // 14.39
-    "DUPLICATE_UPCASTER_CHAIN",
-    "DUPLICATE_COMMAND_HANDLER",
-    // 14.42
-    "MISSING_COMMAND_BOOK",
-    "MISSING_COMMAND_PAGE",
-    "MISSING_COMMAND_PAYLOAD",
-    "MISSING_EVENT_BOOK_COVER",
-    "EMPTY_POLICY_SOURCE",
-    "POLICY_SOURCE_OUTSIDE_INPUT_DOMAIN",
-    "REFUSAL_FACT_MISSING",
-    "REFUSAL_WITHOUT_COMMAND",
-    "REFUSAL_WITHOUT_EVENT",
-    "REFUSAL_WITHOUT_REFUSED_COMMAND",
-    "REFUSED_COMMAND_WITHOUT_ID",
-    "REFUSAL_WITHOUT_TRIGGER_STREAM",
-    "HOST_STATUS_UNDECODABLE",
-    "NULL_ABI_POINTER",
+/// Every live key, in number order: the router's first, then the
+/// component host's, then the coordinator's (reasons.proto).
+const LIVE: &[&str] = &[
+    "ANGZARR_REASON_COMMAND_REFUSED",
+    "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR",
+    "ANGZARR_REASON_HANDLER_PANICKED",
+    "ANGZARR_REASON_FOLD_FAILED",
+    "ANGZARR_REASON_FOLD_FAILED_EMITTED",
+    "ANGZARR_REASON_PERSISTED_EVENT_CORRUPT",
+    "ANGZARR_REASON_ANY_DECODE_FAILED",
+    "ANGZARR_REASON_UNKNOWN_COMMAND_TYPE",
+    "ANGZARR_REASON_NO_FACT_HANDLER",
+    "ANGZARR_REASON_NO_REFUSAL_HANDLER",
+    "ANGZARR_REASON_NO_COMPONENT_OF_KIND",
+    "ANGZARR_REASON_NO_HANDLERS_REGISTERED",
+    "ANGZARR_REASON_DUPLICATE_COMPONENT",
+    "ANGZARR_REASON_UPCASTER_WITH_COMPONENT",
+    "ANGZARR_REASON_NO_COMPONENTS_REGISTERED",
+    "ANGZARR_REASON_UPCASTER_UNKNOWN_DOMAIN",
+    "ANGZARR_REASON_UPCASTER_OTHER_DOMAIN",
+    "ANGZARR_REASON_REMOTE_SOURCE",
+    "ANGZARR_REASON_PM_NO_INSTANCE",
+    "ANGZARR_REASON_POLICY_COMMAND_NO_ROOT",
+    "ANGZARR_REASON_MISSING_RULES_VERSION",
+    "ANGZARR_REASON_MISSING_STATE_TYPE",
+    "ANGZARR_REASON_POLICY_NO_OUTPUT_DOMAIN",
+    "ANGZARR_REASON_RETRY_CAP_EXHAUSTED",
+    "ANGZARR_REASON_EDITION_REMOVAL_FAILED",
+    "ANGZARR_REASON_POLICY_COMMAND_UNKNOWN_DOMAIN",
+    "ANGZARR_REASON_HANDLER_UNAVAILABLE",
+    "ANGZARR_REASON_CHAIN_TOO_DEEP",
+    "ANGZARR_REASON_STORE_UNAVAILABLE",
+    "ANGZARR_REASON_UPCASTER_UNAVAILABLE",
+    "ANGZARR_REASON_RULES_VERSION_MISMATCH",
+    "ANGZARR_REASON_EDITION_NOT_FORKED",
+    "ANGZARR_REASON_POLICY_TARGETS_ITS_TRIGGER",
+    "ANGZARR_REASON_NO_INPUT_DOMAIN",
+    "ANGZARR_REASON_DESCRIPTOR_NO_KIND",
+    "ANGZARR_REASON_FACT_DEAD_LETTERED",
+    "ANGZARR_REASON_DESCRIPTOR_NO_DOMAIN",
+    "ANGZARR_REASON_STATE_TYPE_MISMATCH",
+    "ANGZARR_REASON_SYNC_PROJECTION_FAILED",
+    "ANGZARR_REASON_SYNC_NO_PROJECTORS",
+    "ANGZARR_REASON_SYNC_PROJECTOR_NOT_SUBSCRIBED",
 ];
 
-/// The keys retired after the prefix, each answered under its full name
-/// and a number: reserved here by both, never answered again.
-const RETIRED_NUMBERED: &[&str] = &[
-    // 14.69: a policy emits the facts its destination declares.
-    "COORDINATOR_REASON_POLICY_COMMAND_IS_FACT",
-];
-
-/// Every live key of an enum, by name: its values from 1 up. The numbers
-/// with the ones reserved for moved keys are dense (decision 14.64), so a
-/// gap is only a moved key's.
-fn names<E>(name: fn(E) -> &'static str) -> Vec<&'static str>
-where
-    E: TryFrom<i32>,
-{
-    (1..=64)
-        .filter_map(|n| E::try_from(n).ok())
-        .map(name)
+fn live() -> Vec<&'static str> {
+    (1..)
+        .map_while(|n| AngzarrReason::try_from(n).ok())
+        .map(|r| r.as_str_name())
         .collect()
-}
-
-/// The keys decision 14.64 moved from core to a transport: reserved here,
-/// by name and number, live in the transport's crate.
-const MOVED: &[&str] = &[
-    "HOST_REASON_HANDSHAKE_MALFORMED",
-    "HOST_REASON_HANDSHAKE_TIMEOUT",
-    "HOST_REASON_HANDSHAKE_CLOSED",
-    "HOST_REASON_CHILD_NOT_SERVING",
-    "HOST_REASON_CHILD_EXIT_STATUS",
-    "HOST_REASON_CHILD_NOT_EXITED",
-    "HOST_REASON_PROBE_INPUT",
-    "COORDINATOR_REASON_COMPONENT_NOT_REGISTERED",
-    "COORDINATOR_REASON_COMMANDS_NOT_SERVED",
-    "COORDINATOR_REASON_PAYLOAD_UNAVAILABLE",
-];
-
-fn router() -> Vec<&'static str> {
-    names::<RouterReason>(|r| r.as_str_name())
-}
-fn host() -> Vec<&'static str> {
-    names::<HostReason>(|r| r.as_str_name())
-}
-fn coordinator() -> Vec<&'static str> {
-    names::<CoordinatorReason>(|r| r.as_str_name())
 }
 
 #[test]
 fn a_key_travels_as_its_full_name() {
     assert_eq!(
-        RouterReason::DuplicateComponent.as_str_name(),
-        "ROUTER_REASON_DUPLICATE_COMPONENT"
+        AngzarrReason::DuplicateComponent.as_str_name(),
+        "ANGZARR_REASON_DUPLICATE_COMPONENT"
     );
     assert_eq!(
-        HostReason::NoComponentsRegistered.as_str_name(),
-        "HOST_REASON_NO_COMPONENTS_REGISTERED"
+        AngzarrReason::from_str_name("ANGZARR_REASON_UNKNOWN_COMMAND_TYPE"),
+        Some(AngzarrReason::UnknownCommandType)
     );
+    // The keys of the old role-named enums are gone (decision 14.104).
     assert_eq!(
-        CoordinatorReason::ConflictOverlap.as_str_name(),
-        "COORDINATOR_REASON_CONFLICT_OVERLAP"
-    );
-    assert_eq!(
-        RouterReason::from_str_name("ROUTER_REASON_UNKNOWN_COMMAND_TYPE"),
-        Some(RouterReason::UnknownCommandType)
+        AngzarrReason::from_str_name("ROUTER_REASON_COMMAND_REFUSED"),
+        None
     );
 }
 
 #[test]
-fn every_key_carries_its_enums_prefix() {
-    for (prefix, keys) in [
-        ("ROUTER_REASON_", router()),
-        ("HOST_REASON_", host()),
-        ("COORDINATOR_REASON_", coordinator()),
-    ] {
-        assert!(!keys.is_empty(), "{prefix}: no keys");
-        for key in keys {
-            let rest = key.strip_prefix(prefix);
-            assert!(rest.is_some_and(|r| !r.is_empty()), "{key}");
-            assert!(
-                key.chars()
-                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
-                "{key} is not SCREAMING_SNAKE"
-            );
-        }
-    }
-}
-
-#[test]
-fn the_owners_keys_are_these() {
-    assert_eq!(
-        host(),
-        [
-            "HOST_REASON_UPCASTER_WITH_COMPONENT",
-            "HOST_REASON_NO_COMPONENTS_REGISTERED",
-            "HOST_REASON_DESCRIPTOR_RULES_VERSION_MISMATCH",
-            // Decision 14.55.
-            "HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN",
-            // Decision 14.65: one misconfiguration validator's gaps.
-            "HOST_REASON_UPCASTER_UNKNOWN_DOMAIN",
-            "HOST_REASON_UPCASTER_OTHER_DOMAIN",
-            "HOST_REASON_RESOLUTION_UNSUPPORTED",
-            "HOST_REASON_REMOTE_SOURCE",
-            "HOST_REASON_STATE_TYPE_MISMATCH",
-        ]
-    );
-    assert!(router().contains(&"ROUTER_REASON_DUPLICATE_COMPONENT"));
-    assert!(coordinator().contains(&"COORDINATOR_REASON_PM_NO_INSTANCE"));
-    // Decision 14.45.
-    assert!(coordinator().contains(&"COORDINATOR_REASON_EXPECTED_SEQUENCE_STALE"));
-    // Decision 14.46.
-    assert!(coordinator().contains(&"COORDINATOR_REASON_RETRY_CAP_EXHAUSTED"));
-    // Decision 14.47.
-    assert!(coordinator().contains(&"COORDINATOR_REASON_EXPECTED_SEQUENCE_AHEAD"));
-    // Decision 14.48, amended.
-    assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_WITH_HANDLING"));
-    assert!(coordinator().contains(&"COORDINATOR_REASON_EDITION_REMOVAL_FAILED"));
-    assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_OTHER_IDENTITY"));
-    assert!(coordinator().contains(&"COORDINATOR_REASON_POLICY_COMMAND_FACT_ORIGIN"));
-    // Decision 14.69.
-    for key in RETIRED_NUMBERED {
+fn the_live_keys_are_these_numbered_densely_from_one() {
+    assert_eq!(live(), LIVE);
+    // Dense: nothing past the last.
+    let next = i32::try_from(LIVE.len()).unwrap() + 1;
+    assert!(AngzarrReason::try_from(next).is_err());
+    for key in LIVE {
+        let rest = key.strip_prefix("ANGZARR_REASON_");
+        assert!(rest.is_some_and(|r| !r.is_empty()), "{key}");
         assert!(
-            !router().contains(key) && !host().contains(key) && !coordinator().contains(key),
-            "{key} retired"
+            key.chars()
+                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+            "{key} is not SCREAMING_SNAKE"
         );
     }
-    // Decision 14.51: every retryable failure carries a key (the
-    // distribution-only ones are the distributed transport's, 14.64).
-    for key in [
-        "COORDINATOR_REASON_STORE_CONFLICT",
-        "COORDINATOR_REASON_STORE_UNAVAILABLE",
-        "COORDINATOR_REASON_UPCASTER_UNAVAILABLE",
-    ] {
-        assert!(coordinator().contains(&key), "{key}");
-    }
-    for key in MOVED {
-        assert!(
-            !host().contains(key) && !coordinator().contains(key),
-            "{key} moved"
-        );
-    }
-    // Decision 14.56.
-    assert!(coordinator().contains(&"COORDINATOR_REASON_RULES_VERSION_MISMATCH"));
-    let all: Vec<_> = [router(), host(), coordinator()].concat();
-    let distinct: BTreeSet<_> = all.iter().collect();
-    assert_eq!(all.len(), distinct.len(), "a key in two enums");
+    let distinct: BTreeSet<_> = LIVE.iter().collect();
+    assert_eq!(distinct.len(), LIVE.len());
 }
 
 /// reasons.proto compiled by protoc into a FileDescriptorSet.
@@ -201,60 +121,13 @@ fn descriptor() -> FileDescriptorSet {
 }
 
 #[test]
-fn every_enum_reserves_every_retired_key() {
+fn reasons_proto_declares_one_key_enum_and_reserves_nothing() {
     let set = descriptor();
     let file = &set.file[0];
-    let enums: BTreeSet<&str> = file.enum_type.iter().map(|e| e.name()).collect();
-    // The key enums, and the statuses they declare (decision 14.65).
-    assert_eq!(
-        enums,
-        [
-            "CoordinatorReason",
-            "HostReason",
-            "ReasonStatus",
-            "RouterReason"
-        ]
-        .into()
-    );
-    for e in file.enum_type.iter().filter(|e| e.name() != "ReasonStatus") {
-        let prefix = match e.name() {
-            "RouterReason" => "ROUTER_REASON_",
-            "HostReason" => "HOST_REASON_",
-            _ => "COORDINATOR_REASON_",
-        };
-        let retired: BTreeSet<String> = RETIRED.iter().map(|k| format!("{prefix}{k}")).collect();
-        let of_prefix = |keys: &[&str]| -> BTreeSet<String> {
-            keys.iter()
-                .filter(|k| k.starts_with(prefix))
-                .map(|k| (*k).to_string())
-                .collect()
-        };
-        let moved = of_prefix(MOVED);
-        let numbered = of_prefix(RETIRED_NUMBERED);
-        let reserved: BTreeSet<String> = e.reserved_name.iter().cloned().collect();
-        assert_eq!(
-            reserved,
-            &(&retired | &moved) | &numbered,
-            "{}: the retired keys and the moved ones",
-            e.name()
-        );
-        // A number is reserved only for a moved key or a key retired by
-        // number (numbers are bookkeeping): one each, an enum's ranges
-        // inclusive.
-        let numbers: i32 = e
-            .reserved_range
-            .iter()
-            .map(|r| r.end() - r.start() + 1)
-            .sum();
-        assert_eq!(
-            usize::try_from(numbers).unwrap(),
-            moved.len() + numbered.len(),
-            "{}",
-            e.name()
-        );
-        for v in &e.value {
-            let bare = v.name().strip_prefix(prefix).unwrap_or(v.name());
-            assert!(!RETIRED.contains(&bare), "{} is retired", v.name());
-        }
-    }
+    let enums: Vec<&str> = file.enum_type.iter().map(|e| e.name()).collect();
+    // No status enum of its own: a key's status is google.rpc.Code
+    // (decision 14.104).
+    assert_eq!(enums, ["AngzarrReason"]);
+    let e = &file.enum_type[0];
+    assert!(e.reserved_name.is_empty() && e.reserved_range.is_empty());
 }

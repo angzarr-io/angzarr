@@ -1,59 +1,86 @@
-//! The reason keys' args, read from the compiled descriptors (decision
-//! 14.60): each live value of a reasons.proto's `RouterReason`,
-//! `HostReason` and `CoordinatorReason` (core's, and each transport's;
-//! decision 14.64) names its args in its `(io.angzarr.v1.reason)` option,
-//! which prost does not generate (it skips `extend`), so the option is
-//! read off the raw `FileDescriptorSet` bytes (`build_descriptor.rs`), the
-//! way `tests/conflict_units.rs` reads the conflict-unit options. Shared by
-//! angzarr-core's proto crates' build scripts (`#[path]`).
+//! The reason keys' args and surfaces, read from the compiled descriptors
+//! (decisions 14.60 and 14.104): each live value of a reasons.proto's key
+//! enum (core's `AngzarrReason`, each transport's `EmbeddedReason` or
+//! `DistributedReason`; one enum per layer) names its args and its surface
+//! in its `(io.angzarr.v1.reason)` option, which prost does not generate (it
+//! skips `extend`), so the option is read off the raw `FileDescriptorSet`
+//! bytes (`build_descriptor.rs`). Shared by angzarr-core's proto crates'
+//! build scripts (`#[path]`).
 //!
 //! From them it writes `$OUT_DIR/reason_args.rs`, included in `v1`: an
-//! `args()` and a `status()` per enum, each an exhaustive match on its
+//! `args()` and a `surface()` per enum, each an exhaustive match on its
 //! variants (so a value the spec adds without a variant here fails to
-//! compile, never silently has no args or status), and the `reason_args`
-//! module, one constant per distinct arg name. The status is the option's
-//! `status` (decision 14.65), the one table a runtime raises a key under.
+//! compile, never silently has no args or surface), and the `reason_args`
+//! module, one constant per distinct arg name. The surface is the option's
+//! `surfaces` oneof (decision 14.91): its `grpc_status`, a `google.rpc.Code`
+//! named by its variant (read from the vendored code.proto in the same set),
+//! or `readiness`.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
-use super::descriptor::{file, messages, text, varints};
+use super::descriptor::{fields, file, messages, text, varints};
 
-/// Each key enum's value-name prefix, by enum name: the same in core's
-/// reasons.proto and in each transport's (decision 14.64).
+/// Each key enum's value-name prefix, by enum name: one enum per layer
+/// (decision 14.104), core's `AngzarrReason` and each transport's.
 const PREFIXES: [(&str, &str); 3] = [
-    ("RouterReason", "ROUTER_REASON_"),
-    ("HostReason", "HOST_REASON_"),
-    ("CoordinatorReason", "COORDINATOR_REASON_"),
+    ("AngzarrReason", "ANGZARR_REASON_"),
+    ("EmbeddedReason", "EMBEDDED_REASON_"),
+    ("DistributedReason", "DISTRIBUTED_REASON_"),
 ];
 
-/// Core's reasons.proto, under the proto root: it declares `ReasonStatus`.
+/// Core's reasons.proto, under the proto root: the crate whose code names
+/// [`ReasonSurface`] and `google.rpc.Code` from inside its own `v1`.
 const CORE_REASONS: &str = "io/angzarr/v1/reasons.proto";
 
 /// The `(io.angzarr.v1.reason)` extension's field number on
-/// `EnumValueOptions`.
-const REASON_OPTION: u64 = 50109;
+/// `EnumValueOptions` (options.proto's contiguous range, decision 14.100).
+const REASON_OPTION: u64 = 50105;
+
+/// `ReasonOptions`' fields: `args` 1, and the `surfaces` oneof's arms,
+/// `grpc_status` 2 (a `google.rpc.Code`) and `readiness` 3 (decision 14.91).
+const ARGS: u64 = 1;
+const GRPC_STATUS: u64 = 2;
+const READINESS: u64 = 3;
+
+/// How a key surfaces, as its option declares it.
+enum Surface {
+    /// `grpc_status`, its `google.rpc.Code` number.
+    Status(u64),
+    Readiness,
+}
 
 /// One enum value: its full name, its number, its declared args and its
-/// declared status's number (`None` where the option is absent; a status
-/// of 0 where the option sets none).
+/// declared surface (`None` where the option, or its surface, is absent).
 struct Value {
     name: String,
     number: u64,
     args: Option<Vec<String>>,
-    status: u64,
+    surface: Option<Surface>,
+}
+
+/// The surface the last of the option's `surfaces` arms names, as protobuf
+/// reads a oneof: the last arm on the wire wins.
+fn surface(reason: &[u8]) -> Option<Surface> {
+    fields(reason)
+        .into_iter()
+        .filter_map(|(number, _, value)| match number {
+            GRPC_STATUS => Some(Surface::Status(value)),
+            READINESS => Some(Surface::Readiness),
+            _ => None,
+        })
+        .next_back()
 }
 
 /// An `EnumValueDescriptorProto`: name 1, number 2, options 3; the
-/// options' extension holds a `ReasonOptions`, whose args are field 1 and
-/// status field 2.
+/// options' extension holds a `ReasonOptions`.
 fn value(buf: &[u8]) -> Value {
     let number = varints(buf, 2).next().unwrap_or(0);
     let reason = messages(buf, 3)
         .flat_map(|options| messages(options, REASON_OPTION).collect::<Vec<_>>())
         .last();
     let args = reason.map(|reason| {
-        messages(reason, 1)
+        messages(reason, ARGS)
             .map(|arg| String::from_utf8(arg.to_vec()).expect("a UTF-8 arg name"))
             .collect()
     });
@@ -61,7 +88,7 @@ fn value(buf: &[u8]) -> Value {
         name: text(buf, 1),
         number,
         args,
-        status: reason.and_then(|r| varints(r, 2).last()).unwrap_or(0),
+        surface: reason.and_then(surface),
     }
 }
 
@@ -93,10 +120,61 @@ fn variant(name: &str, prefix: &str) -> String {
         .collect()
 }
 
-/// One enum's `impl` with its `args()` and its `status()`, a status named
-/// by the path `status_type` (core's `ReasonStatus`, from the package the
-/// code is included in).
-fn write_enum(out: &mut String, name: &str, prefix: &str, values: &[Value], status_type: &str) {
+/// The paths the generated code names core's types by: from inside core's
+/// own `v1`, or from a transport crate through its angzarr-proto
+/// dependency.
+struct Paths {
+    surface: &'static str,
+    code: &'static str,
+}
+
+/// The vendored `google.rpc.Code` (decision 14.104), as the set holds it
+/// (every crate's set includes it, an import of core's reasons.proto).
+const GOOGLE_RPC_CODE: &str = "google/rpc/code.proto";
+
+/// prost's variant of each `google.rpc.Code` number: its value name, each
+/// word capitalised (the enum's values carry no prefix).
+fn code_variants(set: &[u8]) -> Vec<(u64, String)> {
+    messages(file(set, GOOGLE_RPC_CODE), 5)
+        .filter(|e| text(e, 1) == "Code")
+        .flat_map(|e| {
+            messages(e, 2)
+                .map(|v| (varints(v, 2).next().unwrap_or(0), variant(&text(v, 1), "")))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The `Surface` expression of one live value.
+fn surface_expr(v: &Value, paths: &Paths, codes: &[(u64, String)]) -> String {
+    match &v.surface {
+        Some(Surface::Status(0)) => panic!(
+            "{} declares grpc_status OK, which is no key's status (decision 14.104)",
+            v.name
+        ),
+        Some(Surface::Status(number)) => {
+            let code = codes
+                .iter()
+                .find(|(n, _)| n == number)
+                .map(|(_, name)| name)
+                .unwrap_or_else(|| panic!("{} declares grpc_status {number}, no google.rpc.Code", v.name));
+            format!("Some({}::GrpcStatus({}::{code}))", paths.surface, paths.code)
+        }
+        Some(Surface::Readiness) => format!("Some({}::Readiness)", paths.surface),
+        None => panic!(
+            "{} declares no surface: reasons.proto's live keys each name grpc_status or readiness (decision 14.91)",
+            v.name
+        ),
+    }
+}
+
+/// One enum's `impl` with its `args()` and its `surface()`.
+fn write_enum(
+    out: &mut String,
+    (name, prefix, values): (&str, &str, &[Value]),
+    paths: &Paths,
+    codes: &[(u64, String)],
+) {
     writeln!(out, "impl {name} {{").unwrap();
     writeln!(
         out,
@@ -126,34 +204,28 @@ fn write_enum(out: &mut String, name: &str, prefix: &str, values: &[Value], stat
     out.push_str("        }\n    }\n\n");
     writeln!(
         out,
-        "    /// The gRPC status the key travels with, as its\n    \
-         /// `(io.angzarr.v1.reason)` option declares it in reasons.proto\n    \
-         /// (decision 14.65); `UNSPECIFIED` for `UNSPECIFIED`, which is\n    \
-         /// never answered.\n    \
-         pub fn status(self) -> {status_type} {{\n        let number = match self {{"
+        "    /// How the key surfaces, as its `(io.angzarr.v1.reason)` option\n    \
+         /// declares it in reasons.proto (decisions 14.91 and 14.104): the\n    \
+         /// `google.rpc.Code` it travels with, or a readiness refusal;\n    \
+         /// `None` for `UNSPECIFIED`, which is never answered.\n    \
+         pub const fn surface(self) -> Option<{}> {{\n        match self {{",
+        paths.surface
     )
     .unwrap();
     for v in values {
-        let status = match (v.status, v.number) {
-            (_, 0) => 0,
-            (0, _) => panic!(
-                "{} declares no status: reasons.proto's live keys each declare one (decision 14.65)",
-                v.name
-            ),
-            (status, _) => status,
+        let expr = if v.number == 0 {
+            "None".to_string()
+        } else {
+            surface_expr(v, paths, codes)
         };
         writeln!(
             out,
-            "            Self::{} => {status},",
+            "            Self::{} => {expr},",
             variant(&v.name, prefix)
         )
         .unwrap();
     }
-    writeln!(
-        out,
-        "        }};\n        {status_type}::try_from(number).expect(\"a ReasonStatus value\")\n    }}\n}}\n"
-    )
-    .unwrap();
+    out.push_str("        }\n    }\n}\n\n");
 }
 
 /// The constants module: one `pub const` per distinct arg name.
@@ -180,18 +252,25 @@ fn write_names(out: &mut String, names: &BTreeSet<String>) {
 /// in core's own `v1`; a transport's code names them through its
 /// angzarr-proto dependency.
 pub fn generate(set: &[u8], path: &str, enums: &[&str]) -> String {
-    let status_type = if path == CORE_REASONS {
-        "ReasonStatus"
+    let paths = if path == CORE_REASONS {
+        Paths {
+            surface: "crate::ReasonSurface",
+            code: "crate::google::rpc::Code",
+        }
     } else {
-        "::angzarr_proto::v1::ReasonStatus"
+        Paths {
+            surface: "::angzarr_proto::ReasonSurface",
+            code: "::angzarr_proto::google::rpc::Code",
+        }
     };
+    let codes = code_variants(set);
     let found = read(set, path);
     let names_found: Vec<&str> = found.iter().map(|(n, _, _)| n.as_str()).collect();
     assert_eq!(names_found, enums, "{path}'s key enums");
     let mut out = String::new();
     let mut names = BTreeSet::new();
     for (name, prefix, values) in &found {
-        write_enum(&mut out, name, prefix, values, status_type);
+        write_enum(&mut out, (name, prefix, values), &paths, &codes);
         names.extend(values.iter().flat_map(|v| v.args.iter().flatten().cloned()));
     }
     write_names(&mut out, &names);

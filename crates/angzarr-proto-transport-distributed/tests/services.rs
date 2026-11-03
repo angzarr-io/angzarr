@@ -36,7 +36,7 @@ macro_rules! services {
 fn every_distributed_service_has_a_generated_client_and_server() {
     let rows = services! {
         CommandHandlerCoordinatorService, command_handler_coordinator_service_server::CommandHandlerCoordinatorServiceServer, command_handler_coordinator_service_client::CommandHandlerCoordinatorServiceClient {
-            handle => "Handle", handle_async => "HandleAsync", handle_sync => "HandleSync",
+            handle => "Handle", handle_async => "HandleAsync", handle_sync => "HandleSync", deliver => "Deliver",
         }
         PolicyCoordinatorService, policy_coordinator_service_server::PolicyCoordinatorServiceServer, policy_coordinator_service_client::PolicyCoordinatorServiceClient {
             execute => "Execute",
@@ -46,7 +46,7 @@ fn every_distributed_service_has_a_generated_client_and_server() {
         }
         EventQueryService, event_query_service_server::EventQueryServiceServer, event_query_service_client::EventQueryServiceClient {
             get_event_book => "GetEventBook", get_events => "GetEvents",
-            get_correlated_events => "GetCorrelatedEvents", get_aggregate_roots => "GetAggregateRoots",
+            get_correlated_events => "GetCorrelatedEvents", list_streams => "ListStreams",
         }
         EventStreamService, event_stream_service_server::EventStreamServiceServer, event_stream_service_client::EventStreamServiceClient {
             subscribe => "Subscribe",
@@ -91,7 +91,7 @@ fn a_service_is_reached_under_the_distributed_package() {
 }
 
 #[test]
-fn the_transport_imports_core_and_sererr_only() {
+fn the_transport_imports_core_sererr_and_cloudevents_only() {
     let set = prost_types::FileDescriptorSet::decode(
         angzarr_proto_transport_distributed::FILE_DESCRIPTOR_SET,
     )
@@ -106,7 +106,8 @@ fn the_transport_imports_core_and_sererr_only() {
                 import.starts_with("io/angzarr/v1/")
                     || import.starts_with("io/angzarr/transport/distributed/v1/")
                     || import.starts_with("google/")
-                    || import == "sererr/v1/sererr.proto",
+                    || import == "sererr/v1/sererr.proto"
+                    || import == "io/cloudevents/v1/cloudevents.proto",
                 "{} imports {import}",
                 file.name()
             );

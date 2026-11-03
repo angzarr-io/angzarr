@@ -1,7 +1,7 @@
 ## This Repository
 
 angzarr core is a virtual Cargo workspace of the shared crates under
-`crates/` (angzarr-proto, angzarr-proto-component, the two
+`crates/` (angzarr-proto, angzarr-proto-handler, angzarr-proto-component, the two
 angzarr-proto-transport crates, angzarr-ports, angzarr-diagnostic,
 angzarr-yaml, angzarr-presentation, angzarr-test-dir), which the router, angzarr-embedded,
 the CLI and the client and example repos depend on by git rev. Each crate

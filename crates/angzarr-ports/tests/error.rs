@@ -117,16 +117,11 @@ fn stream_errors() -> Vec<(StoreError, &'static str, Recovery)> {
     ]
 }
 
-/// The errors of editions: their names, creations, forks and removal.
+/// The errors of editions: their names and forks.
 fn edition_errors() -> Vec<(StoreError, &'static str, Recovery)> {
     use Recovery::*;
     let name = || "what-if".to_string();
     vec![
-        (
-            StoreError::malformed_creation(stream_in("what-if"), 3, 5),
-            code!("store-malformed-creation"),
-            Invalid,
-        ),
         (
             StoreError::unknown_edition(stream()),
             code!("store-unknown-edition"),
@@ -141,16 +136,6 @@ fn edition_errors() -> Vec<(StoreError, &'static str, Recovery)> {
             StoreError::EditionNotFound { name: name() },
             code!("edition-not-found"),
             Invalid,
-        ),
-        (
-            StoreError::edition_not_deleted(stream_in("what-if")),
-            code!("store-edition-not-deleted"),
-            Bug,
-        ),
-        (
-            StoreError::edition_not_propagated(stream_in("what-if")),
-            code!("store-edition-not-propagated"),
-            Retry,
         ),
         (
             StoreError::edition_not_forked(stream_in("what-if")),
@@ -397,8 +382,6 @@ fn the_new_refusals_name_their_streams() {
     for refusal in [
         StoreError::edition_not_forked(stream_in("what-if")),
         StoreError::edition_already_forked(stream_in("what-if")),
-        StoreError::edition_not_deleted(stream_in("what-if")),
-        StoreError::edition_not_propagated(stream_in("what-if")),
     ] {
         assert_eq!(refusal.args(), vec![("stream", Arg::Str(e.clone()))]);
         assert!(refusal.to_string().contains(&e), "{refusal}");
@@ -429,7 +412,7 @@ fn the_stream_is_read_without_the_box() {
         Some(&stream())
     );
     assert_eq!(
-        StoreError::edition_not_propagated(other()).stream(),
+        StoreError::edition_already_forked(other()).stream(),
         Some(&other())
     );
     assert_eq!(StoreError::EditionNameRequired.stream(), None);

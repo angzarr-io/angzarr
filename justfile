@@ -118,9 +118,11 @@ buf-docs:
     sed -i '1i ---\ntitle: Protocol Buffer API\ndescription: Auto-generated documentation for Angzarr protobuf definitions\n---\n' "{{TOP}}/docs/docs/api/proto/index.md"
 
 # === Shared crates: build, lint, test ===
-# The four proto crates are the spec's four packages (decision 14.64):
-# angzarr-proto core's messages (prost only, wasm32), angzarr-proto-component
-# the handler-side services' tonic stubs, and one crate per transport.
+# The five proto crates are the spec's five packages (decisions 14.64 and
+# 14.78): angzarr-proto core's messages (prost only, wasm32),
+# angzarr-proto-handler the handler layer's messages (prost only, wasm32),
+# angzarr-proto-component the handler-side services' tonic stubs, and one
+# crate per transport.
 # Moved from angzarr-project's rust/. They run on the host, not in a
 # toolchain container: protoc, the wasm32-unknown-unknown target,
 # wasm-bindgen-test-runner (`just -f crates/angzarr-ports/justfile tools`)
@@ -128,7 +130,7 @@ buf-docs:
 
 # Every shared crate, in dependency order. Each has a justfile with check,
 # fmt, fmt-check, build, lint and test (crates/<crate>/justfile).
-SHARED_CRATES := "angzarr-test-dir angzarr-diagnostic angzarr-proto angzarr-proto-component angzarr-proto-transport-embedded angzarr-proto-transport-distributed angzarr-ports angzarr-yaml angzarr-presentation"
+SHARED_CRATES := "angzarr-test-dir angzarr-diagnostic angzarr-proto angzarr-proto-handler angzarr-proto-component angzarr-proto-transport-embedded angzarr-proto-transport-distributed angzarr-ports angzarr-yaml angzarr-presentation"
 
 # Run one recipe of every shared crate's justfile, stopping at the first
 # that fails.

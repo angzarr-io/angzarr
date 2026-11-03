@@ -7,6 +7,7 @@ members = [
     "crates/angzarr-presentation",
     "crates/angzarr-proto",
     "crates/angzarr-proto-component",
+    "crates/angzarr-proto-handler",
     "crates/angzarr-proto-transport-distributed",
     "crates/angzarr-proto-transport-embedded",
     "crates/angzarr-test-dir",

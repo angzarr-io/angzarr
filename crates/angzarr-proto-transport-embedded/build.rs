@@ -34,7 +34,7 @@ const PACKAGE: &str = "io/angzarr/transport/embedded/v1";
 const CHILD_PROTOCOL: &str = "io/angzarr/transport/embedded/v1/child_protocol.proto";
 
 /// The `(child_protocol)` extension's number on `FileOptions`.
-const CHILD_PROTOCOL_OPTION: u64 = 50110;
+const CHILD_PROTOCOL_OPTION: u64 = 50106;
 
 fn main() {
     let root = support::proto_root();
@@ -53,14 +53,16 @@ fn main() {
         .expect("prost: compile angzarr's io.angzarr.transport.embedded.v1 protos");
 
     let set = std::fs::read(out.join("file_descriptor_set.bin")).expect("read the descriptor set");
-    reasons::reason_keys(&root, &out, &set, PACKAGE, &["HostReason"]);
+    reasons::reason_keys(&root, &out, &set, PACKAGE, &["EmbeddedReason"]);
     std::fs::write(out.join("child_protocol.rs"), child_protocol(&set))
         .expect("write child_protocol.rs");
 }
 
 /// The constants module for the `(child_protocol)` option set on
 /// `child_protocol.proto` in the encoded descriptor set `set`: one constant
-/// per `ChildProtocol` field, each required.
+/// per `ChildProtocol` field, each required. There is no handshake line
+/// (decision 14.80): the child listens on the host's path and reports
+/// health SERVING there.
 fn child_protocol(set: &[u8]) -> String {
     let options = descriptor::messages(descriptor::file(set, CHILD_PROTOCOL), 8)
         .last()
@@ -68,43 +70,25 @@ fn child_protocol(set: &[u8]) -> String {
     let constants = descriptor::messages(options, CHILD_PROTOCOL_OPTION)
         .last()
         .unwrap_or_else(|| panic!("{CHILD_PROTOCOL} does not set (child_protocol)"));
-    let text = |number: u64, field: &str| {
-        let value = descriptor::text(constants, number);
-        assert!(!value.is_empty(), "(child_protocol) sets no {field}");
-        value
-    };
-    let max = descriptor::varints(constants, 5)
+    let socket_env = descriptor::text(constants, 1);
+    assert!(
+        !socket_env.is_empty(),
+        "(child_protocol) sets no socket_env"
+    );
+    let max = descriptor::varints(constants, 2)
         .last()
         .expect("(child_protocol) sets no max_socket_path_bytes");
     let mut out = String::new();
-    for (name, doc, value) in [
-        (
-            "HANDSHAKE_PREFIX",
-            "The handshake line's first word.",
-            text(1, "handshake_prefix"),
-        ),
-        (
-            "PROTOCOL_VERSION",
-            "The handshake line's format version.",
-            text(2, "protocol_version"),
-        ),
-        (
-            "ADDRESS_SCHEME",
-            "The scheme before a handshake's socket path.",
-            text(3, "address_scheme"),
-        ),
-        (
-            "SOCKET_ENV",
-            "The environment variable a host names the socket path in.",
-            text(4, "socket_env"),
-        ),
-    ] {
-        writeln!(out, "/// {doc}\npub const {name}: &str = {value:?};").expect("write to a String");
-    }
+    writeln!(
+        out,
+        "/// The environment variable a host names the socket path in.\npub const SOCKET_ENV: &str = {socket_env:?};"
+    )
+    .expect("write to a String");
     writeln!(
         out,
         "/// The longest socket path a host gives, in bytes: a Unix socket\n\
-         /// address's `sun_path`, less its NUL.\npub const MAX_SOCKET_PATH_BYTES: usize = {max};"
+         /// address's `sun_path`, less its NUL, on every platform (macOS and\n\
+         /// the BSDs give 104, so 103; decision 14.108).\npub const MAX_SOCKET_PATH_BYTES: usize = {max};"
     )
     .expect("write to a String");
     out

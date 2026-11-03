@@ -11,8 +11,7 @@ use std::sync::Arc;
 
 use angzarr_ports::angzarr_proto::v1::EventBook;
 use angzarr_ports::contract::{
-    at, command, correlated, created_page, deleted_page, edition_stream, entry, event_ref,
-    main_stream, page,
+    at, command, correlated, created_page, edition_stream, entry, event_ref, main_stream, page,
 };
 use angzarr_ports::memory::MemoryStore;
 use angzarr_ports::{
@@ -89,8 +88,8 @@ async fn one_dyn_store_upcasts_to_each_port() {
     );
 }
 
-/// Core's edition admin through `Arc<dyn DynEditions>`: a creation and a
-/// deletion (writes, through the dyn store), `ListEditions` and the
+/// Core's edition admin through `Arc<dyn DynEditions>`: a fork (a write,
+/// through the dyn store), `ListEditions` and the
 /// removal.
 #[tokio::test]
 async fn editions_are_served_through_dyn() {
@@ -103,19 +102,15 @@ async fn editions_are_served_through_dyn() {
     DynEventStore::write(&*events, Write::append(main, 0, &first))
         .await
         .unwrap();
-    let created = [created_page(1, "what-if")];
+    let created = [created_page(1)];
     DynEventStore::write(&*events, Write::append(e, 1, &created))
         .await
         .unwrap();
     let listed = editions.list_editions().await.unwrap();
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].name, "what-if");
-    assert_eq!(listed[0].origins, [event_ref(e, 1)]);
-    let deleted = [deleted_page(2, "what-if")];
-    DynEventStore::write(&*events, Write::append(e, 2, &deleted))
-        .await
-        .unwrap();
-    assert_eq!(editions.remove_deleted(e).await, Ok(2));
+    assert_eq!(listed[0].forks, [event_ref(e, 1)]);
+    assert_eq!(editions.remove_edition_stream(e).await, Ok(1));
     assert_eq!(editions.list_editions().await, Ok(vec![]));
 }
 

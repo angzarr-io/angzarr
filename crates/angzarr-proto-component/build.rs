@@ -3,8 +3,9 @@
 //! angzarr-project's `proto/` (the `angzarr-project` submodule), found by
 //! walking the directory. One tonic-prost-build pass writes the package's
 //! own messages (`DescribeRequest`) and every service's client and server
-//! modules, with core's messages extern-pathed onto angzarr-proto
-//! (`::angzarr_proto::v1`), so none is generated twice. No `connect` is
+//! modules, on the handler layer's messages (decision 14.78), extern-pathed
+//! onto angzarr-proto-handler (`::angzarr_proto_handler::v1`), and core's
+//! onto angzarr-proto (`::angzarr_proto::v1`), so none is generated twice. No `connect` is
 //! generated (`build_transport(false)`): the caller picks the transport.
 //!
 //! The encoded `FileDescriptorSet` of the files, with their imports, goes
@@ -39,6 +40,7 @@ fn main() {
         .build_server(true)
         .build_transport(false)
         .extern_path(".io.angzarr.v1", "::angzarr_proto::v1")
+        .extern_path(".io.angzarr.handler.v1", "::angzarr_proto_handler::v1")
         .compile_with_config(config, &files, std::slice::from_ref(&root))
         .expect("tonic: compile angzarr's io.angzarr.component.v1 services");
 }

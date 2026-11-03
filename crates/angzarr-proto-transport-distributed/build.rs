@@ -36,8 +36,9 @@ fn main() {
     let root = support::proto_root();
     let files = support::package_files(&root, PACKAGE);
     let sererr = root.join("sererr/v1/sererr.proto");
+    let cloudevents = root.join("io/cloudevents/v1/cloudevents.proto");
     println!("cargo:rustc-env=ANGZARR_PROTO_ROOT={}", root.display());
-    support::rerun_if_changed(files.iter().chain([&sererr]));
+    support::rerun_if_changed(files.iter().chain([&sererr, &cloudevents]));
     let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
 
     // sererr's messages first, alone, for the envelope to extern-path onto.
@@ -46,6 +47,13 @@ fn main() {
         .bytes(["."])
         .compile_protos(&[&sererr], &[&root])
         .expect("prost: compile sererr.v1");
+    // The vendored official CloudEvents format (decision 14.108), alone
+    // too, for CloudEventsResponse to extern-path onto.
+    prost_build::Config::new()
+        .enable_type_names()
+        .bytes(["."])
+        .compile_protos(&[&cloudevents], &[&root])
+        .expect("prost: compile io.cloudevents.v1");
 
     let mut config = prost_build::Config::new();
     config
@@ -58,9 +66,10 @@ fn main() {
         .build_transport(false)
         .extern_path(".io.angzarr.v1", "::angzarr_proto::v1")
         .extern_path(".sererr.v1", "crate::sererr::v1")
+        .extern_path(".io.cloudevents.v1", "crate::cloudevents::v1")
         .compile_with_config(config, &files, std::slice::from_ref(&root))
         .expect("tonic: compile angzarr's io.angzarr.transport.distributed.v1 protos");
 
     let set = std::fs::read(out.join("file_descriptor_set.bin")).expect("read the descriptor set");
-    reasons::reason_keys(&root, &out, &set, PACKAGE, &["CoordinatorReason"]);
+    reasons::reason_keys(&root, &out, &set, PACKAGE, &["DistributedReason"]);
 }

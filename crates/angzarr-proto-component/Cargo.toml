@@ -3,7 +3,7 @@ name = "angzarr-proto-component"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0 OR BSD-3-Clause"
-description = "angzarr's component contract, io.angzarr.component.v1: the handler-side services (CommandHandlerService, PolicyService, ProjectorService, UpcasterService, ComponentService) as tonic client and server stubs on angzarr-proto's messages"
+description = "angzarr's component contract, io.angzarr.component.v1: the handler-side services (CommandHandlerService, PolicyService, ProjectorService, UpcasterService, ComponentService) as tonic client and server stubs on the handler layer's messages"
 repository = "https://github.com/angzarr-io/angzarr"
 publish = false
 
@@ -14,6 +14,9 @@ publish = false
 # Core's messages (io.angzarr.v1), which every service here takes and
 # answers: extern-pathed, never generated twice (decision 14.64).
 angzarr-proto = { path = "../angzarr-proto" }
+# The handler layer's messages (io.angzarr.handler.v1), which the services
+# take and answer (decision 14.78): extern-pathed, never generated twice.
+angzarr-proto-handler = { path = "../angzarr-proto-handler" }
 bytes = "1"
 prost = "0.14"
 prost-types = "0.14"

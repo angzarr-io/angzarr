@@ -5,14 +5,14 @@
 //! The tests under `tests/` pin every trait and method, and record each
 //! design choice as RULED or OPEN (`tests/contract.rs`).
 //!
-//! **Editions are per-stream forks (14.32), their lifecycle framework
-//! meta-events** (`io.angzarr.v1.meta.EditionCreated`, `EditionDeleted`),
-//! which a store recognises by type. Every store reads an edition stream as
-//! main below its own creation, then its own events, and refuses outside
-//! input to an uncreated one; a deletion is recorded like any event, and
-//! the stream's rows are removed only after it has propagated onward.
-//! [`Editions`] adds the administration. Main is never written by any of
-//! it.
+//! **Editions are per-stream forks (14.32), each forked explicitly**
+//! (decision 14.107), the fork a framework meta-event: an `EditionCreated`
+//! in a page's `meta_event` arm, which a store recognises by that arm
+//! ([`is_fork`]). Every store reads an edition stream as main below its own
+//! fork, then its own events, and refuses any other first input to an
+//! unforked one; an edition is deleted by enumeration, each stream's rows
+//! removed directly, nothing appended or propagated. [`Editions`] adds the
+//! administration. Main is never written by any of it.
 //!
 //! # The ports
 //!
@@ -23,7 +23,7 @@
 //! | [`PositionStore`] | a handler's next sequence per stream | base |
 //! | [`EventStore::write`] | ONE handling step's atomic write: optionally one stream's events at an expected length, with the step's positions and outbox entries; there is no unit of work | base |
 //! | [`Purge`] | delete a stream, never the positions on it | opt-in |
-//! | [`Editions`] | per-stream forks' administration: `ListEditions`, and removing a stream after its deletion has propagated | opt-in |
+//! | [`Editions`] | per-stream forks' administration: `ListEditions`, and removing an edition stream's rows (`DeleteEdition`'s step) | opt-in |
 //! | [`ReadStore`] / [`ReadUnit`] | reads that all see one moment | opt-in |
 //! | [`Watch`] | a cheap "anything committed?" | opt-in |
 //! | [`ReadUntilTime`], [`ReadByCorrelation`], [`ListStreams`] | core's queries | opt-in |
@@ -82,10 +82,10 @@ pub use migrate::{
 };
 pub use send::{MaybeSend, MaybeSync};
 pub use store::{
-    Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions,
-    EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, Processed, Purge,
+    is_fork, Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore,
+    Editions, EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, Processed, Purge,
     ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Store, Watch, Write,
-    Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
+    Written,
 };
 pub use stream::{Head, PositionKey, Slice, StreamRef};
 

@@ -28,7 +28,7 @@ fn every_io_angzarr_v1_proto_is_generated_and_embedded() {
     let mut spec = Vec::new();
     protos_under(&root, &root.join("io/angzarr/v1"), &mut spec);
     assert!(
-        spec.len() >= 9 && spec.contains(&"io/angzarr/v1/types.proto".to_string()),
+        spec.len() >= 4 && spec.contains(&"io/angzarr/v1/types.proto".to_string()),
         "found only {spec:?}"
     );
     let embedded: Vec<_> = FILES.iter().map(|f| f.path).collect();
@@ -38,25 +38,18 @@ fn every_io_angzarr_v1_proto_is_generated_and_embedded() {
 }
 
 #[test]
-fn the_in_process_messages_are_angzarr_protos() {
+fn the_coordinators_records_are_angzarr_protos() {
     // Named here, so a message the spec drops or renames fails the build.
-    assert_eq!(
-        v1::CommandHandlerResponse::type_url(),
-        "/io.angzarr.v1.CommandHandlerResponse"
-    );
-    assert_eq!(
-        v1::PolicyResponse::type_url(),
-        "/io.angzarr.v1.PolicyResponse"
-    );
-    assert_eq!(v1::Refusal::type_url(), "/io.angzarr.v1.Refusal");
-    assert_eq!(
-        v1::OnRefusedResponse::type_url(),
-        "/io.angzarr.v1.OnRefusedResponse"
-    );
+    // The handler layer's messages are angzarr-proto-handler's (decision
+    // 14.78); these are core's own records and envelopes.
     assert_eq!(v1::Projection::type_url(), "/io.angzarr.v1.Projection");
     assert_eq!(
-        v1::UpcastResponse::type_url(),
-        "/io.angzarr.v1.UpcastResponse"
+        v1::ReactionDelivery::type_url(),
+        "/io.angzarr.v1.ReactionDelivery"
+    );
+    assert_eq!(
+        v1::ExpectedSequenceMismatch::type_url(),
+        "/io.angzarr.v1.ExpectedSequenceMismatch"
     );
 }
 
@@ -71,8 +64,10 @@ fn the_descriptor_set_holds_every_generated_file() {
             file.path
         );
     }
-    // With its imports, for a reflection server to resolve them.
+    // With its imports, for a reflection server to resolve them: the
+    // well-known types and the vendored google.rpc.Code (decision 14.104).
     assert!(names.contains(&"google/protobuf/any.proto"));
+    assert!(names.contains(&"google/rpc/code.proto"));
 }
 
 #[test]
@@ -81,7 +76,9 @@ fn core_is_messages_only_and_imports_no_other_package() {
     let mut core = 0;
     for file in &set.file {
         assert!(
-            !file.name().starts_with("sererr/") && !file.name().starts_with("google/api/"),
+            !file.name().starts_with("sererr/")
+                && !file.name().starts_with("google/api/")
+                && !file.name().starts_with("io/cloudevents/"),
             "{} is in core's descriptor set",
             file.name()
         );
@@ -90,7 +87,7 @@ fn core_is_messages_only_and_imports_no_other_package() {
         }
         core += 1;
         assert!(
-            file.package() == "io.angzarr.v1" || file.package() == "io.angzarr.v1.meta",
+            file.package() == "io.angzarr.v1",
             "{} is in package {}",
             file.name(),
             file.package()
@@ -102,11 +99,13 @@ fn core_is_messages_only_and_imports_no_other_package() {
         );
         for import in &file.dependency {
             assert!(
-                import.starts_with("io/angzarr/v1/") || import.starts_with("google/protobuf/"),
+                import.starts_with("io/angzarr/v1/")
+                    || import.starts_with("google/protobuf/")
+                    || import == "google/rpc/code.proto",
                 "{} imports {import}",
                 file.name()
             );
         }
     }
-    assert!(core > 5, "only {core} core files");
+    assert!(core >= 4, "only {core} core files");
 }

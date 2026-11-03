@@ -62,6 +62,7 @@ name = "angzarr-proto-component"
 version = "0.1.0"
 dependencies = [
  "angzarr-proto",
+ "angzarr-proto-handler",
  "bytes",
  "prost",
  "prost-build",
@@ -69,6 +70,17 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
+]
+
+[[package]]
+name = "angzarr-proto-handler"
+version = "0.1.0"
+dependencies = [
+ "angzarr-proto",
+ "bytes",
+ "prost",
+ "prost-build",
+ "prost-types",
 ]
 
 [[package]]

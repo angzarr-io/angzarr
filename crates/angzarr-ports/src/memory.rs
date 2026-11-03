@@ -17,27 +17,24 @@
 //!   reference backend: for what-if and AI experimentation, in games and
 //!   elsewhere, create a stream in an edition, run steps there, read both
 //!   timelines side by side, delete the edition, and main is unchanged
-//!   byte for byte. An edition stream keeps only its own rows (its
-//!   creation and after); a read lays them over main's events below its
-//!   fork sequence.
+//!   byte for byte. An edition stream keeps only its own rows (its fork
+//!   and after); a read lays them over main's events below its fork
+//!   sequence.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use angzarr_proto::uuid::Uuid;
 use angzarr_proto::v1::event_meta::Causation;
-use angzarr_proto::v1::meta::EditionCreated;
 use angzarr_proto::v1::{Cover, EditionSummary, EventBook, EventPage, EventRef, Snapshot};
-use prost::Message;
 use prost_types::Timestamp;
 
 use crate::error::StoreError;
 use crate::migrate::{plan_run, plan_undo, AppliedMigration, Backup, Migration, Migrations};
 use crate::store::{
-    Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions,
-    EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, Processed, Purge,
+    is_fork, Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore,
+    Editions, EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, Processed, Purge,
     ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write, Written,
-    EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
 use crate::stream::{PositionKey, Slice, StreamRef};
 
@@ -80,43 +77,17 @@ fn place(position: PositionKey<'_>) -> PositionPlace {
     (key(position.stream), position.handler.to_string())
 }
 
-fn is_type(page: &EventPage, type_url: &str) -> bool {
-    page.payload
-        .as_ref()
-        .is_some_and(|p| p.type_url == type_url)
-}
-
-fn is_creation(page: &EventPage) -> bool {
-    is_type(page, EDITION_CREATED_TYPE_URL)
-}
-
-fn is_deletion(page: &EventPage) -> bool {
-    is_type(page, EDITION_DELETED_TYPE_URL)
-}
-
-/// A creation page's `EditionCreated`, decoded (a framework event: the one
-/// payload a store reads).
-fn creation(page: &EventPage) -> EditionCreated {
-    page.payload
-        .as_ref()
-        .and_then(|p| EditionCreated::decode(p.value.as_slice()).ok())
-        .unwrap_or_default()
-}
-
-/// One pending outbox entry, with the streams of the write that put it
-/// (its stream, and the streams its positions are on): what an edition
-/// stream's removal waits for.
+/// One pending outbox entry.
 #[derive(Clone)]
 struct Pending {
     entry: OutboxEntry,
-    streams: Vec<Key>,
 }
 
 /// The store's data: copied on write only while a read unit holds it.
 #[derive(Clone, Default)]
 struct Data {
     /// Each stream's OWN rows: main's whole log, an edition stream's from
-    /// its creation on.
+    /// its fork on.
     streams: BTreeMap<Key, Vec<EventPage>>,
     snapshots: BTreeMap<Key, Snapshot>,
     positions: BTreeMap<PositionPlace, u64>,
@@ -161,18 +132,9 @@ impl Data {
             .map(|(k, _)| k)
     }
 
-    /// Whether edition `name` exists: a creation of it remains.
+    /// Whether edition `name` exists: a fork of it remains.
     fn edition_exists(&self, name: &str) -> bool {
         self.edition_streams(name).next().is_some()
-    }
-
-    /// Whether edition `name` is live: it exists, and no stream of it has
-    /// recorded its deletion.
-    fn edition_live(&self, name: &str) -> bool {
-        self.edition_exists(name)
-            && !self
-                .edition_streams(name)
-                .any(|k| self.own(k).iter().any(is_deletion))
     }
 
     /// The dead letters about stream `k`, in key order.
@@ -190,13 +152,6 @@ impl Data {
         self.snapshots.remove(k);
         self.dead_letters.retain(|(stream, ..), _| stream != k);
         self.streams.remove(k).map_or(0, |pages| pages.len() as u64)
-    }
-
-    /// Remove every row of stream `k`, the positions on it too: an
-    /// edition's stream removed with its edition (14.32).
-    fn remove(&mut self, k: &Key) -> u64 {
-        self.positions.retain(|(stream, _), _| stream != k);
-        self.purge(k)
     }
 }
 
@@ -243,12 +198,15 @@ fn last_recorded_at(pages: &[EventPage]) -> Option<Timestamp> {
         .and_then(|m| m.recorded_at)
 }
 
-/// Whether `page` was caused by `command_id` (a command's or a fact's).
+/// Whether `page` was caused by `command_id` (a command's or a fact's:
+/// either arm of its causation; decision 14.102).
 fn caused_by(page: &EventPage, command_id: Uuid) -> bool {
-    matches!(
-        page.meta.as_ref().and_then(|m| m.causation.as_ref()),
-        Some(Causation::CommandId(id)) if Uuid::try_from(id).ok() == Some(command_id)
-    )
+    let id = match page.meta.as_ref().and_then(|m| m.causation.as_ref()) {
+        Some(Causation::Command(cause)) => cause.command_id.as_ref(),
+        Some(Causation::Fact(cause)) => cause.command_id.as_ref(),
+        None => None,
+    };
+    id.is_some_and(|id| Uuid::try_from(id).ok() == Some(command_id))
 }
 
 fn covers_of(streams: &BTreeMap<Key, Vec<EventPage>>, domain: &str) -> Vec<Cover> {
@@ -265,8 +223,9 @@ struct Landing {
     pages: Vec<EventPage>,
 }
 
-/// Check a write's stream part against `data`, as 14.32's rules have it:
-/// what lands (if anything), and the stream's length after.
+/// Check a write's stream part against `data`, as 14.32's rules have it
+/// (with 14.107's explicit forks): what lands (if anything), and the
+/// stream's length after.
 fn check_events(data: &Data, events: Append<'_>) -> Result<(Option<Landing>, u64), StoreError> {
     let Append {
         stream,
@@ -275,72 +234,42 @@ fn check_events(data: &Data, events: Append<'_>) -> Result<(Option<Landing>, u64
     } = events;
     let k = key(stream);
     let length = data.view(&k).len() as u64;
-    let Some(name) = stream.edition else {
-        if pages.iter().any(|p| is_creation(p) || is_deletion(p)) {
+    let landing = |key| {
+        Some(Landing {
+            key,
+            pages: pages.to_vec(),
+        })
+    };
+    if stream.edition.is_none() {
+        if pages.iter().any(is_fork) {
             return Err(StoreError::EditionNameRequired);
         }
         check_append(stream, length, expected, pages)?;
-        return Ok((
-            Some(Landing {
-                key: k,
-                pages: pages.to_vec(),
-            }),
-            length + pages.len() as u64,
-        ));
-    };
-    if pages.iter().skip(1).any(is_creation) {
+        return Ok((landing(k), length + pages.len() as u64));
+    }
+    if pages.iter().skip(1).any(is_fork) {
         return Err(StoreError::edition_already_forked(stream));
     }
     if !data.own(&k).is_empty() {
-        if pages.first().is_some_and(is_creation) {
+        if pages.first().is_some_and(is_fork) {
             return Err(StoreError::edition_already_forked(stream));
         }
         check_append(stream, length, expected, pages)?;
-        return Ok((
-            Some(Landing {
-                key: k,
-                pages: pages.to_vec(),
-            }),
-            length + pages.len() as u64,
-        ));
+        return Ok((landing(k), length + pages.len() as u64));
     }
-    // A stream with no row in the edition.
+    // A stream with no row in the edition: only its fork lands first.
     match pages.first() {
         None => {
             check_append(stream, length, expected, pages)?;
             Ok((None, length))
         }
-        // D4: a deletion reaching it has nothing to delete.
-        Some(first) if is_deletion(first) => {
-            check_append(stream, length, expected, &[])?;
-            Ok((None, length))
-        }
-        Some(first) if is_creation(first) => {
-            // 14.36: the fork is where it says.
-            let stated = creation(first).parent_sequence;
-            if stated != first.sequence {
-                return Err(StoreError::malformed_creation(
-                    stream,
-                    first.sequence,
-                    stated,
-                ));
-            }
+        Some(first) if is_fork(first) => {
+            // 14.36: the fork is where it says, at or below main's head.
             if expected > length {
                 return Err(StoreError::conflict(stream, expected, length));
             }
             check_run(stream, expected, pages)?;
-            if creation(first).propagated_from.is_some() && !data.edition_live(name) {
-                return Err(StoreError::EditionNotFound {
-                    name: name.to_string(),
-                });
-            }
-            Ok((
-                Some(Landing {
-                    key: k,
-                    pages: pages.to_vec(),
-                }),
-                expected + pages.len() as u64,
-            ))
+            Ok((landing(k), expected + pages.len() as u64))
         }
         Some(_) => Err(StoreError::edition_not_forked(stream)),
     }
@@ -389,7 +318,7 @@ impl EventStore for MemoryStore {
             let k = key(position.stream);
             if let Some(name) = position.stream.edition {
                 let has_rows = !guard.own(&k).is_empty() || landing_key.as_ref() == Some(&k);
-                if !has_rows && !guard.edition_live(name) {
+                if !has_rows && !guard.edition_exists(name) {
                     return Err(StoreError::EditionNotFound {
                         name: name.to_string(),
                     });
@@ -419,13 +348,10 @@ impl EventStore for MemoryStore {
             data.positions.insert(place(*position), *next);
         }
         data.dead_letters.extend(letters);
-        let mut streams: Vec<Key> = landing_key.into_iter().collect();
-        streams.extend(write.positions.iter().map(|(p, _)| key(p.stream)));
         for entry in write.outbox {
             if !data.outbox.iter().any(|kept| kept.entry.id == entry.id) {
                 data.outbox.push(Pending {
                     entry: entry.clone(),
-                    streams: streams.clone(),
                 });
             }
         }
@@ -512,41 +438,17 @@ impl Editions for MemoryStore {
                     name: name.clone(),
                     ..EditionSummary::default()
                 });
-            summary.forked_streams += 1;
-            if creation(first).propagated_from.is_none() {
-                summary.origins.push(EventRef {
-                    stream: Some(cover(k)),
-                    sequence: first.sequence,
-                });
-            }
+            summary.forks.push(EventRef {
+                stream: Some(cover(k)),
+                sequence: first.sequence,
+            });
         }
         Ok(editions.into_values().collect())
     }
 
-    async fn remove_deleted(&self, stream: StreamRef<'_>) -> Result<u64, StoreError> {
-        let Some(name) = stream.edition else {
-            return Err(StoreError::EditionNameRequired);
-        };
-        let k = key(stream);
-        let mut guard = self.lock();
-        let own = guard.own(&k);
-        if own.is_empty() {
-            return Ok(0);
-        }
-        if !own.iter().any(is_deletion) {
-            return Err(StoreError::edition_not_deleted(stream));
-        }
-        let waiting = guard
-            .outbox
-            .iter()
-            .any(|p| p.entry.edition.as_deref() == Some(name) && p.streams.contains(&k));
-        if waiting {
-            return Err(StoreError::edition_not_propagated(stream));
-        }
-        let data = Arc::make_mut(&mut guard);
-        let removed = data.remove(&k);
-        data.commits += 1;
-        Ok(removed)
+    async fn remove_edition_stream(&self, stream: StreamRef<'_>) -> Result<u64, StoreError> {
+        let _ = stream;
+        todo!("remove an edition stream's rows (decision 14.107)")
     }
 }
 

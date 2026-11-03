@@ -1,0 +1,40 @@
+# angzarr-proto-handler: prost types for the handler layer,
+# io.angzarr.handler.v1 (decision 14.78), on angzarr-proto's messages. Needs
+# protoc on PATH (or PROTOC set), the wasm32-unknown-unknown target, and the
+# angzarr-project submodule checked out (build.rs reads its proto/). A member
+# of angzarr-core's workspace: every recipe names this package, and --locked
+# means the workspace's Cargo.lock. Runs on the host
+# (`just -f crates/angzarr-proto-handler/justfile check`).
+
+# Format check, build, lint and test natively, then the wasm32 build
+check: check-untested tests
+
+# Every check but running the tests, the tests' build included: a failure
+# here is never a red test (the root justfile's `check-shared-crates-commit`)
+check-untested: fmt-check build lint wasm build-tests
+
+# Run the tests: a failure here is a red test
+tests: test
+
+fmt:
+    cargo fmt -p angzarr-proto-handler
+
+fmt-check:
+    cargo fmt -p angzarr-proto-handler --check
+
+build:
+    cargo build --locked -p angzarr-proto-handler
+
+lint:
+    cargo clippy --locked -p angzarr-proto-handler --all-targets -- -D warnings
+
+test:
+    cargo test --locked -p angzarr-proto-handler
+
+# Build the tests without running them
+build-tests:
+    cargo test --locked -p angzarr-proto-handler --no-run
+
+# The handler layer stays prost only and builds for the browser, as core does
+wasm:
+    cargo build --locked -p angzarr-proto-handler --target wasm32-unknown-unknown

@@ -1,34 +1,52 @@
-//! The distributed transport's messages (decision 14.64): its envelopes wrap
-//! core's messages unchanged, and what moved here from core kept its field
-//! numbers.
+//! The distributed transport's messages (decision 14.64), as the merged
+//! spec shapes them: its envelopes wrap core's messages unchanged; one
+//! result per command RPC (decision 14.105); plain DLQ admin results
+//! (decision 14.106); minimal envelopes and a transport's own dead-letter
+//! why (decision 14.107); the official CloudEvents format (decision
+//! 14.108). Field numbers are contiguous from 1 (decision 14.100).
 
 use angzarr_proto::v1::{
     angzarr_dead_letter, AngzarrDeadLetter, CommandBook, Cover, DeliveryOutcome, Diagnostic,
-    EditionSummary, EventBook, EventRef, Outcome, ProcessingFailedDetails, Projection, Uuid,
+    EditionSummary, EventBook, EventRef, Projection, ReactionDelivery, Uuid,
 };
+use angzarr_proto_transport_distributed::cloudevents::v1::{cloud_event, CloudEvent};
 use angzarr_proto_transport_distributed::sererr::v1::CapturedError;
 use angzarr_proto_transport_distributed::v1::{
-    bus_envelope, BusEnvelope, ClaimCheck, CommandResponse, CorrelationQuery, DeadLetterEnvelope,
-    DeleteEditionRequest, EventStreamFilter, ForkStreamRequest, ListEditionsResponse,
-    PayloadReference, PayloadRetrievalFailedDetails, PayloadStorageType, ProjectorFailure,
-    StoredDeadLetter, SyncOutcome,
+    bus_envelope, delete_dead_letter_response, subscribe_request, BusEnvelope, ClaimCheck,
+    CloudEventsResponse, CommandResult, CommandSyncResult, CorrelationFrom, CorrelationQuery,
+    DeadLetterEnvelope, DeadLetterRemoved, DeleteDeadLetterResponse, DeleteEditionRequest,
+    ExecuteResponse, ForkStreamRequest, HandleSyncRequest, ListEditionsResponse, PayloadReference,
+    PayloadRetrievalFailed, StoredDeadLetter, StreamCursor, StreamFrom, SubscribeRequest,
 };
 use prost::{Message, Name};
 
-fn round_trip<M: Message + Default>(m: &M) -> M {
-    M::decode(&*m.encode_to_vec()).expect("decodes")
+fn round_trip<M: Message + Default + PartialEq + std::fmt::Debug>(m: &M) {
+    assert_eq!(&M::decode(&*m.encode_to_vec()).expect("decodes"), m);
 }
 
-/// The first byte of an encoding: the first field's tag.
-fn first_tag<M: Message>(m: &M) -> u8 {
-    m.encode_to_vec()[0]
+/// The tags of a message's top-level fields, in wire order (every value
+/// here is length-delimited and under 128 bytes, or a one-byte varint).
+fn tags<M: Message>(m: &M) -> Vec<u8> {
+    let bytes = m.encode_to_vec();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        out.push(bytes[i]);
+        i += if bytes[i] & 7 == 0 {
+            2
+        } else {
+            2 + usize::from(bytes[i + 1])
+        };
+    }
+    out
 }
 
-/// A field `number` of wire type 2 holding `text`.
-fn text_field(number: u8, text: &str) -> Vec<u8> {
-    let mut bytes = vec![(number << 3) | 2, u8::try_from(text.len()).unwrap()];
-    bytes.extend_from_slice(text.as_bytes());
-    bytes
+const fn ld(n: u8) -> u8 {
+    (n << 3) | 2
+}
+
+const fn varint(n: u8) -> u8 {
+    n << 3
 }
 
 fn uuid(byte: u8) -> Uuid {
@@ -55,90 +73,76 @@ fn diagnostic(code: &str) -> Diagnostic {
 #[test]
 fn the_messages_are_the_transports_by_name() {
     assert_eq!(
-        CommandResponse::type_url(),
-        "/io.angzarr.transport.distributed.v1.CommandResponse"
+        CommandResult::type_url(),
+        "/io.angzarr.transport.distributed.v1.CommandResult"
     );
     assert_eq!(
-        EventStreamFilter::type_url(),
-        "/io.angzarr.transport.distributed.v1.EventStreamFilter"
-    );
-    assert_eq!(
-        DeadLetterEnvelope::full_name(),
-        "io.angzarr.transport.distributed.v1.DeadLetterEnvelope"
+        SubscribeRequest::type_url(),
+        "/io.angzarr.transport.distributed.v1.SubscribeRequest"
     );
     assert_eq!(
         StoredDeadLetter::full_name(),
-        "io.angzarr.transport.distributed.v1.StoredDeadLetter",
-        "folded in from io.angzarr.status.v1"
+        "io.angzarr.transport.distributed.v1.StoredDeadLetter"
     );
     assert_eq!(CapturedError::full_name(), "sererr.v1.CapturedError");
+    assert_eq!(CloudEvent::full_name(), "io.cloudevents.v1.CloudEvent");
 }
 
 #[test]
-fn a_command_response_wraps_core_outcome_with_the_sync_projectors() {
-    let projection = Projection {
-        cover: Some(stream("what-if")),
-        projector: "draw-history".into(),
-        next_sequence: u64::from(u32::MAX) + 2,
-        projection: None,
+fn a_command_answers_its_events_and_delivery_and_a_sync_one_its_projections() {
+    let result = CommandResult {
+        events: Some(EventBook::default()),
+        delivery: DeliveryOutcome::Duplicate as i32,
     };
-    // HandleSync answers OK with the successful projections beside the
-    // failed ones; a failure never replaces the events.
-    let failure = ProjectorFailure {
-        projector: "draw-stats".into(),
-        code: 14, // UNAVAILABLE
-        diagnostic: Some(diagnostic("STATS_STORE_UNAVAILABLE")),
+    round_trip(&result);
+    assert_eq!(tags(&result), [ld(1), varint(2)]);
+    let sync = CommandSyncResult {
+        events: Some(EventBook::default()),
+        delivery: DeliveryOutcome::Applied as i32,
+        projections: vec![Projection {
+            cover: Some(stream("what-if")),
+            projector: "draw-history".into(),
+            next_sequence: 3,
+            projection: None,
+        }],
     };
-    for delivery in [
-        DeliveryOutcome::Applied,
-        DeliveryOutcome::Duplicate,
-        DeliveryOutcome::Parked,
-    ] {
-        let response = CommandResponse {
-            events: Some(EventBook::default()),
-            outcome: Some(SyncOutcome {
-                outcome: Some(Outcome {
-                    delivery: delivery as i32,
-                }),
-                projections: vec![projection.clone()],
-                projector_failures: vec![failure.clone()],
-            }),
-        };
-        let decoded = round_trip(&response);
-        assert_eq!(decoded, response);
-        let outcome = decoded.outcome.unwrap();
-        assert_eq!(outcome.outcome.unwrap().delivery(), delivery);
-        assert_eq!(outcome.projections, vec![projection.clone()]);
-        assert_eq!(outcome.projector_failures, vec![failure.clone()]);
-    }
+    round_trip(&sync);
+    assert_eq!(tags(&sync), [ld(1), varint(2), ld(3)]);
+    // HandleSync names the projectors it waits for (decision 14.107).
+    let request = HandleSyncRequest {
+        command: Some(CommandBook::default()),
+        projectors: vec!["draw-history".into()],
+    };
+    round_trip(&request);
+    assert_eq!(tags(&request), [ld(1), ld(2)]);
+    // A policy's coordinator answers ReactionDeliveries (decision 14.79).
+    round_trip(&ExecuteResponse {
+        outputs: vec![ReactionDelivery::default()],
+    });
 }
 
 #[test]
-fn a_projector_failure_carries_its_code_and_a_diagnostic_in_field_4() {
-    let failure = ProjectorFailure {
-        diagnostic: Some(Diagnostic::default()),
-        ..Default::default()
+fn a_dead_letter_envelope_is_the_core_entry_and_its_stack_trace() {
+    let reference = PayloadReference {
+        uri: "s3://payloads/abc.bin".into(),
+        content_hash: vec![7; 32].into(),
+        original_size: 1 << 20,
+        stored_at: None,
     };
-    assert_eq!(first_tag(&failure), (4 << 3) | 2);
-    // The old text `message` (3) decodes to nothing (decision 14.37).
-    let old = ProjectorFailure::decode(&*text_field(3, "view store unavailable")).unwrap();
-    assert_eq!(old, ProjectorFailure::default());
-}
-
-#[test]
-fn a_dead_letter_envelope_wraps_the_core_entry_whole() {
+    let why = PayloadRetrievalFailed {
+        reference: Some(reference),
+        failure: Some(diagnostic("DISTRIBUTED_REASON_PAYLOAD_UNAVAILABLE")),
+    };
+    round_trip(&why);
     let letter = AngzarrDeadLetter {
         payload: Some(angzarr_dead_letter::Payload::RejectedEvents(EventBook {
             cover: Some(stream("what-if")),
             ..Default::default()
         })),
-        reason: Some(diagnostic("COORDINATOR_REASON_PAYLOAD_UNAVAILABLE")),
-        rejection_details: Some(angzarr_dead_letter::RejectionDetails::ProcessingFailed(
-            ProcessingFailedDetails {
-                failure: Some(diagnostic("COORDINATOR_REASON_PAYLOAD_UNAVAILABLE")),
-                retry_count: 2,
-                is_transient: true,
-            },
+        // A transport's own why rides core's why oneof, packed (decision
+        // 14.107).
+        why: Some(angzarr_dead_letter::Why::Transport(
+            prost_types::Any::from_msg(&why).unwrap(),
         )),
         source_component: "order-fulfilment".into(),
         ..Default::default()
@@ -149,35 +153,12 @@ fn a_dead_letter_envelope_wraps_the_core_entry_whole() {
             r#type: "sqlx::Error::PoolTimedOut".into(),
             ..Default::default()
         }],
-        metadata: [("attempt".to_string(), "3".to_string())].into(),
-        payload_retrieval_failed: Some(PayloadRetrievalFailedDetails {
-            storage_type: PayloadStorageType::S3 as i32,
-            uri: "s3://payloads/abc.bin".into(),
-            failure: Some(diagnostic("COORDINATOR_REASON_PAYLOAD_UNAVAILABLE")),
-            ..Default::default()
-        }),
     };
-    let decoded = round_trip(&envelope);
-    assert_eq!(decoded, envelope);
-    // The core entry inside is byte for byte the bare one a kernel stores.
+    round_trip(&envelope);
+    assert_eq!(tags(&envelope)[..1], [ld(1)]);
     assert_eq!(
-        AngzarrDeadLetter::decode(&*letter.encode_to_vec()).unwrap(),
-        decoded.dead_letter.unwrap()
-    );
-    assert_eq!(first_tag(&envelope), (1 << 3) | 2);
-}
-
-#[test]
-fn payload_retrieval_details_kept_their_numbers() {
-    let retrieval = PayloadRetrievalFailedDetails {
-        failure: Some(Diagnostic::default()),
-        ..Default::default()
-    };
-    assert_eq!(first_tag(&retrieval), (6 << 3) | 2);
-    // The old text `error` (5) decodes to nothing (decision 14.37).
-    assert_eq!(
-        PayloadRetrievalFailedDetails::decode(&*text_field(5, "no such key")).unwrap(),
-        PayloadRetrievalFailedDetails::default()
+        PayloadRetrievalFailed::type_url(),
+        "/io.angzarr.transport.distributed.v1.PayloadRetrievalFailed"
     );
 }
 
@@ -188,7 +169,6 @@ fn a_bus_envelope_claim_checks_a_page_in_place_of_its_payload() {
         claim_checks: vec![ClaimCheck {
             page: 0,
             reference: Some(PayloadReference {
-                storage_type: PayloadStorageType::Gcs as i32,
                 uri: "gs://bucket/abc.bin".into(),
                 content_hash: vec![7; 32].into(),
                 original_size: 1 << 20,
@@ -196,22 +176,23 @@ fn a_bus_envelope_claim_checks_a_page_in_place_of_its_payload() {
             }),
         }],
     };
-    assert_eq!(round_trip(&envelope), envelope);
-    assert_eq!(
-        PayloadStorageType::Filesystem.as_str_name(),
-        "PAYLOAD_STORAGE_TYPE_FILESYSTEM"
-    );
+    round_trip(&envelope);
+    // The URI's scheme names the store: no storage-type field (14.107).
+    let reference = PayloadReference {
+        uri: "u".into(),
+        ..PayloadReference::default()
+    };
+    assert_eq!(reference.encode_to_vec(), [ld(1), 1, b'u']);
 }
 
 #[test]
 fn a_correlation_query_tells_main_from_an_empty_edition() {
     // Unset is main; a set "" is malformed, so the two encode apart.
     for edition in [None, Some(String::new()), Some("what-if".to_string())] {
-        let q = CorrelationQuery {
+        round_trip(&CorrelationQuery {
             correlation_id: Some(uuid(0xc0)),
-            edition: edition.clone(),
-        };
-        assert_eq!(round_trip(&q).edition, edition);
+            edition,
+        });
     }
     assert_ne!(
         CorrelationQuery {
@@ -228,20 +209,55 @@ fn a_correlation_query_tells_main_from_an_empty_edition() {
 }
 
 #[test]
-fn fork_stream_request_names_the_stream_and_its_parent_sequence() {
+fn a_subscription_targets_a_stream_or_a_correlation_and_resumes_per_stream() {
+    // Decisions 14.105 and 14.106: per-stream catch-up, an inclusive start,
+    // no store-wide position.
+    let from = SubscribeRequest {
+        target: Some(subscribe_request::Target::Stream(StreamFrom {
+            cover: Some(stream("what-if")),
+            from_sequence: 4,
+        })),
+    };
+    round_trip(&from);
+    let correlation = SubscribeRequest {
+        target: Some(subscribe_request::Target::Correlation(CorrelationFrom {
+            correlation_id: Some(uuid(0xc0)),
+            seen: vec![StreamCursor {
+                cover: Some(stream("what-if")),
+                next_sequence: 7,
+            }],
+            edition: Some("what-if".into()),
+        })),
+    };
+    round_trip(&correlation);
+    assert_eq!(tags(&from), [ld(1)]);
+    assert_eq!(tags(&correlation), [ld(2)]);
+    assert_eq!(
+        StreamCursor {
+            cover: None,
+            next_sequence: 7
+        }
+        .encode_to_vec(),
+        [varint(2), 7]
+    );
+}
+
+#[test]
+fn fork_stream_states_its_fork_sequence() {
     let request = ForkStreamRequest {
         stream: Some(stream("what-if")),
-        parent_sequence: 5,
+        fork_sequence: 5,
     };
-    assert_eq!(round_trip(&request), request);
-    assert_eq!(first_tag(&request), (1 << 3) | 2);
-    // 14.36: field 3, a plain uint64; 0 (a fork at the start) encodes as
-    // nothing.
-    let at_three = ForkStreamRequest {
-        stream: None,
-        parent_sequence: 3,
-    };
-    assert_eq!(at_three.encode_to_vec(), [3 << 3, 3]);
+    round_trip(&request);
+    // Field 2, a plain uint64; 0 (a fork at the start) encodes as nothing.
+    assert_eq!(
+        ForkStreamRequest {
+            stream: None,
+            fork_sequence: 3
+        }
+        .encode_to_vec(),
+        [varint(2), 3]
+    );
     assert!(ForkStreamRequest::default().encode_to_vec().is_empty());
 }
 
@@ -250,21 +266,53 @@ fn editions_are_listed_as_core_summaries_and_deleted_by_name() {
     let response = ListEditionsResponse {
         editions: vec![EditionSummary {
             name: "what-if".into(),
-            origins: vec![EventRef {
+            forks: vec![EventRef {
                 stream: Some(stream("what-if")),
                 sequence: 12,
             }],
-            forked_streams: 4,
         }],
     };
-    assert_eq!(round_trip(&response), response);
+    round_trip(&response);
     let request = DeleteEditionRequest {
         name: "what-if".into(),
     };
-    assert_eq!(first_tag(&request), (1 << 3) | 2);
-    assert_eq!(round_trip(&request), request);
-    assert_eq!(
-        ForkStreamRequest::type_url(),
-        "/io.angzarr.transport.distributed.v1.ForkStreamRequest"
-    );
+    assert_eq!(tags(&request), [ld(1)]);
+    round_trip(&request);
+}
+
+#[test]
+fn a_stored_dead_letter_mirrors_the_why_and_a_delete_answers_its_outcome() {
+    let stored = StoredDeadLetter {
+        id: 9,
+        domain: "lists".into(),
+        why: Some(
+            angzarr_proto_transport_distributed::v1::stored_dead_letter::Why::Reason(diagnostic(
+                "ANGZARR_REASON_HANDLER_UNAVAILABLE",
+            )),
+        ),
+        ..StoredDeadLetter::default()
+    };
+    round_trip(&stored);
+    let deleted = DeleteDeadLetterResponse {
+        outcome: Some(delete_dead_letter_response::Outcome::Removed(
+            DeadLetterRemoved {},
+        )),
+    };
+    round_trip(&deleted);
+    assert_eq!(deleted.encode_to_vec(), [ld(1), 0]);
+}
+
+#[test]
+fn cloud_events_are_the_official_format() {
+    let response = CloudEventsResponse {
+        events: vec![CloudEvent {
+            id: "lists/abab/3".into(),
+            source: "angzarr/lists".into(),
+            spec_version: "1.0".into(),
+            r#type: "io.example.v1.ItemAdded".into(),
+            attributes: Default::default(),
+            data: Some(cloud_event::Data::TextData("{}".into())),
+        }],
+    };
+    round_trip(&response);
 }

@@ -1,63 +1,65 @@
-//! The local-process transport's reason keys (decision 14.64): HostReason's
-//! child keys, moved here from core with their strings unchanged, their
-//! args from the spec's `(reason)` options, their English the spec's
-//! catalog beside the file.
+//! The local-process transport's reason keys (decisions 14.64 and 14.104):
+//! `EmbeddedReason`, named by layer, their args and surfaces from the
+//! spec's `(reason)` options, their English the spec's catalog beside the
+//! file.
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use angzarr_proto_transport_embedded::v1::{reason_args, HostReason};
+use angzarr_proto_transport_embedded::v1::{reason_args, EmbeddedReason};
 use angzarr_proto_transport_embedded::{reason_key_args, FILE_DESCRIPTOR_SET, REASONS_EN_US};
 use prost::Message;
 
 /// Every live key, with its args.
 fn every_key() -> Vec<(&'static str, &'static [&'static str])> {
     (1..=64)
-        .filter_map(|n| HostReason::try_from(n).ok())
+        .filter_map(|n| EmbeddedReason::try_from(n).ok())
         .map(|r| (r.as_str_name(), r.args()))
         .collect()
 }
 
 #[test]
-fn the_keys_are_the_childs_and_keep_their_strings() {
+fn the_keys_are_the_childs() {
     let keys: Vec<_> = every_key().into_iter().map(|(k, _)| k).collect();
     assert_eq!(
         keys,
         [
-            "HOST_REASON_HANDSHAKE_MALFORMED",
-            "HOST_REASON_HANDSHAKE_TIMEOUT",
-            "HOST_REASON_HANDSHAKE_CLOSED",
-            "HOST_REASON_CHILD_NOT_SERVING",
-            "HOST_REASON_CHILD_EXIT_STATUS",
-            "HOST_REASON_CHILD_NOT_EXITED",
-            "HOST_REASON_PROBE_INPUT",
+            "EMBEDDED_REASON_CHILD_NOT_SERVING",
+            "EMBEDDED_REASON_CHILD_EXIT_STATUS",
+            "EMBEDDED_REASON_CHILD_NOT_EXITED",
+            "EMBEDDED_REASON_PROBE_INPUT",
         ]
     );
     assert_eq!(
-        HostReason::from_str_name("HOST_REASON_HANDSHAKE_TIMEOUT"),
-        Some(HostReason::HandshakeTimeout)
+        EmbeddedReason::from_str_name("EMBEDDED_REASON_CHILD_NOT_EXITED"),
+        Some(EmbeddedReason::ChildNotExited)
     );
 }
 
 #[test]
 fn a_keys_args_are_its_options() {
-    assert_eq!(HostReason::HandshakeMalformed.args(), &[reason_args::LINE]);
-    assert_eq!(HostReason::HandshakeTimeout.args(), &["timeout_ms"]);
-    assert!(HostReason::HandshakeClosed.args().is_empty());
+    // Decision 14.80: not SERVING within the start time limit.
     assert_eq!(
-        HostReason::ChildNotServing.args(),
-        &[reason_args::COMPONENT, reason_args::STATUS]
+        EmbeddedReason::ChildNotServing.args(),
+        &[
+            reason_args::COMPONENT,
+            reason_args::STATUS,
+            reason_args::TIMEOUT_MS
+        ]
     );
     assert_eq!(
-        HostReason::ChildExitStatus.args(),
+        EmbeddedReason::ChildExitStatus.args(),
         &["component", "exit_code"]
     );
-    assert_eq!(HostReason::ChildNotExited.args(), &["component", "ended"]);
     assert_eq!(
-        HostReason::ProbeInput.args(),
+        EmbeddedReason::ChildNotExited.args(),
+        &["component", "ended"]
+    );
+    assert_eq!(
+        EmbeddedReason::ProbeInput.args(),
         &["component", reason_args::KIND]
     );
-    assert!(HostReason::Unspecified.args().is_empty());
+    assert!(EmbeddedReason::Unspecified.args().is_empty());
 }
 
 #[test]
@@ -66,10 +68,10 @@ fn a_keys_args_are_found_by_its_name() {
         assert_eq!(reason_key_args(key), Some(args), "{key}");
     }
     for other in [
-        "HOST_REASON_UNSPECIFIED",
-        // Core's keys are angzarr-proto's.
-        "HOST_REASON_PROJECTOR_NO_INPUT_DOMAIN",
-        "COORDINATOR_REASON_HANDLER_UNAVAILABLE",
+        "EMBEDDED_REASON_UNSPECIFIED",
+        // The keys' old names, and core's keys, which are angzarr-proto's.
+        "HOST_REASON_CHILD_NOT_SERVING",
+        "ANGZARR_REASON_HANDLER_UNAVAILABLE",
         "",
     ] {
         assert_eq!(reason_key_args(other), None, "{other}");
@@ -120,18 +122,23 @@ fn the_package_imports_only_core_and_declares_no_service() {
     }
 }
 
-// Decision 14.65: a key's status is its option's, in core's ReasonStatus.
+// Decision 14.104: a key's surface is its option's, a google.rpc.Code.
 #[test]
-fn a_keys_status_is_its_options() {
-    use angzarr_proto::v1::ReasonStatus;
+fn a_keys_surface_is_its_options() {
+    use angzarr_proto::google::rpc::Code;
+    use angzarr_proto::ReasonSurface;
+    let status = |code| Some(ReasonSurface::GrpcStatus(code));
     assert_eq!(
-        HostReason::HandshakeMalformed.status(),
-        ReasonStatus::Internal
+        EmbeddedReason::ChildNotServing.surface(),
+        status(Code::Internal)
     );
-    assert_eq!(HostReason::ChildNotExited.status(), ReasonStatus::Internal);
     assert_eq!(
-        HostReason::ProbeInput.status(),
-        ReasonStatus::InvalidArgument
+        EmbeddedReason::ChildNotExited.surface(),
+        status(Code::Internal)
     );
-    assert_eq!(HostReason::Unspecified.status(), ReasonStatus::Unspecified);
+    assert_eq!(
+        EmbeddedReason::ProbeInput.surface(),
+        status(Code::InvalidArgument)
+    );
+    assert_eq!(EmbeddedReason::Unspecified.surface(), None);
 }
