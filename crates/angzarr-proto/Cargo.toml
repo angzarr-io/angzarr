@@ -24,6 +24,10 @@ uuid = { version = "1", default-features = false, features = ["v5"] }
 [build-dependencies]
 prost-build = "0.14"
 
+[dev-dependencies]
+# The protos tests' scratch directory (std alone).
+angzarr-test-dir = { path = "../angzarr-test-dir" }
+
 # The shared crates' lints: the workspace's (the root Cargo.toml).
 [lints]
 workspace = true

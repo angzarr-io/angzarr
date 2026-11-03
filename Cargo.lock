@@ -15,6 +15,7 @@ dependencies = [
 name = "angzarr-diagnostic"
 version = "0.1.0"
 dependencies = [
+ "angzarr-test-dir",
  "fluent-syntax",
 ]
 
@@ -48,6 +49,7 @@ dependencies = [
 name = "angzarr-proto"
 version = "0.1.0"
 dependencies = [
+ "angzarr-test-dir",
  "bytes",
  "prost",
  "prost-build",

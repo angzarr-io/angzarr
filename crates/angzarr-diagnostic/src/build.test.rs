@@ -1,6 +1,6 @@
 use super::*;
 
-use crate::test_dir::TestDir;
+use angzarr_test_dir::TestDir;
 
 /// A fresh directory of this test's own under the system's temporary one,
 /// removed when it drops, the test passing or failing.

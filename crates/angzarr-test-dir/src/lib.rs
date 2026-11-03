@@ -41,7 +41,10 @@ pub enum OnPanic {
 impl OnPanic {
     /// [`OnPanic::Keep`] when [`KEEP`] is set, else [`OnPanic::Remove`].
     pub fn from_env() -> OnPanic {
-        todo!("red: the environment's choice")
+        match std::env::var_os(KEEP) {
+            Some(_) => OnPanic::Keep,
+            None => OnPanic::Remove,
+        }
     }
 }
 
@@ -63,14 +66,16 @@ impl TestDir {
     /// A fresh, empty `<base>/<prefix>-<pid>-<n>`, doing `on_panic` with it
     /// when dropped in a panic.
     pub fn under(base: &Path, prefix: &str, on_panic: OnPanic) -> TestDir {
-        let _ = (
-            base,
-            prefix,
-            on_panic,
-            AtomicUsize::new(0),
-            Ordering::Relaxed,
-        );
-        todo!("red: a fresh directory")
+        static RUN: AtomicUsize = AtomicUsize::new(0);
+        let path = base.join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            RUN.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path)
+            .unwrap_or_else(|e| panic!("creating {}: {e}", path.display()));
+        TestDir { path, on_panic }
     }
 
     /// The directory.
@@ -81,8 +86,11 @@ impl TestDir {
 
 impl Drop for TestDir {
     fn drop(&mut self) {
-        // red: nothing removed yet
-        let _ = (self.on_panic, &self.path);
+        if self.on_panic == OnPanic::Keep && std::thread::panicking() {
+            eprintln!("{KEEP}: kept {}", self.path.display());
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.path);
     }
 }
 
