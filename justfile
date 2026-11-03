@@ -128,7 +128,7 @@ buf-docs:
 
 # Every shared crate, in dependency order. Each has a justfile with check,
 # fmt, fmt-check, build, lint and test (crates/<crate>/justfile).
-SHARED_CRATES := "angzarr-test-dir angzarr-diagnostic angzarr-proto angzarr-proto-component angzarr-proto-transport-embedded angzarr-proto-transport-distributed angzarr-ports angzarr-yaml angzarr-presentation"
+SHARED_CRATES := "angzarr-test-dir angzarr-diagnostic angzarr-proto angzarr-proto-component angzarr-proto-transport-embedded angzarr-proto-transport-distributed angzarr-ports angzarr-yaml angzarr-presentation angzarr-store-transfer"
 
 # Run one recipe of every shared crate's justfile, stopping at the first
 # that fails.

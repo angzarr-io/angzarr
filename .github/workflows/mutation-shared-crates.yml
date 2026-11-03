@@ -3,7 +3,8 @@
 # crates/angzarr-diagnostic and crates/angzarr-yaml (moved from
 # angzarr-embedded), and crates/angzarr-presentation (moved from taskloom), and
 # crates/angzarr-test-dir (the one test-directory guard of core,
-# angzarr-embedded and angzarr-cli);
+# angzarr-embedded and angzarr-cli), and crates/angzarr-store-transfer
+# (a store carried across a proto generation);
 # weekly and by hand. Each crate's `just mutation-test`
 # (its justfile, through the root justfile's shared-mutation) mutates the
 # whole crate and judges the kill rate against its MUTATION_THRESHOLD. No git hook runs mutation. angzarr-proto is
@@ -33,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [angzarr-ports, angzarr-diagnostic, angzarr-yaml, angzarr-presentation, angzarr-test-dir]
+        crate: [angzarr-ports, angzarr-diagnostic, angzarr-yaml, angzarr-presentation, angzarr-test-dir, angzarr-store-transfer]
     # GitHub's cap for a hosted job; let the full pass finish rather than
     # cancel it mid-run.
     timeout-minutes: 360
