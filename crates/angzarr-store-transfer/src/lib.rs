@@ -39,6 +39,16 @@
 //!   rows beyond their versions, the columns it copies out of a page). A
 //!   pending outbox entry refuses the export (D5 (a)): deliver first.
 //!
+//! # The re-fold digest
+//!
+//! [`write_digest`] writes the other half of the crossing's check (the
+//! plan's section 5.3.2): each build folds every stream of its own store
+//! (the runtime's to do: angzarr-embedded's `Kernel::fold_digest`), and
+//! writes one line per stream, `{"cover": Cover, "head": "h", "state":
+//! Any}` ([`record::DigestLine`]), in the same JSON mapping, keys sorted.
+//! The old build's digest of the source and the new build's of the import
+//! must be the same bytes.
+//!
 //! # Refused, nothing written
 //!
 //! An export refuses ([`ExportError`]) a store whose ledger is not the

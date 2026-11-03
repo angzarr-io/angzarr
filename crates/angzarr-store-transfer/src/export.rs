@@ -11,8 +11,8 @@ use prost_reflect::{DescriptorPool, DynamicMessage, MessageDescriptor, ReflectMe
 
 use crate::error::{ExportError, RowAt};
 use crate::record::{
-    At, Count, DeadLetterRecord, End, Header, PageRecord, PositionRecord, Record, SnapshotRecord,
-    StreamCount,
+    At, Count, DeadLetterRecord, DigestLine, End, Header, PageRecord, PositionRecord, Record,
+    SnapshotRecord, StreamCount,
 };
 use crate::{FORMAT, FORMAT_VERSION, GENERATION};
 
@@ -107,7 +107,10 @@ where
 }
 
 /// `records`, one per line, then a flush.
-fn write_lines<W: Write>(out: &mut W, records: &[Record]) -> Result<(), ExportError> {
+fn write_lines<W: Write, R: serde::Serialize>(
+    out: &mut W,
+    records: &[R],
+) -> Result<(), ExportError> {
     let failed = |e: std::io::Error| ExportError::Write {
         kind: format!("{:?}", e.kind()),
     };
@@ -180,6 +183,7 @@ struct Writer<'p> {
     snapshot: MessageDescriptor,
     letter: MessageDescriptor,
     uuid: MessageDescriptor,
+    any: MessageDescriptor,
 }
 
 impl<'p> Writer<'p> {
@@ -195,6 +199,7 @@ impl<'p> Writer<'p> {
             snapshot: get(Snapshot::full_name())?,
             letter: get(AngzarrDeadLetter::full_name())?,
             uuid: get(Uuid::full_name())?,
+            any: get(ANY.to_string())?,
         })
     }
 
@@ -452,6 +457,19 @@ pub fn write_digest<W: Write>(
     pool: &DescriptorPool,
     out: &mut W,
 ) -> Result<(), ExportError> {
-    let _ = (streams, pool, out);
-    todo!("the digest's lines")
+    let writer = Writer::new(pool)?;
+    let mut lines = Vec::new();
+    for stream in streams {
+        let at = || RowAt {
+            kind: "state",
+            stream: stream_text(&stream.cover),
+            place: String::new(),
+        };
+        lines.push(DigestLine {
+            cover: writer.cover(&stream.cover, &at)?,
+            head: Count(stream.head),
+            state: writer.json(&writer.any, &stream.state.encode_to_vec(), &at)?,
+        });
+    }
+    write_lines(out, &lines)
 }

@@ -109,6 +109,17 @@ pub struct StreamCount {
     pub dead_letters: Count,
 }
 
+/// One line of a re-fold digest: a stream folded, its head, and its
+/// state (an `Any`, expanded). Not a record of the export's file: a
+/// digest is a file of its own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DigestLine {
+    pub cover: Value,
+    pub head: Count,
+    pub state: Value,
+}
+
 /// A `uint64`, written as proto3 JSON writes one: a decimal string.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Count(pub u64);
