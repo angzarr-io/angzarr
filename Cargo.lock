@@ -96,6 +96,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "angzarr-test-dir"
+version = "0.1.0"
+
+[[package]]
 name = "angzarr-yaml"
 version = "0.1.0"
 dependencies = [
