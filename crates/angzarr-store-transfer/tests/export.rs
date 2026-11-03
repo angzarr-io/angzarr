@@ -469,3 +469,252 @@ async fn export_refuses_a_pending_outbox() {
         Err(ExportError::PendingOutbox { entries: 1 })
     );
 }
+
+/// A ledger row that is not the build's own, though its version is: a
+/// migration changed since it was applied, or one that did not finish.
+#[test]
+fn check_ledger_refuses_a_changed_or_failed_migration() {
+    use angzarr_store_transfer::check_ledger;
+    let build: Vec<Migration> = [1, 2].into_iter().map(migration).collect();
+    let row = |version: u64| AppliedMigration {
+        version,
+        description: format!("m{version}"),
+        checksum: vec![version as u8],
+        success: true,
+        installed_on: Timestamp::default(),
+        execution_time: std::time::Duration::ZERO,
+    };
+    assert_eq!(check_ledger(&build, &[row(1), row(2)]), Ok(vec![1, 2]));
+    let changed = AppliedMigration {
+        checksum: vec![0xFF],
+        ..row(2)
+    };
+    let failed = AppliedMigration {
+        success: false,
+        ..row(2)
+    };
+    for (ledger, why) in [(changed, "changed"), (failed, "failed")] {
+        assert_eq!(
+            check_ledger(&build, &[row(1), ledger]),
+            Err(ExportError::LedgerNotTheBuilds {
+                applied: "1,2".to_string(),
+                build: "1,2".to_string(),
+            }),
+            "a migration {why}"
+        );
+    }
+    let renumbered = AppliedMigration {
+        version: 3,
+        ..row(2)
+    };
+    assert!(check_ledger(&build, &[row(1), renumbered]).is_err());
+}
+
+/// Every line reads back as the record it is, the format's own types
+/// refusing nothing they wrote; the last is the end the export answered.
+#[tokio::test]
+async fn every_line_reads_back_as_its_record() {
+    use angzarr_store_transfer::record::{Count, Record};
+    let store = store().await;
+    let pool = descriptor_pool(&[]).unwrap();
+    let mut out = Vec::new();
+    let end = export(&store, &pool, &mut out).await.unwrap();
+    let records: Vec<Record> = std::str::from_utf8(&out)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(records.last(), Some(&Record::End(end.clone())));
+    assert_eq!(end.records, Count(5));
+    assert_eq!(end.streams[0].head, Count(2));
+    for line in std::str::from_utf8(&out).unwrap().lines() {
+        let record: Record = serde_json::from_str(line).unwrap();
+        assert_eq!(
+            serde_json::to_string(&record).unwrap(),
+            line,
+            "written again, the same line"
+        );
+    }
+    assert!(
+        serde_json::from_str::<Count>("\"x\"").is_err(),
+        "a count is a decimal string"
+    );
+}
+
+/// A dead letter refused names where on its stream it is: a command's id.
+#[tokio::test]
+async fn a_refused_dead_letter_is_named_by_its_place() {
+    let store = MemoryStore::new();
+    let mut letter = letter();
+    letter.at = DeadLetterAt::Command(uuid(7));
+    letter.letter.reason = None;
+    letter.letter.rejection_details = None;
+    letter.letter.payload = Some(
+        angzarr_ports::angzarr_proto::v1::angzarr_dead_letter::Payload::RejectedEvents(
+            angzarr_ports::angzarr_proto::v1::EventBook {
+                cover: Some(stream().to_cover()),
+                pages: vec![page_of(
+                    0,
+                    Any {
+                        type_url: "/nowhere.v1.Gone".to_string(),
+                        value: Vec::new(),
+                    },
+                )],
+                ..Default::default()
+            },
+        ),
+    );
+    store
+        .write(Write {
+            dead_letters: &[letter],
+            ..Write::default()
+        })
+        .await
+        .unwrap();
+    match exported(&store).await {
+        Err(ExportError::UnresolvedType { row, type_url }) => {
+            assert_eq!(row.kind, "dead-letter");
+            assert_eq!(row.place, uuid(7).to_string());
+            assert_eq!(type_url, "/nowhere.v1.Gone", "a page in a list, checked");
+        }
+        other => panic!("a dead letter's unresolvable page refused: {other:?}"),
+    }
+}
+
+/// A length-delimited field `number` holding `bytes` (both short).
+fn field(number: u8, bytes: &[u8]) -> Vec<u8> {
+    let mut out = vec![(number << 3) | 2, bytes.len() as u8];
+    out.extend_from_slice(bytes);
+    out
+}
+
+/// An app's descriptor set: `test.v1.Holder`, a map of `Item`s and a list
+/// of them, and `test.v1.Item`, a name.
+fn holder_set() -> Vec<u8> {
+    use prost_types::field_descriptor_proto::{Label, Type};
+    use prost_types::{
+        DescriptorProto, FieldDescriptorProto, FileDescriptorProto, FileDescriptorSet,
+        MessageOptions,
+    };
+    let field = |name: &str, number, label: Label, kind: Type, type_name: Option<&str>| {
+        FieldDescriptorProto {
+            name: Some(name.to_string()),
+            number: Some(number),
+            label: Some(label as i32),
+            r#type: Some(kind as i32),
+            type_name: type_name.map(str::to_string),
+            json_name: Some(name.to_string()),
+            ..FieldDescriptorProto::default()
+        }
+    };
+    let item = DescriptorProto {
+        name: Some("Item".to_string()),
+        field: vec![field("name", 1, Label::Optional, Type::String, None)],
+        ..DescriptorProto::default()
+    };
+    let entry = DescriptorProto {
+        name: Some("ItemsEntry".to_string()),
+        field: vec![
+            field("key", 1, Label::Optional, Type::String, None),
+            field(
+                "value",
+                2,
+                Label::Optional,
+                Type::Message,
+                Some(".test.v1.Item"),
+            ),
+        ],
+        options: Some(MessageOptions {
+            map_entry: Some(true),
+            ..MessageOptions::default()
+        }),
+        ..DescriptorProto::default()
+    };
+    let holder = DescriptorProto {
+        name: Some("Holder".to_string()),
+        field: vec![
+            field(
+                "items",
+                1,
+                Label::Repeated,
+                Type::Message,
+                Some(".test.v1.Holder.ItemsEntry"),
+            ),
+            field(
+                "list",
+                2,
+                Label::Repeated,
+                Type::Message,
+                Some(".test.v1.Item"),
+            ),
+        ],
+        nested_type: vec![entry],
+        ..DescriptorProto::default()
+    };
+    FileDescriptorSet {
+        file: vec![FileDescriptorProto {
+            name: Some("test/v1/holder.proto".to_string()),
+            package: Some("test.v1".to_string()),
+            message_type: vec![holder, item],
+            syntax: Some("proto3".to_string()),
+            ..FileDescriptorProto::default()
+        }],
+    }
+    .encode_to_vec()
+}
+
+/// A `Holder` payload whose one `Item`, in its map or in its list, holds
+/// a field `Item` does not declare.
+fn holder(in_map: bool) -> Any {
+    let mut item = field(1, b"one");
+    item.extend_from_slice(&UNKNOWN_FIELD);
+    let value = if in_map {
+        let mut entry = field(1, b"k");
+        entry.extend(field(2, &item));
+        field(1, &entry)
+    } else {
+        field(2, &item)
+    };
+    Any {
+        type_url: "/test.v1.Holder".to_string(),
+        value,
+    }
+}
+
+/// An app's payload is resolved through the app's descriptor set, and an
+/// unknown field in an item of its map or its list is refused at its path.
+#[tokio::test]
+async fn an_unknown_field_in_a_maps_or_lists_item_is_refused() {
+    let set = holder_set();
+    let pool = descriptor_pool(&[&set]).unwrap();
+    for (in_map, path) in [(true, "payload.items"), (false, "payload.list")] {
+        let store = MemoryStore::new();
+        store
+            .write(Write::append(stream(), 0, &[page_of(0, holder(in_map))]))
+            .await
+            .unwrap();
+        let mut out = Vec::new();
+        match export(&store, &pool, &mut out).await {
+            Err(ExportError::UnknownFields {
+                message, path: at, ..
+            }) => {
+                assert_eq!(message, "test.v1.Item");
+                assert_eq!(at, path);
+            }
+            other => panic!("an unknown field at {path} refused: {other:?}"),
+        }
+        assert!(out.is_empty());
+    }
+}
+
+/// A descriptor set that does not decode is refused by its index: the
+/// app's first is 1, angzarr's own 0.
+#[test]
+fn descriptor_pool_refuses_a_set_that_does_not_decode_by_its_index() {
+    let set = holder_set();
+    assert!(descriptor_pool(&[&set]).is_ok());
+    assert_eq!(
+        descriptor_pool(&[&set, b"\xff\xff"]).err(),
+        Some(ExportError::DescriptorSet { index: 2 })
+    );
+}
