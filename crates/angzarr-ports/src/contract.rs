@@ -1457,8 +1457,9 @@ where
 /// Decision 14.107: once an edition is deleted, work in flight in it is
 /// refused: a step's position on a removed stream of it is refused
 /// `EditionNotFound` (it would leave a row of the edition behind), and an
-/// input to the stream `EditionNotForked`. Only a fork brings the name
-/// back.
+/// input to the stream `EditionNotForked`. While the edition exists, a
+/// position on any stream of it lands, forked or not. Only a fork brings
+/// the name back, and its write may carry a position on its stream.
 pub async fn after_deletion_only_a_fork_brings_the_edition_back<S>(store: S)
 where
     S: Store + Editions,
@@ -1469,6 +1470,13 @@ where
     );
     fork(&store, origin).await;
     fork(&store, other).await;
+    let unforked = edition_stream("ledger", 1, "what-if");
+    put(&store, key("ledger-view", unforked), 1).await.unwrap();
+    assert_eq!(
+        store.position(key("ledger-view", unforked)).await,
+        Ok(1),
+        "a position on an unforked stream of a live edition lands"
+    );
     delete_edition(&store, "what-if").await;
     let positions = [(key("table-player", origin), 2)];
     assert_eq!(
@@ -1489,18 +1497,20 @@ where
         "an input to a removed stream"
     );
     assert_eq!(store.list_editions().await, Ok(vec![]), "not listed");
+    let fork_page = [created_page(0)];
     assert_eq!(
-        append(&store, origin, 0, &[created_page(0)]).await,
-        Ok(1),
-        "a fork brings the name back"
-    );
-    assert_eq!(
-        store.write(Write::positions(&positions)).await,
+        store
+            .write(Write {
+                positions: &positions,
+                ..Write::append(origin, 0, &fork_page)
+            })
+            .await,
         Ok(Written {
-            next_sequence: None
+            next_sequence: Some(1)
         }),
-        "and a position in it lands again"
+        "a fork brings the name back, with a position on its stream"
     );
+    assert_eq!(store.position(key("table-player", origin)).await, Ok(2));
 }
 
 /// One step on `s`, as a command handler and a projector take it: event
@@ -1635,6 +1645,11 @@ where
         .unwrap();
     let mains = [entry(4, "player-table", 4)];
     put_outbox(&store, &mains).await;
+    assert_eq!(
+        store.pending(10).await.map(|p| p.len()),
+        Ok(4),
+        "every entry pending before"
+    );
     assert_eq!(store.remove_edition_stream(e).await, Ok(2));
     assert_eq!(
         store.pending(10).await,
@@ -1645,6 +1660,11 @@ where
         store.position(key("player-table", e)).await,
         Ok(0),
         "its positions too"
+    );
+    assert_eq!(
+        store.position(key("table-player", other)).await,
+        Ok(1),
+        "another stream's kept"
     );
 }
 

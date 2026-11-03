@@ -77,10 +77,13 @@ fn place(position: PositionKey<'_>) -> PositionPlace {
     (key(position.stream), position.handler.to_string())
 }
 
-/// One pending outbox entry.
+/// One pending outbox entry, with the streams of the write that put it
+/// (its stream, and the streams its positions are on): what an edition
+/// stream's removal takes with it (decision 14.107).
 #[derive(Clone)]
 struct Pending {
     entry: OutboxEntry,
+    streams: Vec<Key>,
 }
 
 /// The store's data: copied on write only while a read unit holds it.
@@ -152,6 +155,16 @@ impl Data {
         self.snapshots.remove(k);
         self.dead_letters.retain(|(stream, ..), _| stream != k);
         self.streams.remove(k).map_or(0, |pages| pages.len() as u64)
+    }
+
+    /// Remove every row of edition stream `k`: what a purge removes, the
+    /// positions on it, and the pending outbox entries of its edition
+    /// written with it (decision 14.107: deletion by enumeration).
+    fn remove(&mut self, k: &Key) -> u64 {
+        self.positions.retain(|(stream, _), _| stream != k);
+        self.outbox
+            .retain(|p| p.entry.edition != k.1 || !p.streams.contains(k));
+        self.purge(k)
     }
 }
 
@@ -348,10 +361,13 @@ impl EventStore for MemoryStore {
             data.positions.insert(place(*position), *next);
         }
         data.dead_letters.extend(letters);
+        let mut streams: Vec<Key> = landing_key.into_iter().collect();
+        streams.extend(write.positions.iter().map(|(p, _)| key(p.stream)));
         for entry in write.outbox {
             if !data.outbox.iter().any(|kept| kept.entry.id == entry.id) {
                 data.outbox.push(Pending {
                     entry: entry.clone(),
+                    streams: streams.clone(),
                 });
             }
         }
@@ -447,8 +463,15 @@ impl Editions for MemoryStore {
     }
 
     async fn remove_edition_stream(&self, stream: StreamRef<'_>) -> Result<u64, StoreError> {
-        let _ = stream;
-        todo!("remove an edition stream's rows (decision 14.107)")
+        if stream.edition.is_none() {
+            return Err(StoreError::EditionNameRequired);
+        }
+        let k = key(stream);
+        let mut guard = self.lock();
+        let data = Arc::make_mut(&mut guard);
+        let removed = data.remove(&k);
+        data.commits += 1;
+        Ok(removed)
     }
 }
 

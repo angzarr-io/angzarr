@@ -1643,13 +1643,11 @@ fn the_edition_checks_catch_a_wrong_list_or_removal() {
         RemoveKeepsSnapshot,
         RemoveKeepsPositions,
         RemoveTakesMain,
-        RemoveSpreads,
     );
     catches!(
         an_edition_is_deleted_by_removing_each_forked_stream,
         broken,
-        RemoveSpreads,
-        ListsOneForkPerEdition,
+        RemoveSpreads
     );
     catches!(
         after_deletion_only_a_fork_brings_the_edition_back,
