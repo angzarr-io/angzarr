@@ -39,12 +39,12 @@ fn a_digest_is_one_line_per_stream_its_state_expanded_and_deterministic() {
         Digested {
             cover: cover(1),
             head: 3,
-            state: state("one"),
+            state: Some(state("one")),
         },
         Digested {
             cover: cover(2),
             head: 0,
-            state: state("two"),
+            state: Some(state("two")),
         },
     ];
     let first = digest(&streams).unwrap();
@@ -73,10 +73,10 @@ fn a_digest_refuses_a_state_the_pool_cannot_resolve() {
     let streams = [Digested {
         cover: cover(1),
         head: 1,
-        state: Any {
+        state: Some(Any {
             type_url: "/nowhere.v1.State".to_string(),
             value: Vec::new(),
-        },
+        }),
     }];
     match digest(&streams) {
         Err(ExportError::UnresolvedType { row, type_url }) => {
@@ -86,4 +86,20 @@ fn a_digest_refuses_a_state_the_pool_cannot_resolve() {
         }
         other => panic!("an unresolvable state refused: {other:?}"),
     }
+}
+
+/// A stream of a domain that takes no snapshot has no state to show (its
+/// runtime gives none): its line is its cover and head alone, never a
+/// stand-in for a state.
+#[test]
+fn a_digest_line_of_a_stream_with_no_state_is_its_cover_and_head() {
+    let streams = [Digested {
+        cover: cover(1),
+        head: 2,
+        state: None,
+    }];
+    let line: serde_json::Value = serde_json::from_slice(&digest(&streams).unwrap()).unwrap();
+    let keys: Vec<&String> = line.as_object().unwrap().keys().collect();
+    assert_eq!(keys, ["cover", "head"]);
+    assert_eq!(line["head"], "2");
 }

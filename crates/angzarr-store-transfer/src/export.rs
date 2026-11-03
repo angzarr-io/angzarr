@@ -439,12 +439,13 @@ impl Counts {
 
 /// One stream folded by an app's build: its cover, its head and its state
 /// (its snapshot form, packed), what a re-fold digest writes (the store
-/// export/import plan, section 5.3).
+/// export/import plan, section 5.3). `None`: the domain takes no snapshot,
+/// so its runtime has no form of the state to show.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Digested {
     pub cover: Cover,
     pub head: u64,
-    pub state: prost_types::Any,
+    pub state: Option<prost_types::Any>,
 }
 
 /// Write the re-fold digest of `streams`, one line per stream in the
@@ -468,7 +469,10 @@ pub fn write_digest<W: Write>(
         lines.push(DigestLine {
             cover: writer.cover(&stream.cover, &at)?,
             head: Count(stream.head),
-            state: writer.json(&writer.any, &stream.state.encode_to_vec(), &at)?,
+            state: match &stream.state {
+                Some(state) => writer.json(&writer.any, &state.encode_to_vec(), &at)?,
+                None => todo!("a stream with no state"),
+            },
         });
     }
     write_lines(out, &lines)
