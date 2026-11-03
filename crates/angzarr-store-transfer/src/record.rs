@@ -110,14 +110,16 @@ pub struct StreamCount {
 }
 
 /// One line of a re-fold digest: a stream folded, its head, and its
-/// state (an `Any`, expanded). Not a record of the export's file: a
-/// digest is a file of its own.
+/// state (an `Any`, expanded), absent for a domain with no form of its
+/// state to show. Not a record of the export's file: a digest is a file
+/// of its own.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DigestLine {
     pub cover: Value,
     pub head: Count,
-    pub state: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<Value>,
 }
 
 /// A `uint64`, written as proto3 JSON writes one: a decimal string.

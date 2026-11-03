@@ -47,7 +47,9 @@
 //! writes one line per stream, `{"cover": Cover, "head": "h", "state":
 //! Any}` ([`record::DigestLine`]), in the same JSON mapping, keys sorted.
 //! The old build's digest of the source and the new build's of the import
-//! must be the same bytes.
+//! must be the same bytes. A domain that takes no snapshot (a marked-up
+//! aggregate with no `snapshot = ..`) has no form of its state to show:
+//! its lines hold its cover and head alone, so its fold is not compared.
 //!
 //! # Refused, nothing written
 //!

@@ -470,8 +470,8 @@ pub fn write_digest<W: Write>(
             cover: writer.cover(&stream.cover, &at)?,
             head: Count(stream.head),
             state: match &stream.state {
-                Some(state) => writer.json(&writer.any, &state.encode_to_vec(), &at)?,
-                None => todo!("a stream with no state"),
+                Some(state) => Some(writer.json(&writer.any, &state.encode_to_vec(), &at)?),
+                None => None,
             },
         });
     }
