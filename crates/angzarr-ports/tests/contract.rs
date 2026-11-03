@@ -149,6 +149,12 @@
 //!   A policy's step writes positions and entries but no events: whether its
 //!   entries are ordered by the stream its position is on, at that
 //!   position, is not pinned.
+//! - **FLAG(X1) `Export`** (the store export/import plan, D2 (a), not yet
+//!   ruled): every row a store keeps, as stored, at one moment, one stream
+//!   at a time in `StreamRef`'s order, then the pending outbox; the
+//!   `export*` sections. It answers a `Vec` at once, as the ports take no
+//!   stream type (no dependency beyond prost): a store too large for that
+//!   needs a paged form.
 //! - **FLAG(E3') `read_by_correlation` in an edition** answers an uncreated
 //!   stream's pages under the edition's cover.
 //!
@@ -314,6 +320,26 @@ mod dead_letters_purge {
 mod dead_letters_editions {
     use super::*;
     angzarr_ports::store_contract!(dead_letters_editions, #[tokio::test], MemoryStore::new());
+}
+
+mod export {
+    use super::*;
+    angzarr_ports::store_contract!(export, #[tokio::test], MemoryStore::new());
+}
+
+mod export_pair {
+    use super::*;
+    angzarr_ports::store_contract!(export_pair, #[tokio::test], pair());
+}
+
+mod export_dead_letters {
+    use super::*;
+    angzarr_ports::store_contract!(export_dead_letters, #[tokio::test], MemoryStore::new());
+}
+
+mod export_every_kind {
+    use super::*;
+    angzarr_ports::store_contract!(export_every_kind, #[tokio::test], MemoryStore::new());
 }
 
 /// The backup section's fixture on `MemoryStore`: a target is a

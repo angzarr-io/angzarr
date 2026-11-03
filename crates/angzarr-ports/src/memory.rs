@@ -35,9 +35,9 @@ use crate::error::StoreError;
 use crate::migrate::{plan_run, plan_undo, AppliedMigration, Backup, Migration, Migrations};
 use crate::store::{
     Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions,
-    EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, Processed, Purge,
-    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write, Written,
-    EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
+    EventStore, Export, ExportRow, ListStreams, Outbox, OutboxEntry, PositionStore, Processed,
+    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write,
+    Written, EDITION_CREATED_TYPE_URL, EDITION_DELETED_TYPE_URL,
 };
 use crate::stream::{PositionKey, Slice, StreamRef};
 
@@ -842,5 +842,15 @@ impl Outbox for MemoryStore {
         data.outbox.retain(|p| !ids.contains(&p.entry.id));
         data.commits += 1;
         Ok((before - data.outbox.len()) as u64)
+    }
+}
+
+impl Export for MemoryStore {
+    fn backend(&self) -> &str {
+        env!("CARGO_PKG_NAME")
+    }
+
+    async fn export(&self) -> Result<Vec<ExportRow>, StoreError> {
+        todo!("the export of a MemoryStore")
     }
 }
