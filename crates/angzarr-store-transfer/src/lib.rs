@@ -55,7 +55,7 @@ mod export;
 pub mod record;
 
 pub use error::{ExportError, RowAt};
-pub use export::{check_ledger, descriptor_pool, export};
+pub use export::{check_ledger, descriptor_pool, export, write_digest, Digested};
 
 /// The ports and their wire types, as this crate uses them.
 pub use angzarr_ports;

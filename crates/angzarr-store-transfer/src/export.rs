@@ -431,3 +431,27 @@ impl Counts {
         Ok(())
     }
 }
+
+/// One stream folded by an app's build: its cover, its head and its state
+/// (its snapshot form, packed), what a re-fold digest writes (the store
+/// export/import plan, section 5.3).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Digested {
+    pub cover: Cover,
+    pub head: u64,
+    pub state: prost_types::Any,
+}
+
+/// Write the re-fold digest of `streams`, one line per stream in the
+/// order given: `{"cover": Cover, "head": "h", "state": Any}`, the state
+/// expanded through `pool`, every object's keys sorted. Two builds whose
+/// folds agree write the same bytes. Refused, as an export refuses a row:
+/// a state whose type the pool does not name, or holding an unknown field.
+pub fn write_digest<W: Write>(
+    streams: &[Digested],
+    pool: &DescriptorPool,
+    out: &mut W,
+) -> Result<(), ExportError> {
+    let _ = (streams, pool, out);
+    todo!("the digest's lines")
+}

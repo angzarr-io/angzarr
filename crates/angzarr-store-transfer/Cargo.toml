@@ -19,6 +19,8 @@ angzarr-ports = { path = "../angzarr-ports" }
 # The re-encoding check: a stored row decoded by the build's own types and
 # encoded again must be its bytes.
 prost = "0.14"
+# `Any`, as a digest's state is packed.
+prost-types = "0.14"
 # proto3's JSON mapping over descriptors, `Any` expanded, unknown fields
 # kept to be refused (the store export/import plan, D4 (a)): here only, so
 # angzarr-proto stays prost-only.
