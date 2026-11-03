@@ -9,6 +9,7 @@ members = [
     "crates/angzarr-proto-component",
     "crates/angzarr-proto-transport-distributed",
     "crates/angzarr-proto-transport-embedded",
+    "crates/angzarr-test-dir",
     "crates/angzarr-yaml",
 ]
 # sererr is a submodule with its own cargo workspace (its protos feed the
