@@ -342,6 +342,13 @@ mod export_every_kind {
     angzarr_ports::store_contract!(export_every_kind, #[tokio::test], MemoryStore::new());
 }
 
+/// An export says what it was taken from: `MemoryStore`'s package.
+#[test]
+fn a_memory_store_names_its_backend_by_its_package() {
+    use angzarr_ports::Export;
+    assert_eq!(MemoryStore::new().backend(), "angzarr-ports");
+}
+
 /// The backup section's fixture on `MemoryStore`: a target is a
 /// [`BackupSlot`].
 struct MemoryBackups;

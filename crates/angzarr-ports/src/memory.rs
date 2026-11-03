@@ -193,12 +193,8 @@ impl Data {
             .map(|(k, _)| k)
             .collect();
         streams.extend(self.snapshots.keys());
-        streams.extend(
-            self.positions
-                .iter()
-                .filter(|(_, next)| **next > 0)
-                .map(|((k, _), _)| k),
-        );
+        // A stream holding only positions at 0 is listed, and gives no row.
+        streams.extend(self.positions.keys().map(|(k, _)| k));
         streams.extend(self.dead_letters.keys().map(|(k, ..)| k));
         let mut rows: Vec<ExportRow> = streams
             .into_iter()
