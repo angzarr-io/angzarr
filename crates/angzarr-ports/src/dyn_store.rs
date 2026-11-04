@@ -19,8 +19,8 @@ use prost_types::Timestamp;
 use crate::error::StoreError;
 use crate::send::{MaybeSend, MaybeSync};
 use crate::store::{
-    Editions, EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, ReadByCorrelation,
-    ReadUntilTime, SnapshotStore, Write, Written,
+    ChangeToken, EditionKnown, Editions, EventStore, ListStreams, Outbox, OutboxEntry,
+    PositionStore, ReadByCorrelation, ReadUntilTime, SnapshotStore, Watch, Write, Written,
 };
 use crate::stream::{Head, PositionKey, Slice, StreamRef};
 
@@ -93,6 +93,16 @@ pub trait DynReadByCorrelation: MaybeSend + MaybeSync {
         edition: Option<&'a str>,
         correlation_id: Uuid,
     ) -> BoxFuture<'a, Result<Vec<EventBook>, StoreError>>;
+}
+
+/// [`Watch`], object-safe.
+pub trait DynWatch: MaybeSend + MaybeSync {
+    fn change_token(&self) -> BoxFuture<'_, Result<ChangeToken, StoreError>>;
+}
+
+/// [`EditionKnown`], object-safe.
+pub trait DynEditionKnown: MaybeSend + MaybeSync {
+    fn edition_known<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<bool, StoreError>>;
 }
 
 /// [`ListStreams`], object-safe.
@@ -200,6 +210,18 @@ impl<T: ReadByCorrelation> DynReadByCorrelation for T {
     }
 }
 
+impl<T: Watch> DynWatch for T {
+    fn change_token(&self) -> BoxFuture<'_, Result<ChangeToken, StoreError>> {
+        Box::pin(Watch::change_token(self))
+    }
+}
+
+impl<T: EditionKnown> DynEditionKnown for T {
+    fn edition_known<'a>(&'a self, name: &'a str) -> BoxFuture<'a, Result<bool, StoreError>> {
+        Box::pin(EditionKnown::edition_known(self, name))
+    }
+}
+
 impl<T: ListStreams> DynListStreams for T {
     fn list_streams(&self) -> BoxFuture<'_, Result<Vec<Cover>, StoreError>> {
         Box::pin(ListStreams::list_streams(self))
@@ -260,5 +282,38 @@ impl SnapshotStore for dyn DynStore + '_ {
 impl PositionStore for dyn DynStore + '_ {
     async fn position(&self, key: PositionKey<'_>) -> Result<u64, StoreError> {
         DynPositionStore::position(self, key).await
+    }
+}
+
+impl ReadUntilTime for dyn DynReadUntilTime + '_ {
+    async fn read_until_time(
+        &self,
+        stream: StreamRef<'_>,
+        until: &Timestamp,
+    ) -> Result<Slice, StoreError> {
+        DynReadUntilTime::read_until_time(self, stream, until).await
+    }
+}
+
+impl ReadByCorrelation for dyn DynReadByCorrelation + '_ {
+    async fn read_by_correlation(
+        &self,
+        domain: Option<&str>,
+        edition: Option<&str>,
+        correlation_id: Uuid,
+    ) -> Result<Vec<EventBook>, StoreError> {
+        DynReadByCorrelation::read_by_correlation(self, domain, edition, correlation_id).await
+    }
+}
+
+impl Watch for dyn DynWatch + '_ {
+    async fn change_token(&self) -> Result<ChangeToken, StoreError> {
+        DynWatch::change_token(self).await
+    }
+}
+
+impl EditionKnown for dyn DynEditionKnown + '_ {
+    async fn edition_known(&self, name: &str) -> Result<bool, StoreError> {
+        DynEditionKnown::edition_known(self, name).await
     }
 }

@@ -175,6 +175,54 @@ pub trait EventStore: MaybeSend + MaybeSync {
     ) -> impl Future<Output = Result<Vec<Cover>, StoreError>> + MaybeSend;
 }
 
+// ============================================================ read-only
+
+/// The read side of [`EventStore`]: what a reader of streams needs, with no
+/// `write`. Every [`EventStore`] is one (below), so a store handed to a
+/// reader is already one; a handle that can only read implements this alone.
+/// Each method means what the [`EventStore`] method of its name does,
+/// editions included.
+pub trait EventRead: MaybeSend + MaybeSync {
+    /// As [`EventStore::read`].
+    fn read(
+        &self,
+        stream: StreamRef<'_>,
+        from: u64,
+        to: Option<u64>,
+    ) -> impl Future<Output = Result<Slice, StoreError>> + MaybeSend;
+
+    /// As [`EventStore::head`]: by default a read past the end.
+    fn head(
+        &self,
+        stream: StreamRef<'_>,
+    ) -> impl Future<Output = Result<Head, StoreError>> + MaybeSend {
+        async move { Ok(EventRead::read(self, stream, u64::MAX, None).await?.head()) }
+    }
+
+    /// As [`EventStore::covers`].
+    fn covers(
+        &self,
+        domain: &str,
+    ) -> impl Future<Output = Result<Vec<Cover>, StoreError>> + MaybeSend;
+}
+
+impl<T: EventStore + ?Sized> EventRead for T {
+    async fn read(
+        &self,
+        stream: StreamRef<'_>,
+        from: u64,
+        to: Option<u64>,
+    ) -> Result<Slice, StoreError> {
+        EventStore::read(self, stream, from, to).await
+    }
+    async fn head(&self, stream: StreamRef<'_>) -> Result<Head, StoreError> {
+        EventStore::head(self, stream).await
+    }
+    async fn covers(&self, domain: &str) -> Result<Vec<Cover>, StoreError> {
+        EventStore::covers(self, domain).await
+    }
+}
+
 /// The newest snapshot per stream: whatever was written last. Whether it
 /// may be used is the caller's to judge. Written by its own call, never in
 /// a [`Write`] (ruling 5).
@@ -278,6 +326,33 @@ pub trait Editions: MaybeSend + MaybeSync {
         &self,
         stream: StreamRef<'_>,
     ) -> impl Future<Output = Result<u64, StoreError>> + MaybeSend;
+}
+
+/// Opt-in: whether an edition exists, with no write and no administration:
+/// the one question a reader of editions asks, so a read-only handle can
+/// answer "unknown edition" ([`StoreError::UnknownEdition`], NOT_FOUND on the
+/// wire) without holding [`Editions`], whose `remove_edition_stream` writes.
+///
+/// An edition exists while a fork of it remains (see [`Editions`]); main has
+/// no name and is not asked about. Every [`Editions`] store is one (below:
+/// the answer is derived from [`Editions::list_editions`]); a read-only
+/// store with a cheaper way implements this alone.
+pub trait EditionKnown: MaybeSend + MaybeSync {
+    /// Whether a fork of edition `name` exists.
+    fn edition_known(
+        &self,
+        name: &str,
+    ) -> impl Future<Output = Result<bool, StoreError>> + MaybeSend;
+}
+
+impl<T: Editions + ?Sized> EditionKnown for T {
+    async fn edition_known(&self, name: &str) -> Result<bool, StoreError> {
+        Ok(self
+            .list_editions()
+            .await?
+            .iter()
+            .any(|edition| edition.name == name))
+    }
 }
 
 // ========================================================== one-moment reads
@@ -675,5 +750,43 @@ impl<T: Processed + ?Sized> Processed for Arc<T> {
         handler: &str,
     ) -> impl Future<Output = Result<Vec<(Cover, u64)>, StoreError>> + MaybeSend {
         (**self).processed(handler)
+    }
+}
+
+// ============================================ shared handles: Arc<T> (opt-in)
+
+impl<T: ReadByCorrelation + ?Sized> ReadByCorrelation for Arc<T> {
+    fn read_by_correlation(
+        &self,
+        domain: Option<&str>,
+        edition: Option<&str>,
+        correlation_id: Uuid,
+    ) -> impl Future<Output = Result<Vec<EventBook>, StoreError>> + MaybeSend {
+        (**self).read_by_correlation(domain, edition, correlation_id)
+    }
+}
+
+impl<T: ReadUntilTime + ?Sized> ReadUntilTime for Arc<T> {
+    fn read_until_time(
+        &self,
+        stream: StreamRef<'_>,
+        until: &Timestamp,
+    ) -> impl Future<Output = Result<Slice, StoreError>> + MaybeSend {
+        (**self).read_until_time(stream, until)
+    }
+}
+
+impl<T: Watch + ?Sized> Watch for Arc<T> {
+    fn change_token(&self) -> impl Future<Output = Result<ChangeToken, StoreError>> + MaybeSend {
+        (**self).change_token()
+    }
+}
+
+impl<T: EditionKnown + ?Sized> EditionKnown for Arc<T> {
+    fn edition_known(
+        &self,
+        name: &str,
+    ) -> impl Future<Output = Result<bool, StoreError>> + MaybeSend {
+        (**self).edition_known(name)
     }
 }

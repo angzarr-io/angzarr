@@ -24,6 +24,8 @@
 //! | [`EventStore::write`] | ONE handling step's atomic write: optionally one stream's events at an expected length, with the step's positions and outbox entries; there is no unit of work | base |
 //! | [`Purge`] | delete a stream, never the positions on it | opt-in |
 //! | [`Editions`] | per-stream forks' administration: `ListEditions`, and removing an edition stream's rows (`DeleteEdition`'s step) | opt-in |
+//! | [`EditionKnown`] | does a fork of an edition exist: the one question a reader of editions asks, with no write; every [`Editions`] store has it | opt-in |
+//! | [`EventRead`] | [`EventStore`]'s read, head and covers, with no `write`; every [`EventStore`] is one | read-only |
 //! | [`ReadStore`] / [`ReadUnit`] | reads that all see one moment | opt-in |
 //! | [`Watch`] | a cheap "anything committed?" | opt-in |
 //! | [`ReadUntilTime`], [`ReadByCorrelation`], [`ListStreams`] | core's queries | opt-in |
@@ -42,6 +44,10 @@
 //!   `wasm32`, where a browser backend's futures need not be. **A native
 //!   backend whose futures are not `Send` is not supported.**
 //! - **dyn.** [`dyn_store`] boxes the ports for core's `Arc<dyn DynStore>`.
+//! - **Shared handles.** `Arc<T>` forwards each port a coordinator holds
+//!   through one (the base ports, [`ListStreams`], [`Processed`],
+//!   [`ReadByCorrelation`], [`ReadUntilTime`], [`Watch`], [`EditionKnown`]),
+//!   and `dyn` of each of the last four's twins is the port again.
 //!
 //! # Features
 //!
@@ -76,8 +82,8 @@ pub mod faulty;
 pub mod memory;
 
 pub use dyn_store::{
-    BoxFuture, DynEditions, DynEventStore, DynListStreams, DynOutbox, DynPositionStore,
-    DynReadByCorrelation, DynReadUntilTime, DynSnapshotStore, DynStore,
+    BoxFuture, DynEditionKnown, DynEditions, DynEventStore, DynListStreams, DynOutbox,
+    DynPositionStore, DynReadByCorrelation, DynReadUntilTime, DynSnapshotStore, DynStore, DynWatch,
 };
 pub use error::{Arg, Cause, Recovery, StoreError};
 pub use migrate::{
@@ -86,9 +92,9 @@ pub use migrate::{
 pub use send::{MaybeSend, MaybeSync};
 pub use store::{
     is_fork, Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore,
-    Editions, EventStore, Export, ExportRow, ListStreams, Outbox, OutboxEntry, PositionStore,
-    Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Store,
-    Watch, Write, Written,
+    EditionKnown, Editions, EventRead, EventStore, Export, ExportRow, ListStreams, Outbox,
+    OutboxEntry, PositionStore, Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit,
+    ReadUntilTime, SnapshotStore, Store, Watch, Write, Written,
 };
 pub use stream::{Head, PositionKey, Slice, StreamRef};
 
