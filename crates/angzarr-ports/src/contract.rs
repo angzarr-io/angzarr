@@ -34,8 +34,10 @@
 //! | `shared_handles_read` (was `read`) | [`ReadStore`] | two handles |
 //! | `shared_handles_read_purge` (was `read_purge`) | [`ReadStore`], [`Purge`] | two handles |
 //! | `shared_handles_watch` (was `watch_pair`) | [`Watch`] | two handles |
+//! | `read_one_handle` | [`ReadStore`] | a store |
+//! | `read_one_handle_purge` | [`ReadStore`], [`Purge`] | a store |
 //! | `read_forks` | [`ReadStore`] | a store |
-//! | `watch` | [`Watch`] | a store |
+//! | `watch` (one handle's token moves when it commits) | [`Watch`] | a store |
 //! | `until_time` | [`ReadUntilTime`] | a store |
 //! | `correlation` | [`ReadByCorrelation`] | a store |
 //! | `list_streams` | [`ListStreams`] | a store |
@@ -64,11 +66,23 @@
 //! `shared_handles*` sections out, which says exactly what it provides. A
 //! store whose handles reach one durable store from several handles or
 //! processes runs them all. The capability's checks are listed in
-//! [`SHARED_HANDLES`]. The old names `pair`, `read`, `read_purge` and
-//! `watch_pair` still run the same checks as the `shared_handles*` section
-//! each is listed against; nothing a caller ran before is dropped. The
-//! sections that need a trait (`ReadStore`, `Purge`, `Watch`) keep it as
-//! well: the capability is orthogonal to the traits.
+//! [`SHARED_HANDLES`].
+//!
+//! **What a store with one handle is held to.** The same properties on ONE
+//! handle (or clones of it) are not the capability: `read_one_handle` and
+//! `read_one_handle_purge` check that a read unit keeps its moment (its
+//! reads, heads and snapshots, the unknown-edition refusal, a stream purged
+//! after it began) while the same handle commits afterwards; `watch`
+//! checks that a handle's change token moves when that handle commits. They
+//! need the opt-in traits ([`ReadStore`], [`Purge`], [`Watch`]), so they are
+//! sections beside the bare base form, not in it (a store without those
+//! traits, `Arc<dyn DynStore>` among them, runs the base).
+//!
+//! The old names `pair`, `read`, `read_purge` and `watch_pair` are PERMANENT
+//! aliases of `shared_handles`, `shared_handles_read`,
+//! `shared_handles_read_purge` and `shared_handles_watch`: they run the same
+//! checks and are not deprecated. The capability is a choice of section at
+//! the call site, not a runtime flag.
 //!
 //! Every open migrates (the owner, 2026-10-31): reading and writing both
 //! run what is pending before they serve, and refuse a store newer than
@@ -1691,22 +1705,22 @@ where
 
 // --------------------------------------------------- read units (opt-in)
 
-pub async fn a_read_unit_sees_the_store_as_it_began<S>((reader, writer): (S, S))
+async fn a_read_unit_sees_the_store_as_it_began_between<S>(reader: &S, writer: &S)
 where
     S: Store + ReadStore,
 {
     let early = main_stream("account", 1);
     let late = main_stream("account", 2);
-    append(&writer, early, 0, &[page(0, 1)]).await.unwrap();
+    append(writer, early, 0, &[page(0, 1)]).await.unwrap();
     let mut reads = reader.begin_read().await.unwrap();
-    append(&writer, early, 1, &[page(1, 2)]).await.unwrap();
-    append(&writer, late, 0, &[page(0, 2)]).await.unwrap();
+    append(writer, early, 1, &[page(1, 2)]).await.unwrap();
+    append(writer, late, 0, &[page(0, 2)]).await.unwrap();
     assert_eq!(
         reads.covers("account").await,
         Ok(covers(&[early])),
         "covers as the unit began"
     );
-    append(&writer, early, 2, &[page(2, 3)]).await.unwrap();
+    append(writer, early, 2, &[page(2, 3)]).await.unwrap();
     let slice = reads.read(early, 0, None).await.unwrap();
     assert_eq!(slice.pages, [page(0, 1)], "pages as the unit began");
     assert_eq!(slice.next_sequence, 1);
@@ -1722,16 +1736,30 @@ where
     assert_eq!(later.read(early, 0, None).await.unwrap().next_sequence, 3);
 }
 
-pub async fn a_read_unit_keeps_a_stream_purged_after_it_began<S>((reader, writer): (S, S))
+pub async fn a_read_unit_sees_the_store_as_it_began<S>((reader, writer): (S, S))
+where
+    S: Store + ReadStore,
+{
+    a_read_unit_sees_the_store_as_it_began_between(&reader, &writer).await;
+}
+
+pub async fn a_read_unit_sees_the_store_as_it_began_through_one_handle<S>(store: S)
+where
+    S: Store + ReadStore,
+{
+    a_read_unit_sees_the_store_as_it_began_between(&store, &store).await;
+}
+
+async fn a_read_unit_keeps_a_stream_purged_after_it_began_between<S>(reader: &S, writer: &S)
 where
     S: Store + ReadStore + Purge,
 {
     let purged = main_stream("account", 1);
     let kept = main_stream("account", 2);
-    append(&writer, purged, 0, &[page(0, 1), page(1, 2)])
+    append(writer, purged, 0, &[page(0, 1), page(1, 2)])
         .await
         .unwrap();
-    append(&writer, kept, 0, &[page(0, 3)]).await.unwrap();
+    append(writer, kept, 0, &[page(0, 3)]).await.unwrap();
     let mut reads = reader.begin_read().await.unwrap();
     let listed = reads.covers("account").await.unwrap();
     assert_eq!(listed, covers(&[purged, kept]));
@@ -1744,17 +1772,31 @@ where
     assert_eq!(later.covers("account").await, Ok(covers(&[kept])));
 }
 
+pub async fn a_read_unit_keeps_a_stream_purged_after_it_began<S>((reader, writer): (S, S))
+where
+    S: Store + ReadStore + Purge,
+{
+    a_read_unit_keeps_a_stream_purged_after_it_began_between(&reader, &writer).await;
+}
+
+pub async fn a_read_unit_keeps_a_stream_purged_after_it_began_through_one_handle<S>(store: S)
+where
+    S: Store + ReadStore + Purge,
+{
+    a_read_unit_keeps_a_stream_purged_after_it_began_between(&store, &store).await;
+}
+
 /// A read unit's head and snapshot are its moment's, like its reads: a
 /// write or snapshot landing after it began is not seen through it.
-pub async fn a_read_unit_heads_and_snapshots_as_it_began<S>((reader, writer): (S, S))
+async fn a_read_unit_heads_and_snapshots_as_it_began_between<S>(reader: &S, writer: &S)
 where
     S: Store + ReadStore,
 {
     let s = main_stream("account", 1);
-    append(&writer, s, 0, &[page(0, 1)]).await.unwrap();
+    append(writer, s, 0, &[page(0, 1)]).await.unwrap();
     writer.write_snapshot(s, &snapshot(0, "v1")).await.unwrap();
     let mut reads = reader.begin_read().await.unwrap();
-    append(&writer, s, 1, &[page(1, 2)]).await.unwrap();
+    append(writer, s, 1, &[page(1, 2)]).await.unwrap();
     writer.write_snapshot(s, &snapshot(1, "v1")).await.unwrap();
     let head = reads.head(s).await.unwrap();
     assert_eq!(
@@ -1777,15 +1819,30 @@ where
     assert_eq!(later.read_snapshot(s).await, Ok(Some(snapshot(1, "v1"))));
 }
 
+pub async fn a_read_unit_heads_and_snapshots_as_it_began<S>((reader, writer): (S, S))
+where
+    S: Store + ReadStore,
+{
+    a_read_unit_heads_and_snapshots_as_it_began_between(&reader, &writer).await;
+}
+
+pub async fn a_read_unit_heads_and_snapshots_as_it_began_through_one_handle<S>(store: S)
+where
+    S: Store + ReadStore,
+{
+    a_read_unit_heads_and_snapshots_as_it_began_between(&store, &store).await;
+}
+
 /// A stream purged after a read unit began keeps, through the unit, its
 /// head and its snapshot as well as its pages.
-pub async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began<S>(
-    (reader, writer): (S, S),
+async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began_between<S>(
+    reader: &S,
+    writer: &S,
 ) where
     S: Store + ReadStore + Purge,
 {
     let s = main_stream("account", 1);
-    append(&writer, s, 0, &[page(0, 1), page(1, 2)])
+    append(writer, s, 0, &[page(0, 1), page(1, 2)])
         .await
         .unwrap();
     writer.write_snapshot(s, &snapshot(1, "v1")).await.unwrap();
@@ -1803,17 +1860,42 @@ pub async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it
     assert_eq!(later.read_snapshot(s).await, Ok(None));
 }
 
+pub async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began<S>(
+    (reader, writer): (S, S),
+) where
+    S: Store + ReadStore + Purge,
+{
+    a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began_between(
+        &reader, &writer,
+    )
+    .await;
+}
+
+pub async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began_through_one_handle<
+    S,
+>(
+    store: S,
+) where
+    S: Store + ReadStore + Purge,
+{
+    a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began_between(
+        &store, &store,
+    )
+    .await;
+}
+
 /// 14.32: a read unit refuses a stream in an edition that does not exist
 /// (no fork event of it anywhere), in its reads, head and snapshot; once
 /// the edition exists, an unforked stream of it reads as main's.
-pub async fn a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main<S>(
-    (reader, writer): (S, S),
+async fn a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main_between<S>(
+    reader: &S,
+    writer: &S,
 ) where
     S: Store + ReadStore,
 {
     let main = main_stream("account", 1);
     let e = edition_stream("account", 1, "what-if");
-    append(&writer, main, 0, &[page(0, 1)]).await.unwrap();
+    append(writer, main, 0, &[page(0, 1)]).await.unwrap();
     writer
         .write_snapshot(main, &snapshot(0, "v1"))
         .await
@@ -1825,7 +1907,7 @@ pub async fn a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream
     assert_eq!(reads.read_snapshot(e).await, Err(unknown()), "its snapshot");
     assert_eq!(reads.covers("account").await, Ok(covers(&[main])));
     drop(reads);
-    fork(&writer, edition_stream("account", 2, "what-if")).await;
+    fork(writer, edition_stream("account", 2, "what-if")).await;
     let mut reads = reader.begin_read().await.unwrap();
     assert_eq!(
         reads.read(e, 0, None).await.unwrap().pages,
@@ -1838,6 +1920,30 @@ pub async fn a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream
         Ok(None),
         "no snapshot of main's"
     );
+}
+
+pub async fn a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main<S>(
+    (reader, writer): (S, S),
+) where
+    S: Store + ReadStore,
+{
+    a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main_between(
+        &reader, &writer,
+    )
+    .await;
+}
+
+pub async fn a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main_through_one_handle<
+    S,
+>(
+    store: S,
+) where
+    S: Store + ReadStore,
+{
+    a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main_between(
+        &store, &store,
+    )
+    .await;
 }
 
 /// A read unit reads a forked stream as the store does: main below its
@@ -1928,44 +2034,6 @@ where
     put(&writer, key("h", s), 1).await.unwrap();
     let grown = steady(&watcher, "a position-only write").await;
     assert_ne!(grown, created, "another handle's position-only write");
-}
-
-pub async fn a_read_unit_sees_the_store_as_it_began_through_one_handle<S: Store + ReadStore>(
-    _store: S,
-) {
-    todo!()
-}
-
-pub async fn a_read_unit_heads_and_snapshots_as_it_began_through_one_handle<
-    S: Store + ReadStore,
->(
-    _store: S,
-) {
-    todo!()
-}
-
-pub async fn a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main_through_one_handle<
-    S: Store + ReadStore,
->(
-    _store: S,
-) {
-    todo!()
-}
-
-pub async fn a_read_unit_keeps_a_stream_purged_after_it_began_through_one_handle<
-    S: Store + ReadStore + Purge,
->(
-    _store: S,
-) {
-    todo!()
-}
-
-pub async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began_through_one_handle<
-    S: Store + ReadStore + Purge,
->(
-    _store: S,
-) {
-    todo!()
 }
 
 // ------------------------------------------------------ core's reads (opt-in)
@@ -3401,7 +3469,8 @@ async fn futures_join<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output
 /// through the other. [`store_contract!`](crate::store_contract)'s
 /// `shared_handles*` sections run exactly these; `tests/meta.rs` requires
 /// the list and the sections to agree and each check to fail on handles
-/// that share nothing.
+/// that share nothing. The same properties on one handle are NOT here: the
+/// `read_one_handle*` sections and `watch` hold them.
 pub const SHARED_HANDLES: &[&str] = &[
     "two_writers_racing_on_one_stream_land_one",
     "a_change_token_changes_when_another_handle_commits",
