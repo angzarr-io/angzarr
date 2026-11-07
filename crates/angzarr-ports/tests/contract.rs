@@ -212,6 +212,31 @@ mod pair {
     angzarr_ports::store_contract!(pair, #[tokio::test], pair());
 }
 
+mod shared_handles {
+    use super::*;
+    angzarr_ports::store_contract!(shared_handles, #[tokio::test], pair());
+}
+
+mod shared_handles_read {
+    use super::*;
+    angzarr_ports::store_contract!(shared_handles_read, #[tokio::test], pair());
+}
+
+mod shared_handles_read_purge {
+    use super::*;
+    angzarr_ports::store_contract!(shared_handles_read_purge, #[tokio::test], pair());
+}
+
+mod shared_handles_watch {
+    use super::*;
+    angzarr_ports::store_contract!(shared_handles_watch, #[tokio::test], pair());
+}
+
+mod base_explicit {
+    use super::*;
+    angzarr_ports::store_contract!(base, #[tokio::test], MemoryStore::new());
+}
+
 mod purge {
     use super::*;
     angzarr_ports::store_contract!(purge, #[tokio::test], MemoryStore::new());

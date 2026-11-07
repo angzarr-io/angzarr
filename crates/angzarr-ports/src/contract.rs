@@ -3337,6 +3337,9 @@ async fn futures_join<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output
 
 // ------------------------------------------------------------------- macro
 
+/// The cross-handle checks (stub).
+pub const SHARED_HANDLES: &[&str] = &[];
+
 /// One test per check of a section, under the caller's test attribute (its
 /// runtime), each on a fresh store (or pair) from the last argument: an
 /// expression evaluated once per test, inside its `async fn`, so it may
@@ -3347,6 +3350,41 @@ async fn futures_join<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output
 /// each section in a module of its own.
 #[macro_export]
 macro_rules! store_contract {
+    (base, $(#[$t:meta])+, $f:expr) => {
+        $(#[$t])+
+        async fn not_yet_implemented() {
+            let _ = $f;
+            todo!("the base form")
+        }
+    };
+    (shared_handles, $(#[$t:meta])+, $f:expr) => {
+        $(#[$t])+
+        async fn not_yet_implemented() {
+            let _ = $f;
+            todo!("the shared_handles form")
+        }
+    };
+    (shared_handles_read, $(#[$t:meta])+, $f:expr) => {
+        $(#[$t])+
+        async fn not_yet_implemented() {
+            let _ = $f;
+            todo!("the shared_handles_read form")
+        }
+    };
+    (shared_handles_read_purge, $(#[$t:meta])+, $f:expr) => {
+        $(#[$t])+
+        async fn not_yet_implemented() {
+            let _ = $f;
+            todo!("the shared_handles_read_purge form")
+        }
+    };
+    (shared_handles_watch, $(#[$t:meta])+, $f:expr) => {
+        $(#[$t])+
+        async fn not_yet_implemented() {
+            let _ = $f;
+            todo!("the shared_handles_watch form")
+        }
+    };
     (pair, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             two_writers_racing_on_one_stream_land_one,
