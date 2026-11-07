@@ -1930,6 +1930,44 @@ where
     assert_ne!(grown, created, "another handle's position-only write");
 }
 
+pub async fn a_read_unit_sees_the_store_as_it_began_through_one_handle<S: Store + ReadStore>(
+    _store: S,
+) {
+    todo!()
+}
+
+pub async fn a_read_unit_heads_and_snapshots_as_it_began_through_one_handle<
+    S: Store + ReadStore,
+>(
+    _store: S,
+) {
+    todo!()
+}
+
+pub async fn a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main_through_one_handle<
+    S: Store + ReadStore,
+>(
+    _store: S,
+) {
+    todo!()
+}
+
+pub async fn a_read_unit_keeps_a_stream_purged_after_it_began_through_one_handle<
+    S: Store + ReadStore + Purge,
+>(
+    _store: S,
+) {
+    todo!()
+}
+
+pub async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began_through_one_handle<
+    S: Store + ReadStore + Purge,
+>(
+    _store: S,
+) {
+    todo!()
+}
+
 // ------------------------------------------------------ core's reads (opt-in)
 
 pub async fn read_until_time_is_the_prefix_recorded_by_then<S>(store: S)
@@ -3448,6 +3486,19 @@ macro_rules! store_contract {
     };
     (read_purge, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(shared_handles_read_purge, $(#[$t])+, $f);
+    };
+    (read_one_handle, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            a_read_unit_sees_the_store_as_it_began_through_one_handle,
+            a_read_unit_heads_and_snapshots_as_it_began_through_one_handle,
+            a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main_through_one_handle,
+        );
+    };
+    (read_one_handle_purge, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            a_read_unit_keeps_a_stream_purged_after_it_began_through_one_handle,
+            a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began_through_one_handle,
+        );
     };
     (read_forks, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;

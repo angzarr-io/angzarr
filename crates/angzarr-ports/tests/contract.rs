@@ -237,6 +237,16 @@ mod base_explicit {
     angzarr_ports::store_contract!(base, #[tokio::test], MemoryStore::new());
 }
 
+mod read_one_handle {
+    use super::*;
+    angzarr_ports::store_contract!(read_one_handle, #[tokio::test], MemoryStore::new());
+}
+
+mod read_one_handle_purge {
+    use super::*;
+    angzarr_ports::store_contract!(read_one_handle_purge, #[tokio::test], MemoryStore::new());
+}
+
 mod purge {
     use super::*;
     angzarr_ports::store_contract!(purge, #[tokio::test], MemoryStore::new());

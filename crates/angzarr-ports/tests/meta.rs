@@ -1872,6 +1872,39 @@ fn an_honest_broken_store_passes_every_check() {
     );
 }
 
+/// The one-handle read-unit checks catch a unit that is live: it sees what
+/// the SAME handle commits after the unit began.
+#[test]
+fn the_one_handle_read_unit_checks_catch_a_live_unit() {
+    catches!(
+        a_read_unit_sees_the_store_as_it_began_through_one_handle,
+        broken,
+        ReadUnitIsLive
+    );
+    catches!(
+        a_read_unit_heads_and_snapshots_as_it_began_through_one_handle,
+        broken,
+        ReadUnitHeadIsLive,
+        ReadUnitSnapshotIsLive,
+    );
+    catches!(
+        a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main_through_one_handle,
+        broken,
+        ReadUnitAnyEdition
+    );
+    catches!(
+        a_read_unit_keeps_a_stream_purged_after_it_began_through_one_handle,
+        broken,
+        ReadUnitIsLive
+    );
+    catches!(
+        a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began_through_one_handle,
+        broken,
+        ReadUnitHeadIsLive,
+        ReadUnitSnapshotIsLive,
+    );
+}
+
 /// Two handles that share nothing, as a single-process store's pair.
 fn isolated_pair() -> (MemoryStore, MemoryStore) {
     (MemoryStore::new(), MemoryStore::new())

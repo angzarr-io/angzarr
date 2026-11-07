@@ -29,6 +29,18 @@ mod base_without_the_capability {
     angzarr_ports::store_contract!(base, #[tokio::test], MemoryStore::new());
 }
 
+/// Each isolated handle is correct alone: the one-handle read-unit sections
+/// pass on it.
+mod one_handle_read_units_pass_on_an_isolated_handle {
+    use super::*;
+    angzarr_ports::store_contract!(read_one_handle, #[tokio::test], isolated_pair().0);
+}
+
+mod one_handle_read_unit_purges_pass_on_an_isolated_handle {
+    use super::*;
+    angzarr_ports::store_contract!(read_one_handle_purge, #[tokio::test], isolated_pair().1);
+}
+
 mod shared_handles_fails_on_isolated_handles {
     use super::*;
     angzarr_ports::store_contract!(
