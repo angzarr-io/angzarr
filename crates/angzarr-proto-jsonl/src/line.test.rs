@@ -67,7 +67,6 @@ fn every_kind_of_field_round_trips() {
         r#"{"inner":{"name":"nested"},"color":"RED","blob":"3q2+7w==","flag":true,"ratio":1.5,"small":-7}"#,
         r#"{"at":"2026-11-06T12:30:45.123456789Z","span":"3.000000001s"}"#,
         r#"{"any":{"@type":"type.googleapis.com/t.Inner","name":"packed"}}"#,
-        r#"{"ratio":"NaN"}"#,
     ] {
         let m = message(&pool, "Record", json);
         let line = encode_line(&m).unwrap();
@@ -84,10 +83,30 @@ fn well_known_types_are_written_per_the_spec() {
         "Record",
         r#"{"at":"2026-11-06T12:30:45Z","span":"1.5s"}"#,
     );
+    // A Duration is written in groups of three digits.
     assert_eq!(
         encode_line(&m).unwrap(),
-        r#"{"at":"2026-11-06T12:30:45Z","span":"1.5s"}"#
+        r#"{"at":"2026-11-06T12:30:45Z","span":"1.500s"}"#
     );
+}
+
+/// NaN is not equal to itself, so it is checked by its text.
+#[test]
+fn a_non_finite_double_is_a_string() {
+    let pool = pool();
+    let record = descriptor(&pool, "Record");
+    let mut m = DynamicMessage::new(record.clone());
+    m.set_field_by_name("ratio", Value::F64(f64::NAN));
+    assert_eq!(encode_line(&m).unwrap(), r#"{"ratio":"NaN"}"#);
+    let back = decode_line(&record, r#"{"ratio":"NaN"}"#).unwrap();
+    assert!(back
+        .get_field_by_name("ratio")
+        .unwrap()
+        .as_f64()
+        .unwrap()
+        .is_nan());
+    m.set_field_by_name("ratio", Value::F64(f64::NEG_INFINITY));
+    assert_eq!(encode_line(&m).unwrap(), r#"{"ratio":"-Infinity"}"#);
 }
 
 /// A string holding line breaks (and the Unicode ones) is escaped: the
