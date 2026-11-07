@@ -56,8 +56,8 @@ pre-commit:
     # is refused everywhere (`just check-shared-crates-commit`).
     shared-crates-precommit:
       glob: &shared-crates
-        - "crates/{angzarr-test-dir,angzarr-diagnostic,angzarr-proto,angzarr-proto-handler,angzarr-proto-component,angzarr-proto-transport-embedded,angzarr-proto-transport-distributed,angzarr-ports,angzarr-yaml,angzarr-presentation}/**/*.{rs,ftl,toml}"
-        - "crates/{angzarr-test-dir,angzarr-diagnostic,angzarr-proto,angzarr-proto-handler,angzarr-proto-component,angzarr-proto-transport-embedded,angzarr-proto-transport-distributed,angzarr-ports,angzarr-yaml,angzarr-presentation}/justfile"
+        - "crates/{angzarr-test-dir,angzarr-diagnostic,angzarr-proto,angzarr-proto-handler,angzarr-proto-component,angzarr-proto-transport-embedded,angzarr-proto-transport-distributed,angzarr-ports,angzarr-yaml,angzarr-presentation,angzarr-proto-jsonl}/**/*.{rs,ftl,toml}"
+        - "crates/{angzarr-test-dir,angzarr-diagnostic,angzarr-proto,angzarr-proto-handler,angzarr-proto-component,angzarr-proto-transport-embedded,angzarr-proto-transport-distributed,angzarr-ports,angzarr-yaml,angzarr-presentation,angzarr-proto-jsonl}/justfile"
         - "crates/clippy.toml"
         - "Cargo.toml"
         - "Cargo.lock"
