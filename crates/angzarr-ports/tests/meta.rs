@@ -1872,6 +1872,81 @@ fn an_honest_broken_store_passes_every_check() {
     );
 }
 
+/// The one-handle read-unit checks catch a unit that is live: it sees what
+/// the SAME handle commits after the unit began.
+#[test]
+fn the_one_handle_read_unit_checks_catch_a_live_unit() {
+    catches!(
+        a_read_unit_sees_the_store_as_it_began_through_one_handle,
+        broken,
+        ReadUnitIsLive
+    );
+    catches!(
+        a_read_unit_heads_and_snapshots_as_it_began_through_one_handle,
+        broken,
+        ReadUnitHeadIsLive,
+        ReadUnitSnapshotIsLive,
+    );
+    catches!(
+        a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main_through_one_handle,
+        broken,
+        ReadUnitAnyEdition
+    );
+    catches!(
+        a_read_unit_keeps_a_stream_purged_after_it_began_through_one_handle,
+        broken,
+        ReadUnitIsLive
+    );
+    catches!(
+        a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began_through_one_handle,
+        broken,
+        ReadUnitHeadIsLive,
+        ReadUnitSnapshotIsLive,
+    );
+}
+
+/// Two handles that share nothing, as a single-process store's pair.
+fn isolated_pair() -> (MemoryStore, MemoryStore) {
+    (MemoryStore::new(), MemoryStore::new())
+}
+
+/// The shared-handles capability's checks each fail on handles that share
+/// nothing (the bug is the missing capability), and pass on handles that
+/// do; the list the macro's sections agree with (`contract::SHARED_HANDLES`)
+/// names exactly these.
+#[test]
+fn the_shared_handles_checks_catch_handles_that_share_nothing() {
+    let mut named: Vec<&str> = Vec::new();
+    macro_rules! isolated {
+        ($($check:ident),+ $(,)?) => {$(
+            named.push(stringify!($check));
+            honest_passed(
+                stringify!($check),
+                run(contract::$check({
+                    let a = MemoryStore::new();
+                    (a.clone(), a)
+                })),
+            );
+            if let Err(why) = caught(contract::$check(isolated_pair())) {
+                panic!("{} on handles that share nothing: {why}", stringify!($check));
+            }
+        )+};
+    }
+    isolated!(
+        two_writers_racing_on_one_stream_land_one,
+        a_change_token_changes_when_another_handle_commits,
+        a_read_unit_sees_the_store_as_it_began,
+        a_read_unit_heads_and_snapshots_as_it_began,
+        a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main,
+        a_read_unit_keeps_a_stream_purged_after_it_began,
+        a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began,
+    );
+    let mut listed: Vec<&str> = contract::SHARED_HANDLES.to_vec();
+    named.sort_unstable();
+    listed.sort_unstable();
+    assert_eq!(named, listed);
+}
+
 // ============================================== migrations and backups
 
 /// The migrations sections' checks, run against a backend simulated here
