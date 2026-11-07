@@ -26,16 +26,16 @@
 //!
 //! | Section | Needs | Takes |
 //! |---|---|---|
-//! | base | [`Store`] | a store |
-//! | `pair` | [`Store`] | two handles |
+//! | `base` (the form with no section name) | [`Store`] | a store |
 //! | `purge` | [`Purge`] | a store |
 //! | `editions` | [`Editions`] | a store |
 //! | `editions_outbox` | [`Editions`], [`Outbox`] | a store |
-//! | `read` | [`ReadStore`] | two handles |
-//! | `read_purge` | [`ReadStore`], [`Purge`] | two handles |
+//! | `shared_handles` (was `pair`) | [`Store`] | two handles |
+//! | `shared_handles_read` (was `read`) | [`ReadStore`] | two handles |
+//! | `shared_handles_read_purge` (was `read_purge`) | [`ReadStore`], [`Purge`] | two handles |
+//! | `shared_handles_watch` (was `watch_pair`) | [`Watch`] | two handles |
 //! | `read_forks` | [`ReadStore`] | a store |
 //! | `watch` | [`Watch`] | a store |
-//! | `watch_pair` | [`Watch`] | two handles |
 //! | `until_time` | [`ReadUntilTime`] | a store |
 //! | `correlation` | [`ReadByCorrelation`] | a store |
 //! | `list_streams` | [`ListStreams`] | a store |
@@ -51,6 +51,24 @@
 //! | `migrate_on_open` | [`Migrations`] | an [`OpenFixture`] |
 //! | `migrate_to` | [`Migrations`], a build whose top migrations are reversible above one that is not | an [`OpenFixture`] |
 //! | `migrate_on_open_backup` | [`Migrations`], [`Backup`] | an [`OpenBackupFixture`] |
+//!
+//!
+//! **The shared-handles capability.** Every section that takes two handles
+//! `(a, b)` is the capability's: a commit through one handle must be seen
+//! through the other (a race on one stream is decided between them, a
+//! change token moves when the other commits, a read unit begun on one
+//! keeps its moment while the other writes). A store whose handles are
+//! copies of one in-process object, or whose handles otherwise share
+//! nothing, cannot pass them honestly and is otherwise a valid store: it
+//! runs the `base` form and the one-handle sections, and leaves the
+//! `shared_handles*` sections out, which says exactly what it provides. A
+//! store whose handles reach one durable store from several handles or
+//! processes runs them all. The capability's checks are listed in
+//! [`SHARED_HANDLES`]. The old names `pair`, `read`, `read_purge` and
+//! `watch_pair` still run the same checks as the `shared_handles*` section
+//! each is listed against; nothing a caller ran before is dropped. The
+//! sections that need a trait (`ReadStore`, `Purge`, `Watch`) keep it as
+//! well: the capability is orthogonal to the traits.
 //!
 //! Every open migrates (the owner, 2026-10-31): reading and writing both
 //! run what is pending before they serve, and refuse a store newer than
@@ -926,7 +944,10 @@ pub async fn positions_are_per_handler_and_per_stream<S: Store>(store: S) {
 
 // ------------------------------------------------------ base: units of work
 
-// ----------------------------------------------------- pair (two handles)
+// ----------------------------------------- shared handles (two handles)
+//
+// The shared-handles capability's checks: `SHARED_HANDLES` lists them. The
+// read-unit and change-token ones sit with their traits below.
 
 /// Two writers race on ONE stream, both having read it at 0: the first
 /// lands; the other is refused as a conflict, and nothing of its write
@@ -3337,58 +3358,63 @@ async fn futures_join<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output
 
 // ------------------------------------------------------------------- macro
 
-/// The cross-handle checks (stub).
-pub const SHARED_HANDLES: &[&str] = &[];
+/// The checks of the shared-handles capability, by name: every check that
+/// takes two handles `(a, b)` and needs a commit through one to be seen
+/// through the other. [`store_contract!`](crate::store_contract)'s
+/// `shared_handles*` sections run exactly these; `tests/meta.rs` requires
+/// the list and the sections to agree and each check to fail on handles
+/// that share nothing.
+pub const SHARED_HANDLES: &[&str] = &[
+    "two_writers_racing_on_one_stream_land_one",
+    "a_change_token_changes_when_another_handle_commits",
+    "a_read_unit_sees_the_store_as_it_began",
+    "a_read_unit_heads_and_snapshots_as_it_began",
+    "a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main",
+    "a_read_unit_keeps_a_stream_purged_after_it_began",
+    "a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began",
+];
 
 /// One test per check of a section, under the caller's test attribute (its
 /// runtime), each on a fresh store (or pair) from the last argument: an
 /// expression evaluated once per test, inside its `async fn`, so it may
 /// `.await`. `store_contract!(#[tokio::test], $fresh)` is the base section;
+/// `store_contract!(base, #[tokio::test], $fresh)` is the same, spelled out;
 /// `store_contract!(<section>, #[tokio::test], $fresh)` any other (see the
-/// module's table). Several attributes may be given, as
+/// module's table). The `shared_handles*` sections are the capability a
+/// single-process store leaves out (the module's header); `pair`, `read`,
+/// `read_purge` and `watch_pair` are their former names. Several attributes may be given, as
 /// `#[tokio::test] #[ignore = "..."]`. Tests are named after their checks, so a backend runs
 /// each section in a module of its own.
 #[macro_export]
 macro_rules! store_contract {
     (base, $(#[$t:meta])+, $f:expr) => {
-        $(#[$t])+
-        async fn not_yet_implemented() {
-            let _ = $f;
-            todo!("the base form")
-        }
+        $crate::store_contract!($(#[$t])+, $f);
     };
     (shared_handles, $(#[$t:meta])+, $f:expr) => {
-        $(#[$t])+
-        async fn not_yet_implemented() {
-            let _ = $f;
-            todo!("the shared_handles form")
-        }
-    };
-    (shared_handles_read, $(#[$t:meta])+, $f:expr) => {
-        $(#[$t])+
-        async fn not_yet_implemented() {
-            let _ = $f;
-            todo!("the shared_handles_read form")
-        }
-    };
-    (shared_handles_read_purge, $(#[$t:meta])+, $f:expr) => {
-        $(#[$t])+
-        async fn not_yet_implemented() {
-            let _ = $f;
-            todo!("the shared_handles_read_purge form")
-        }
-    };
-    (shared_handles_watch, $(#[$t:meta])+, $f:expr) => {
-        $(#[$t])+
-        async fn not_yet_implemented() {
-            let _ = $f;
-            todo!("the shared_handles_watch form")
-        }
-    };
-    (pair, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             two_writers_racing_on_one_stream_land_one,
         );
+    };
+    (shared_handles_read, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            a_read_unit_sees_the_store_as_it_began,
+            a_read_unit_heads_and_snapshots_as_it_began,
+            a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main,
+        );
+    };
+    (shared_handles_read_purge, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            a_read_unit_keeps_a_stream_purged_after_it_began,
+            a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began,
+        );
+    };
+    (shared_handles_watch, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            a_change_token_changes_when_another_handle_commits,
+        );
+    };
+    (pair, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(shared_handles, $(#[$t])+, $f);
     };
     (purge, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
@@ -3418,17 +3444,10 @@ macro_rules! store_contract {
         );
     };
     (read, $(#[$t:meta])+, $f:expr) => {
-        $crate::store_contract!(@each [$(#[$t])+], $f;
-            a_read_unit_sees_the_store_as_it_began,
-            a_read_unit_heads_and_snapshots_as_it_began,
-            a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main,
-        );
+        $crate::store_contract!(shared_handles_read, $(#[$t])+, $f);
     };
     (read_purge, $(#[$t:meta])+, $f:expr) => {
-        $crate::store_contract!(@each [$(#[$t])+], $f;
-            a_read_unit_keeps_a_stream_purged_after_it_began,
-            a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began,
-        );
+        $crate::store_contract!(shared_handles_read_purge, $(#[$t])+, $f);
     };
     (read_forks, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
@@ -3441,9 +3460,7 @@ macro_rules! store_contract {
         );
     };
     (watch_pair, $(#[$t:meta])+, $f:expr) => {
-        $crate::store_contract!(@each [$(#[$t])+], $f;
-            a_change_token_changes_when_another_handle_commits,
-        );
+        $crate::store_contract!(shared_handles_watch, $(#[$t])+, $f);
     };
     (until_time, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;

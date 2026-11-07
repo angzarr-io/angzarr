@@ -115,4 +115,7 @@ mod legacy_watch_pair_still_holds_the_token_check {
 #[test]
 fn the_capability_lists_its_seven_checks() {
     assert_eq!(angzarr_ports::contract::SHARED_HANDLES.len(), 7);
+    let mut names = angzarr_ports::contract::SHARED_HANDLES.to_vec();
+    names.dedup();
+    assert_eq!(names.len(), 7, "no check twice");
 }

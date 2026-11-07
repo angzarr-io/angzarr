@@ -51,7 +51,9 @@
 //!   steps there, read both timelines, delete the edition, and main is
 //!   unchanged).
 //! - `contract`: the conformance suite, [`contract`] and
-//!   [`store_contract!`].
+//!   [`store_contract!`]. A store whose handles share nothing runs its
+//!   `base` form and leaves the shared-handles capability out
+//!   (`contract::SHARED_HANDLES`; the module's header says which sections).
 //! - `faulty`: [`faulty::FaultyStore`], any backend failing what a test
 //!   says (scripted write and read faults) and changed by "another
 //!   process" between its calls: for a caller's tests of its retries,
