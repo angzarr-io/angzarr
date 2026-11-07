@@ -11,6 +11,7 @@ members = [
     "crates/angzarr-proto-transport-distributed",
     "crates/angzarr-proto-jsonl",
     "crates/angzarr-proto-transport-embedded",
+    "crates/angzarr-store-transfer",
     "crates/angzarr-test-dir",
     "crates/angzarr-yaml",
 ]

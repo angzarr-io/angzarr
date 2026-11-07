@@ -26,6 +26,7 @@ virtual Cargo workspace under `crates/`:
 | `angzarr-proto-jsonl` | protobuf messages as JSON Lines: canonical proto3 JSON, one message per line, against descriptors the caller supplies |
 | `angzarr-presentation` | JSON or text at a driving edge, diagnostics rendered from Fluent catalogs |
 | `angzarr-test-dir` | a test's scratch directory, removed when its guard drops, on a panic too (a dev-dependency only) |
+| `angzarr-store-transfer` | a store carried across a proto generation: every row exported as JSONL in proto3's JSON mapping (the export half) |
 
 ## Retired: the distributed runtime
 
@@ -113,7 +114,8 @@ The shared crates `angzarr-proto`, `angzarr-proto-handler`,
 `angzarr-proto-component`,
 `angzarr-proto-transport-embedded`, `angzarr-proto-transport-distributed`,
 `angzarr-ports`, `angzarr-diagnostic`, `angzarr-yaml`,
-`angzarr-presentation`, `angzarr-proto-jsonl` and `angzarr-test-dir`: Licensed under either
+`angzarr-presentation`, `angzarr-proto-jsonl`, `angzarr-test-dir` and
+`angzarr-store-transfer`: Licensed under either
 of Apache License 2.0 or BSD 3-Clause, at your option (each crate's
 `LICENSE-APACHE` and `LICENSE-BSD`).
 

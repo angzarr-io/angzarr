@@ -122,6 +122,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "angzarr-store-transfer"
+version = "0.1.0"
+dependencies = [
+ "angzarr-diagnostic",
+ "angzarr-ports",
+ "prost",
+ "prost-reflect",
+ "prost-types",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "angzarr-test-dir"
 version = "0.1.0"
 

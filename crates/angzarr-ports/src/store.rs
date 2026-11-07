@@ -533,6 +533,73 @@ pub trait DeadLetterStore: MaybeSend + MaybeSync {
     ) -> impl Future<Output = Result<u64, StoreError>> + MaybeSend;
 }
 
+// ================================================================= export
+
+/// One row a store keeps, as [`Export`] gives it. Pages, snapshots and
+/// dead letters are given as STORED: their encoded bytes, which the store
+/// never decodes, so an exporter can tell a row that does not re-encode
+/// to its bytes (one carrying a field this build does not know) from one
+/// that does.
+#[derive(Clone, PartialEq, Debug)]
+pub enum ExportRow {
+    /// One of a stream's OWN pages (an edition stream's from its fork
+    /// on, never main's below it): an encoded `EventPage`, with the
+    /// sequence the store keeps it at.
+    Page {
+        stream: Cover,
+        sequence: u64,
+        stored: Vec<u8>,
+    },
+    /// The stream's snapshot: an encoded `Snapshot`.
+    Snapshot { stream: Cover, stored: Vec<u8> },
+    /// A handler's position on the stream, above 0 (0 is no position:
+    /// [`Processed`]).
+    Position {
+        stream: Cover,
+        handler: String,
+        next: u64,
+    },
+    /// A dead letter about the stream, where on it, and its component: an
+    /// encoded `AngzarrDeadLetter`.
+    DeadLetter {
+        stream: Cover,
+        at: DeadLetterAt,
+        component: String,
+        stored: Vec<u8>,
+    },
+    /// A pending outbox entry ([`Outbox`]). Its stream is not given: an
+    /// exporter refuses a store with one (store-export-import plan, D5
+    /// (a)), so it is listed only so that nothing a store keeps is left
+    /// out.
+    Outbox(OutboxEntry),
+}
+
+/// Opt-in: every row the store keeps, at one moment, so a store can be
+/// carried to a build of another proto generation (the store
+/// export/import plan, D2 (a)). The base ports cannot list it all: no port
+/// lists the handlers holding positions, nor the streams a dead letter is
+/// about but which hold no event, nor an edition stream's own rows apart
+/// from main's.
+///
+/// **The order.** One stream at a time, in [`StreamRef`]'s order (by
+/// domain, then main first, then each edition by name, then root), every
+/// stream holding any row: events, a snapshot, a position above 0 or a
+/// dead letter. Within a stream: its own pages by sequence, then its
+/// snapshot, then the positions on it by handler, then the dead letters
+/// about it in key order ([`DeadLetterKey`]). Then the pending outbox
+/// entries, as [`Outbox::pending`] gives them. The order across streams
+/// is a canonical sort, so two exports of one store are the same; it
+/// orders nothing (there is no order across streams: decision 14.35).
+pub trait Export: MaybeSend + MaybeSync {
+    /// The backend's name, as its package names it (`CARGO_PKG_NAME`):
+    /// what an export says it was taken from.
+    fn backend(&self) -> &str;
+
+    /// Every row, as one moment of the store: a write that lands while it
+    /// reads is wholly in it or wholly out of it.
+    fn export(&self) -> impl Future<Output = Result<Vec<ExportRow>, StoreError>> + MaybeSend;
+}
+
 // ========================================== shared handles: Arc<T> (base)
 
 impl<T: EventStore + ?Sized> EventStore for Arc<T> {

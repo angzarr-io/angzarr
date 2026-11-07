@@ -6,7 +6,7 @@
 //! as a store with per-handle state hands out: nothing one commits is seen
 //! by the other. It passes the base section, and fails every check of the
 //! `shared_handles` sections, and so does the legacy spelling of each
-//! (`pair`, `read`, `read_purge`, `watch_pair`), which keeps running the
+//! (`pair`, `read`, `read_purge`, `watch_pair`, `export_pair`), which keeps running the
 //! same checks. `MemoryStore`, whose handles share one store, passes every
 //! form (`tests/contract.rs`).
 
@@ -81,6 +81,16 @@ mod shared_handles_watch_fails_on_isolated_handles {
     );
 }
 
+mod shared_handles_export_fails_on_isolated_handles {
+    use super::*;
+    angzarr_ports::store_contract!(
+        shared_handles_export,
+        #[tokio::test]
+        #[should_panic],
+        isolated_pair()
+    );
+}
+
 // The legacy spellings keep every check they ran: still failing here.
 
 mod legacy_pair_still_holds_the_race_check {
@@ -123,11 +133,38 @@ mod legacy_watch_pair_still_holds_the_token_check {
     );
 }
 
+mod legacy_export_pair_still_holds_the_moment_check {
+    use super::*;
+    angzarr_ports::store_contract!(
+        export_pair,
+        #[tokio::test]
+        #[should_panic],
+        isolated_pair()
+    );
+}
+
+/// The one-store export sections need no shared handles: an isolated
+/// handle passes them.
+mod one_handle_export_passes_on_an_isolated_handle {
+    use super::*;
+    angzarr_ports::store_contract!(export, #[tokio::test], isolated_pair().0);
+}
+
+mod one_handle_export_every_kind_passes_on_an_isolated_handle {
+    use super::*;
+    angzarr_ports::store_contract!(export_every_kind, #[tokio::test], isolated_pair().0);
+}
+
+mod one_handle_export_dead_letters_passes_on_an_isolated_handle {
+    use super::*;
+    angzarr_ports::store_contract!(export_dead_letters, #[tokio::test], isolated_pair().0);
+}
+
 /// The capability's checks, by name, are the ones the sections run.
 #[test]
-fn the_capability_lists_its_seven_checks() {
-    assert_eq!(angzarr_ports::contract::SHARED_HANDLES.len(), 7);
+fn the_capability_lists_its_eight_checks() {
+    assert_eq!(angzarr_ports::contract::SHARED_HANDLES.len(), 8);
     let mut names = angzarr_ports::contract::SHARED_HANDLES.to_vec();
     names.dedup();
-    assert_eq!(names.len(), 7, "no check twice");
+    assert_eq!(names.len(), 8, "no check twice");
 }

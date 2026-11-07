@@ -32,6 +32,7 @@
 //! | [`DeadLetterStore`] | dead letters, read and drained per stream or by key (written in a [`Write`]) | opt-in |
 //! | [`Migrations`] | the build's migration set, the store's ledger, `info`, `validate` and `run` (every open runs it) | opt-in |
 //! | [`Backup`] | a copy of the store as one moment, never overwriting | opt-in |
+//! | [`Export`] | every row the store keeps, as stored, at one moment: for carrying a store across a proto generation | opt-in |
 //!
 //! # Send, wasm, dyn
 //!
@@ -85,9 +86,9 @@ pub use migrate::{
 pub use send::{MaybeSend, MaybeSync};
 pub use store::{
     is_fork, Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore,
-    Editions, EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, Processed, Purge,
-    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Store, Watch, Write,
-    Written,
+    Editions, EventStore, Export, ExportRow, ListStreams, Outbox, OutboxEntry, PositionStore,
+    Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Store,
+    Watch, Write, Written,
 };
 pub use stream::{Head, PositionKey, Slice, StreamRef};
 

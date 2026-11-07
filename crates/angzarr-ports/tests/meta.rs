@@ -27,9 +27,9 @@ use angzarr_ports::angzarr_proto::v1::{Cover, EditionSummary, EventBook, EventPa
 use angzarr_ports::contract;
 use angzarr_ports::memory::{MemoryRead, MemoryStore};
 use angzarr_ports::{
-    Append, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore, Head,
-    ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge,
-    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
+    Append, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore, Export,
+    ExportRow, Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed,
+    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
     StreamRef, Uuid, Watch, Write, Written,
 };
 use prost_types::Timestamp;
@@ -237,6 +237,29 @@ enum Bug {
     RemovalKeepsLetters,
     /// Its change token counts events only, not dead letters' changes.
     LettersUnwatched,
+    // ---- export
+    /// The export leaves the pending outbox out.
+    ExportDropsOutbox,
+    /// The export gives a stream's snapshot twice.
+    ExportSnapshotTwice,
+    /// The export orders the streams by root first.
+    ExportStreamsByRoot,
+    /// The export gives a stream's pages newest first.
+    ExportPagesReversed,
+    /// The export gives an edition stream as it reads: main's pages below
+    /// its fork too.
+    ExportEditionReadsMain,
+    /// The export gives positions only on streams holding events (as a
+    /// lister of `covers` would).
+    ExportPositionsOfEventStreamsOnly,
+    /// The export gives a position put back to 0.
+    ExportKeepsZeroPositions,
+    /// The export gives dead letters only about streams holding events.
+    ExportLettersOfEventStreamsOnly,
+    /// The export gives a stream's letters by component first.
+    ExportLettersByComponent,
+    /// The export reads its pages at one moment and the rest at another.
+    ExportTwoMoments,
 }
 
 /// One handle's own bookkeeping (a pair's two handles have one each).
@@ -1301,6 +1324,218 @@ fn by_fact(page: &EventPage) -> bool {
     )
 }
 
+/// Yields once, waking itself: an await point inside an export.
+struct YieldOnce(bool);
+
+impl Future for YieldOnce {
+    type Output = ();
+
+    fn poll(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<()> {
+        if self.0 {
+            return std::task::Poll::Ready(());
+        }
+        self.0 = true;
+        cx.waker().wake_by_ref();
+        std::task::Poll::Pending
+    }
+}
+
+/// The stream an exported row is on (`None`: an outbox entry).
+fn row_stream(row: &ExportRow) -> Option<&Cover> {
+    match row {
+        ExportRow::Page { stream, .. }
+        | ExportRow::Snapshot { stream, .. }
+        | ExportRow::Position { stream, .. }
+        | ExportRow::DeadLetter { stream, .. } => Some(stream),
+        ExportRow::Outbox(_) => None,
+    }
+}
+
+/// `rows` grouped by stream, in their order: each stream's rows, then the
+/// outbox's as one last group.
+fn by_stream(rows: Vec<ExportRow>) -> Vec<Vec<ExportRow>> {
+    let mut groups: Vec<Vec<ExportRow>> = Vec::new();
+    for row in rows {
+        let same = groups
+            .last()
+            .and_then(|g| g.last())
+            .is_some_and(|last| row_stream(last) == row_stream(&row));
+        match groups.last_mut() {
+            Some(group) if same => group.push(row),
+            _ => groups.push(vec![row]),
+        }
+    }
+    groups
+}
+
+/// Whether `stream` holds pages among `rows`.
+fn holds_pages(rows: &[ExportRow], stream: &Cover) -> bool {
+    rows.iter()
+        .any(|r| matches!(r, ExportRow::Page { stream: s, .. } if s == stream))
+}
+
+impl Broken {
+    /// The honest export, bent by the bug.
+    async fn bent_export(&self) -> Result<Vec<ExportRow>, StoreError> {
+        let rows = self.inner.export().await?;
+        if self.is(Bug::ExportTwoMoments) {
+            YieldOnce(false).await;
+            let later = self.inner.export().await?;
+            let mut mixed: Vec<ExportRow> = rows
+                .into_iter()
+                .filter(|r| matches!(r, ExportRow::Page { .. }))
+                .collect();
+            mixed.extend(
+                later
+                    .into_iter()
+                    .filter(|r| !matches!(r, ExportRow::Page { .. })),
+            );
+            return Ok(mixed);
+        }
+        let all = rows.clone();
+        let mut groups = by_stream(rows);
+        for group in &mut groups {
+            self.bend_group(group, &all).await?;
+        }
+        if self.is(Bug::ExportStreamsByRoot) {
+            groups.sort_by_key(|g| {
+                g.first()
+                    .and_then(row_stream)
+                    .and_then(|c| c.root.clone())
+                    .map(|r| r.value)
+            });
+        }
+        Ok(groups.into_iter().flatten().collect())
+    }
+
+    /// One stream's exported rows, as the bug bends them.
+    async fn bend_group(
+        &self,
+        group: &mut Vec<ExportRow>,
+        all: &[ExportRow],
+    ) -> Result<(), StoreError> {
+        let Some(stream) = group.first().and_then(row_stream).cloned() else {
+            if self.is(Bug::ExportDropsOutbox) {
+                group.clear();
+            }
+            return Ok(());
+        };
+        let has_pages = holds_pages(group, &stream);
+        match self.bug {
+            Bug::ExportSnapshotTwice => {
+                if let Some(at) = group
+                    .iter()
+                    .position(|r| matches!(r, ExportRow::Snapshot { .. }))
+                {
+                    let again = group[at].clone();
+                    group.insert(at, again);
+                }
+            }
+            Bug::ExportPagesReversed => {
+                let pages = group
+                    .iter()
+                    .take_while(|r| matches!(r, ExportRow::Page { .. }))
+                    .count();
+                group[..pages].reverse();
+            }
+            Bug::ExportEditionReadsMain if stream.edition.is_some() => {
+                let fork = group.iter().find_map(|r| match r {
+                    ExportRow::Page { sequence, .. } => Some(*sequence),
+                    _ => None,
+                });
+                let main = Cover {
+                    edition: None,
+                    ..stream.clone()
+                };
+                let below: Vec<ExportRow> = all
+                    .iter()
+                    .filter_map(|r| match r {
+                        ExportRow::Page {
+                            stream: s,
+                            sequence,
+                            stored,
+                        } if *s == main && fork.is_some_and(|f| *sequence < f) => {
+                            Some(ExportRow::Page {
+                                stream: stream.clone(),
+                                sequence: *sequence,
+                                stored: stored.clone(),
+                            })
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                group.splice(0..0, below);
+            }
+            Bug::ExportPositionsOfEventStreamsOnly if !has_pages => {
+                group.retain(|r| !matches!(r, ExportRow::Position { .. }));
+            }
+            Bug::ExportLettersOfEventStreamsOnly if !has_pages => {
+                group.retain(|r| !matches!(r, ExportRow::DeadLetter { .. }));
+            }
+            Bug::ExportLettersByComponent => {
+                let from = group
+                    .iter()
+                    .position(|r| matches!(r, ExportRow::DeadLetter { .. }))
+                    .unwrap_or(group.len());
+                group[from..].sort_by(|a, b| match (a, b) {
+                    (
+                        ExportRow::DeadLetter { component: a, .. },
+                        ExportRow::DeadLetter { component: b, .. },
+                    ) => a.cmp(b),
+                    _ => std::cmp::Ordering::Equal,
+                });
+            }
+            Bug::ExportKeepsZeroPositions => self.zero_positions(group, &stream).await?,
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Add to `group` the positions on `stream` once put and now 0, after
+    /// its other positions.
+    async fn zero_positions(
+        &self,
+        group: &mut Vec<ExportRow>,
+        stream: &Cover,
+    ) -> Result<(), StoreError> {
+        let puts = self.shared.positions.lock().unwrap().clone();
+        let at = group
+            .iter()
+            .rposition(|r| matches!(r, ExportRow::Position { .. }))
+            .map_or(group.len(), |i| i + 1);
+        for (handler, owned) in puts {
+            let key = PositionKey {
+                handler: &handler,
+                stream: owned.get(),
+            };
+            if owned.get().to_cover() == *stream && self.inner.position(key).await? == 0 {
+                group.insert(
+                    at,
+                    ExportRow::Position {
+                        stream: stream.clone(),
+                        handler: handler.clone(),
+                        next: 0,
+                    },
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Export for Broken {
+    fn backend(&self) -> &str {
+        self.inner.backend()
+    }
+
+    async fn export(&self) -> Result<Vec<ExportRow>, StoreError> {
+        self.bent_export().await
+    }
+}
+
 // ------------------------------------------------------------------ harness
 
 /// Run `check` to its end on a fresh current-thread runtime: `Ok` if it
@@ -1860,8 +2095,14 @@ fn an_honest_broken_store_passes_every_check() {
         a_purge_removes_the_dead_letters_about_its_stream,
         a_removed_edition_stream_takes_its_dead_letters,
         dead_letters_written_drained_and_removed_change_the_change_token,
+        export_yields_every_row_kind_once,
+        export_orders_a_streams_pages_by_sequence_and_streams_as_list_streams,
+        export_of_an_edition_stream_holds_only_its_own_rows,
+        export_includes_positions_of_a_handler_no_one_names,
+        export_includes_dead_letters_about_a_stream_with_no_events,
     );
     passes!(broken_pair;
+        export_is_one_moment_while_a_writer_writes,
         two_writers_racing_on_one_stream_land_one,
         a_read_unit_sees_the_store_as_it_began,
         a_read_unit_keeps_a_stream_purged_after_it_began,
@@ -1940,6 +2181,7 @@ fn the_shared_handles_checks_catch_handles_that_share_nothing() {
         a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main,
         a_read_unit_keeps_a_stream_purged_after_it_began,
         a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began,
+        export_is_one_moment_while_a_writer_writes,
     );
     let mut listed: Vec<&str> = contract::SHARED_HANDLES.to_vec();
     named.sort_unstable();
@@ -2751,5 +2993,67 @@ fn the_letters_change_token_check_catches_letters_unwatched() {
         dead_letters_written_drained_and_removed_change_the_change_token,
         broken,
         LettersUnwatched,
+    );
+}
+
+// ------------------------------------------------- export: each check catches
+
+#[test]
+fn the_every_kind_check_catches_a_kind_lost_or_given_twice() {
+    catches!(
+        export_yields_every_row_kind_once,
+        broken,
+        ExportDropsOutbox,
+        ExportSnapshotTwice,
+        ExportPagesReversed,
+    );
+}
+
+#[test]
+fn the_export_order_check_catches_streams_by_root_and_pages_reversed() {
+    catches!(
+        export_orders_a_streams_pages_by_sequence_and_streams_as_list_streams,
+        broken,
+        ExportStreamsByRoot,
+        ExportPagesReversed,
+        ExportEditionReadsMain,
+    );
+}
+
+#[test]
+fn the_edition_export_check_catches_mains_pages_under_the_fork() {
+    catches!(
+        export_of_an_edition_stream_holds_only_its_own_rows,
+        broken,
+        ExportEditionReadsMain,
+    );
+}
+
+#[test]
+fn the_position_export_check_catches_positions_lost_or_at_zero() {
+    catches!(
+        export_includes_positions_of_a_handler_no_one_names,
+        broken,
+        ExportPositionsOfEventStreamsOnly,
+        ExportKeepsZeroPositions,
+    );
+}
+
+#[test]
+fn the_letter_export_check_catches_letters_lost_or_by_component() {
+    catches!(
+        export_includes_dead_letters_about_a_stream_with_no_events,
+        broken,
+        ExportLettersOfEventStreamsOnly,
+        ExportLettersByComponent,
+    );
+}
+
+#[test]
+fn the_one_moment_export_check_catches_two_moments() {
+    catches!(
+        export_is_one_moment_while_a_writer_writes,
+        broken_pair,
+        ExportTwoMoments,
     );
 }

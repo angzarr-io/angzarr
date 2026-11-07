@@ -27,14 +27,16 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use angzarr_proto::uuid::Uuid;
 use angzarr_proto::v1::event_meta::Causation;
 use angzarr_proto::v1::{Cover, EditionSummary, EventBook, EventPage, EventRef, Snapshot};
+use prost::Message;
 use prost_types::Timestamp;
 
 use crate::error::StoreError;
 use crate::migrate::{plan_run, plan_undo, AppliedMigration, Backup, Migration, Migrations};
 use crate::store::{
     is_fork, Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore,
-    Editions, EventStore, ListStreams, Outbox, OutboxEntry, PositionStore, Processed, Purge,
-    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write, Written,
+    Editions, EventStore, Export, ExportRow, ListStreams, Outbox, OutboxEntry, PositionStore,
+    Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch,
+    Write, Written,
 };
 use crate::stream::{PositionKey, Slice, StreamRef};
 
@@ -146,6 +148,67 @@ impl Data {
             .iter()
             .filter(move |((stream, ..), _)| stream == k)
             .map(|(_, letter)| letter)
+    }
+
+    /// Every row, as [`Export`] orders it: each stream holding any row,
+    /// in key order, then the pending outbox.
+    fn export(&self) -> Vec<ExportRow> {
+        let mut streams: BTreeSet<&Key> = self
+            .streams
+            .iter()
+            .filter(|(_, own)| !own.is_empty())
+            .map(|(k, _)| k)
+            .collect();
+        streams.extend(self.snapshots.keys());
+        // A stream holding only positions at 0 is listed, and gives no row.
+        streams.extend(self.positions.keys().map(|(k, _)| k));
+        streams.extend(self.dead_letters.keys().map(|(k, ..)| k));
+        let mut rows: Vec<ExportRow> = streams
+            .into_iter()
+            .flat_map(|k| self.export_stream(k))
+            .collect();
+        rows.extend(
+            self.outbox
+                .iter()
+                .map(|p| ExportRow::Outbox(p.entry.clone())),
+        );
+        rows
+    }
+
+    /// Stream `k`'s rows: its own pages, its snapshot, the positions on
+    /// it by handler, the letters about it in key order.
+    fn export_stream(&self, k: &Key) -> Vec<ExportRow> {
+        let stream = cover(k);
+        let mut rows: Vec<ExportRow> = self
+            .own(k)
+            .iter()
+            .map(|page| ExportRow::Page {
+                stream: stream.clone(),
+                sequence: page.sequence,
+                stored: page.encode_to_vec(),
+            })
+            .collect();
+        rows.extend(self.snapshots.get(k).map(|snapshot| ExportRow::Snapshot {
+            stream: stream.clone(),
+            stored: snapshot.encode_to_vec(),
+        }));
+        rows.extend(
+            self.positions
+                .iter()
+                .filter(|((on, _), next)| on == k && **next > 0)
+                .map(|((_, handler), next)| ExportRow::Position {
+                    stream: stream.clone(),
+                    handler: handler.clone(),
+                    next: *next,
+                }),
+        );
+        rows.extend(self.letters_of(k).map(|letter| ExportRow::DeadLetter {
+            stream: stream.clone(),
+            at: letter.at,
+            component: letter.letter.source_component.clone(),
+            stored: letter.letter.encode_to_vec(),
+        }));
+        rows
     }
 
     /// Remove every row of stream `k` a purge removes: its events (and
@@ -767,5 +830,16 @@ impl Outbox for MemoryStore {
         data.outbox.retain(|p| !ids.contains(&p.entry.id));
         data.commits += 1;
         Ok((before - data.outbox.len()) as u64)
+    }
+}
+
+impl Export for MemoryStore {
+    fn backend(&self) -> &str {
+        env!("CARGO_PKG_NAME")
+    }
+
+    /// The data as it stands under the lock: one moment.
+    async fn export(&self) -> Result<Vec<ExportRow>, StoreError> {
+        Ok(self.data().export())
     }
 }

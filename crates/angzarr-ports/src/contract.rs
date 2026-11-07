@@ -48,6 +48,10 @@
 //! | `dead_letters_watch` | [`DeadLetterStore`], [`Watch`] | a store |
 //! | `dead_letters_purge` | [`DeadLetterStore`], [`Purge`] | a store |
 //! | `dead_letters_editions` | [`DeadLetterStore`], [`Editions`] | a store |
+//! | `export` | [`Export`] | a store |
+//! | `shared_handles_export` (was `export_pair`) | [`Export`] | two handles |
+//! | `export_dead_letters` | [`Export`], [`DeadLetterStore`] | a store |
+//! | `export_every_kind` | [`Export`], [`DeadLetterStore`], [`Outbox`] | a store |
 //! | `migrations` | [`Migrations`] | an opened store |
 //! | `backup` | [`Migrations`], [`Backup`] | a [`BackupFixture`] |
 //! | `migrate_on_open` | [`Migrations`] | an [`OpenFixture`] |
@@ -78,9 +82,16 @@
 //! sections beside the bare base form, not in it (a store without those
 //! traits, `Arc<dyn DynStore>` among them, runs the base).
 //!
-//! The old names `pair`, `read`, `read_purge` and `watch_pair` are PERMANENT
-//! aliases of `shared_handles`, `shared_handles_read`,
-//! `shared_handles_read_purge` and `shared_handles_watch`: they run the same
+//! The export's single-moment check is the capability's too
+//! (`shared_handles_export`): it reads through one handle while a write
+//! lands through the other, and holds the export to a moment only if that
+//! write is seen through the first. The other `export*` sections take one
+//! store and are not the capability.
+//!
+//! The old names `pair`, `read`, `read_purge`, `watch_pair` and `export_pair`
+//! are PERMANENT aliases of `shared_handles`, `shared_handles_read`,
+//! `shared_handles_read_purge`, `shared_handles_watch` and
+//! `shared_handles_export`: they run the same
 //! checks and are not deprecated. The capability is a choice of section at
 //! the call site, not a runtime flag.
 //!
@@ -102,14 +113,15 @@ use angzarr_proto::v1::{
     event_page, meta_event, AngzarrDeadLetter, CommandCause, Cover, EditionCreated, EditionSummary,
     EventBook, EventMeta, EventPage, EventRef, FactCause, FactOrigin, MetaEvent, Snapshot,
 };
+use prost::Message;
 use prost_types::{Any, Timestamp};
 
 use crate::error::StoreError;
 use crate::migrate::{latest, AppliedMigration, Backup, Migration, MigrationStatus, Migrations};
 use crate::store::{
-    Append, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions, EventStore,
-    ListStreams, Outbox, OutboxEntry, Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit,
-    ReadUntilTime, Store, Watch, Write, Written,
+    Append, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions, EventStore, Export,
+    ExportRow, ListStreams, Outbox, OutboxEntry, Processed, Purge, ReadByCorrelation, ReadStore,
+    ReadUnit, ReadUntilTime, Store, Watch, Write, Written,
 };
 use crate::stream::{PositionKey, StreamRef};
 
@@ -3462,6 +3474,255 @@ async fn futures_join<A: Future, B: Future>(a: A, b: B) -> (A::Output, B::Output
     )
 }
 
+// ------------------------------------------------------------ export (opt-in)
+
+/// An exported row, its stored bytes decoded: what the export checks
+/// compare. A page's decoded sequence must be the one the store keeps it
+/// at, and a letter's component its letter's `source_component`.
+#[derive(Clone, PartialEq, Debug)]
+enum Exported {
+    Page(Cover, EventPage),
+    Snapshot(Cover, Snapshot),
+    Position(Cover, String, u64),
+    DeadLetter(Box<DeadLetter>),
+    Outbox(OutboxEntry),
+}
+
+/// `rows`, decoded, panicking on a row that does not decode or does not
+/// agree with its own key.
+fn exported(rows: Vec<ExportRow>) -> Vec<Exported> {
+    rows.into_iter()
+        .map(|row| match row {
+            ExportRow::Page {
+                stream,
+                sequence,
+                stored,
+            } => {
+                let page = EventPage::decode(stored.as_slice())
+                    .unwrap_or_else(|e| panic!("an exported page does not decode: {e}"));
+                assert_eq!(
+                    page.sequence, sequence,
+                    "a page is exported at the sequence it holds"
+                );
+                Exported::Page(stream, page)
+            }
+            ExportRow::Snapshot { stream, stored } => Exported::Snapshot(
+                stream,
+                Snapshot::decode(stored.as_slice())
+                    .unwrap_or_else(|e| panic!("an exported snapshot does not decode: {e}")),
+            ),
+            ExportRow::Position {
+                stream,
+                handler,
+                next,
+            } => Exported::Position(stream, handler, next),
+            ExportRow::DeadLetter {
+                stream,
+                at,
+                component,
+                stored,
+            } => {
+                let letter = AngzarrDeadLetter::decode(stored.as_slice())
+                    .unwrap_or_else(|e| panic!("an exported dead letter does not decode: {e}"));
+                assert_eq!(
+                    component, letter.source_component,
+                    "a dead letter is exported under its own component"
+                );
+                Exported::DeadLetter(Box::new(DeadLetter { stream, at, letter }))
+            }
+            ExportRow::Outbox(entry) => Exported::Outbox(entry),
+        })
+        .collect()
+}
+
+/// The store's export, decoded, which must be answered.
+async fn export_of<S: Export>(store: &S, what: &str) -> Vec<Exported> {
+    match store.export().await {
+        Ok(rows) => exported(rows),
+        Err(e) => panic!("{what}: the export is not answered: {e}"),
+    }
+}
+
+/// `stream`'s pages, as exported rows.
+fn pages_of(stream: StreamRef<'_>, pages: &[EventPage]) -> Vec<Exported> {
+    pages
+        .iter()
+        .map(|p| Exported::Page(stream.to_cover(), p.clone()))
+        .collect()
+}
+
+/// P1: every kind of row a store keeps is exported, each once: a stream's
+/// pages, its snapshot, the position on it, the dead letter about it, and
+/// a pending outbox entry, in the port's order.
+pub async fn export_yields_every_row_kind_once<S>(store: S)
+where
+    S: Store + Export + DeadLetterStore + Outbox,
+{
+    let s = main_stream("account", 1);
+    let pages = [page(0, 1), page(1, 2)];
+    let positions = [(key("h", s), 2)];
+    let outbox = [entry(1, "h", 1)];
+    let letters = [dead_letter(s, DeadLetterAt::Sequence(1), "p", 4)];
+    store
+        .write(Write {
+            positions: &positions,
+            outbox: &outbox,
+            dead_letters: &letters,
+            ..Write::append(s, 0, &pages)
+        })
+        .await
+        .unwrap();
+    store.write_snapshot(s, &snapshot(1, "v1")).await.unwrap();
+    let mut want = pages_of(s, &pages);
+    want.extend([
+        Exported::Snapshot(s.to_cover(), snapshot(1, "v1")),
+        Exported::Position(s.to_cover(), "h".to_string(), 2),
+        Exported::DeadLetter(Box::new(letters[0].clone())),
+        Exported::Outbox(outbox[0].clone()),
+    ]);
+    assert_eq!(
+        export_of(&store, "a store of every kind").await,
+        want,
+        "pages, then the snapshot, the position and the letter, then the outbox: each once"
+    );
+}
+
+/// P2: one stream at a time, in `StreamRef`'s order (domain, main first,
+/// then each edition, then root), whatever order they were written in;
+/// within a stream, its pages by sequence.
+pub async fn export_orders_a_streams_pages_by_sequence_and_streams_as_list_streams<S>(store: S)
+where
+    S: Store + Export,
+{
+    let (ledger, account2, account1) = (
+        main_stream("ledger", 1),
+        main_stream("account", 2),
+        main_stream("account", 1),
+    );
+    let forked = edition_stream("account", 1, "a");
+    append(&store, ledger, 0, &[page(0, 1)]).await.unwrap();
+    append(&store, account2, 0, &[page(0, 2)]).await.unwrap();
+    append(&store, account1, 0, &[page(0, 3)]).await.unwrap();
+    append(&store, account1, 1, &[page(1, 4), page(2, 5)])
+        .await
+        .unwrap();
+    let at = fork(&store, forked).await;
+    let mut want = pages_of(account1, &[page(0, 3), page(1, 4), page(2, 5)]);
+    want.extend(pages_of(account2, &[page(0, 2)]));
+    want.extend(pages_of(forked, &[created_page(at)]));
+    want.extend(pages_of(ledger, &[page(0, 1)]));
+    assert_eq!(export_of(&store, "four streams").await, want);
+}
+
+/// P3: an edition stream's export is its own rows alone, its fork on:
+/// none of main's pages below its fork.
+pub async fn export_of_an_edition_stream_holds_only_its_own_rows<S>(store: S)
+where
+    S: Store + Export,
+{
+    let main = main_stream("account", 1);
+    let forked = edition_stream("account", 1, "x");
+    let mains = [page(0, 1), page(1, 2), page(2, 3)];
+    append(&store, main, 0, &mains).await.unwrap();
+    let own = [created_page(1), page(2, 4)];
+    append(&store, forked, 1, &own).await.unwrap();
+    let mut want = pages_of(main, &mains);
+    want.extend(pages_of(forked, &own));
+    assert_eq!(
+        export_of(&store, "a stream forked below main's head").await,
+        want,
+        "main's pages under main, the fork's own under the fork"
+    );
+}
+
+/// P4: every position above 0 is exported, a handler's no one lists
+/// included, on a stream with no event too; by stream, then handler. A
+/// position put back to 0 is none.
+pub async fn export_includes_positions_of_a_handler_no_one_names<S>(store: S)
+where
+    S: Store + Export,
+{
+    let (account, order) = (main_stream("account", 1), main_stream("order", 9));
+    append(&store, account, 0, &[page(0, 1)]).await.unwrap();
+    put(&store, key("ghost", order), 5).await.unwrap();
+    put(&store, key("ghost", account), 1).await.unwrap();
+    put(&store, key("alpha", order), 2).await.unwrap();
+    put(&store, key("forgotten", order), 3).await.unwrap();
+    put(&store, key("forgotten", order), 0).await.unwrap();
+    let mut want = pages_of(account, &[page(0, 1)]);
+    want.extend([
+        Exported::Position(account.to_cover(), "ghost".to_string(), 1),
+        Exported::Position(order.to_cover(), "alpha".to_string(), 2),
+        Exported::Position(order.to_cover(), "ghost".to_string(), 5),
+    ]);
+    assert_eq!(export_of(&store, "positions").await, want);
+}
+
+/// P5: a dead letter about a stream holding no event, in a domain holding
+/// none, is exported; a stream's letters in key order.
+pub async fn export_includes_dead_letters_about_a_stream_with_no_events<S>(store: S)
+where
+    S: Store + Export + DeadLetterStore,
+{
+    let refused = main_stream("refused", 1);
+    let by_command = dead_letter(refused, DeadLetterAt::Command(command(7)), "c", 1);
+    let second = dead_letter(refused, DeadLetterAt::Sequence(2), "b", 2);
+    let first = dead_letter(refused, DeadLetterAt::Sequence(1), "z", 3);
+    put_dead_letters(&store, &[by_command.clone(), second.clone(), first.clone()]).await;
+    assert_eq!(
+        export_of(&store, "letters alone").await,
+        vec![
+            Exported::DeadLetter(Box::new(first)),
+            Exported::DeadLetter(Box::new(second)),
+            Exported::DeadLetter(Box::new(by_command)),
+        ]
+    );
+}
+
+/// Poll `first` once, then run `between` to its end, then `first` to its
+/// end: forcing `between` into the middle of `first` wherever `first`
+/// yields on its first poll. The suite takes no runtime of its own.
+async fn interleaved<A: Future, B: Future>(first: A, between: B) -> (A::Output, B::Output) {
+    let mut first = std::pin::pin!(first);
+    let mut early = None;
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    if let std::task::Poll::Ready(v) = first.as_mut().poll(&mut cx) {
+        early = Some(v);
+    }
+    let middle = between.await;
+    let done = match early {
+        Some(v) => v,
+        None => first.await,
+    };
+    (done, middle)
+}
+
+/// P6: an export is one moment: a write landing while it reads (forced
+/// into its first yield) is wholly in it or wholly out of it, never half.
+pub async fn export_is_one_moment_while_a_writer_writes<S>((reader, writer): (S, S))
+where
+    S: Store + Export,
+{
+    let (s, t) = (main_stream("account", 1), main_stream("ledger", 1));
+    append(&reader, s, 0, &[page(0, 1)]).await.unwrap();
+    let before = export_of(&reader, "before the write").await;
+    let pages = [page(1, 2)];
+    let positions = [(key("h", t), 1)];
+    let write = writer.write(Write {
+        positions: &positions,
+        ..Write::append(s, 1, &pages)
+    });
+    let (during, written) = interleaved(reader.export(), write).await;
+    written.unwrap();
+    let during = exported(during.expect("the export during the write is answered"));
+    let after = export_of(&reader, "after the write").await;
+    assert_ne!(before, after, "the write changed the store");
+    assert!(
+        during == before || during == after,
+        "an export is one moment, the write wholly in or out of it: {during:?}"
+    );
+}
+
 // ------------------------------------------------------------------- macro
 
 /// The checks of the shared-handles capability, by name: every check that
@@ -3479,6 +3740,7 @@ pub const SHARED_HANDLES: &[&str] = &[
     "a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main",
     "a_read_unit_keeps_a_stream_purged_after_it_began",
     "a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began",
+    "export_is_one_moment_while_a_writer_writes",
 ];
 
 /// One test per check of a section, under the caller's test attribute (its
@@ -3489,7 +3751,7 @@ pub const SHARED_HANDLES: &[&str] = &[
 /// `store_contract!(<section>, #[tokio::test], $fresh)` any other (see the
 /// module's table). The `shared_handles*` sections are the capability a
 /// single-process store leaves out (the module's header); `pair`, `read`,
-/// `read_purge` and `watch_pair` are their former names. Several attributes may be given, as
+/// `read_purge`, `watch_pair` and `export_pair` are their former names. Several attributes may be given, as
 /// `#[tokio::test] #[ignore = "..."]`. Tests are named after their checks, so a backend runs
 /// each section in a module of its own.
 #[macro_export]
@@ -3644,6 +3906,31 @@ macro_rules! store_contract {
     (dead_letters_editions, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             a_removed_edition_stream_takes_its_dead_letters,
+        );
+    };
+    (export, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            export_orders_a_streams_pages_by_sequence_and_streams_as_list_streams,
+            export_of_an_edition_stream_holds_only_its_own_rows,
+            export_includes_positions_of_a_handler_no_one_names,
+        );
+    };
+    (shared_handles_export, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            export_is_one_moment_while_a_writer_writes,
+        );
+    };
+    (export_pair, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(shared_handles_export, $(#[$t])+, $f);
+    };
+    (export_dead_letters, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            export_includes_dead_letters_about_a_stream_with_no_events,
+        );
+    };
+    (export_every_kind, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            export_yields_every_row_kind_once,
         );
     };
     (migrations, $(#[$t:meta])+, $f:expr) => {
