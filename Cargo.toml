@@ -4,6 +4,7 @@
 members = [
     "crates/angzarr-coordinator",
     "crates/angzarr-coordinator-base",
+    "crates/angzarr-coordinator-grpc",
     "crates/angzarr-diagnostic",
     "crates/angzarr-ports",
     "crates/angzarr-presentation",

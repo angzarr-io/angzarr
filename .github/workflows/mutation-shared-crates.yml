@@ -34,7 +34,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        crate: [angzarr-ports, angzarr-diagnostic, angzarr-yaml, angzarr-presentation, angzarr-test-dir, angzarr-proto-jsonl, angzarr-store-transfer, angzarr-coordinator-base, angzarr-reads, angzarr-coordinator]
+        crate: [angzarr-ports, angzarr-diagnostic, angzarr-yaml, angzarr-presentation, angzarr-test-dir, angzarr-proto-jsonl, angzarr-store-transfer, angzarr-coordinator-base, angzarr-reads, angzarr-coordinator, angzarr-coordinator-grpc]
     # GitHub's cap for a hosted job; let the full pass finish rather than
     # cancel it mid-run.
     timeout-minutes: 360

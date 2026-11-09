@@ -1,0 +1,61 @@
+[package]
+name = "angzarr-coordinator-grpc"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "The coordinators' gRPC server, shared by the embedded and distributed runtimes: the listener policy (UDS 0600 in a 0700 directory, TCP, an Arrival declared per listener), Code to tonic::Status with an ErrorInfo, the bearer read from metadata, health and shutdown"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace declares no [workspace.package], so nothing is inherited.
+
+# The one crate of core that links tonic and tokio: the transport-free
+# crates (base, reads, coordinator) never do (their tests/dependencies.rs
+# pin it). In this slice it depends on angzarr-coordinator-base only; the
+# services (commands, queries, subscriptions) come in later slices and add
+# the edge and reads crates behind the two features.
+[features]
+# The command-handler coordinator service (a later slice). A read-only
+# container builds without it.
+commands = []
+# The EventQuery and EventStream services (later slices).
+reads = []
+
+[dependencies]
+# Code, Coded and Refusal: what a status is made from.
+angzarr-coordinator-base = { path = "../angzarr-coordinator-base" }
+# Every error is a Diagnostic; the catalog's parity test is this crate's.
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+# google.rpc.Status and ErrorInfo, on the wire as googleapis defines them
+# (already in the lock, with `Any`).
+prost = "0.14"
+prost-types = "0.14"
+tokio = { version = "1", features = ["net", "rt", "sync"] }
+# The listeners as streams of connections, for tonic's server.
+tokio-stream = { version = "0.1", features = ["net"] }
+# The server, its router (the services are added to it) and its codegen
+# re-exports; no TLS, no client channel.
+tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server"] }
+# The grpc.health.v1 service.
+tonic-health = "0.14"
+
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+
+[dev-dependencies]
+# Each test's scratch directory (a short path, for a socket).
+angzarr-test-dir = { path = "../angzarr-test-dir" }
+# A UDS client: tonic's channel over a connector, whose stream hyper reads
+# through its own IO traits (hyper-util's adapter).
+hyper-util = { version = "0.1", features = ["tokio"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "router", "server"] }
+# The probe service's codec.
+tonic-prost = "0.14"
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

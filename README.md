@@ -24,6 +24,7 @@ virtual Cargo workspace under `crates/`:
 | `angzarr-coordinator-base` | the coordinators' shared vocabulary, transport-free: `Code`/`Coded`/`Refusal`, the upcast port and its drivers, `Wait`, `Answered` |
 | `angzarr-reads` | the coordinators' read engine, transport-free, linking no command-side code: GetEvents, GetEventBook, correlated reads, ListStreams over the store's read ports |
 | `angzarr-coordinator` | the coordinators' edge, transport-free: `Arrival`/`Reach`/`Hidden`/`Unserved` routing, the `Commands` trait (feature `commands`), and the gate (`Gate`, `Allowlist`, `Credential`, `Coordinator`/`Session`: identify, operation allowed, reach, owns, stamp, handle; refusals answered as a missing domain) |
+| `angzarr-coordinator-grpc` | the coordinators' tonic server, the one crate of core that links tonic and tokio: the listener policy (Unix socket 0600 in a 0700 directory, TCP, an `Arrival` declared per listener), the bearer read from metadata, `Code` as a status with an `ErrorInfo`, health and shutdown |
 | `angzarr-diagnostic` | localizable errors: a stable code and named data, rendered from a Fluent catalog |
 | `angzarr-yaml` | a strict subset of YAML, versioned documents migrated on read, decoded strictly |
 | `angzarr-proto-jsonl` | protobuf messages as JSON Lines: canonical proto3 JSON, one message per line, against descriptors the caller supplies |
@@ -117,6 +118,7 @@ The shared crates `angzarr-proto`, `angzarr-proto-handler`,
 `angzarr-proto-component`,
 `angzarr-proto-transport-embedded`, `angzarr-proto-transport-distributed`,
 `angzarr-ports`, `angzarr-coordinator-base`, `angzarr-reads`, `angzarr-coordinator`,
+`angzarr-coordinator-grpc`,
 `angzarr-diagnostic`, `angzarr-yaml`,
 `angzarr-presentation`, `angzarr-proto-jsonl`, `angzarr-test-dir` and
 `angzarr-store-transfer`: Licensed under either

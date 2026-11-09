@@ -7,7 +7,9 @@ angzarr-yaml, angzarr-presentation, angzarr-proto-jsonl, angzarr-test-dir, angza
 and the coordinators' crates: angzarr-coordinator-base (the shared vocabulary,
 transport-free), angzarr-reads (the read engine), angzarr-coordinator (the
 edge and the gate: `Gate`, closed `Allowlist`, `Credential`,
-`Coordinator`/`Session`; no tonic, no tokio)), which the router, angzarr-embedded,
+`Coordinator`/`Session`; no tonic, no tokio) and angzarr-coordinator-grpc (the
+one crate that links tonic and tokio: the listener policy, the bearer, the
+status mapping and the services)), which the router, angzarr-embedded,
 the CLI and the client and example repos depend on by git rev. Each crate
 has its own justfile; the root justfile runs them all:
 

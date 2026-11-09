@@ -1,0 +1,51 @@
+# angzarr-coordinator-grpc: the coordinators' gRPC server (listener policy,
+# status mapping, bearer extraction, health, shutdown). The one core crate
+# that links tonic and tokio, so no wasm32 build. A member of angzarr-core's
+# workspace: every recipe names this package, and --locked means the
+# workspace's Cargo.lock. Runs on the host, not in core's toolchain container
+# (`just -f crates/angzarr-coordinator-grpc/justfile check`).
+
+# Format check, build, lint and test natively
+check: check-untested tests
+
+# Every check but running the tests, the tests' build included: a failure
+# here is never a red test (the root justfile's `check-shared-crates-commit`)
+check-untested: fmt-check build lint build-tests
+
+# Run the tests: a failure here is a red test
+tests: test
+
+fmt:
+    cargo fmt -p angzarr-coordinator-grpc
+
+fmt-check:
+    cargo fmt -p angzarr-coordinator-grpc --check
+
+build:
+    cargo build --locked -p angzarr-coordinator-grpc --all-features
+
+lint:
+    cargo clippy --locked -p angzarr-coordinator-grpc --all-targets --all-features -- -D warnings
+
+test:
+    cargo test --locked -p angzarr-coordinator-grpc --all-features
+
+# Build the tests without running them
+build-tests:
+    cargo test --locked -p angzarr-coordinator-grpc --all-features --no-run
+
+# Mutation kill-rate threshold, percent, over viable mutants; 90 is the
+# org's bar. No git hook runs mutation; the full pass runs weekly in CI
+# (.github/workflows/mutation-shared-crates.yml). The work is the root
+# justfile's shared-mutation (a scratch copy, never --in-place).
+MUTATION_THRESHOLD := "90"
+# Seconds per mutant's tests: real sockets, one runtime per test.
+MUTATION_TIMEOUT := "120"
+
+# Mutation-test the whole crate, judged by MUTATION_THRESHOLD: the full pass.
+mutation-test:
+    just -f '{{justfile_directory()}}/../../justfile' shared-mutation angzarr-coordinator-grpc {{MUTATION_THRESHOLD}} {{MUTATION_TIMEOUT}} target/mutants
+
+# Mutation-test only the lines the diff PATCH changes, judged the same way.
+mutation-diff PATCH:
+    just -f '{{justfile_directory()}}/../../justfile' shared-mutation angzarr-coordinator-grpc {{MUTATION_THRESHOLD}} {{MUTATION_TIMEOUT}} target/mutants-diff '{{PATCH}}'
