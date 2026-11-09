@@ -21,6 +21,12 @@ pub enum ListenError {
     DirectoryNotPrivate { path: String },
     /// The socket path has no directory to put the socket in.
     NoDirectory { path: String },
+    /// TLS was asked of a Unix socket listener: TLS is for TCP, and a Unix
+    /// socket's protection is its mode and its directory.
+    TlsOnUds { path: String },
+    /// The TLS configuration was refused (no identity, or a certificate or
+    /// key that does not parse), with the TLS layer's `error`.
+    TlsConfig { error: String },
     /// A system call failed: `op` on `target`, with the system's `error`.
     Io {
         op: &'static str,
@@ -81,6 +87,8 @@ impl Diagnostic for ListenError {
             ListenError::NotASocket { .. } => code!("listen-not-a-socket"),
             ListenError::DirectoryNotPrivate { .. } => code!("listen-directory-not-private"),
             ListenError::NoDirectory { .. } => code!("listen-no-directory"),
+            ListenError::TlsOnUds { .. } => code!("listen-tls-on-uds"),
+            ListenError::TlsConfig { .. } => code!("listen-tls-config"),
             ListenError::Io { .. } => code!("listen-io"),
         }
     }
@@ -91,7 +99,9 @@ impl Diagnostic for ListenError {
             ListenError::SocketInUse { path }
             | ListenError::NotASocket { path }
             | ListenError::DirectoryNotPrivate { path }
-            | ListenError::NoDirectory { path } => vec![("path", path.as_str().into())],
+            | ListenError::NoDirectory { path }
+            | ListenError::TlsOnUds { path } => vec![("path", path.as_str().into())],
+            ListenError::TlsConfig { error } => vec![("error", error.as_str().into())],
             ListenError::Io { op, target, error } => vec![
                 ("op", (*op).into()),
                 ("target", target.as_str().into()),
@@ -120,6 +130,12 @@ pub(crate) fn samples() -> Vec<ListenError> {
         },
         ListenError::NoDirectory {
             path: "a.sock".to_string(),
+        },
+        ListenError::TlsOnUds {
+            path: "/run/user/1000/angzarr/a.sock".to_string(),
+        },
+        ListenError::TlsConfig {
+            error: "no identity".to_string(),
         },
         ListenError::Io {
             op: "bind",

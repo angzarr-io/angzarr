@@ -38,6 +38,8 @@ enum Address {
 pub struct Listener {
     address: Address,
     declared: Option<Arrival>,
+    #[cfg(feature = "tls")]
+    tls: Option<tonic::transport::ServerTlsConfig>,
 }
 
 impl Listener {
@@ -48,6 +50,8 @@ impl Listener {
         Listener {
             address: Address::Uds(path.into()),
             declared: None,
+            #[cfg(feature = "tls")]
+            tls: None,
         }
     }
 
@@ -57,7 +61,20 @@ impl Listener {
         Listener {
             address: Address::Tcp(addr),
             declared: None,
+            #[cfg(feature = "tls")]
+            tls: None,
         }
+    }
+
+    /// Serve TLS on this listener: the server does the handshake with the
+    /// identity (and client-certificate policy) `config` holds. TLS is for
+    /// a TCP listener; on a Unix socket it is refused at bind
+    /// ([`ListenError::TlsOnUds`]), as is a config the TLS layer rejects
+    /// ([`ListenError::TlsConfig`]). Needs the `tls` feature.
+    #[cfg(feature = "tls")]
+    pub fn tls(mut self, config: tonic::transport::ServerTlsConfig) -> Listener {
+        self.tls = Some(config);
+        self
     }
 
     /// Declare the listener's arrival, in place of the default.
@@ -212,6 +229,8 @@ impl Server {
         };
         for listener in self.listeners {
             let arrival = listener.arrival();
+            #[cfg(feature = "tls")]
+            let _ = &listener.tls; // RED stub: not served yet
             let service = Declared {
                 inner: routes.clone(),
                 arrival,

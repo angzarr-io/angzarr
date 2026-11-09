@@ -25,6 +25,8 @@ allow = [
   "Apache-2.0",
   "Apache-2.0 WITH LLVM-exception",
   "BSD-3-Clause",
+  # ring, rustls-webpki and untrusted (the `tls` feature of angzarr-coordinator-grpc, ring provider): permissive.
+  "ISC",
   "MIT",
   "Unicode-3.0",
   "Unlicense",

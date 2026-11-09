@@ -22,6 +22,10 @@ default = ["commands", "reads"]
 commands = ["angzarr-coordinator/commands"]
 # The EventQueryService (`GetEvents`). The EventStream service is a later slice.
 reads = ["angzarr-coordinator/reads", "dep:angzarr-reads"]
+# TLS on a TCP listener (`Listener::tls`): the server does the handshake.
+# Off by default; with it off nothing of TLS is linked. It enables tonic's
+# `tls-ring` and never `tls-aws-lc`, so ring is the one crypto provider.
+tls = ["tonic/tls-ring"]
 
 [dependencies]
 # Code, Coded and Refusal: what a status is made from.
@@ -68,6 +72,8 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "router", "server"] }
 # The probe service's codec.
 tonic-prost = "0.14"
+# Certificates the TLS tests mint (ring, never aws-lc: one provider).
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
 
 # The shared crates' lints: the workspace's (the root Cargo.toml).
 [lints]

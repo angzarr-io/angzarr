@@ -12,4 +12,6 @@ listen-socket-in-use = another process is listening on { $path }
 listen-not-a-socket = { $path } exists and is not a socket
 listen-directory-not-private = the directory of the socket, { $path }, is not a directory we own with mode 0700
 listen-no-directory = the socket path { $path } has no directory
+listen-tls-on-uds = TLS was asked of the Unix socket { $path }; TLS is for a TCP listener
+listen-tls-config = the TLS configuration was refused: { $error }
 listen-io = { $op } of { $target } failed: { $error }

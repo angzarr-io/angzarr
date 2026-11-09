@@ -109,17 +109,23 @@ pub async fn uds(path: &Path) -> Channel {
 
 /// The arrival the server declared for this connection's requests.
 pub async fn arrival(channel: Channel) -> String {
+    try_arrival(channel).await.expect("the probe answers")
+}
+
+/// The same call, the failure returned.
+pub async fn try_arrival(channel: Channel) -> Result<String, Status> {
     let mut grpc = tonic::client::Grpc::new(channel);
-    grpc.ready().await.expect("channel ready");
+    grpc.ready()
+        .await
+        .map_err(|e| Status::unavailable(e.to_string()))?;
     let reply = grpc
         .unary(
             tonic::Request::new(()),
             http::uri::PathAndQuery::from_static("/probe.Probe/Arrival"),
             ProstCodec::<(), Reply>::default(),
         )
-        .await
-        .expect("the probe answers");
-    reply.into_inner().arrival
+        .await?;
+    Ok(reply.into_inner().arrival)
 }
 
 /// `name` in `dir`, which is first made private (a `TestDir` is made with

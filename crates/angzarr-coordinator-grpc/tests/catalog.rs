@@ -28,6 +28,8 @@ fn grpc_errors_have_catalog_messages() {
         "listen-not-a-socket",
         "listen-directory-not-private",
         "listen-no-directory",
+        "listen-tls-on-uds",
+        "listen-tls-config",
         "listen-io",
     ]
     .into_iter()

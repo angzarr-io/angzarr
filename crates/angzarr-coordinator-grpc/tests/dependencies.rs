@@ -102,6 +102,7 @@ fn the_listener_links_no_third_party_crate_outside_the_tonic_stack() {
         "hyper-util",
         "prost",
         "prost-types",
+        "rcgen",
         "tokio",
         "tokio-stream",
         "tonic",
@@ -112,4 +113,42 @@ fn the_listener_links_no_third_party_crate_outside_the_tonic_stack() {
     .map(ToString::to_string)
     .collect();
     assert_eq!(own, allowed);
+}
+
+/// The ring-versus-aws-lc trap: with every feature on (`tls` included), the
+/// closure has ring and no aws-lc, so tonic's TLS has the one provider and
+/// rustls needs no process-wide default chosen.
+#[test]
+fn tls_has_one_crypto_provider_and_it_is_ring() {
+    let output = Command::new(env!("CARGO"))
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args([
+            "tree",
+            "--locked",
+            "--offline",
+            "-e",
+            "all",
+            "--prefix",
+            "none",
+        ])
+        .args(["-p", env!("CARGO_PKG_NAME"), "--all-features"])
+        .output()
+        .expect("cargo tree runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let names: BTreeSet<String> = String::from_utf8(output.stdout)
+        .expect("utf-8")
+        .lines()
+        .filter_map(|line| line.split_whitespace().next())
+        .map(str::to_string)
+        .collect();
+    for linked in ["ring", "rustls", "tokio-rustls"] {
+        assert!(names.contains(linked), "{linked} is not in the closure");
+    }
+    for crypto in ["aws-lc-rs", "aws-lc-sys", "openssl", "native-tls"] {
+        assert!(!names.contains(crypto), "{crypto} is in the closure");
+    }
 }
