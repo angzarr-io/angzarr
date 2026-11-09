@@ -2,33 +2,6 @@ use std::net::SocketAddr;
 
 use super::*;
 
-/// A loopback arrival reaches loopback and ip domains; an ip arrival only
-/// ip domains; a domain of no reach is reached by none.
-#[test]
-fn an_arrival_is_admitted_by_the_reach_that_covers_it() {
-    let table = [
-        (Arrival::Loopback, Reach::None, false),
-        (Arrival::Loopback, Reach::Loopback, true),
-        (Arrival::Loopback, Reach::Ip, true),
-        (Arrival::Ip, Reach::None, false),
-        (Arrival::Ip, Reach::Loopback, false),
-        (Arrival::Ip, Reach::Ip, true),
-    ];
-    for (arrival, reach, admitted) in table {
-        assert_eq!(
-            arrival.admitted_by(reach),
-            admitted,
-            "{arrival:?} {reach:?}"
-        );
-    }
-}
-
-#[test]
-fn an_arrival_is_named_as_it_is_logged() {
-    assert_eq!(Arrival::Loopback.as_str(), "loopback");
-    assert_eq!(Arrival::Ip.as_str(), "ip");
-}
-
 /// Loopback addresses (v4 and v6) default to loopback, every other address,
 /// the unspecified ones included, to ip.
 #[test]
@@ -44,7 +17,7 @@ fn a_bind_address_declares_loopback_only_when_it_is_one() {
     ];
     for (addr, arrival) in table {
         let addr: SocketAddr = addr.parse().unwrap();
-        assert_eq!(Arrival::for_bind(addr), arrival, "{addr}");
+        assert_eq!(arrival_for_bind(addr), arrival, "{addr}");
     }
 }
 

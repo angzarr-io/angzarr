@@ -15,6 +15,7 @@ use tonic::service::Routes;
 use tonic_health::server::HealthReporter;
 use tonic_health::ServingStatus;
 
+use crate::arrival::arrival_for_bind;
 use crate::uds::{self, OwnedSocket};
 use crate::{Arrival, ListenError};
 
@@ -70,7 +71,7 @@ impl Listener {
     fn arrival(&self) -> Arrival {
         self.declared.unwrap_or(match self.address {
             Address::Uds(_) => Arrival::Loopback,
-            Address::Tcp(addr) => Arrival::for_bind(addr),
+            Address::Tcp(addr) => arrival_for_bind(addr),
         })
     }
 
@@ -79,7 +80,7 @@ impl Listener {
         match self.address {
             Address::Tcp(addr)
                 if self.arrival() == Arrival::Loopback
-                    && Arrival::for_bind(addr) != Arrival::Loopback =>
+                    && arrival_for_bind(addr) != Arrival::Loopback =>
             {
                 Err(ListenError::LoopbackOnWideBind { addr })
             }

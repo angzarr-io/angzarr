@@ -212,6 +212,11 @@ async fn a_request_after_still_valid_goes_false_is_refused() {
         error_info(&status).expect("keyed").reason,
         "angzarr-coordinator-unauthenticated"
     );
+    // A read by the revoked identity is refused too, as a write is.
+    let status = events(&channel, WRITER, from_sequence(7, 0))
+        .await
+        .expect_err("a revoked identity reads nothing");
+    assert_eq!(status.code(), Code::Unauthenticated);
     // Only the first fact is in the stream; another identity still reads it.
     let seen = events(&channel, SEVEN, from_sequence(7, 0)).await.unwrap();
     assert_eq!(seen[0].pages.len(), 1);

@@ -9,7 +9,8 @@ use angzarr_proto_transport_distributed::v1::{
 };
 use tonic::{Request, Response, Status};
 
-use crate::Edge;
+use crate::edge::{unimplemented, Presented};
+use crate::{status_of, Edge};
 
 #[tonic::async_trait]
 impl<C, R, G> CommandHandlerCoordinatorService for Edge<C, R, G>
@@ -20,26 +21,35 @@ where
 {
     async fn handle(
         &self,
-        _request: Request<CommandBook>,
+        request: Request<CommandBook>,
     ) -> Result<Response<CommandResult>, Status> {
-        Err(Status::unimplemented("stub"))
+        let presented = Presented::of(&request)?;
+        let session = self.session(&presented).await?;
+        let answered = session
+            .handle(request.into_inner())
+            .await
+            .map_err(|failure| status_of(&failure))?;
+        Ok(Response::new(CommandResult {
+            events: answered.events,
+            delivery: answered.delivery.into(),
+        }))
     }
 
     async fn handle_async(&self, _request: Request<CommandBook>) -> Result<Response<()>, Status> {
-        Err(Status::unimplemented("stub"))
+        Err(unimplemented("handle_async"))
     }
 
     async fn handle_sync(
         &self,
         _request: Request<HandleSyncRequest>,
     ) -> Result<Response<CommandSyncResult>, Status> {
-        Err(Status::unimplemented("stub"))
+        Err(unimplemented("handle_sync"))
     }
 
     async fn deliver(
         &self,
         _request: Request<ReactionDelivery>,
     ) -> Result<Response<CommandResult>, Status> {
-        Err(Status::unimplemented("stub"))
+        Err(unimplemented("deliver"))
     }
 }

@@ -1,9 +1,17 @@
 //! The coordinators' gRPC server, shared by the embedded and the
 //! distributed runtimes: the one core crate that links tonic and tokio.
-//! This slice holds the listener and the status mapping; the services
-//! (commands, queries, subscriptions) come in later slices, behind the
-//! `commands` and `reads` features.
 //!
+//! - [`Edge`]: an [`angzarr_coordinator::Coordinator`] (commands, reads and
+//!   gate) served. With the `commands` feature it is a
+//!   `CommandHandlerCoordinatorService` (`Handle` through the gate; the
+//!   other RPCs are UNIMPLEMENTED, keyed); with `reads`, an
+//!   `EventQueryService` (`GetEvents`; the other RPCs are UNIMPLEMENTED,
+//!   keyed). On every request the arrival is the one its listener declared
+//!   ([`arrival_of`]) and the credential is the `authorization` bearer
+//!   ([`bearer`]), handed to the gate's `identify`; a refused request is the
+//!   status the gate's contract names (UNAUTHENTICATED for a bad or revoked
+//!   credential, the endpoint's own unknown-domain for anything else the
+//!   gate forbids). [`Server::add_edge`] adds both services.
 //! - [`Server`]: the builder. Services are added once and served on every
 //!   [`Listener`]; `grpc.health.v1.Health` is always served (SERVING once
 //!   bound, NOT_SERVING when shutdown begins). [`Server::bind`] gives a
@@ -23,13 +31,12 @@
 //!   [`Refusal`](angzarr_coordinator_base::Refusal) as a `tonic::Status`:
 //!   its code, its key as the message, a `google.rpc.ErrorInfo` with the key
 //!   as reason and the args as metadata; [`unauthenticated`] for a
-//!   credential that is missing, stale or malformed.
+//!   credential that is malformed.
 //! - [`bearer`]: the bearer credential read from a request's metadata,
 //!   opaque and redacted ([`Bearer`]).
 //!
-//! [`Arrival`] and [`Reach`] are stand-ins for the coordinator edge's types
-//! (see their module): the edge crate is a sibling this one does not depend
-//! on yet.
+//! [`Arrival`] and [`Reach`] are the coordinator edge's own types,
+//! re-exported.
 
 mod arrival;
 mod bearer;
@@ -45,7 +52,7 @@ mod command;
 #[cfg(feature = "reads")]
 mod query;
 
-pub use arrival::{arrival_of, Arrival, Reach};
+pub use arrival::{arrival_for_bind, arrival_of, Arrival, Reach};
 pub use bearer::{bearer, AuthorizationError, Bearer};
 pub use edge::Edge;
 pub use error::ListenError;

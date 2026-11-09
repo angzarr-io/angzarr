@@ -92,7 +92,7 @@ impl Commands for Counter {
             let Some(command_page::Body::Fact(fact)) = book.page.and_then(|p| p.body) else {
                 return Err(Coded::new(Code::InvalidArgument, "counter-fact-only", []));
             };
-            let read = EventRead::read(&*self.store, stream, u64::MAX, None)
+            let read = EventRead::read(&*self.store, stream, 0, None)
                 .await
                 .map_err(internal)?;
             let head = read.next_sequence;
@@ -244,8 +244,14 @@ pub struct Harness {
 
 /// Serve the counter, behind the token gate, on a Unix socket at `path`.
 pub async fn serve(path: PathBuf) -> Harness {
+    serve_declared(path, Reach::Loopback, None).await
+}
+
+/// Serve the counter at `reach`, on a Unix socket at `path` whose listener
+/// declares `arrival` (the socket's own default, loopback, when `None`).
+pub async fn serve_declared(path: PathBuf, reach: Reach, arrival: Option<Arrival>) -> Harness {
     let store = Arc::new(MemoryStore::new());
-    let served: BTreeMap<String, Reach> = [(DOMAIN.to_string(), Reach::Loopback)].into();
+    let served: BTreeMap<String, Reach> = [(DOMAIN.to_string(), reach)].into();
     let commands = Counter {
         store: Arc::clone(&store),
         served: served.clone(),
@@ -257,7 +263,10 @@ pub async fn serve(path: PathBuf) -> Harness {
     let edge = Edge::new(Arc::new(coordinator));
     let running = Server::builder()
         .add_edge(edge)
-        .listen(Listener::uds(&path))
+        .listen(match arrival {
+            Some(arrival) => Listener::uds(&path).declare(arrival),
+            None => Listener::uds(&path),
+        })
         .bind()
         .await
         .expect("binds");
