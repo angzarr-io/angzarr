@@ -92,8 +92,22 @@ impl Listener {
         })
     }
 
-    /// Refuse a loopback declaration on a bind that is not loopback.
+    /// Refuse a loopback declaration on a bind that is not loopback, TLS on
+    /// a Unix socket, and a TLS configuration the TLS layer rejects.
     fn check(&self) -> Result<(), ListenError> {
+        #[cfg(feature = "tls")]
+        if let Some(config) = &self.tls {
+            match &self.address {
+                Address::Uds(path) => {
+                    return Err(ListenError::TlsOnUds {
+                        path: path.display().to_string(),
+                    })
+                }
+                Address::Tcp(_) => {
+                    tls_builder(config)?;
+                }
+            }
+        }
         match self.address {
             Address::Tcp(addr)
                 if self.arrival() == Arrival::Loopback
@@ -103,6 +117,36 @@ impl Listener {
             }
             _ => Ok(()),
         }
+    }
+}
+
+/// A listener's TLS configuration: with the feature off, a type nothing
+/// can make.
+#[cfg(feature = "tls")]
+type Tls = tonic::transport::ServerTlsConfig;
+#[cfg(not(feature = "tls"))]
+type Tls = std::convert::Infallible;
+
+/// A tonic server builder that does the TLS handshake with `config`.
+///
+/// tonic panics on a config with no identity (it unwraps it), so that is
+/// caught and told as the typed [`ListenError::TlsConfig`]; this relies on
+/// unwinding panics.
+#[cfg(feature = "tls")]
+fn tls_builder(
+    config: &tonic::transport::ServerTlsConfig,
+) -> Result<tonic::transport::Server, ListenError> {
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tonic::transport::Server::builder().tls_config(config.clone())
+    }));
+    match attempt {
+        Ok(Ok(builder)) => Ok(builder),
+        Ok(Err(error)) => Err(ListenError::TlsConfig {
+            error: error.to_string(),
+        }),
+        Err(_) => Err(ListenError::TlsConfig {
+            error: "the configuration has no identity".to_string(),
+        }),
     }
 }
 
@@ -230,7 +274,9 @@ impl Server {
         for listener in self.listeners {
             let arrival = listener.arrival();
             #[cfg(feature = "tls")]
-            let _ = &listener.tls; // RED stub: not served yet
+            let tls = listener.tls.as_ref();
+            #[cfg(not(feature = "tls"))]
+            let tls = None;
             let service = Declared {
                 inner: routes.clone(),
                 arrival,
@@ -239,7 +285,7 @@ impl Server {
                 Address::Uds(path) => {
                     let (bound, socket) = uds::bind(path)?;
                     running.sockets.push(socket);
-                    running.serve(service, UnixListenerStream::new(bound));
+                    running.serve(service, UnixListenerStream::new(bound), tls)?;
                     running.bound.endpoints.push(BoundEndpoint::Uds {
                         path: path.clone(),
                         arrival,
@@ -252,7 +298,7 @@ impl Server {
                     let addr = bound
                         .local_addr()
                         .map_err(ListenError::io("local-addr", addr))?;
-                    running.serve(service, TcpListenerStream::new(bound));
+                    running.serve(service, TcpListenerStream::new(bound), tls)?;
                     running
                         .bound
                         .endpoints
@@ -281,7 +327,12 @@ pub struct Running {
 
 impl Running {
     /// Serve `service` on `incoming` until [`Running::stop`] fires.
-    fn serve<S, I, IO>(&mut self, service: S, incoming: I)
+    fn serve<S, I, IO>(
+        &mut self,
+        service: S,
+        incoming: I,
+        tls: Option<&Tls>,
+    ) -> Result<(), ListenError>
     where
         S: Service<
                 http::Request<tonic::body::Body>,
@@ -303,10 +354,15 @@ impl Running {
         let signal = async move {
             let _ = stop.wait_for(|stopped| *stopped).await;
         };
+        let builder = match tls {
+            #[cfg(feature = "tls")]
+            Some(config) => tls_builder(config)?,
+            _ => tonic::transport::Server::builder(),
+        };
         self.tasks.push(tokio::spawn(
-            tonic::transport::Server::builder()
-                .serve_with_incoming_shutdown(service, incoming, signal),
+            builder.serve_with_incoming_shutdown(service, incoming, signal),
         ));
+        Ok(())
     }
 
     /// The listeners, as bound.

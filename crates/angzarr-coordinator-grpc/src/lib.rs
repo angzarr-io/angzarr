@@ -27,6 +27,12 @@
 //!   [`ListenError`] at bind, declaring wider than the bind is allowed (the
 //!   container bridge is TCP declared [`Arrival::Ip`]). The arrival of a
 //!   request is [`arrival_of`]; it is never derived from a peer address.
+//! - TLS (the `tls` feature, off by default; tonic's `tls-ring`, ring the one
+//!   crypto provider): `Listener::tcp(addr).tls(ServerTlsConfig)` makes the
+//!   server do the handshake on that listener. On a Unix socket it is
+//!   [`ListenError::TlsOnUds`], and a config the TLS layer rejects is
+//!   [`ListenError::TlsConfig`], both at bind. Without the feature, or
+//!   without the option, a listener serves as it always did.
 //! - [`status`]: a [`Coded`](angzarr_coordinator_base::Coded) or any
 //!   [`Refusal`](angzarr_coordinator_base::Refusal) as a `tonic::Status`:
 //!   its code, its key as the message, a `google.rpc.ErrorInfo` with the key
