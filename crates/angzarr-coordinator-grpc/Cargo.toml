@@ -12,21 +12,32 @@ publish = false
 
 # The one crate of core that links tonic and tokio: the transport-free
 # crates (base, reads, coordinator) never do (their tests/dependencies.rs
-# pin it). In this slice it depends on angzarr-coordinator-base only; the
-# services (commands, queries, subscriptions) come in later slices and add
-# the edge and reads crates behind the two features.
+# pin it). It serves the edge's `Coordinator` (commands, reads, gate) as the
+# command-handler coordinator and event-query services, behind the two
+# features. The coordinator crate's own features are enabled by these.
 [features]
-# The command-handler coordinator service (a later slice). A read-only
-# container builds without it.
-commands = []
-# The EventQuery and EventStream services (later slices).
-reads = []
+default = ["commands", "reads"]
+# The CommandHandlerCoordinatorService (`Handle`). A read-only container
+# builds without it.
+commands = ["angzarr-coordinator/commands"]
+# The EventQueryService (`GetEvents`). The EventStream service is a later slice.
+reads = ["angzarr-coordinator/reads", "dep:angzarr-reads"]
 
 [dependencies]
 # Code, Coded and Refusal: what a status is made from.
 angzarr-coordinator-base = { path = "../angzarr-coordinator-base" }
+# The edge: Coordinator, Session, Gate, Credential, Arrival, Reach, Commands.
+angzarr-coordinator = { path = "../angzarr-coordinator", default-features = false }
 # Every error is a Diagnostic; the catalog's parity test is this crate's.
 angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+# The ports' BoxFuture.
+angzarr-ports = { path = "../angzarr-ports" }
+# The wire messages the services speak.
+angzarr-proto = { path = "../angzarr-proto" }
+# The services as tonic stubs (server side).
+angzarr-proto-transport-distributed = { path = "../angzarr-proto-transport-distributed" }
+# The read engine, behind the `reads` feature.
+angzarr-reads = { path = "../angzarr-reads", optional = true }
 # google.rpc.Status and ErrorInfo, on the wire as googleapis defines them
 # (already in the lock, with `Any`).
 prost = "0.14"
@@ -46,6 +57,8 @@ tonic-health = "0.14"
 angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
 
 [dev-dependencies]
+# The tests' counter domain's store.
+angzarr-ports = { path = "../angzarr-ports", features = ["memory"] }
 # Each test's scratch directory (a short path, for a socket).
 angzarr-test-dir = { path = "../angzarr-test-dir" }
 # A UDS client: tonic's channel over a connector, whose stream hyper reads

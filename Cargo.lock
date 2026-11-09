@@ -36,8 +36,13 @@ dependencies = [
 name = "angzarr-coordinator-grpc"
 version = "0.1.0"
 dependencies = [
+ "angzarr-coordinator",
  "angzarr-coordinator-base",
  "angzarr-diagnostic",
+ "angzarr-ports",
+ "angzarr-proto",
+ "angzarr-proto-transport-distributed",
+ "angzarr-reads",
  "angzarr-test-dir",
  "hyper-util",
  "prost",

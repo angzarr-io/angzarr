@@ -1,8 +1,7 @@
-//! What this crate may link of angzarr's: the coordinators' base and what the
-//! base links, and nothing else. The services that come in later slices add
-//! the edge and the reads crates (behind the `commands` and `reads`
-//! features); the pipeline stays out, and so do the router and the
-//! embedded runtime. This crate is the one core crate that links a
+//! What this crate may link of angzarr's: the coordinators' base, the edge
+//! and the reads engine (behind the `commands` and `reads` features), the
+//! wire types and the distributed transport's stubs, and what those link;
+//! the pipeline stays out, and so do the router and the embedded runtime. This crate is the one core crate that links a
 //! transport and a runtime, so none of them is banned here.
 
 use std::collections::BTreeSet;
@@ -41,20 +40,26 @@ fn tree(depth: Option<u32>) -> BTreeSet<String> {
         .collect()
 }
 
-const ALLOWED: [&str; 5] = [
+const ALLOWED: [&str; 10] = [
+    "angzarr-coordinator",
     "angzarr-coordinator-base",
     "angzarr-diagnostic",
-    "angzarr-proto",
     "angzarr-ports",
+    "angzarr-proto",
+    "angzarr-proto-component",
+    "angzarr-proto-handler",
+    "angzarr-proto-transport-distributed",
+    "angzarr-reads",
     // The tests' scratch directories (a dev-dependency).
     "angzarr-test-dir",
 ];
 
-/// The angzarr crates in the closure are the five allowed (the base and its
-/// own, and the tests' scratch directory), and none of the router, the embedded runtime, the pipeline or the
-/// edge and reads crates (a later slice's, behind their features).
+/// The angzarr crates in the closure are the allowed ones (the base, the
+/// edge, the reads engine, the wire types and the transport's stubs, and the
+/// tests' scratch directory), and none of the router, the embedded runtime
+/// or the pipeline.
 #[test]
-fn the_listener_links_only_base_and_below_in_this_slice() {
+fn the_listener_links_only_the_edge_the_reads_and_the_wire() {
     let every = tree(None);
     let angzarr: BTreeSet<_> = every
         .iter()
@@ -86,8 +91,13 @@ fn the_listener_links_no_third_party_crate_outside_the_tonic_stack() {
         .filter(|name| name != env!("CARGO_PKG_NAME"))
         .collect();
     let allowed: BTreeSet<_> = [
+        "angzarr-coordinator",
         "angzarr-coordinator-base",
         "angzarr-diagnostic",
+        "angzarr-ports",
+        "angzarr-proto",
+        "angzarr-proto-transport-distributed",
+        "angzarr-reads",
         "angzarr-test-dir",
         "hyper-util",
         "prost",

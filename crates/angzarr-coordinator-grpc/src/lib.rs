@@ -33,15 +33,24 @@
 
 mod arrival;
 mod bearer;
+mod edge;
 mod error;
 mod server;
 mod status;
 #[cfg(unix)]
 mod uds;
 
+#[cfg(feature = "commands")]
+mod command;
+#[cfg(feature = "reads")]
+mod query;
+
 pub use arrival::{arrival_of, Arrival, Reach};
 pub use bearer::{bearer, AuthorizationError, Bearer};
+pub use edge::Edge;
 pub use error::ListenError;
+#[cfg(feature = "reads")]
+pub use query::{Queries, ServedReads};
 pub use server::{Bound, BoundEndpoint, Listener, Running, Server};
 pub use status::{
     error_info, status, status_of, tonic_code, unauthenticated, ErrorInfo, ERROR_DOMAIN,
