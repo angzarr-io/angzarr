@@ -3,7 +3,11 @@
 angzarr core is a virtual Cargo workspace of the shared crates under
 `crates/` (angzarr-proto, angzarr-proto-handler, angzarr-proto-component, the two
 angzarr-proto-transport crates, angzarr-ports, angzarr-diagnostic,
-angzarr-yaml, angzarr-presentation, angzarr-proto-jsonl, angzarr-test-dir, angzarr-store-transfer), which the router, angzarr-embedded,
+angzarr-yaml, angzarr-presentation, angzarr-proto-jsonl, angzarr-test-dir, angzarr-store-transfer,
+and the coordinators' crates: angzarr-coordinator-base (the shared vocabulary,
+transport-free), angzarr-reads (the read engine), angzarr-coordinator (the
+edge and the gate: `Gate`, closed `Allowlist`, `Credential`,
+`Coordinator`/`Session`; no tonic, no tokio)), which the router, angzarr-embedded,
 the CLI and the client and example repos depend on by git rev. Each crate
 has its own justfile; the root justfile runs them all:
 

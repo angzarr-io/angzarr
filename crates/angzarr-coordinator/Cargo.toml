@@ -1,0 +1,47 @@
+[package]
+name = "angzarr-coordinator"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "The coordinators' edge, transport-free: routing and reach (Arrival, Reach, Hidden, Unserved), the Commands trait a frontend implements, and the gate (Gate, Allowlist, Credential, Coordinator, Session) that decides who may reach which streams"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace declares no [workspace.package], so nothing is inherited.
+
+# The edge: it links no tonic and no tokio (tests/dependencies.rs pins it);
+# the tonic server is angzarr-coordinator-grpc, above this crate.
+[dependencies]
+# Every error is a Diagnostic; the catalog's parity test is its.
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+# The wire types (CommandBook, ReactionDelivery, Projection).
+angzarr-proto = { path = "../angzarr-proto" }
+# The ports' BoxFuture, MaybeSend and MaybeSync.
+angzarr-ports = { path = "../angzarr-ports" }
+# Coded, Refusal, Code and Answered.
+angzarr-coordinator-base = { path = "../angzarr-coordinator-base" }
+# The read engine, behind the `reads` feature: the gate's read operations
+# and filter are built on it. It links no command code, so a reads-only
+# build still has none.
+angzarr-reads = { path = "../angzarr-reads", optional = true }
+
+# What a build carries. A read-only container builds with
+# `default-features = false, features = ["reads"]` and links no command code
+# (tests/features.rs pins it); a frontend that takes commands enables
+# `commands`. `reads` is the one that enables a dependency: the reads
+# engine. The gate itself (Gate, Credential, Principal, Allowlist, Denied,
+# AuditSink, Trusted, Coordinator, Session's stream checks) is in every build.
+[features]
+default = ["commands", "reads"]
+commands = []
+reads = ["dep:angzarr-reads"]
+
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

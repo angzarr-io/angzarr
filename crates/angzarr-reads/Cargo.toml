@@ -1,0 +1,43 @@
+[package]
+name = "angzarr-reads"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "The coordinators' read engine, transport-free: GetEvents, GetEventBook, correlated reads and ListStreams over the store's read ports, with no command-side code"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace declares no [workspace.package], so nothing is inherited.
+
+# A read-only container links this crate alone: nothing above
+# angzarr-coordinator-base but the crates it already links. No pipeline, no
+# edge, no tonic, no tokio, no router (tests/dependencies.rs pins it).
+[dependencies]
+# The vocabulary: Coded, Refusal, Code, the Upcast port and its driver.
+angzarr-coordinator-base = { path = "../angzarr-coordinator-base" }
+# Every error is a Diagnostic; the catalog's parity test is its.
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+# The store's read ports (EventRead, ReadByCorrelation, ListStreams,
+# EditionKnown, ReadUntilTime's dyn twin).
+angzarr-ports = { path = "../angzarr-ports" }
+# The wire types (Cover, EventBook, EventPage, UUID).
+angzarr-proto = { path = "../angzarr-proto" }
+# `Timestamp`, as angzarr-proto's messages hold it (already in the lock).
+prost-types = "0.14"
+# A page's encoded size, for the chunk limit (already in the lock).
+prost = "0.14"
+
+# The tests' store and fixtures: the in-memory backend and the conformance
+# suite's page builders. A dev-dependency only: not in the closure.
+[dev-dependencies]
+angzarr-ports = { path = "../angzarr-ports", features = ["memory", "contract"] }
+
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

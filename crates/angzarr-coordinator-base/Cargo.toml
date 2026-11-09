@@ -1,0 +1,33 @@
+[package]
+name = "angzarr-coordinator-base"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "The coordinators' shared vocabulary, transport-free: Code, Coded and Refusal, the Upcast port and its drivers, Wait, and Answered"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace declares no [workspace.package], so nothing is inherited.
+
+# Nothing above angzarr-ports: reads, pipeline and the edge build on this
+# crate, so it links no tonic, no tokio and none of them
+# (tests/dependencies.rs pins it).
+[dependencies]
+# Every error is a Diagnostic; the catalog's parity test is its.
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+# The wire types (EventPage, EventBook, DeliveryOutcome, AngzarrReason).
+angzarr-proto = { path = "../angzarr-proto" }
+# The ports' StoreError, and the ports' MaybeSend and BoxFuture.
+angzarr-ports = { path = "../angzarr-ports" }
+# `Any`, as angzarr-proto's messages hold it (already in the lock).
+prost-types = "0.14"
+
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

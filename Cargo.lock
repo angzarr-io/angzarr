@@ -12,6 +12,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "angzarr-coordinator"
+version = "0.1.0"
+dependencies = [
+ "angzarr-coordinator-base",
+ "angzarr-diagnostic",
+ "angzarr-ports",
+ "angzarr-proto",
+ "angzarr-reads",
+]
+
+[[package]]
+name = "angzarr-coordinator-base"
+version = "0.1.0"
+dependencies = [
+ "angzarr-diagnostic",
+ "angzarr-ports",
+ "angzarr-proto",
+ "prost-types",
+]
+
+[[package]]
 name = "angzarr-diagnostic"
 version = "0.1.0"
 dependencies = [
@@ -118,6 +139,18 @@ dependencies = [
  "angzarr-proto-component",
  "prost",
  "prost-build",
+ "prost-types",
+]
+
+[[package]]
+name = "angzarr-reads"
+version = "0.1.0"
+dependencies = [
+ "angzarr-coordinator-base",
+ "angzarr-diagnostic",
+ "angzarr-ports",
+ "angzarr-proto",
+ "prost",
  "prost-types",
 ]
 

@@ -2,9 +2,12 @@
 # and tested by its own justfile (`just check-shared-crates`).
 [workspace]
 members = [
+    "crates/angzarr-coordinator",
+    "crates/angzarr-coordinator-base",
     "crates/angzarr-diagnostic",
     "crates/angzarr-ports",
     "crates/angzarr-presentation",
+    "crates/angzarr-reads",
     "crates/angzarr-proto",
     "crates/angzarr-proto-component",
     "crates/angzarr-proto-handler",
