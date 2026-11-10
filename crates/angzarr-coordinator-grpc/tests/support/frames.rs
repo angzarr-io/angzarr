@@ -7,8 +7,10 @@
 use std::io;
 use std::net::SocketAddr;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use std::path::Path;
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpStream, UnixStream};
 
 pub const HEADERS: u8 = 0x1;
 pub const RST_STREAM: u8 = 0x3;
@@ -58,14 +60,25 @@ impl Frame {
 /// as every HTTP/2 client must first; nothing more.
 pub async fn open(addr: SocketAddr) -> TcpStream {
     let mut stream = TcpStream::connect(addr).await.expect("connects");
-    stream.write_all(PREFACE).await.unwrap();
-    write(&mut stream, SETTINGS, 0, 0, &[]).await.unwrap();
+    greet(&mut stream).await;
     stream
 }
 
+/// The same over the Unix socket at `path`.
+pub async fn open_uds(path: &Path) -> UnixStream {
+    let mut stream = UnixStream::connect(path).await.expect("connects");
+    greet(&mut stream).await;
+    stream
+}
+
+async fn greet<S: AsyncWrite + Unpin>(stream: &mut S) {
+    stream.write_all(PREFACE).await.unwrap();
+    write(stream, SETTINGS, 0, 0, &[]).await.unwrap();
+}
+
 /// Writes one frame.
-pub async fn write(
-    stream: &mut TcpStream,
+pub async fn write<S: AsyncWrite + Unpin>(
+    stream: &mut S,
     kind: u8,
     flags: u8,
     id: u32,
@@ -80,7 +93,7 @@ pub async fn write(
 
 /// The next frame, or `None` once the server has closed the connection
 /// (an end of stream, or a reset).
-pub async fn read(stream: &mut TcpStream) -> Option<Frame> {
+pub async fn read<S: AsyncRead + Unpin>(stream: &mut S) -> Option<Frame> {
     let mut header = [0u8; 9];
     if stream.read_exact(&mut header).await.is_err() {
         return None;

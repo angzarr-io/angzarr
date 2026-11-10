@@ -1,7 +1,9 @@
 //! A listener's limits, each forced: a peer that never answers a
 //! ping is closed and one that answers is kept; a handler that never
 //! returns is cut by the request timeout; a stream beyond the per-connection
-//! maximum is refused, and the maximum is what the server advertises. No
+//! maximum is refused, and the maximum is what the server advertises; a
+//! connection past its maximum age is closed (with its open calls, once the
+//! grace passes) and a new one is served. No
 //! test waits on the clock for a race: each waits for an outcome, bounded by
 //! a guard far longer than the limit it forces (and shorter than the
 //! defaults, so a limit left at its default fails the test).
@@ -83,7 +85,10 @@ async fn the_request_timeout_holds_on_a_unix_socket() {
 /// Every frame the server sends until it closes the connection, answering
 /// the first `answer` pings it sends (and every SETTINGS) and then going
 /// silent; the frames it read, in order.
-async fn frames_until_closed(stream: &mut tokio::net::TcpStream, answer: usize) -> Vec<Frame> {
+async fn frames_until_closed<S>(stream: &mut S, answer: usize) -> Vec<Frame>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
     let mut read = Vec::new();
     let mut answered = 0;
     while let Some(frame) = frames::read(stream).await {
@@ -187,4 +192,61 @@ async fn the_default_listener_advertises_the_default_stream_limit() {
         settings.setting(frames::MAX_CONCURRENT_STREAMS),
         Some(Listener::DEFAULT_MAX_CONCURRENT_STREAMS)
     );
+}
+
+fn goaways(frames: &[Frame]) -> usize {
+    frames.iter().filter(|f| f.kind == frames::GOAWAY).count()
+}
+
+/// A connection the client keeps open, answering every ping, is told
+/// GOAWAY and closed once it is past its age; a new connection is then
+/// served.
+#[tokio::test]
+async fn a_connection_past_its_age_is_closed_and_a_new_one_is_served() {
+    let running = serve(loopback().max_connection_age(SHORT)).await;
+    let addr = tcp_addr(&running);
+    let mut stream = frames::open(addr).await;
+    let read = within("the close", frames_until_closed(&mut stream, usize::MAX)).await;
+    assert_eq!(goaways(&read), 1, "{read:?}");
+    assert_eq!(pings(&read), 0, "closed by its age, not the keepalive");
+
+    assert_eq!(support::arrival(support::tcp(addr).await).await, "loopback");
+}
+
+/// The age holds on a Unix socket too.
+#[tokio::test]
+async fn the_age_holds_on_a_unix_socket() {
+    let dir = TestDir::new("grpc-limit-uds-age");
+    let socket = support::socket_in(&dir, "a.sock");
+    let _running = serve(Listener::uds(&socket).max_connection_age(SHORT)).await;
+    let mut stream = frames::open_uds(&socket).await;
+    let read = within("the close", frames_until_closed(&mut stream, usize::MAX)).await;
+    assert_eq!(goaways(&read), 1, "{read:?}");
+
+    assert_eq!(
+        support::arrival(support::uds(&socket).await).await,
+        "loopback"
+    );
+}
+
+/// A call still open when the age passes keeps its connection only for the
+/// grace: then the connection is closed with it.
+#[tokio::test]
+async fn a_call_open_past_the_age_is_closed_with_its_connection_after_the_grace() {
+    let running = serve(
+        loopback()
+            .max_connection_age(SHORT)
+            .max_connection_age_grace(SHORT),
+    )
+    .await;
+    let addr = tcp_addr(&running);
+    let mut stream = frames::open(addr).await;
+    let block = frames::request("/probe.Probe/Hang");
+    frames::write(&mut stream, frames::HEADERS, frames::END_HEADERS, 1, &block)
+        .await
+        .unwrap();
+    let read = within("the close", frames_until_closed(&mut stream, usize::MAX)).await;
+    assert_eq!(goaways(&read), 1, "{read:?}");
+
+    assert_eq!(support::arrival(support::tcp(addr).await).await, "loopback");
 }

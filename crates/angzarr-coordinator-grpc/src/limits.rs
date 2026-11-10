@@ -1,6 +1,6 @@
 //! A listener's limits: how long a TLS handshake may take, how a silent
-//! peer is found, how long a request may take, and how many streams one
-//! connection may have open. Each is one of tonic's own knobs, set on the
+//! peer is found, how long a connection may live, how long a request may
+//! take, and how many streams one connection may have open. Each is one of tonic's own knobs, set on the
 //! listener's tonic server ([`Limits::apply`]) or its TLS config
 //! ([`Limits::tls`]); no transport code of angzarr's is involved.
 
@@ -15,6 +15,8 @@ pub(crate) struct Limits {
     pub(crate) tls_handshake_timeout: Duration,
     pub(crate) keepalive_interval: Option<Duration>,
     pub(crate) keepalive_timeout: Duration,
+    pub(crate) max_connection_age: Duration,
+    pub(crate) max_connection_age_grace: Option<Duration>,
     pub(crate) request_timeout: Option<Duration>,
     pub(crate) max_concurrent_streams: NonZeroU32,
 }
@@ -26,6 +28,8 @@ impl Default for Limits {
             tls_handshake_timeout: crate::Listener::DEFAULT_TLS_HANDSHAKE_TIMEOUT,
             keepalive_interval: Some(crate::Listener::DEFAULT_KEEPALIVE_INTERVAL),
             keepalive_timeout: crate::Listener::DEFAULT_KEEPALIVE_TIMEOUT,
+            max_connection_age: crate::Listener::DEFAULT_MAX_CONNECTION_AGE,
+            max_connection_age_grace: None,
             request_timeout: None,
             max_concurrent_streams: NonZeroU32::new(
                 crate::Listener::DEFAULT_MAX_CONCURRENT_STREAMS,

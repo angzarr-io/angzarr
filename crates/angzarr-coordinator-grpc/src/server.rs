@@ -42,6 +42,8 @@ enum Address {
 /// builder method sets it: how long a TLS handshake may take
 /// (`Listener::tls_handshake_timeout`, with the `tls` feature), how a peer
 /// that stopped answering is found ([`Listener::keepalive`]), how long a
+/// connection may live ([`Listener::max_connection_age`], then
+/// [`Listener::max_connection_age_grace`] for the calls still open), how long a
 /// request may take ([`Listener::request_timeout`], none by default) and
 /// how many streams one connection may have open
 /// ([`Listener::max_concurrent_streams`]).
@@ -99,6 +101,8 @@ impl Listener {
     pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
     /// How long the server waits for a ping's acknowledgement, by default.
     pub const DEFAULT_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+    /// How long a connection may live by default.
+    pub const DEFAULT_MAX_CONNECTION_AGE: Duration = Duration::from_secs(60 * 60);
     /// How many streams one connection may have open at once by default
     /// (hyper's own default, which tonic would otherwise lift).
     pub const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 200;
@@ -125,6 +129,26 @@ impl Listener {
     pub fn keepalive(mut self, interval: Option<Duration>, timeout: Duration) -> Listener {
         self.limits.keepalive_interval = interval;
         self.limits.keepalive_timeout = timeout;
+        self
+    }
+
+    /// Close a connection once it is `age` old, busy or idle (default
+    /// [`Listener::DEFAULT_MAX_CONNECTION_AGE`]): the server sends GOAWAY,
+    /// takes no new stream on it, and closes it when the calls open on it
+    /// end (or when [`Listener::max_connection_age_grace`] passes). The
+    /// client opens a new connection for its next call. No connection lives
+    /// forever, however well it answers its pings.
+    pub fn max_connection_age(mut self, age: Duration) -> Listener {
+        self.limits.max_connection_age = age;
+        self
+    }
+
+    /// Once a connection is past its age, give the calls still open on it
+    /// `grace` to end, then close it with them. By default there is no
+    /// grace period: the calls open when the age passes run to their end,
+    /// and the connection lives as long as they do.
+    pub fn max_connection_age_grace(mut self, grace: Duration) -> Listener {
+        self.limits.max_connection_age_grace = Some(grace);
         self
     }
 

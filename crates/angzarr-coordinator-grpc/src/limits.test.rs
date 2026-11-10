@@ -20,6 +20,10 @@ fn the_defaults_are_the_documented_values() {
         Duration::from_secs(60)
     );
     assert_eq!(Listener::DEFAULT_KEEPALIVE_TIMEOUT, Duration::from_secs(20));
+    assert_eq!(
+        Listener::DEFAULT_MAX_CONNECTION_AGE,
+        Duration::from_secs(3600)
+    );
     assert_eq!(Listener::DEFAULT_MAX_CONCURRENT_STREAMS, 200);
 }
 
@@ -32,6 +36,8 @@ fn a_listener_starts_at_the_defaults() {
         tls_handshake_timeout: Duration::from_secs(10),
         keepalive_interval: Some(Duration::from_secs(60)),
         keepalive_timeout: Duration::from_secs(20),
+        max_connection_age: Duration::from_secs(3600),
+        max_connection_age_grace: None,
         request_timeout: None,
         max_concurrent_streams: NonZeroU32::new(200).unwrap(),
     };
@@ -76,6 +82,25 @@ fn each_setter_sets_its_limit_alone() {
     );
     let set = base().keepalive(None, Duration::from_millis(6)).limits;
     assert_eq!(set.keepalive_interval, None);
+
+    let set = base().max_connection_age(Duration::from_millis(8)).limits;
+    assert_eq!(
+        set,
+        Limits {
+            max_connection_age: Duration::from_millis(8),
+            ..defaults.clone()
+        }
+    );
+    let set = base()
+        .max_connection_age_grace(Duration::from_millis(3))
+        .limits;
+    assert_eq!(
+        set,
+        Limits {
+            max_connection_age_grace: Some(Duration::from_millis(3)),
+            ..defaults.clone()
+        }
+    );
 
     let set = base().request_timeout(Duration::from_millis(9)).limits;
     assert_eq!(
