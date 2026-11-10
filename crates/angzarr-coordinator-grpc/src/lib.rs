@@ -39,12 +39,17 @@
 //!   (10 s, the `tls` feature; a client that never completes its handshake
 //!   is dropped), [`Listener::keepalive`] (an HTTP/2 PING every 60 s, the
 //!   connection closed when one goes unanswered for 20 s),
+//!   [`Listener::max_connection_age`] with its mandatory, never-zero
+//!   [`Listener::max_connection_age_grace`] (1 hour plus 30 s; tonic sends
+//!   no GOAWAY and hard-closes the connection then, cutting calls in flight;
+//!   a zero grace is [`ListenError::ZeroConnectionAgeGrace`] at bind, since
+//!   tonic panics on an age without a grace),
 //!   [`Listener::request_timeout`] (none: the client's `grpc-timeout`
 //!   alone; when set, a handler slower than it is CANCELLED) and
 //!   [`Listener::max_concurrent_streams`] (200 per connection, advertised in
 //!   SETTINGS; a stream beyond it is REFUSED_STREAM). Against tonic's own
-//!   defaults, what changes is: a handshake timeout, keepalive pings, and a
-//!   stream limit where tonic advertises none. Each is tonic's own knob.
+//!   defaults, what changes is: a handshake timeout, keepalive pings, a
+//!   connection age, and a stream limit where tonic advertises none. Each is tonic's own knob.
 //! - [`status`]: a [`Coded`](angzarr_coordinator_base::Coded) or any
 //!   [`Refusal`](angzarr_coordinator_base::Refusal) as a `tonic::Status`:
 //!   its code, its key as the message, a `google.rpc.ErrorInfo` with the key

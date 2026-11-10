@@ -199,9 +199,13 @@ impl Listener {
         })
     }
 
-    /// Refuse a loopback declaration on a bind that is not loopback, TLS on
-    /// a Unix socket, and a TLS configuration the TLS layer rejects.
+    /// Refuse a zero connection-age grace, a loopback declaration on a
+    /// bind that is not loopback, TLS on a Unix socket, and a TLS
+    /// configuration the TLS layer rejects.
     fn check(&self) -> Result<(), ListenError> {
+        if self.limits.max_connection_age_grace.is_zero() {
+            return Err(ListenError::ZeroConnectionAgeGrace);
+        }
         #[cfg(feature = "tls")]
         if let Some(config) = &self.tls {
             match &self.address {

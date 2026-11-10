@@ -41,13 +41,16 @@ impl Default for Limits {
 
 impl Limits {
     /// `builder` with these limits set: the stream maximum, the keepalive,
-    /// and the request timeout when there is one. (The handshake timeout is
+    /// the connection age always with its grace (tonic panics on an age
+    /// without one), and the request timeout when there is one. (The handshake timeout is
     /// the TLS config's, [`Limits::tls`].)
     pub(crate) fn apply(&self, builder: tonic::transport::Server) -> tonic::transport::Server {
         let builder = builder
             .max_concurrent_streams(self.max_concurrent_streams.get())
             .http2_keepalive_interval(self.keepalive_interval)
-            .http2_keepalive_timeout(Some(self.keepalive_timeout));
+            .http2_keepalive_timeout(Some(self.keepalive_timeout))
+            .max_connection_age(self.max_connection_age)
+            .max_connection_age_grace(self.max_connection_age_grace);
         match self.request_timeout {
             Some(timeout) => builder.timeout(timeout),
             None => builder,
