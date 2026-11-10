@@ -68,7 +68,8 @@ angzarr-test-dir = { path = "../angzarr-test-dir" }
 # A UDS client: tonic's channel over a connector, whose stream hyper reads
 # through its own IO traits (hyper-util's adapter).
 hyper-util = { version = "0.1", features = ["tokio"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+# The limits' tests bound every wait (time) and speak raw HTTP/2 (io-util).
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "time"] }
 tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "router", "server"] }
 # The probe service's codec.
 tonic-prost = "0.14"

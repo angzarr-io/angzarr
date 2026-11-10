@@ -3,12 +3,16 @@
 //! and one that does not, or that asks for another name, or that does not
 //! speak TLS, does not. Certificates are minted here with explicit validity
 //! dates, so no test depends on today's date. Each refusal is paired with a
-//! control that connects, so a refusal is never the setup's.
+//! control that connects, so a refusal is never the setup's. The listener's
+//! limits that touch TLS (the handshake timeout, the connection maximum
+//! before the handshake) are forced here too.
 #![cfg(feature = "tls")]
 
 mod support;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::num::NonZeroUsize;
+use std::time::Duration;
 
 use angzarr_coordinator_grpc::{BoundEndpoint, ListenError, Listener, Running, Server};
 use angzarr_test_dir::TestDir;
@@ -229,4 +233,79 @@ async fn a_tls_config_without_a_usable_identity_is_refused() {
         .err()
         .expect("refused");
     assert!(matches!(error, ListenError::TlsConfig { .. }), "{error:?}");
+}
+
+/// A TLS listener with `limits` applied to it.
+async fn serve_with(
+    minted: &Minted,
+    limits: impl FnOnce(Listener) -> Listener,
+) -> (Running, SocketAddr) {
+    let running = Server::builder()
+        .add_service(support::Probe)
+        .listen(limits(
+            Listener::tcp(SocketAddr::new(LOOPBACK, 0))
+                .tls(ServerTlsConfig::new().identity(minted.identity())),
+        ))
+        .bind()
+        .await
+        .expect("binds");
+    let BoundEndpoint::Tcp { addr, .. } = running.bound().endpoints()[0].clone() else {
+        panic!("a tcp endpoint");
+    };
+    (running, addr)
+}
+
+/// A client that opens the connection and never sends its ClientHello is
+/// dropped once the handshake timeout passes (the guard is far longer than
+/// that, and shorter than the default); a client that does the handshake
+/// is served on the same listener.
+#[tokio::test]
+async fn a_client_that_never_says_hello_is_dropped_after_the_handshake_timeout() {
+    use tokio::io::AsyncReadExt;
+
+    let minted = valid(vec![ip(LOOPBACK)]);
+    let (_running, addr) = serve_with(&minted, |listener| {
+        listener.tls_handshake_timeout(Duration::from_millis(100))
+    })
+    .await;
+
+    let mut silent = tokio::net::TcpStream::connect(addr)
+        .await
+        .expect("connects");
+    let mut byte = [0u8; 1];
+    let read = tokio::time::timeout(Duration::from_secs(5), silent.read(&mut byte))
+        .await
+        .expect("dropped within the guard");
+    // Closed: an end of stream, or a reset; never a byte of a ServerHello.
+    assert!(matches!(read, Ok(0) | Err(_)), "{read:?}");
+
+    assert!(call(&format!("https://{addr}"), &minted, None)
+        .await
+        .is_ok());
+}
+
+/// The connection maximum holds before the handshake: a TLS client beyond
+/// it is closed, and the one held still works.
+#[tokio::test]
+async fn connections_beyond_the_maximum_are_closed_over_tls_too() {
+    let minted = valid(vec![ip(LOOPBACK)]);
+    let (_running, addr) = serve_with(&minted, |listener| {
+        listener.max_connections(NonZeroUsize::new(1).unwrap())
+    })
+    .await;
+    let url = format!("https://{addr}");
+    let held = Endpoint::from_shared(url.clone())
+        .unwrap()
+        .tls_config(ClientTlsConfig::new().ca_certificate(minted.root()))
+        .unwrap()
+        .connect()
+        .await
+        .expect("connects");
+    assert_eq!(support::arrival(held.clone()).await, "loopback");
+
+    let beyond = tokio::time::timeout(Duration::from_secs(5), call(&url, &minted, None))
+        .await
+        .expect("refused within the guard");
+    assert!(beyond.is_err(), "{beyond:?}");
+    assert_eq!(support::arrival(held).await, "loopback");
 }

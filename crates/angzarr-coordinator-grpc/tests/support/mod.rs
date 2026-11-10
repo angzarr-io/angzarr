@@ -1,7 +1,11 @@
 //! What the listener tests share: a probe service that answers the arrival
-//! its listener declared, and clients over TCP and over a Unix socket.
+//! its listener declared (and a call that never returns), clients over TCP
+//! and over a Unix socket, and raw HTTP/2 frames for the tests that must
+//! speak below a client.
 
 #![allow(dead_code)]
+
+pub mod frames;
 
 use std::convert::Infallible;
 use std::future::Future;
@@ -66,6 +70,8 @@ where
                     Ok(grpc.unary(Arrival, request).await)
                 })
             }
+            // A handler that never answers: what a request timeout cuts.
+            "/probe.Probe/Hang" => Box::pin(std::future::pending()),
             _ => Box::pin(async { Ok(Status::unimplemented("").into_http()) }),
         }
     }
@@ -107,6 +113,16 @@ pub async fn uds(path: &Path) -> Channel {
         .expect("connects over the socket")
 }
 
+/// The probe's answer over the Unix socket at `path`, or the failure:
+/// connecting, or the first call.
+pub async fn try_uds(path: &Path) -> Result<String, String> {
+    let channel = Endpoint::from_static("http://uds.invalid")
+        .connect_with_connector(Uds(path.to_path_buf()))
+        .await
+        .map_err(|e| format!("connect: {e:?}"))?;
+    try_arrival(channel).await.map_err(|e| e.to_string())
+}
+
 /// The arrival the server declared for this connection's requests.
 pub async fn arrival(channel: Channel) -> String {
     try_arrival(channel).await.expect("the probe answers")
@@ -126,6 +142,35 @@ pub async fn try_arrival(channel: Channel) -> Result<String, Status> {
         )
         .await?;
     Ok(reply.into_inner().arrival)
+}
+
+/// `probe.Probe/Hang` on `channel`: its handler never answers, so this ends
+/// only with the status that cut it.
+pub async fn try_hang(channel: Channel) -> Result<String, Status> {
+    let mut grpc = tonic::client::Grpc::new(channel);
+    grpc.ready()
+        .await
+        .map_err(|e| Status::unavailable(e.to_string()))?;
+    let reply = grpc
+        .unary(
+            tonic::Request::new(()),
+            http::uri::PathAndQuery::from_static("/probe.Probe/Hang"),
+            ProstCodec::<(), Reply>::default(),
+        )
+        .await?;
+    Ok(reply.into_inner().arrival)
+}
+
+/// A channel to `addr` over TCP, or the failure: connecting, or the first
+/// call (a server that closes a connection at once lets the connect
+/// succeed and fails the call).
+pub async fn try_tcp(addr: SocketAddr) -> Result<String, String> {
+    let channel = Endpoint::from_shared(format!("http://{addr}"))
+        .unwrap()
+        .connect()
+        .await
+        .map_err(|e| format!("connect: {e:?}"))?;
+    try_arrival(channel).await.map_err(|e| e.to_string())
 }
 
 /// `name` in `dir`, which is first made private (a `TestDir` is made with

@@ -48,6 +48,7 @@ mod arrival;
 mod bearer;
 mod edge;
 mod error;
+mod limits;
 mod server;
 mod status;
 #[cfg(unix)]

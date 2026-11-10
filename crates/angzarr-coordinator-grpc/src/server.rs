@@ -1,8 +1,10 @@
 //! The [`Server`] builder, its [`Listener`]s, and the [`Running`] server.
 
 use std::net::SocketAddr;
+use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 use tokio::net::TcpListener;
 use tokio::sync::watch;
@@ -16,6 +18,7 @@ use tonic_health::server::HealthReporter;
 use tonic_health::ServingStatus;
 
 use crate::arrival::arrival_for_bind;
+use crate::limits::Limits;
 use crate::uds::{self, OwnedSocket};
 use crate::{Arrival, ListenError};
 
@@ -34,10 +37,20 @@ enum Address {
 /// ip for a wider one). Declaring wider than the bind is allowed (a
 /// container bridge is a TCP listener declared [`Arrival::Ip`]); declaring
 /// loopback on a bind that is not loopback is an error at bind.
+///
+/// Every listener has limits, each at its documented default until a
+/// builder method sets it: how many connections it holds at once
+/// ([`Listener::max_connections`]), how long a TLS handshake may take
+/// ([`Listener::tls_handshake_timeout`], with the `tls` feature), how a peer
+/// that stopped answering is found ([`Listener::keepalive`]), how long a
+/// request may take ([`Listener::request_timeout`], none by default) and
+/// how many streams one connection may have open
+/// ([`Listener::max_concurrent_streams`]).
 #[derive(Clone, Debug)]
 pub struct Listener {
     address: Address,
     declared: Option<Arrival>,
+    pub(crate) limits: Limits,
     #[cfg(feature = "tls")]
     tls: Option<tonic::transport::ServerTlsConfig>,
 }
@@ -50,6 +63,7 @@ impl Listener {
         Listener {
             address: Address::Uds(path.into()),
             declared: None,
+            limits: Limits::default(),
             #[cfg(feature = "tls")]
             tls: None,
         }
@@ -61,6 +75,7 @@ impl Listener {
         Listener {
             address: Address::Tcp(addr),
             declared: None,
+            limits: Limits::default(),
             #[cfg(feature = "tls")]
             tls: None,
         }
@@ -74,6 +89,76 @@ impl Listener {
     #[cfg(feature = "tls")]
     pub fn tls(mut self, config: tonic::transport::ServerTlsConfig) -> Listener {
         self.tls = Some(config);
+        self
+    }
+
+    /// How many connections a listener holds at once by default.
+    pub const DEFAULT_MAX_CONNECTIONS: usize = 1024;
+    /// How long a TLS handshake may take by default.
+    #[cfg(feature = "tls")]
+    pub const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+    /// How long a connection is quiet before the server pings it, by
+    /// default.
+    pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
+    /// How long the server waits for a ping's acknowledgement, by default.
+    pub const DEFAULT_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+    /// How many streams one connection may have open at once by default
+    /// (hyper's own default, which tonic would otherwise lift).
+    pub const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 200;
+
+    /// Hold at most `max` connections at once (default
+    /// [`Listener::DEFAULT_MAX_CONNECTIONS`]). A connection beyond it is
+    /// accepted and closed at once, before a byte is read from it; the
+    /// connections already held are not touched, and a slot frees when one
+    /// of them closes. A connection still in its TLS handshake is held.
+    pub fn max_connections(mut self, max: NonZeroUsize) -> Listener {
+        self.limits.max_connections = max;
+        self
+    }
+
+    /// Drop a connection whose TLS handshake has not completed within
+    /// `timeout` (default [`Listener::DEFAULT_TLS_HANDSHAKE_TIMEOUT`]): a
+    /// client that connects and never says hello holds a slot no longer.
+    /// It replaces any timeout set on the listener's `ServerTlsConfig`; a
+    /// listener without TLS has no handshake, so nothing to time. Needs the
+    /// `tls` feature.
+    #[cfg(feature = "tls")]
+    pub fn tls_handshake_timeout(mut self, timeout: Duration) -> Listener {
+        self.limits.tls_handshake_timeout = timeout;
+        self
+    }
+
+    /// Ping a connection every `interval` (HTTP/2 PING, idle or not), and
+    /// close it when a ping is not acknowledged within `timeout` (defaults
+    /// [`Listener::DEFAULT_KEEPALIVE_INTERVAL`] and
+    /// [`Listener::DEFAULT_KEEPALIVE_TIMEOUT`]). A peer that is alive
+    /// answers and is kept, however long it is idle; one that went silent
+    /// (gone, stalled, or never speaking HTTP/2 past its preface) is closed.
+    /// `None` pings never, as tonic does by default.
+    pub fn keepalive(mut self, interval: Option<Duration>, timeout: Duration) -> Listener {
+        self.limits.keepalive_interval = interval;
+        self.limits.keepalive_timeout = timeout;
+        self
+    }
+
+    /// Cut a request whose handler has not answered within `timeout`: the
+    /// caller gets tonic's status for an expired timeout (CANCELLED,
+    /// "Timeout expired"). By default there is none, and the client's own
+    /// `grpc-timeout` is the only deadline (it still applies, the shorter
+    /// one winning). A streaming response is timed until its headers, not
+    /// over its whole body.
+    pub fn request_timeout(mut self, timeout: Duration) -> Listener {
+        self.limits.request_timeout = Some(timeout);
+        self
+    }
+
+    /// Allow at most `max` streams open at once on one connection (HTTP/2
+    /// `SETTINGS_MAX_CONCURRENT_STREAMS`, default
+    /// [`Listener::DEFAULT_MAX_CONCURRENT_STREAMS`]). The client is told;
+    /// a client that keeps to it holds its further calls until a stream
+    /// ends, and a stream opened beyond it is reset with REFUSED_STREAM.
+    pub fn max_concurrent_streams(mut self, max: NonZeroU32) -> Listener {
+        self.limits.max_concurrent_streams = max;
         self
     }
 
