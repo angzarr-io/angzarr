@@ -42,8 +42,8 @@ enum Address {
 /// builder method sets it: how long a TLS handshake may take
 /// (`Listener::tls_handshake_timeout`, with the `tls` feature), how a peer
 /// that stopped answering is found ([`Listener::keepalive`]), how long a
-/// connection may live ([`Listener::max_connection_age`], then
-/// [`Listener::max_connection_age_grace`] for the calls still open), how long a
+/// connection may live ([`Listener::max_connection_age`] plus
+/// [`Listener::max_connection_age_grace`]), how long a
 /// request may take ([`Listener::request_timeout`], none by default) and
 /// how many streams one connection may have open
 /// ([`Listener::max_concurrent_streams`]).
@@ -101,8 +101,12 @@ impl Listener {
     pub const DEFAULT_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(60);
     /// How long the server waits for a ping's acknowledgement, by default.
     pub const DEFAULT_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
-    /// How long a connection may live by default.
+    /// How long a connection may live by default, before its grace.
     pub const DEFAULT_MAX_CONNECTION_AGE: Duration = Duration::from_secs(60 * 60);
+    /// The grace after a connection's age by default: 30 s, long enough for
+    /// a unary call begun just before the age to end, short against the
+    /// hour, and never zero (see [`Listener::max_connection_age_grace`]).
+    pub const DEFAULT_MAX_CONNECTION_AGE_GRACE: Duration = Duration::from_secs(30);
     /// How many streams one connection may have open at once by default
     /// (hyper's own default, which tonic would otherwise lift).
     pub const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 200;
@@ -132,23 +136,30 @@ impl Listener {
         self
     }
 
-    /// Close a connection once it is `age` old, busy or idle (default
-    /// [`Listener::DEFAULT_MAX_CONNECTION_AGE`]): the server sends GOAWAY,
-    /// takes no new stream on it, and closes it when the calls open on it
-    /// end (or when [`Listener::max_connection_age_grace`] passes). The
-    /// client opens a new connection for its next call. No connection lives
-    /// forever, however well it answers its pings.
+    /// Close a connection once it has lived `age` plus its grace
+    /// ([`Listener::max_connection_age_grace`]), busy or idle (default
+    /// [`Listener::DEFAULT_MAX_CONNECTION_AGE`]): no connection lives
+    /// forever, however well it answers its pings. The age is always applied
+    /// with its grace.
+    ///
+    /// What tonic (0.14.5, and the same code in 0.14.9) does with it is
+    /// cruder than its docs say: it sends no GOAWAY, and hard-closes the
+    /// connection when age plus grace has passed, so a call still in flight
+    /// then is cut with a transport error (the client's next call opens a
+    /// new connection). That is a known tonic bug, accepted here.
     pub fn max_connection_age(mut self, age: Duration) -> Listener {
         self.limits.max_connection_age = age;
         self
     }
 
-    /// Once a connection is past its age, give the calls still open on it
-    /// `grace` to end, then close it with them. By default there is no
-    /// grace period: the calls open when the age passes run to their end,
-    /// and the connection lives as long as they do.
+    /// The grace added to the connection's age before it is closed (default
+    /// [`Listener::DEFAULT_MAX_CONNECTION_AGE_GRACE`]). It is mandatory and
+    /// never zero: tonic with an age and no grace panics in the
+    /// connection's task once the age passes (`async fn resumed after
+    /// completion`; under `panic = "abort"`, the process). A zero grace is
+    /// refused at bind ([`ListenError::ZeroConnectionAgeGrace`]).
     pub fn max_connection_age_grace(mut self, grace: Duration) -> Listener {
-        self.limits.max_connection_age_grace = Some(grace);
+        self.limits.max_connection_age_grace = grace;
         self
     }
 

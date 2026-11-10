@@ -16,7 +16,7 @@ pub(crate) struct Limits {
     pub(crate) keepalive_interval: Option<Duration>,
     pub(crate) keepalive_timeout: Duration,
     pub(crate) max_connection_age: Duration,
-    pub(crate) max_connection_age_grace: Option<Duration>,
+    pub(crate) max_connection_age_grace: Duration,
     pub(crate) request_timeout: Option<Duration>,
     pub(crate) max_concurrent_streams: NonZeroU32,
 }
@@ -29,7 +29,7 @@ impl Default for Limits {
             keepalive_interval: Some(crate::Listener::DEFAULT_KEEPALIVE_INTERVAL),
             keepalive_timeout: crate::Listener::DEFAULT_KEEPALIVE_TIMEOUT,
             max_connection_age: crate::Listener::DEFAULT_MAX_CONNECTION_AGE,
-            max_connection_age_grace: None,
+            max_connection_age_grace: crate::Listener::DEFAULT_MAX_CONNECTION_AGE_GRACE,
             request_timeout: None,
             max_concurrent_streams: NonZeroU32::new(
                 crate::Listener::DEFAULT_MAX_CONCURRENT_STREAMS,

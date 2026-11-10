@@ -27,6 +27,9 @@ pub enum ListenError {
     /// The TLS configuration was refused (no identity, or a certificate or
     /// key that does not parse), with the TLS layer's `error`.
     TlsConfig { error: String },
+    /// The connection age's grace is zero: tonic panics on an age without
+    /// a grace, so a grace is mandatory and never zero.
+    ZeroConnectionAgeGrace,
     /// A system call failed: `op` on `target`, with the system's `error`.
     Io {
         op: &'static str,
@@ -89,6 +92,7 @@ impl Diagnostic for ListenError {
             ListenError::NoDirectory { .. } => code!("listen-no-directory"),
             ListenError::TlsOnUds { .. } => code!("listen-tls-on-uds"),
             ListenError::TlsConfig { .. } => code!("listen-tls-config"),
+            ListenError::ZeroConnectionAgeGrace => code!("listen-zero-connection-age-grace"),
             ListenError::Io { .. } => code!("listen-io"),
         }
     }
@@ -102,6 +106,7 @@ impl Diagnostic for ListenError {
             | ListenError::NoDirectory { path }
             | ListenError::TlsOnUds { path } => vec![("path", path.as_str().into())],
             ListenError::TlsConfig { error } => vec![("error", error.as_str().into())],
+            ListenError::ZeroConnectionAgeGrace => vec![],
             ListenError::Io { op, target, error } => vec![
                 ("op", (*op).into()),
                 ("target", target.as_str().into()),
@@ -137,6 +142,7 @@ pub(crate) fn samples() -> Vec<ListenError> {
         ListenError::TlsConfig {
             error: "no identity".to_string(),
         },
+        ListenError::ZeroConnectionAgeGrace,
         ListenError::Io {
             op: "bind",
             target: "127.0.0.1:7000".to_string(),

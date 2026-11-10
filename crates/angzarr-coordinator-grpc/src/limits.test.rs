@@ -24,6 +24,10 @@ fn the_defaults_are_the_documented_values() {
         Listener::DEFAULT_MAX_CONNECTION_AGE,
         Duration::from_secs(3600)
     );
+    assert_eq!(
+        Listener::DEFAULT_MAX_CONNECTION_AGE_GRACE,
+        Duration::from_secs(30)
+    );
     assert_eq!(Listener::DEFAULT_MAX_CONCURRENT_STREAMS, 200);
 }
 
@@ -37,7 +41,7 @@ fn a_listener_starts_at_the_defaults() {
         keepalive_interval: Some(Duration::from_secs(60)),
         keepalive_timeout: Duration::from_secs(20),
         max_connection_age: Duration::from_secs(3600),
-        max_connection_age_grace: None,
+        max_connection_age_grace: Duration::from_secs(30),
         request_timeout: None,
         max_concurrent_streams: NonZeroU32::new(200).unwrap(),
     };
@@ -97,7 +101,7 @@ fn each_setter_sets_its_limit_alone() {
     assert_eq!(
         set,
         Limits {
-            max_connection_age_grace: Some(Duration::from_millis(3)),
+            max_connection_age_grace: Duration::from_millis(3),
             ..defaults.clone()
         }
     );

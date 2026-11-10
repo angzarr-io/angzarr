@@ -30,6 +30,7 @@ fn grpc_errors_have_catalog_messages() {
         "listen-no-directory",
         "listen-tls-on-uds",
         "listen-tls-config",
+        "listen-zero-connection-age-grace",
         "listen-io",
     ]
     .into_iter()

@@ -14,4 +14,5 @@ listen-directory-not-private = the directory of the socket, { $path }, is not a 
 listen-no-directory = the socket path { $path } has no directory
 listen-tls-on-uds = TLS was asked of the Unix socket { $path }; TLS is for a TCP listener
 listen-tls-config = the TLS configuration was refused: { $error }
+listen-zero-connection-age-grace = the connection age's grace is zero; it must be longer than zero
 listen-io = { $op } of { $target } failed: { $error }
