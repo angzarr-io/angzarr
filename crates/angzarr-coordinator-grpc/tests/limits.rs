@@ -1,5 +1,4 @@
-//! A listener's limits, each forced: connections beyond the maximum are
-//! closed while the first ones keep working; a peer that never answers a
+//! A listener's limits, each forced: a peer that never answers a
 //! ping is closed and one that answers is kept; a handler that never
 //! returns is cut by the request timeout; a stream beyond the per-connection
 //! maximum is refused, and the maximum is what the server advertises. No
@@ -11,7 +10,7 @@ mod support;
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use angzarr_coordinator_grpc::{BoundEndpoint, Listener, Running, Server};
@@ -48,67 +47,6 @@ fn tcp_addr(running: &Running) -> SocketAddr {
 
 fn loopback() -> Listener {
     Listener::tcp("127.0.0.1:0".parse().unwrap())
-}
-
-/// Polls `attempt` until it succeeds: a slot freed by a closed connection
-/// is freed when the server has seen the close, which is not when the
-/// client dropped it.
-async fn until_ok<F, Fut>(what: &str, mut attempt: F)
-where
-    F: FnMut() -> Fut,
-    Fut: Future<Output = Result<String, String>>,
-{
-    within(what, async {
-        loop {
-            if attempt().await.is_ok() {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await;
-}
-
-/// With a maximum of two, the first two connections are served, a third is
-/// closed (its call fails), the first two still work after it, and when one
-/// of them closes a new connection is served again.
-#[tokio::test]
-async fn connections_beyond_the_maximum_are_closed_while_the_first_still_work() {
-    let running = serve(loopback().max_connections(NonZeroUsize::new(2).unwrap())).await;
-    let addr = tcp_addr(&running);
-
-    let first = support::tcp(addr).await;
-    let second = support::tcp(addr).await;
-    assert_eq!(support::arrival(first.clone()).await, "loopback");
-    assert_eq!(support::arrival(second.clone()).await, "loopback");
-
-    let third = within("the third connection", support::try_tcp(addr)).await;
-    assert!(third.is_err(), "{third:?}");
-
-    assert_eq!(support::arrival(first.clone()).await, "loopback");
-    assert_eq!(support::arrival(second.clone()).await, "loopback");
-
-    drop(second);
-    until_ok("a freed slot", || support::try_tcp(addr)).await;
-    assert_eq!(support::arrival(first).await, "loopback");
-}
-
-/// The same maximum holds on a Unix socket.
-#[tokio::test]
-async fn connections_beyond_the_maximum_are_closed_on_a_unix_socket() {
-    let dir = TestDir::new("grpc-limit-uds");
-    let socket = support::socket_in(&dir, "a.sock");
-    let _running =
-        serve(Listener::uds(&socket).max_connections(NonZeroUsize::new(1).unwrap())).await;
-
-    let first = support::uds(&socket).await;
-    assert_eq!(support::arrival(first.clone()).await, "loopback");
-    let second = within("the second connection", support::try_uds(&socket)).await;
-    assert!(second.is_err(), "{second:?}");
-    assert_eq!(support::arrival(first.clone()).await, "loopback");
-
-    drop(first);
-    until_ok("a freed slot", || support::try_uds(&socket)).await;
 }
 
 /// A handler that never answers is cut by the listener's request timeout,

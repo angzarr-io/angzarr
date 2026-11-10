@@ -113,16 +113,6 @@ pub async fn uds(path: &Path) -> Channel {
         .expect("connects over the socket")
 }
 
-/// The probe's answer over the Unix socket at `path`, or the failure:
-/// connecting, or the first call.
-pub async fn try_uds(path: &Path) -> Result<String, String> {
-    let channel = Endpoint::from_static("http://uds.invalid")
-        .connect_with_connector(Uds(path.to_path_buf()))
-        .await
-        .map_err(|e| format!("connect: {e:?}"))?;
-    try_arrival(channel).await.map_err(|e| e.to_string())
-}
-
 /// The arrival the server declared for this connection's requests.
 pub async fn arrival(channel: Channel) -> String {
     try_arrival(channel).await.expect("the probe answers")
@@ -159,18 +149,6 @@ pub async fn try_hang(channel: Channel) -> Result<String, Status> {
         )
         .await?;
     Ok(reply.into_inner().arrival)
-}
-
-/// A channel to `addr` over TCP, or the failure: connecting, or the first
-/// call (a server that closes a connection at once lets the connect
-/// succeed and fails the call).
-pub async fn try_tcp(addr: SocketAddr) -> Result<String, String> {
-    let channel = Endpoint::from_shared(format!("http://{addr}"))
-        .unwrap()
-        .connect()
-        .await
-        .map_err(|e| format!("connect: {e:?}"))?;
-    try_arrival(channel).await.map_err(|e| e.to_string())
 }
 
 /// `name` in `dir`, which is first made private (a `TestDir` is made with

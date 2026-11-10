@@ -1,7 +1,7 @@
 //! The [`Server`] builder, its [`Listener`]s, and the [`Running`] server.
 
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroUsize};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -39,8 +39,7 @@ enum Address {
 /// loopback on a bind that is not loopback is an error at bind.
 ///
 /// Every listener has limits, each at its documented default until a
-/// builder method sets it: how many connections it holds at once
-/// ([`Listener::max_connections`]), how long a TLS handshake may take
+/// builder method sets it: how long a TLS handshake may take
 /// (`Listener::tls_handshake_timeout`, with the `tls` feature), how a peer
 /// that stopped answering is found ([`Listener::keepalive`]), how long a
 /// request may take ([`Listener::request_timeout`], none by default) and
@@ -92,8 +91,6 @@ impl Listener {
         self
     }
 
-    /// How many connections a listener holds at once by default.
-    pub const DEFAULT_MAX_CONNECTIONS: usize = 1024;
     /// How long a TLS handshake may take by default.
     #[cfg(feature = "tls")]
     pub const DEFAULT_TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -106,19 +103,9 @@ impl Listener {
     /// (hyper's own default, which tonic would otherwise lift).
     pub const DEFAULT_MAX_CONCURRENT_STREAMS: u32 = 200;
 
-    /// Hold at most `max` connections at once (default
-    /// [`Listener::DEFAULT_MAX_CONNECTIONS`]). A connection beyond it is
-    /// accepted and closed at once, before a byte is read from it; the
-    /// connections already held are not touched, and a slot frees when one
-    /// of them closes. A connection still in its TLS handshake is held.
-    pub fn max_connections(mut self, max: NonZeroUsize) -> Listener {
-        self.limits.max_connections = max;
-        self
-    }
-
     /// Drop a connection whose TLS handshake has not completed within
     /// `timeout` (default [`Listener::DEFAULT_TLS_HANDSHAKE_TIMEOUT`]): a
-    /// client that connects and never says hello holds a slot no longer.
+    /// client that connects and never says hello is not held open.
     /// It replaces any timeout set on the listener's `ServerTlsConfig`; a
     /// listener without TLS has no handshake, so nothing to time. Needs the
     /// `tls` feature.
@@ -370,7 +357,7 @@ impl Server {
                 Address::Uds(path) => {
                     let (bound, socket) = uds::bind(path)?;
                     running.sockets.push(socket);
-                    let incoming = listener.limits.cap(UnixListenerStream::new(bound));
+                    let incoming = UnixListenerStream::new(bound);
                     running.serve(service, incoming, tls, &listener.limits)?;
                     running.bound.endpoints.push(BoundEndpoint::Uds {
                         path: path.clone(),
@@ -384,7 +371,7 @@ impl Server {
                     let addr = bound
                         .local_addr()
                         .map_err(ListenError::io("local-addr", addr))?;
-                    let incoming = listener.limits.cap(TcpListenerStream::new(bound));
+                    let incoming = TcpListenerStream::new(bound);
                     running.serve(service, incoming, tls, &listener.limits)?;
                     running
                         .bound
