@@ -3,7 +3,7 @@ name = "angzarr-coordinator-grpc"
 version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0 OR BSD-3-Clause"
-description = "The coordinators' gRPC server, shared by the embedded and distributed runtimes: the listener policy (UDS 0600 in a 0700 directory, TCP, an Arrival declared per listener), Code to tonic::Status with an ErrorInfo, the bearer read from metadata, health and shutdown"
+description = "The coordinators' gRPC server, shared by the embedded and distributed runtimes: the listener policy (UDS 0600 in a 0700 directory, TCP, an Arrival declared per listener, limits per listener), Code to tonic::Status with an ErrorInfo, the bearer read from metadata, health and shutdown"
 repository = "https://github.com/angzarr-io/angzarr"
 publish = false
 

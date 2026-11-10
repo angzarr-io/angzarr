@@ -33,6 +33,19 @@
 //!   [`ListenError::TlsOnUds`], and a config the TLS layer rejects is
 //!   [`ListenError::TlsConfig`], both at bind. Without the feature, or
 //!   without the option, a listener serves as it always did.
+//! - Limits, per listener, each with a default (`Listener::DEFAULT_*`) and a
+//!   builder method, on TCP (plain and TLS) and Unix sockets alike:
+//!   [`Listener::max_connections`] (1024; one beyond is closed as it is
+//!   accepted, the held ones untouched), `Listener::tls_handshake_timeout`
+//!   (10 s, the `tls` feature; a client that never completes its handshake
+//!   is dropped), [`Listener::keepalive`] (an HTTP/2 PING every 60 s, the
+//!   connection closed when one goes unanswered for 20 s),
+//!   [`Listener::request_timeout`] (none: the client's `grpc-timeout`
+//!   alone; when set, a handler slower than it is CANCELLED) and
+//!   [`Listener::max_concurrent_streams`] (200 per connection, advertised in
+//!   SETTINGS; a stream beyond it is REFUSED_STREAM). Against tonic's own
+//!   defaults, what changes is: a connection maximum, a handshake timeout,
+//!   keepalive pings, and a stream limit where tonic advertises none.
 //! - [`status`]: a [`Coded`](angzarr_coordinator_base::Coded) or any
 //!   [`Refusal`](angzarr_coordinator_base::Refusal) as a `tonic::Status`:
 //!   its code, its key as the message, a `google.rpc.ErrorInfo` with the key

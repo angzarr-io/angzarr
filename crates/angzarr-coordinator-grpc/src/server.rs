@@ -41,7 +41,7 @@ enum Address {
 /// Every listener has limits, each at its documented default until a
 /// builder method sets it: how many connections it holds at once
 /// ([`Listener::max_connections`]), how long a TLS handshake may take
-/// ([`Listener::tls_handshake_timeout`], with the `tls` feature), how a peer
+/// (`Listener::tls_handshake_timeout`, with the `tls` feature), how a peer
 /// that stopped answering is found ([`Listener::keepalive`]), how long a
 /// request may take ([`Listener::request_timeout`], none by default) and
 /// how many streams one connection may have open
@@ -370,7 +370,8 @@ impl Server {
                 Address::Uds(path) => {
                     let (bound, socket) = uds::bind(path)?;
                     running.sockets.push(socket);
-                    running.serve(service, UnixListenerStream::new(bound), tls)?;
+                    let incoming = listener.limits.cap(UnixListenerStream::new(bound));
+                    running.serve(service, incoming, tls, &listener.limits)?;
                     running.bound.endpoints.push(BoundEndpoint::Uds {
                         path: path.clone(),
                         arrival,
@@ -383,7 +384,8 @@ impl Server {
                     let addr = bound
                         .local_addr()
                         .map_err(ListenError::io("local-addr", addr))?;
-                    running.serve(service, TcpListenerStream::new(bound), tls)?;
+                    let incoming = listener.limits.cap(TcpListenerStream::new(bound));
+                    running.serve(service, incoming, tls, &listener.limits)?;
                     running
                         .bound
                         .endpoints
@@ -411,12 +413,14 @@ pub struct Running {
 }
 
 impl Running {
-    /// Serve `service` on `incoming` until [`Running::stop`] fires.
+    /// Serve `service` on `incoming` until [`Running::stop`] fires, within
+    /// `limits`.
     fn serve<S, I, IO>(
         &mut self,
         service: S,
         incoming: I,
         tls: Option<&Tls>,
+        limits: &Limits,
     ) -> Result<(), ListenError>
     where
         S: Service<
@@ -441,9 +445,10 @@ impl Running {
         };
         let builder = match tls {
             #[cfg(feature = "tls")]
-            Some(config) => tls_builder(config)?,
+            Some(config) => tls_builder(&limits.tls(config))?,
             _ => tonic::transport::Server::builder(),
         };
+        let builder = limits.apply(builder);
         self.tasks.push(tokio::spawn(
             builder.serve_with_incoming_shutdown(service, incoming, signal),
         ));
