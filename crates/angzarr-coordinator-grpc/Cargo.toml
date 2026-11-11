@@ -20,8 +20,13 @@ default = ["commands", "reads"]
 # The CommandHandlerCoordinatorService (`Handle`). A read-only container
 # builds without it.
 commands = ["angzarr-coordinator/commands"]
-# The EventQueryService (`GetEvents`). The EventStream service is a later slice.
+# The EventQueryService (`GetEvents`).
 reads = ["angzarr-coordinator/reads", "dep:angzarr-reads"]
+# The EventStreamService (`Subscribe`, one stream: catch-up, then live on
+# the store's commit push with its change token polled as the fallback).
+# Off by default: a read half that follows needs a store with `Watch` and
+# `CommitNotify`. It links tokio's timer and `select!`.
+subscribe = ["reads", "tokio/time", "tokio/macros"]
 # TLS on a TCP listener (`Listener::tls`): the server does the handshake.
 # Off by default; with it off nothing of TLS is linked. It enables tonic's
 # `tls-ring` and never `tls-aws-lc`, so ring is the one crypto provider.

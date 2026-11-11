@@ -71,6 +71,23 @@ mod shared_handles_read_purge_fails_on_isolated_handles {
     );
 }
 
+mod shared_handles_notify_fails_on_isolated_handles {
+    use super::*;
+    angzarr_ports::store_contract!(
+        shared_handles_notify,
+        #[tokio::test]
+        #[should_panic],
+        isolated_pair()
+    );
+}
+
+/// Each isolated handle pushes its own commits: the one-handle `notify`
+/// section passes on it.
+mod one_handle_notify_passes_on_an_isolated_handle {
+    use super::*;
+    angzarr_ports::store_contract!(notify, #[tokio::test], isolated_pair().0);
+}
+
 mod shared_handles_watch_fails_on_isolated_handles {
     use super::*;
     angzarr_ports::store_contract!(
@@ -162,9 +179,10 @@ mod one_handle_export_dead_letters_passes_on_an_isolated_handle {
 
 /// The capability's checks, by name, are the ones the sections run.
 #[test]
-fn the_capability_lists_its_eight_checks() {
-    assert_eq!(angzarr_ports::contract::SHARED_HANDLES.len(), 8);
+fn the_capability_lists_its_nine_checks() {
+    assert_eq!(angzarr_ports::contract::SHARED_HANDLES.len(), 9);
     let mut names = angzarr_ports::contract::SHARED_HANDLES.to_vec();
+    names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 8, "no check twice");
+    assert_eq!(names.len(), 9, "no check twice");
 }

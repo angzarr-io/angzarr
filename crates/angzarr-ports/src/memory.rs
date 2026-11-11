@@ -10,6 +10,8 @@
 //! - **A write** is checked whole, then lands under the lock at once: its
 //!   stream's pages against the expected length, its positions, its
 //!   outbox entries and its dead letters, all or none.
+//! - **Push** ([`CommitNotify`]): every commit of anything, through any
+//!   clone, notifies the clones' one [`CommitSignal`] once it has landed.
 //! - **Read units** read one moment: the store's data is copy-on-write
 //!   behind an `Arc`, so a read unit keeps the moment it began, and a
 //!   writer copies the data only while a read unit still holds it.
@@ -32,6 +34,7 @@ use prost_types::Timestamp;
 
 use crate::error::StoreError;
 use crate::migrate::{plan_run, plan_undo, AppliedMigration, Backup, Migration, Migrations};
+use crate::notify::{CommitNotify, CommitSignal, CommitWait};
 use crate::store::{
     is_fork, Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore,
     Editions, EventStore, Export, ExportRow, ListStreams, Outbox, OutboxEntry, PositionStore,
@@ -355,6 +358,8 @@ fn check_events(data: &Data, events: Append<'_>) -> Result<(Option<Landing>, u64
 #[derive(Clone, Default)]
 pub struct MemoryStore {
     state: Arc<Mutex<Arc<Data>>>,
+    /// Notified after each commit: clones share it, as they share the data.
+    signal: CommitSignal,
 }
 
 impl MemoryStore {
@@ -435,6 +440,7 @@ impl EventStore for MemoryStore {
             }
         }
         data.commits += 1;
+        self.signal.notify();
         Ok(Written { next_sequence })
     }
 
@@ -476,6 +482,7 @@ impl SnapshotStore for MemoryStore {
         let data = Arc::make_mut(&mut guard);
         data.snapshots.insert(key(stream), snapshot.clone());
         data.commits += 1;
+        self.signal.notify();
         Ok(())
     }
 }
@@ -499,6 +506,7 @@ impl Purge for MemoryStore {
         let data = Arc::make_mut(&mut guard);
         let deleted = data.purge(&k);
         data.commits += 1;
+        self.signal.notify();
         Ok(deleted)
     }
 }
@@ -534,6 +542,7 @@ impl Editions for MemoryStore {
         let data = Arc::make_mut(&mut guard);
         let removed = data.remove(&k);
         data.commits += 1;
+        self.signal.notify();
         Ok(removed)
     }
 }
@@ -585,6 +594,15 @@ impl ReadUnit for MemoryRead {
     ) -> Result<Option<Snapshot>, StoreError> {
         let k = self.known(stream)?;
         Ok(self.data.snapshots.get(&k).cloned())
+    }
+}
+
+impl CommitNotify for MemoryStore {
+    /// Every commit of anything through any clone, as the change token
+    /// counts them.
+    fn next_commit(&self) -> CommitWait {
+        let _ = &self.signal;
+        todo!("resolute-sleet: the memory store pushes")
     }
 }
 
@@ -662,8 +680,10 @@ impl Backup for MemoryStore {
         }
         // The data is copy-on-write: the copy shares it until either side
         // writes, and then neither sees the other's write.
+        // A store of its own: its commits are not this one's to push.
         *slot = Some(MemoryStore {
             state: Arc::new(Mutex::new(self.data())),
+            signal: CommitSignal::new(),
         });
         Ok(())
     }
@@ -787,6 +807,7 @@ impl DeadLetterStore for MemoryStore {
         let data = Arc::make_mut(&mut guard);
         data.dead_letters.retain(|(s, ..), _| *s != k);
         data.commits += 1;
+        self.signal.notify();
         Ok(drained)
     }
 
@@ -805,6 +826,7 @@ impl DeadLetterStore for MemoryStore {
             data.dead_letters.remove(place);
         }
         data.commits += 1;
+        self.signal.notify();
         Ok(held as u64)
     }
 }
@@ -829,6 +851,7 @@ impl Outbox for MemoryStore {
         let data = Arc::make_mut(&mut guard);
         data.outbox.retain(|p| !ids.contains(&p.entry.id));
         data.commits += 1;
+        self.signal.notify();
         Ok((before - data.outbox.len()) as u64)
     }
 }

@@ -85,7 +85,7 @@ pub struct Shared {
 
 /// The handle a `Reads` is built over, and the test keeps a clone of.
 #[derive(Clone)]
-pub struct Handle(Arc<Shared>);
+pub struct Handle(pub Arc<Shared>);
 
 impl std::ops::Deref for Handle {
     type Target = Shared;

@@ -813,3 +813,15 @@ fn a_read_only_store_handle_serves_every_read() {
     assert_eq!(block_on(reads.list_streams()).unwrap().len(), 3);
     let _: Option<StoreError> = None;
 }
+
+// ------------------------------------------------------------------ store
+
+/// Why: a frontend that follows a stream asks the engine's own store for
+/// what the engine does not answer (its change token, its commit push), so
+/// `store` is that store, not another handle.
+#[test]
+fn the_engine_hands_out_the_store_it_reads() {
+    let handle = player(2);
+    let reads = reads_over(&handle);
+    assert!(Arc::ptr_eq(&reads.store().0, &handle.0));
+}

@@ -28,6 +28,7 @@
 //! | [`EventRead`] | [`EventStore`]'s read, head and covers, with no `write`; every [`EventStore`] is one | read-only |
 //! | [`ReadStore`] / [`ReadUnit`] | reads that all see one moment | opt-in |
 //! | [`Watch`] | a cheap "anything committed?" | opt-in |
+//! | [`CommitNotify`] | a push when this process commits ([`CommitSignal`], [`CommitWait`]); [`Watch`] is its fallback for other processes | opt-in |
 //! | [`ReadUntilTime`], [`ReadByCorrelation`], [`ListStreams`] | core's queries | opt-in |
 //! | [`Processed`] | a driver's record of what its handler processed: every stream it holds a position on, which a purge never touches (14.68) | opt-in |
 //! | [`Outbox`] | the transactional outbox's relay side, kind-agnostic (entries are written in a [`Write`]) | opt-in |
@@ -46,8 +47,11 @@
 //! - **dyn.** [`dyn_store`] boxes the ports for core's `Arc<dyn DynStore>`.
 //! - **Shared handles.** `Arc<T>` forwards each port a coordinator holds
 //!   through one (the base ports, [`ListStreams`], [`Processed`],
-//!   [`ReadByCorrelation`], [`ReadUntilTime`], [`Watch`], [`EditionKnown`]),
-//!   and `dyn` of each of the last four's twins is the port again.
+//!   [`ReadByCorrelation`], [`ReadUntilTime`], [`Watch`], [`EditionKnown`],
+//!   [`CommitNotify`]), and `dyn` of each of [`ReadByCorrelation`],
+//!   [`ReadUntilTime`], [`Watch`] and [`EditionKnown`]'s twins is the port
+//!   again. [`CommitNotify`] is object-safe as it is: `dyn CommitNotify`
+//!   needs no twin.
 //!
 //! # Features
 //!
@@ -67,6 +71,7 @@
 //!   races and lost answers.
 
 mod error;
+mod notify;
 mod send;
 mod store;
 mod stream;
@@ -89,6 +94,7 @@ pub use error::{Arg, Cause, Recovery, StoreError};
 pub use migrate::{
     AppliedMigration, Backup, Migration, MigrationInfo, MigrationStatus, Migrations,
 };
+pub use notify::{CommitNotify, CommitSignal, CommitWait};
 pub use send::{MaybeSend, MaybeSync};
 pub use store::{
     is_fork, Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore,

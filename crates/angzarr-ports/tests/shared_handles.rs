@@ -47,6 +47,24 @@ async fn arc_forwards_watch_change_token() {
     contract::a_change_token_changes_when_another_handle_commits((a.clone(), a)).await;
 }
 
+/// The push is the target's own: a wait through one `Arc` is woken by a
+/// commit through another, and `dyn CommitNotify` is the port as it is.
+#[tokio::test]
+async fn arc_and_dyn_forward_commit_notify() {
+    contract::a_commit_wakes_a_wait_armed_before_it(Arc::new(MemoryStore::new())).await;
+    let a = Arc::new(MemoryStore::new());
+    contract::a_commit_through_another_handle_wakes_a_wait((a.clone(), a)).await;
+    let store = MemoryStore::new();
+    let pushing: Arc<dyn angzarr_ports::CommitNotify> = Arc::new(store.clone());
+    let wait = pushing.next_commit();
+    contract::append(&store, main_stream("account", 1), 0, &[page(0, 1)])
+        .await
+        .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+        .await
+        .expect("the commit wakes the wait through dyn");
+}
+
 // ------------------------------------------------------- dyn is the trait
 
 /// A generic reader, which is all `dyn` must satisfy.

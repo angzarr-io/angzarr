@@ -320,3 +320,19 @@ fn the_composed_halves_are_reachable() {
     assert_eq!(coordinator.commands(), &());
     assert_eq!(coordinator.reads().0.len(), 2);
 }
+
+/// Why: a subscription served on a task of its own carries its caller past
+/// the session's borrow: the principal given up is the one identified, and
+/// a session opened again with it is that caller.
+#[test]
+fn a_session_gives_up_the_principal_it_identified() {
+    let (coordinator, _sink) = coordinator();
+    let principal = open(&coordinator, "tok-both", Arrival::Ip).into_principal();
+    assert_eq!(principal.identity().name, "both");
+    let again = coordinator.open_as(Arrival::Ip, principal);
+    assert_eq!(again.principal().identity().name, "both");
+    assert_eq!(
+        again.authorize_streams(ReadOp::Events, &[cover("table", 2)]),
+        Ok(())
+    );
+}

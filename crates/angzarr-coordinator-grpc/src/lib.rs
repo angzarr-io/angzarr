@@ -12,6 +12,29 @@
 //!   status the gate's contract names (UNAUTHENTICATED for a bad or revoked
 //!   credential, the endpoint's own unknown-domain for anything else the
 //!   gate forbids). [`Server::add_edge`] adds both services.
+//! - With `subscribe` (off by default; it needs `reads`), an
+//!   `EventStreamService`: `Subscribe` to ONE stream (`StreamFrom`), served
+//!   by [`Server::add_event_stream`] for a read half that [`Follows`]. The
+//!   gate is asked as for a follow read (`ReadOp::Follow`); the stream's
+//!   pages from `from_sequence` (inclusive) are delivered through the
+//!   GetEvents read path (catch-up), then every page committed after
+//!   (live), with no gap and no duplicate: the subscription keeps the next
+//!   sequence it owes, reads from it, and drops what it has delivered. It
+//!   goes live on the store's commit push (`angzarr_ports::CommitNotify`,
+//!   armed before every read) and polls the store's change token as the
+//!   fallback for commits the push cannot see (another process's), every
+//!   [`Follow::poll`]. The gate's `still_valid` is asked again every
+//!   [`Follow::revalidate_every`] wakes, and a revoked caller's stream ends
+//!   UNAUTHENTICATED. A stream the caller may not follow is answered as an
+//!   absent one that never grows: the call is accepted, nothing is
+//!   delivered, and the stream stays open until the caller leaves or is
+//!   revoked. Each subscriber's server-side buffer holds at most
+//!   [`Follow::buffer`] books; when it is full the subscription reads no
+//!   further until the subscriber takes one (the store is the buffer:
+//!   nothing is dropped, and a commit push is a flag, never queued). A
+//!   connection closed under it (its age cap) ends the stream; the
+//!   subscriber resumes from the last sequence it received + 1.
+//!   `CorrelationFrom` is UNIMPLEMENTED.
 //! - [`Server`]: the builder. Services are added once and served on every
 //!   [`Listener`]; `grpc.health.v1.Health` is always served (SERVING once
 //!   bound, NOT_SERVING when shutdown begins). [`Server::bind`] gives a
@@ -75,6 +98,8 @@ mod uds;
 mod command;
 #[cfg(feature = "reads")]
 mod query;
+#[cfg(feature = "subscribe")]
+mod subscribe;
 
 pub use arrival::{arrival_for_bind, arrival_of, Arrival, Reach};
 pub use bearer::{bearer, AuthorizationError, Bearer};
@@ -87,6 +112,8 @@ pub use status::{
     error_info, status, status_of, tonic_code, unauthenticated, ErrorInfo, ERROR_DOMAIN,
     ERROR_INFO_TYPE_URL,
 };
+#[cfg(feature = "subscribe")]
+pub use subscribe::{Follow, Follows};
 
 /// This crate's en-US Fluent catalog, its name first: what a runtime that
 /// shows these errors embeds to render them (`locales/en-US/messages.ftl`,

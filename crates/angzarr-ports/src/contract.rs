@@ -34,10 +34,12 @@
 //! | `shared_handles_read` (was `read`) | [`ReadStore`] | two handles |
 //! | `shared_handles_read_purge` (was `read_purge`) | [`ReadStore`], [`Purge`] | two handles |
 //! | `shared_handles_watch` (was `watch_pair`) | [`Watch`] | two handles |
+//! | `shared_handles_notify` | [`CommitNotify`] | two handles |
 //! | `read_one_handle` | [`ReadStore`] | a store |
 //! | `read_one_handle_purge` | [`ReadStore`], [`Purge`] | a store |
 //! | `read_forks` | [`ReadStore`] | a store |
 //! | `watch` (one handle's token moves when it commits) | [`Watch`] | a store |
+//! | `notify` (a commit wakes a wait armed before it) | [`CommitNotify`] | a store |
 //! | `until_time` | [`ReadUntilTime`] | a store |
 //! | `correlation` | [`ReadByCorrelation`] | a store |
 //! | `list_streams` | [`ListStreams`] | a store |
@@ -118,6 +120,7 @@ use prost_types::{Any, Timestamp};
 
 use crate::error::StoreError;
 use crate::migrate::{latest, AppliedMigration, Backup, Migration, MigrationStatus, Migrations};
+use crate::notify::CommitNotify;
 use crate::store::{
     Append, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions, EventStore, Export,
     ExportRow, ListStreams, Outbox, OutboxEntry, Processed, Purge, ReadByCorrelation, ReadStore,
@@ -2048,6 +2051,65 @@ where
     assert_ne!(grown, created, "another handle's position-only write");
 }
 
+// -------------------------------------------------------- notify (opt-in)
+
+/// Whether `wait` has resolved, polled once (no runtime needed: the checks
+/// stay runtime-agnostic).
+fn resolved(wait: &mut crate::CommitWait) -> bool {
+    use std::task::{Context, Poll, Waker};
+    let mut cx = Context::from_waker(Waker::noop());
+    std::pin::Pin::new(wait).poll(&mut cx) == Poll::Ready(())
+}
+
+/// A wait armed before a commit resolves after it lands: an append, a
+/// position-only write; one armed after a commit waits for the next; reads
+/// and a refused write resolve nothing.
+pub async fn a_commit_wakes_a_wait_armed_before_it<S>(store: S)
+where
+    S: Store + CommitNotify,
+{
+    let s = main_stream("account", 1);
+    let mut first = store.next_commit();
+    assert!(!resolved(&mut first), "nothing committed yet");
+    store.read(s, 0, None).await.unwrap();
+    store.head(s).await.unwrap();
+    store.covers("account").await.unwrap();
+    store.find_command(s, command(1)).await.unwrap();
+    store.read_snapshot(s).await.unwrap();
+    assert!(!resolved(&mut first), "reads commit nothing");
+    append(&store, s, 0, &[page(0, 1)]).await.unwrap();
+    assert!(
+        resolved(&mut first),
+        "an append wakes a wait armed before it"
+    );
+    let mut second = store.next_commit();
+    assert!(
+        !resolved(&mut second),
+        "a wait armed after a commit waits for the next"
+    );
+    assert_eq!(
+        append(&store, s, 0, &[page(0, 2)]).await,
+        Err(conflict(s, 0, 1)),
+        "a stale append is refused"
+    );
+    assert!(!resolved(&mut second), "a refused write commits nothing");
+    put(&store, key("h", s), 1).await.unwrap();
+    assert!(resolved(&mut second), "a position-only write is a commit");
+}
+
+/// A commit through one handle wakes a wait armed on the other: the
+/// handles share one store's commits.
+pub async fn a_commit_through_another_handle_wakes_a_wait<S>((watcher, writer): (S, S))
+where
+    S: Store + CommitNotify,
+{
+    let s = main_stream("account", 1);
+    let mut wait = watcher.next_commit();
+    assert!(!resolved(&mut wait), "nothing committed yet");
+    append(&writer, s, 0, &[page(0, 1)]).await.unwrap();
+    assert!(resolved(&mut wait), "another handle's append");
+}
+
 // ------------------------------------------------------ core's reads (opt-in)
 
 pub async fn read_until_time_is_the_prefix_recorded_by_then<S>(store: S)
@@ -3735,6 +3797,7 @@ where
 pub const SHARED_HANDLES: &[&str] = &[
     "two_writers_racing_on_one_stream_land_one",
     "a_change_token_changes_when_another_handle_commits",
+    "a_commit_through_another_handle_wakes_a_wait",
     "a_read_unit_sees_the_store_as_it_began",
     "a_read_unit_heads_and_snapshots_as_it_began",
     "a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main",
@@ -3780,6 +3843,11 @@ macro_rules! store_contract {
     (shared_handles_watch, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             a_change_token_changes_when_another_handle_commits,
+        );
+    };
+    (shared_handles_notify, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            a_commit_through_another_handle_wakes_a_wait,
         );
     };
     (pair, $(#[$t:meta])+, $f:expr) => {
@@ -3839,6 +3907,11 @@ macro_rules! store_contract {
     (watch, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             a_change_token_changes_when_its_own_store_commits,
+        );
+    };
+    (notify, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
+            a_commit_wakes_a_wait_armed_before_it,
         );
     };
     (watch_pair, $(#[$t:meta])+, $f:expr) => {

@@ -13,12 +13,26 @@ use crate::{arrival_of, bearer, status, Arrival};
 /// here.
 pub struct Edge<C, R, G: Gate> {
     pub(crate) coordinator: Arc<Coordinator<C, R, G>>,
+    /// How a subscription follows its stream once caught up.
+    #[cfg(feature = "subscribe")]
+    pub(crate) follow: crate::Follow,
 }
 
 impl<C, R, G: Gate> Edge<C, R, G> {
-    /// `coordinator`, served.
+    /// `coordinator`, served (a subscription follows by [`Follow::DEFAULT`](crate::Follow::DEFAULT)).
     pub fn new(coordinator: Arc<Coordinator<C, R, G>>) -> Edge<C, R, G> {
-        Edge { coordinator }
+        Edge {
+            coordinator,
+            #[cfg(feature = "subscribe")]
+            follow: crate::Follow::DEFAULT,
+        }
+    }
+
+    /// Subscriptions follow by `follow`.
+    #[cfg(feature = "subscribe")]
+    pub fn with_follow(mut self, follow: crate::Follow) -> Edge<C, R, G> {
+        self.follow = follow;
+        self
     }
 
     /// The caller's session: the gate is asked to identify what the request
@@ -41,7 +55,7 @@ impl<C, R, G: Gate> Edge<C, R, G> {
 /// its bearer as the gate's credential. Taken before the message is, so the
 /// request's metadata is read once and never logged.
 pub(crate) struct Presented {
-    arrival: Arrival,
+    pub(crate) arrival: Arrival,
     credential: Option<Credential>,
 }
 
@@ -66,7 +80,26 @@ impl<C, R, G: Gate> Clone for Edge<C, R, G> {
     fn clone(&self) -> Self {
         Edge {
             coordinator: Arc::clone(&self.coordinator),
+            #[cfg(feature = "subscribe")]
+            follow: self.follow,
         }
+    }
+}
+
+#[cfg(feature = "subscribe")]
+impl crate::Server {
+    /// Serve `edge` as the event-stream service (`Subscribe`), on every
+    /// listener: beside [`add_edge`](crate::Server::add_edge), for a read
+    /// half that can be followed.
+    pub fn add_event_stream<C, R, G>(self, edge: Edge<C, R, G>) -> crate::Server
+    where
+        C: Send + Sync + 'static,
+        R: crate::Follows + 'static,
+        G: Gate + 'static,
+        G::Identity: 'static,
+    {
+        use angzarr_proto_transport_distributed::v1::event_stream_service_server::EventStreamServiceServer;
+        self.add_service(EventStreamServiceServer::new(edge))
     }
 }
 

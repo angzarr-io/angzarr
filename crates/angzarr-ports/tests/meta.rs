@@ -27,10 +27,11 @@ use angzarr_ports::angzarr_proto::v1::{Cover, EditionSummary, EventBook, EventPa
 use angzarr_ports::contract;
 use angzarr_ports::memory::{MemoryRead, MemoryStore};
 use angzarr_ports::{
-    Append, ChangeToken, DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore, Export,
-    ExportRow, Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed,
-    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
-    StreamRef, Uuid, Watch, Write, Written,
+    Append, ChangeToken, CommitNotify, CommitSignal, CommitWait, DeadLetter, DeadLetterKey,
+    DeadLetterStore, Editions, EventStore, Export, ExportRow, Head, ListStreams, Outbox,
+    OutboxEntry, PositionKey, PositionStore, Processed, Purge, ReadByCorrelation, ReadStore,
+    ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Uuid, Watch, Write,
+    Written,
 };
 use prost_types::Timestamp;
 
@@ -161,6 +162,15 @@ enum Bug {
     TokenChangesOnRead,
     /// Its token counts this handle's commits only.
     TokenPerHandle,
+    // ---- notify
+    /// It never pushes a commit.
+    Unpushed,
+    /// Its wait is resolved as soon as it is armed.
+    PushedAtOnce,
+    /// It pushes a refused write too.
+    PushesRefusals,
+    /// It pushes this handle's commits only.
+    PushPerHandle,
     // ---- core's reads
     /// `read_until_time` excludes events recorded at `until`.
     UntilTimeExclusive,
@@ -267,6 +277,8 @@ enum Bug {
 struct Local {
     /// Commits through this handle.
     commits: AtomicU64,
+    /// This handle's own signal, for the push bugs.
+    signal: CommitSignal,
     /// Reads of the change token.
     token_reads: AtomicU64,
 }
@@ -703,12 +715,19 @@ impl EventStore for Broken {
         }
         let written = match self.inner.write(bent.write()).await {
             Ok(written) => written,
+            Err(refused) if self.is(Bug::PushesRefusals) => {
+                self.local.signal.notify();
+                return Err(refused);
+            }
             Err(refused) => match self.on_refusal(refused, &mut bent).await? {
                 ControlFlow::Break(answer) => return Ok(answer),
                 ControlFlow::Continue(written) => written,
             },
         };
         self.landed(&bent).await;
+        if self.is(Bug::PushPerHandle) || self.is(Bug::PushesRefusals) {
+            self.local.signal.notify();
+        }
         Ok(written)
     }
 
@@ -1086,6 +1105,20 @@ impl ReadUnit for BrokenRead {
             return self.store.read_snapshot(stream).await;
         }
         self.inner.read_snapshot(stream).await
+    }
+}
+
+impl CommitNotify for Broken {
+    fn next_commit(&self) -> CommitWait {
+        match self.bug {
+            Bug::Unpushed | Bug::PushPerHandle | Bug::PushesRefusals => self.local.signal.wait(),
+            Bug::PushedAtOnce => {
+                let wait = self.local.signal.wait();
+                self.local.signal.notify();
+                wait
+            }
+            _ => self.inner.next_commit(),
+        }
     }
 }
 
@@ -1942,6 +1975,23 @@ fn the_watch_checks_catch_a_token_still_restless_or_per_handle() {
 }
 
 #[test]
+fn the_notify_checks_catch_a_push_missing_early_on_refusals_or_per_handle() {
+    catches!(
+        a_commit_wakes_a_wait_armed_before_it,
+        broken,
+        Unpushed,
+        PushedAtOnce,
+        PushesRefusals,
+    );
+    catches!(
+        a_commit_through_another_handle_wakes_a_wait,
+        broken_pair,
+        Unpushed,
+        PushPerHandle,
+    );
+}
+
+#[test]
 fn the_core_read_checks_catch_a_wrong_bound_filter_or_order() {
     catches!(
         read_until_time_is_the_prefix_recorded_by_then,
@@ -2176,6 +2226,7 @@ fn the_shared_handles_checks_catch_handles_that_share_nothing() {
     isolated!(
         two_writers_racing_on_one_stream_land_one,
         a_change_token_changes_when_another_handle_commits,
+        a_commit_through_another_handle_wakes_a_wait,
         a_read_unit_sees_the_store_as_it_began,
         a_read_unit_heads_and_snapshots_as_it_began,
         a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main,

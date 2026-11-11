@@ -38,12 +38,13 @@ pub const COUNTED: &str = "type.invalid/counter.v1.Counted";
 /// A Fact type no principal may send.
 pub const OTHER: &str = "type.invalid/counter.v1.Other";
 
-/// The writer's token: may send `Counted` facts, read events, owns every stream.
+/// The writer's token: may send `Counted` facts, read and follow events,
+/// owns every stream.
 pub const WRITER: &str = "writer-secret";
 /// The reader's token: may read events only.
 pub const READER: &str = "reader-secret";
-/// A token that may send `Counted` facts and read events, but owns only
-/// stream 7.
+/// A token that may send `Counted` facts and read and follow events, but
+/// owns only stream 7.
 pub const SEVEN: &str = "seven-secret";
 
 /// The counter's command half: every fact appends one event to its stream,
@@ -52,6 +53,13 @@ pub const SEVEN: &str = "seven-secret";
 pub struct Counter {
     store: Arc<MemoryStore>,
     served: BTreeMap<String, Reach>,
+}
+
+impl Counter {
+    /// The counter on `store`, serving `served`.
+    pub fn new(store: Arc<MemoryStore>, served: BTreeMap<String, Reach>) -> Counter {
+        Counter { store, served }
+    }
 }
 
 impl Served for Counter {
@@ -196,7 +204,8 @@ impl Gate for Tokens {
         let principal = credential.and_then(|credential| {
             let sends = Allowlist::none()
                 .send(BodyKind::Fact, COUNTED)
-                .read(ReadOp::Events);
+                .read(ReadOp::Events)
+                .read(ReadOp::Follow);
             if credential.secret_matches(WRITER.as_bytes()) {
                 Some(Principal::new("writer", sends))
             } else if credential.secret_matches(READER.as_bytes()) {

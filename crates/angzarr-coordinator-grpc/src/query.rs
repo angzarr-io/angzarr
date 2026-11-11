@@ -29,7 +29,7 @@ pub trait Queries: Served + MaybeSend + MaybeSync {
 
 /// A [`Reads`] engine and the reach it serves each domain at.
 pub struct ServedReads<S> {
-    reads: Reads<S>,
+    pub(crate) reads: Reads<S>,
     served: BTreeMap<String, Reach>,
 }
 

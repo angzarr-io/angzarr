@@ -283,6 +283,16 @@ mod watch {
     angzarr_ports::store_contract!(watch, #[tokio::test], MemoryStore::new());
 }
 
+mod notify {
+    use super::*;
+    angzarr_ports::store_contract!(notify, #[tokio::test], MemoryStore::new());
+}
+
+mod shared_handles_notify {
+    use super::*;
+    angzarr_ports::store_contract!(shared_handles_notify, #[tokio::test], pair());
+}
+
 mod watch_pair {
     use super::*;
     angzarr_ports::store_contract!(watch_pair, #[tokio::test], pair());
