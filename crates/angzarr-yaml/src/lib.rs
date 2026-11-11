@@ -5,13 +5,17 @@
 //! block sequences (`- item`, including `- key: value` starting a mapping),
 //! flow sequences `[a, b]` and flow mappings `{a: 1, b: 2}` (on one line or
 //! split across lines, each break a space, with comments and blank lines
-//! between; a quoted scalar in them stays on one line), plain and quoted
-//! scalars, block scalars as a key's or an item's value (literal `|`,
+//! between; a quoted scalar in them stays on one line; a comma may end
+//! one, and a `: ` ends a plain value in one, so `[a: b]` is refused),
+//! plain and quoted scalars, block scalars as a key's or an item's value (literal `|`,
 //! folded `>`, each with `-` to strip the final line break or `+` to keep
 //! the empty lines after it), `#` comments, and an empty value as null. Not
 //! supported, and refused rather than misread: anchors and aliases, tags,
 //! a block scalar's indentation indicator (`|2`) or one standing alone on
-//! its line, multiple documents, tabs for indentation.
+//! its line, multiple documents and document markers (`---`, `...`, and at
+//! column 0 either one before a space and more: `--- text`), tabs for
+//! indentation. Its tests hold it to the official YAML test suite
+//! (`conformance.test.rs`, `testdata/yaml-test-suite-unsupported.txt`).
 //!
 //! A plain scalar may go on onto the lines under it (YAML 1.2 §7.3.3):
 //! lines deeper than its key (or dash), or at its own indent when it stands
@@ -448,7 +452,7 @@ fn meaningful(no: usize, raw_line: &str) -> Result<Option<Line<'_>>, Error> {
     let indent = body.len() - body.trim_start_matches(' ').len();
     let text = &body[indent..];
     indented_by_spaces(no, text)?;
-    no_document_marker(no, text)?;
+    no_document_marker(no, text, indent == 0)?;
     if let Some(problem) = unsupported(text) {
         return err(no, problem);
     }
@@ -474,17 +478,22 @@ fn indented_by_spaces(no: usize, text: &str) -> Result<(), Error> {
     }
 }
 
-/// `text` is no document marker (`---`, `...`): one document per file.
-fn no_document_marker(no: usize, text: &str) -> Result<(), Error> {
-    if text == "---" || text == "..." {
-        return err(
+/// `text` is no document marker (`---`, `...`): one document per file. At
+/// column 0 (`column_0`) a marker followed by a space or tab and more
+/// (`--- text`) is one too, never text.
+fn no_document_marker(no: usize, text: &str, column_0: bool) -> Result<(), Error> {
+    let starts = |m: &str| {
+        text == m || column_0 && text.strip_prefix(m).is_some_and(|r| r.starts_with(SPACE))
+    };
+    match ["---", "..."].into_iter().find(|m| starts(m)) {
+        Some(marker) => err(
             no,
             ParseProblem::DocumentMarker {
-                marker: text.to_string(),
+                marker: marker.to_string(),
             },
-        );
+        ),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// A document's raw lines (see [`raw_lines`]), and the next one to read: a
@@ -530,7 +539,7 @@ impl<'a> Raw<'a> {
             let piece = l[..s.cut].trim_end_matches(SPACE);
             let content = piece.trim_start_matches(' ');
             indented_by_spaces(next_no, content)?;
-            no_document_marker(next_no, piece)?;
+            no_document_marker(next_no, piece, true)?;
             if s.open_quote {
                 return err(next_no, ParseProblem::UnterminatedQuote);
             }
@@ -618,7 +627,7 @@ impl<'a> Raw<'a> {
                 break;
             }
             indented_by_spaces(next_no, content)?;
-            no_document_marker(next_no, l)?;
+            no_document_marker(next_no, l, true)?;
             let cut = plain_comment(content);
             match empties {
                 0 => value.push(' '),
@@ -916,6 +925,10 @@ impl<'a> Flow<'a> {
                 if !self.eat(',') {
                     return err(self.no, ParseProblem::ExpectedSeqSeparator);
                 }
+                // A comma may end the sequence: `[a, b, ]` is two items.
+                if self.eat(']') {
+                    return Ok(Value::Seq(items));
+                }
             }
         }
         if self.eat('{') {
@@ -942,13 +955,18 @@ impl<'a> Flow<'a> {
                 if !self.eat(',') {
                     return err(self.no, ParseProblem::ExpectedMapSeparator);
                 }
+                if self.eat('}') {
+                    return Ok(Value::Map(entries));
+                }
             }
         }
         self.scalar(false)
     }
 
     /// A scalar: quoted, or plain up to the end — or, inside a flow
-    /// collection, up to `,` `]` `}` (and `:` for a key).
+    /// collection, up to `,` `]` `}`, and `:` for a key or, for a value, a
+    /// `:` before a space, a tab, `,` `]` `}` or the end (YAML's `: ` ends a
+    /// plain scalar there: `[a: b]` is refused, never the text `a: b`).
     fn scalar(&mut self, key: bool) -> Result<Value, Error> {
         self.space();
         match self.rest().chars().next() {
@@ -984,11 +1002,16 @@ impl<'a> Flow<'a> {
     fn plain(&mut self, key: bool) -> Value {
         let rest = self.rest();
         let nested = self.s.starts_with('[') || self.s.starts_with('{');
+        let b = rest.as_bytes();
+        let ends = |i: usize| match b[i] {
+            b',' | b']' | b'}' => true,
+            b':' => key || matches!(b.get(i + 1), None | Some(b' ' | b'\t' | b',' | b']' | b'}')),
+            _ => false,
+        };
         let end = if nested {
-            rest.find(|c| c == ',' || c == ']' || c == '}' || (key && c == ':'))
-                .unwrap_or(rest.len())
+            (0..b.len()).find(|&i| ends(i)).unwrap_or(b.len())
         } else {
-            rest.len()
+            b.len()
         };
         let text = rest[..end].trim_end_matches(SPACE);
         self.at += end;
