@@ -1359,3 +1359,7 @@ mod plain_tests;
 #[cfg(test)]
 #[path = "rng.test.rs"]
 pub(crate) mod rng;
+
+#[cfg(test)]
+#[path = "conformance.test.rs"]
+mod conformance_tests;

@@ -1,0 +1,221 @@
+# The yaml-test-suite cases (testdata/yaml-test-suite, data-2022-01-17) that
+# angzarr-yaml does not pass, one per line: `<case> <how>: <why>`. <how> is
+# `refused` (a valid case the reader refuses), `misread` (a valid case read
+# as another value) or `accepts-invalid` (an invalid case read as a value).
+# Every other case passes. src/conformance.test.rs holds the list to the
+# run: a listed case that passes, or fails another way, and an unlisted one
+# that fails, fail it. Take a case off when it passes; never add one to get
+# a change through without saying why here.
+#
+# This reader is a strict subset (lib.rs): directives, multiple documents,
+# anchors, aliases, tags, explicit keys, collection or null keys, quoted
+# scalars over several lines and some block scalar headers are refused by
+# design. The misread and accepts-invalid rows are leniencies, known and
+# kept here until fixed.
+4ABK misread: a flow mapping key ends at its first `:`, so the key `http://foo.com` is read as `http` with the value `//foo.com`
+M2N8/00 misread: an explicit key (`- ? : x`) is read as the key `?`
+M2N8/01 misread: an explicit key (`? []: x`) is read as the key `? []`
+WZ62 misread: a tag inside a flow collection (`!!str`) is read as text, not refused
+Y79Y/010 misread: a tab after a dash (`-\t-1`) is no separation here: the line is read as the text `-\t-1`, not an item
+5LLU accepts-invalid: a block scalar's leading lines of spaces deeper than its first content line are taken as empty, not refused
+9MMA accepts-invalid: a directive alone (`%YAML 1.2`) is read as plain text: `%` cannot start a plain scalar in YAML
+CML9 accepts-invalid: a comment between the lines of a plain scalar in a flow collection is skipped, not refused
+S98Z accepts-invalid: a block scalar's leading lines of spaces deeper than its first content line are taken as empty, not refused
+VJP3/00 accepts-invalid: a flow collection's lines at its parent's indent are joined, not refused
+Y79Y/000 accepts-invalid: a block scalar's line of a tab alone is taken as empty, not refused
+Y79Y/004 accepts-invalid: a tab after a dash (`-\t-`) is read as text, not refused
+Y79Y/005 accepts-invalid: a tab before an indicator (`- \t-`) is read as text, not refused
+Y79Y/006 accepts-invalid: a tab after `?` (`?\t-`) is read as text, not refused
+Y79Y/008 accepts-invalid: a tab after `?` (`?\tkey:`) is read as a key, not refused
+YJV2 accepts-invalid: a dash alone in a flow sequence (`[-]`) is read as text, not refused
+ZCZ6 accepts-invalid: `a: b: c: d` is read as the text `b: c: d`; YAML ends a plain scalar at `: `
+26DV refused: an alias (*): not supported
+27NA refused: a directive (%YAML, %TAG): directives are not supported
+2AUY refused: a tag (!): not supported
+2G84/02 refused: content on a document marker line (`--- text`), which this reader does not strip
+2G84/03 refused: content on a document marker line (`--- text`), which this reader does not strip
+2JQS refused: an empty or null key: keys are non-null scalars here
+2LFX refused: a directive (%YAML, %TAG): directives are not supported
+2SXE refused: an anchor (&): not supported
+2XXW refused: content on a document marker line (`--- text`), which this reader does not strip
+33X3 refused: a tag (!): not supported
+35KP refused: more than one document in the stream: one document per file
+3GZX refused: an anchor (&): not supported
+3R3P refused: an anchor (&): not supported
+3RLN/00 refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+3RLN/01 refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+3RLN/02 refused: a tab before content where this reader takes only spaces
+3RLN/03 refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+3RLN/04 refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+3RLN/05 refused: a tab before content where this reader takes only spaces
+3UYS refused: a double-quoted escape this reader does not take (only \\ \" \n \t \r \0 \u \U)
+4CQQ refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+4FJ6 refused: a key that is a collection: keys are scalars here
+4Q9F refused: content on a document marker line (`--- text`), which this reader does not strip
+4QFQ refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+4WA9 refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+4ZYM refused: a tab before content where this reader takes only spaces
+52DL refused: a tag (!): not supported
+565N refused: a tag (!): not supported
+57H4 refused: a tag (!): not supported
+5GBF refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+5TYM refused: a directive (%YAML, %TAG): directives are not supported
+5WE3 refused: an explicit key (`? `): not supported
+6BCT refused: a tab after a dash as separation (`-\tbaz`): only a space separates here
+6BFJ refused: an anchor (&): not supported
+6CA3 refused: a tab before content where this reader takes only spaces
+6CK3 refused: a directive (%YAML, %TAG): directives are not supported
+6FWR refused: content on a document marker line (`--- text`), which this reader does not strip
+6HB6 refused: a tab before content where this reader takes only spaces
+6JQW refused: content on a document marker line (`--- text`), which this reader does not strip
+6JWB refused: a tag (!): not supported
+6KGN refused: an anchor (&): not supported
+6LVF refused: a directive (%YAML, %TAG): directives are not supported
+6M2F refused: an explicit key (`? `): not supported
+6PBE refused: an explicit key (`? `): not supported
+6VJK refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+6WLZ refused: a directive (%YAML, %TAG): directives are not supported
+6WPF refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+6XDY refused: more than one document in the stream: one document per file
+6ZKB refused: a directive (%YAML, %TAG): directives are not supported
+735Y refused: a tag (!): not supported
+74H7 refused: a tag (!): not supported
+753E refused: content on a document marker line (`--- text`), which this reader does not strip
+7A4E refused: a tab before content where this reader takes only spaces
+7BMT refused: an anchor (&): not supported
+7BUB refused: an anchor (&): not supported
+7FWL refused: a tag (!): not supported
+7T8X refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+7W2P refused: an explicit key (`? `): not supported
+7Z25 refused: more than one document in the stream: one document per file
+87E4 refused: a single-pair mapping inside a flow sequence (`[k : v]`): not supported
+8KB6 refused: a flow mapping entry without a value (`{a, b: c}`): not supported
+8MK2 refused: a tag (!): not supported
+8UDB refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+8XYN refused: an anchor (&): not supported
+93WF refused: content on a document marker line (`--- text`), which this reader does not strip
+96L6 refused: content on a document marker line (`--- text`), which this reader does not strip
+9BXH refused: a flow mapping entry without a value (`{"a", b: c}`): not supported
+9DXL refused: a directive (%YAML, %TAG): directives are not supported
+9KAX refused: more than one document in the stream: one document per file
+9MMW refused: a single-pair mapping inside a flow sequence (`[k : v]`): not supported
+9MQT/00 refused: content on a document marker line (`--- text`), which this reader does not strip
+9SA2 refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+9TFX refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+9WXW refused: a directive (%YAML, %TAG): directives are not supported
+A2M4 refused: an explicit key (`? `): not supported
+AB8U refused: a plain scalar continued on a line that reads as an item (`- `): refused as an item indented too deep
+B3HG refused: content on a document marker line (`--- text`), which this reader does not strip
+BEC7 refused: a directive (%YAML, %TAG): directives are not supported
+BU8L refused: a tag (!): not supported
+C4HZ refused: a directive (%YAML, %TAG): directives are not supported
+CC74 refused: a directive (%YAML, %TAG): directives are not supported
+CFD4 refused: an empty or null key: keys are non-null scalars here
+CN3R refused: an anchor (&): not supported
+CT4Q refused: an explicit key (`? `): not supported
+CUP7 refused: a tag (!): not supported
+D83L refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+DE56/00 refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+DE56/01 refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+DE56/02 refused: a double-quoted escape this reader does not take (only \\ \" \n \t \r \0 \u \U)
+DE56/03 refused: a double-quoted escape this reader does not take (only \\ \" \n \t \r \0 \u \U)
+DE56/04 refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+DE56/05 refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+DFF7 refused: an explicit key (`? `): not supported
+DK3J refused: content on a document marker line (`--- text`), which this reader does not strip
+DK95/00 refused: a tab before content where this reader takes only spaces
+DK95/02 refused: a tab before content where this reader takes only spaces
+DK95/07 refused: a directive (%YAML, %TAG): directives are not supported
+DK95/08 refused: a tab before content where this reader takes only spaces
+DWX9 refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+E76Z refused: an anchor (&): not supported
+EHF6 refused: a tag (!): not supported
+F2C7 refused: an anchor (&): not supported
+F6MC refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+FH7J refused: a tag (!): not supported
+FP8R refused: content on a document marker line (`--- text`), which this reader does not strip
+FRK4 refused: an explicit key (`? `): not supported
+FTA2 refused: content on a document marker line (`--- text`), which this reader does not strip
+G4RS refused: a double-quoted escape this reader does not take (only \\ \" \n \t \r \0 \u \U)
+G992 refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+GH63 refused: an explicit key (`? `): not supported
+HMQ5 refused: a tag (!): not supported
+HWV9 refused: content on a document marker line (`--- text`), which this reader does not strip
+J7PZ refused: content on a document marker line (`--- text`), which this reader does not strip
+JHB9 refused: more than one document in the stream: one document per file
+JS2J refused: an anchor (&): not supported
+JTV5 refused: an explicit key (`? `): not supported
+K527 refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+K54U refused: content on a document marker line (`--- text`), which this reader does not strip
+KH5V/01 refused: a double-quoted escape this reader does not take (only \\ \" \n \t \r \0 \u \U)
+KK5P refused: an explicit key (`? `): not supported
+KSS4 refused: more than one document in the stream: one document per file
+L383 refused: more than one document in the stream: one document per file
+L94M refused: an explicit key (`? `): not supported
+L9U5 refused: a single-pair mapping inside a flow sequence (`[k : v]`): not supported
+LE5A refused: a tag (!): not supported
+LQZ7 refused: a single-pair mapping inside a flow sequence (`["k" : v]`): not supported
+LX3P refused: a key that is a collection: keys are scalars here
+M29M refused: content on a document marker line (`--- text`), which this reader does not strip
+M5C3 refused: a tag (!): not supported
+M5DY refused: an explicit key (`? `): not supported
+M7A3 refused: a directive (%YAML, %TAG): directives are not supported
+M9B4 refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+MJS9 refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+MUS6/02 refused: a directive (%YAML, %TAG): directives are not supported
+MUS6/03 refused: a directive (%YAML, %TAG): directives are not supported
+MUS6/04 refused: a directive (%YAML, %TAG): directives are not supported
+MUS6/05 refused: a directive (%YAML, %TAG): directives are not supported
+MUS6/06 refused: a directive (%YAML, %TAG): directives are not supported
+MYW6 refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+NAT4 refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+NHX8 refused: an empty or null key: keys are non-null scalars here
+NKF9 refused: more than one document in the stream: one document per file
+NP9H refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+P2AD refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+P76L refused: a directive (%YAML, %TAG): directives are not supported
+PRH3 refused: a tab before content where this reader takes only spaces
+PUW8 refused: more than one document in the stream: one document per file
+PW8X refused: an anchor (&): not supported
+Q5MG refused: a tab before content where this reader takes only spaces
+Q8AD refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+Q9WF refused: a key that is a collection: keys are scalars here
+QF4Y refused: a single-pair mapping inside a flow sequence (`[k: v]`): not supported
+QT73 refused: content on a document marker line (`--- text`), which this reader does not strip
+R4YG refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+RR7F refused: an explicit key (`? `): not supported
+RTP8 refused: a directive (%YAML, %TAG): directives are not supported
+RZP5 refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+RZT7 refused: more than one document in the stream: one document per file
+S3PD refused: an empty or null key: keys are non-null scalars here
+S4JQ refused: a tag (!): not supported
+S4T7 refused: content on a document marker line (`--- text`), which this reader does not strip
+S9E8 refused: an explicit key (`? `): not supported
+SBG9 refused: a key that is a collection: keys are scalars here
+SKE5 refused: an anchor (&): not supported
+SM9W/01 refused: an empty key (`:` alone): keys are non-null scalars here
+T26H refused: content on a document marker line (`--- text`), which this reader does not strip
+T4YY refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+T5N4 refused: content on a document marker line (`--- text`), which this reader does not strip
+TL85 refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+TS54 refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+U3C3 refused: a directive (%YAML, %TAG): directives are not supported
+U3XV refused: an anchor (&): not supported
+U9NS refused: more than one document in the stream: one document per file
+UGM3 refused: content on a document marker line (`--- text`), which this reader does not strip
+UKK6/00 refused: an empty or null key: keys are non-null scalars here
+UKK6/02 refused: a tag (!): not supported
+UT92 refused: a directive (%YAML, %TAG): directives are not supported
+V55R refused: an anchor (&): not supported
+V9D5 refused: an explicit key (`? `): not supported
+W4TN refused: a directive (%YAML, %TAG): directives are not supported
+W5VH refused: an anchor (&): not supported
+X38W refused: a key that is a collection: keys are scalars here
+X8DW refused: an explicit key (`? `): not supported
+XV9V refused: a quoted scalar over several lines: a quoted scalar stays on one line here
+XW4D refused: an anchor (&): not supported
+Y2GN refused: an anchor (&): not supported
+Z67P refused: a block scalar header this reader does not take (an indentation indicator, a comment after it, or no key or dash before it)
+Z9M4 refused: a directive (%YAML, %TAG): directives are not supported
+ZH7C refused: an anchor (&): not supported
+ZWK4 refused: an anchor (&): not supported

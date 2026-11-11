@@ -889,3 +889,85 @@ fn a_go_era_config_with_split_flow_sequences_reads() {
     );
     assert_eq!(parse(&written), Ok(v));
 }
+
+/// A document marker with content on its line (`--- text`, `... x`) at
+/// column 0 is a marker, refused (one document per file), never the text
+/// of a scalar: nor the start of a value, nor a plain scalar's next line.
+/// Indented, it is text.
+#[test]
+fn a_marker_with_content_at_column_0_is_refused() {
+    let marker = |m: &str| ParseProblem::DocumentMarker { marker: m.into() };
+    for (src, line, m) in [
+        ("--- |\n  x\n", 1, "---"),
+        ("--- text\n", 1, "---"),
+        ("---\ttext\n", 1, "---"),
+        ("... x\n", 1, "..."),
+        ("a: 1\n--- b\n", 2, "---"),
+        ("text\n--- more\n", 2, "---"),
+        ("text\n... more\n", 2, "..."),
+        ("a: [b,\n--- c]\n", 2, "---"),
+    ] {
+        let e = parse(src).unwrap_err();
+        assert_eq!((e.line, e.problem), (line, marker(m)), "{src:?}");
+    }
+    // Not a marker: no space after it, or not at column 0.
+    assert_eq!(parse("---x\n").unwrap(), s("---x"));
+    assert_eq!(parse("a:\n  --- x\n").unwrap().get("a"), Some(&s("--- x")));
+    assert_eq!(
+        parse("a: b\n  --- c\n").unwrap().get("a"),
+        Some(&s("b --- c"))
+    );
+}
+
+/// A comma may end a flow collection: `[a, b, ]` is two items, not a null
+/// third, and `{a: 1, }` one entry.
+#[test]
+fn a_trailing_comma_ends_a_flow_collection() {
+    assert_eq!(
+        parse("a: [b, c, ]\n").unwrap().get("a"),
+        Some(&Value::Seq(vec![s("b"), s("c")]))
+    );
+    assert_eq!(
+        parse("a: {b: 1, }\n").unwrap().get("a"),
+        Some(&Value::Map(vec![("b".into(), s("1"))]))
+    );
+    assert_eq!(
+        parse("a: [\n  b,\n  c,\n]\n").unwrap().get("a"),
+        Some(&Value::Seq(vec![s("b"), s("c")]))
+    );
+}
+
+/// Inside a flow collection a `:` before a space, a tab, `,` `]` `}` or the
+/// end ends a plain value, as YAML's `: ` does: a single-pair mapping in a
+/// sequence (`[a: b]`) is refused, never read as the text `a: b`. A `:`
+/// before anything else is text.
+#[test]
+fn a_colon_and_space_ends_a_plain_value_in_a_flow_collection() {
+    for src in [
+        "[a: b]\n",
+        "[a :b, c: d]\n",
+        "[a:\tb]\n",
+        "[a:, b]\n",
+        "[a:]\n",
+        "[a:\n",
+    ] {
+        let e = parse(src).unwrap_err();
+        assert_eq!(e.problem, ParseProblem::ExpectedSeqSeparator, "{src:?}");
+    }
+    assert_eq!(
+        parse("{a: b: c}\n").unwrap_err().problem,
+        ParseProblem::ExpectedMapSeparator
+    );
+    assert_eq!(
+        parse("{a: b:}\n").unwrap_err().problem,
+        ParseProblem::ExpectedMapSeparator
+    );
+    assert_eq!(
+        parse("[http://x, a:b, c:d:e]\n").unwrap(),
+        Value::Seq(vec![s("http://x"), s("a:b"), s("c:d:e")])
+    );
+    assert_eq!(
+        parse("{k: http://x}\n").unwrap(),
+        Value::Map(vec![("k".into(), s("http://x"))])
+    );
+}
