@@ -327,9 +327,9 @@ fn the_composed_halves_are_reachable() {
 #[test]
 fn a_session_gives_up_the_principal_it_identified() {
     let (coordinator, _sink) = coordinator();
-    let principal = open(&coordinator, "tok-both", Arrival::Ip).into_principal();
+    let principal = open(&coordinator, "tok-both", Arrival::Loopback).into_principal();
     assert_eq!(principal.identity().name, "both");
-    let again = coordinator.open_as(Arrival::Ip, principal);
+    let again = coordinator.open_as(Arrival::Loopback, principal);
     assert_eq!(again.principal().identity().name, "both");
     assert_eq!(
         again.authorize_streams(ReadOp::Events, &[cover("table", 2)]),
