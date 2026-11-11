@@ -21,7 +21,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Context, Poll, Waker};
 
 use crate::send::{MaybeSend, MaybeSync};
@@ -55,8 +55,23 @@ impl CommitSignal {
     /// A commit landed: every [`CommitWait`] armed before now resolves, and
     /// each task waiting on one is woken.
     pub fn notify(&self) {
-        let _ = &self.shared;
-        todo!("resolute-sleet: a commit wakes its waiters")
+        let woken = {
+            let mut signal = lock(&self.shared);
+            signal.commits = signal.commits.wrapping_add(1);
+            std::mem::take(&mut signal.waiting)
+        };
+        for waker in woken.into_values() {
+            waker.wake();
+        }
+    }
+
+    /// The signal, held without keeping it: for a registry of the signals
+    /// live handles share (one per file, say), which forgets one once no
+    /// handle holds it.
+    pub fn downgrade(&self) -> WeakCommitSignal {
+        WeakCommitSignal {
+            shared: Arc::downgrade(&self.shared),
+        }
     }
 
     /// A wait armed now: it resolves at the first [`notify`](Self::notify)
@@ -67,6 +82,19 @@ impl CommitSignal {
             shared: Arc::clone(&self.shared),
             waiter: None,
         }
+    }
+}
+
+/// A [`CommitSignal`] held without keeping it ([`CommitSignal::downgrade`]).
+#[derive(Clone, Default)]
+pub struct WeakCommitSignal {
+    shared: Weak<Mutex<Signal>>,
+}
+
+impl WeakCommitSignal {
+    /// The signal, while a clone of it (or a wait on it) is still held.
+    pub fn upgrade(&self) -> Option<CommitSignal> {
+        self.shared.upgrade().map(|shared| CommitSignal { shared })
     }
 }
 
@@ -84,14 +112,26 @@ pub struct CommitWait {
 impl Future for CommitWait {
     type Output = ();
 
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
-        let _ = (
-            self.armed_at,
-            self.waiter,
-            lock(&self.shared).next_waiter,
-            cx,
-        );
-        todo!("resolute-sleet: a wait resolves at the next commit")
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+        let this = &mut *self;
+        let mut signal = lock(&this.shared);
+        if signal.commits != this.armed_at {
+            if let Some(waiter) = this.waiter.take() {
+                signal.waiting.remove(&waiter);
+            }
+            return Poll::Ready(());
+        }
+        let waiter = match this.waiter {
+            Some(waiter) => waiter,
+            None => {
+                let waiter = signal.next_waiter;
+                signal.next_waiter = waiter.wrapping_add(1);
+                this.waiter = Some(waiter);
+                waiter
+            }
+        };
+        signal.waiting.insert(waiter, cx.waker().clone());
+        Poll::Pending
     }
 }
 

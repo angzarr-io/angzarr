@@ -189,3 +189,21 @@ fn an_arc_forwards_the_stores_signal() {
     store.0.notify();
     assert_eq!(poll(&mut wait), Poll::Ready(()));
 }
+
+/// Why: a registry of the signals live handles share (one per file) must
+/// not keep a signal alive: held weakly, it is the signal while a handle or
+/// a wait holds it, and nothing once none does.
+#[test]
+fn a_weak_signal_is_the_signal_while_it_is_held() {
+    let signal = CommitSignal::new();
+    let weak = signal.downgrade();
+    let upgraded = weak.upgrade().expect("held");
+    let mut wait = upgraded.wait();
+    signal.notify();
+    assert_eq!(poll(&mut wait), Poll::Ready(()), "the same signal");
+    drop((signal, upgraded));
+    assert!(weak.upgrade().is_some(), "a wait still holds it");
+    drop(wait);
+    assert!(weak.upgrade().is_none(), "gone with its last holder");
+    assert!(WeakCommitSignal::default().upgrade().is_none());
+}

@@ -90,8 +90,18 @@ type Sender = mpsc::Sender<Result<EventBook, Status>>;
 /// stream's (before any store call): a domain, a root of 16 bytes, an
 /// edition that is unset or named.
 pub(crate) fn followed_cover(cover: Option<Cover>) -> Result<Cover, Invalid> {
-    let _ = (cover, Uuid::nil(), Invalid::NoDomain);
-    todo!("resolute-sleet: the followed cover")
+    let cover = cover.unwrap_or_default();
+    if cover.domain.is_empty() {
+        return Err(Invalid::NoDomain);
+    }
+    match &cover.root {
+        Some(root) if Uuid::try_from(root).is_ok() => {}
+        _ => return Err(Invalid::BadRoot),
+    }
+    if cover.edition.as_deref() == Some("") {
+        return Err(Invalid::EmptyEdition);
+    }
+    Ok(cover)
 }
 
 /// One subscription's position: the stream, and the next sequence it owes
@@ -105,16 +115,25 @@ pub(crate) struct Position {
 impl Position {
     /// The read from the watermark: every page at or above it.
     pub(crate) fn query(&self) -> Query {
-        let _ = (&self.cover, Select::All);
-        todo!("resolute-sleet: the read from the watermark")
+        Query {
+            cover: self.cover.clone(),
+            select: Select::Range {
+                from: self.next,
+                to: None,
+            },
+            correlation: None,
+        }
     }
 
     /// `book` as the subscriber is owed it: its pages below the watermark
     /// dropped (delivered already), none when nothing is left; the
     /// watermark moved past its last page.
     pub(crate) fn fresh(&mut self, mut book: EventBook) -> Option<EventBook> {
-        let _ = (&mut self.next, &mut book);
-        todo!("resolute-sleet: the watermark")
+        let next = self.next;
+        book.pages.retain(|page| page.sequence >= next);
+        let last = book.pages.last()?.sequence;
+        self.next = last.saturating_add(1);
+        Some(book)
     }
 }
 
@@ -131,8 +150,18 @@ enum Woke {
 
 /// The first of: the subscriber leaving, the push, the poll.
 async fn woken(push: Option<&mut CommitWait>, tx: &Sender, poll: Duration) -> Woke {
-    let _ = (push, tx, poll, Woke::Pushed, Woke::Polled);
-    todo!("resolute-sleet: what wakes a subscription")
+    let pushed = async {
+        match push {
+            Some(wait) => wait.await,
+            None => std::future::pending().await,
+        }
+    };
+    tokio::select! {
+        biased;
+        () = tx.closed() => Woke::Gone,
+        () = pushed => Woke::Pushed,
+        () = tokio::time::sleep(poll) => Woke::Polled,
+    }
 }
 
 /// A subscription that is followed: its position, and what it read last

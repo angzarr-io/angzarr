@@ -601,8 +601,7 @@ impl CommitNotify for MemoryStore {
     /// Every commit of anything through any clone, as the change token
     /// counts them.
     fn next_commit(&self) -> CommitWait {
-        let _ = &self.signal;
-        todo!("resolute-sleet: the memory store pushes")
+        self.signal.wait()
     }
 }
 

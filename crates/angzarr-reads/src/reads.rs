@@ -80,7 +80,7 @@ impl<S: ReadPorts> Reads<S> {
     /// The store the engine reads: for a frontend that also asks it what
     /// the engine does not (a follower's change token or commit push).
     pub fn store(&self) -> &S {
-        todo!("resolute-sleet: the engine's store")
+        &self.store
     }
 
     /// GetEvents: the books `query` selects, each within the limits. A

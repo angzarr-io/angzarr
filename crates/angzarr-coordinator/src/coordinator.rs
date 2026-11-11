@@ -118,8 +118,7 @@ impl<C, R, G: Gate> Session<'_, C, R, G> {
     /// subscription, served on a task of its own, opens it again with
     /// [`Coordinator::open_as`] and the same arrival).
     pub fn into_principal(self) -> Principal<G::Identity> {
-        let _ = self.principal;
-        todo!("resolute-sleet: the principal given up")
+        self.principal
     }
 
     /// Whether the gate still holds this identity good: what a long-lived
