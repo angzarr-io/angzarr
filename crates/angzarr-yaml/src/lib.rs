@@ -13,6 +13,15 @@
 //! a block scalar's indentation indicator (`|2`) or one standing alone on
 //! its line, multiple documents, tabs for indentation.
 //!
+//! A plain scalar may go on onto the lines under it (YAML 1.2 §7.3.3):
+//! lines deeper than its key (or dash), or at its own indent when it stands
+//! alone on its line, folded into one value: each line break between two
+//! lines of text a space, each empty line between them a line break (§6.5),
+//! the space around each line dropped. A comment ends it. A line there that
+//! would read as a key (`b: 2`) or an item (`- b`) is refused, not read as
+//! text: YAML ends a plain scalar at `: `, and a dash there is most often an
+//! item indented too deep. A quoted scalar does not span lines.
+//!
 //! A block scalar's content is the lines under its header indented deeper
 //! than its key (or dash), at the first one's indent or deeper, and the
 //! empty lines among them; inside it `#` and quotes are text.
@@ -422,7 +431,8 @@ fn lines(src: &str) -> Result<Vec<Line<'_>>, Error> {
         let (no, raw_line) = next?;
         if let Some(line) = meaningful(no, raw_line)? {
             let line = raw.join_flow(line)?;
-            out.push(raw.take_block(line)?);
+            let line = raw.take_block(line)?;
+            out.push(raw.join_plain(line, raw_line)?);
         }
     }
     Ok(out)
@@ -573,6 +583,89 @@ impl<'a> Raw<'a> {
         line.block = Some(block_value(&content, h));
         Ok(line)
     }
+
+    /// `line` with its plain value folded, if that value goes on under it
+    /// (YAML 1.2 §7.3.3): the lines at its [`plain_start`] column or deeper,
+    /// each without its indent, the space around it and its comment, joined
+    /// by a space, or by a line break for each empty line between (§6.5).
+    /// A comment ends the value, and so does a line that would read as a
+    /// key or an item: YAML ends a plain scalar at `: `, and a dash there is
+    /// most often an item indented too deep, refused rather than read as
+    /// text. `raw_line` is the line as written, to see its comment.
+    fn join_plain(&mut self, mut line: Line<'a>, raw_line: &str) -> Result<Line<'a>, Error> {
+        let Some((min, first)) = plain_start(&line.text, line.indent) else {
+            return Ok(line);
+        };
+        if strip_comment(raw_line).len() < raw_line.len() {
+            return Ok(line);
+        }
+        let mut value = first.to_string();
+        let mut empties = 0;
+        while let Some(next) = self.peek() {
+            let (next_no, l) = next?;
+            let l = l.trim_end_matches(SPACE);
+            let spaces = l.len() - l.trim_start_matches(' ').len();
+            let content = l.trim_start_matches(SPACE);
+            if content.is_empty() {
+                empties += 1;
+                self.at += 1;
+                continue;
+            }
+            if spaces < min || content.starts_with('#') || is_item(content) {
+                break;
+            }
+            if split_key(content).is_some() {
+                break;
+            }
+            indented_by_spaces(next_no, content)?;
+            no_document_marker(next_no, l)?;
+            let cut = plain_comment(content);
+            match empties {
+                0 => value.push(' '),
+                n => value.push_str(&"\n".repeat(n)),
+            }
+            value.push_str(content[..cut].trim_end_matches(SPACE));
+            (line.last, empties) = (next_no, 0);
+            self.at += 1;
+            if cut < content.len() {
+                break;
+            }
+        }
+        if line.last > line.no {
+            line.block = Some(value);
+        }
+        Ok(line)
+    }
+}
+
+/// The plain value a line at `indent` ends in, if it is one, and the indent
+/// a line under it must have to go on with it: deeper than the key's column
+/// for `key: value`, than the dash's for `- value`, and at least the line's
+/// own for a value alone on its line. A quoted value, a flow collection, a
+/// block scalar's header and what this reader refuses are not plain.
+fn plain_start(text: &str, indent: usize) -> Option<(usize, &str)> {
+    let (mut col, mut t, mut min) = (indent, text, indent);
+    while is_item(t) {
+        let rest = t[1..].trim_start_matches(SPACE);
+        min = col + 1;
+        col += t.len() - rest.len();
+        t = rest;
+    }
+    if let Some((_, rest)) = split_key(t) {
+        min = col + 1;
+        t = rest;
+    }
+    let first = t.chars().next()?;
+    (!"[{\"'|>&*!".contains(first)).then_some((min, t))
+}
+
+/// Where a comment starts in a plain scalar's continuation line, or its
+/// length: a `#` after a space or tab. Quotes are text there.
+fn plain_comment(s: &str) -> usize {
+    let b = s.as_bytes();
+    (1..b.len())
+        .find(|&i| b[i] == b'#' && matches!(b[i - 1], b' ' | b'\t'))
+        .unwrap_or(b.len())
 }
 
 /// Parse a document. One leading byte-order mark is skipped: editors add it,
@@ -637,9 +730,12 @@ impl<'a> Parser<'a> {
         } else if split_key(&first.text).is_some() {
             self.map(indent)
         } else {
-            let (no, text) = (first.no, first.text.clone());
+            let (no, text, block) = (first.no, first.text.clone(), first.block.clone());
             self.at += 1;
-            inline(&text, no)
+            match block {
+                Some(value) => Ok(Value::Scalar(value)),
+                None => inline(&text, no),
+            }
         }
     }
 

@@ -142,6 +142,13 @@ fn an_items_value_continues_deeper_than_its_dash() {
     assert_eq!(v.as_seq().unwrap()[0].get("j"), Some(&s("d")));
     let v = parse("- k: b\n   c\n").unwrap();
     assert_eq!(v.as_seq().unwrap()[0].get("k"), Some(&s("b c")));
+    // At the key's column a line is no continuation, nor at the dash's.
+    assert_eq!(
+        refused("- k: b\n  c\n"),
+        (2, ParseProblem::ExpectedKeyValue { found: "c".into() })
+    );
+    assert_eq!(refused("- b\nc\n"), (2, ParseProblem::UnexpectedIndent));
+    assert_eq!(refused("- - b\n  c\n"), (2, ParseProblem::UnexpectedIndent));
 }
 
 /// A scalar alone under a key may continue at its own indent.
@@ -348,9 +355,20 @@ fn a_continuation_line_keeps_the_line_refusals() {
 /// line of it, and the rest of the document stays as written.
 #[test]
 fn an_edit_takes_a_wrapped_value_whole() {
-    let mut d = Document::parse("items:\n  - a long\n    value\n\n  - b\nafter: 1\n").unwrap();
-    d.remove(&["items"], 0).unwrap();
-    assert_eq!(d.text(), "items:\n\n  - b\nafter: 1\n");
+    // As an item on one line is removed, its blank line after it with it.
+    let removed = |src: &str| {
+        let mut d = Document::parse(src).unwrap();
+        d.remove(&["items"], 0).unwrap();
+        d.text()
+    };
+    assert_eq!(
+        removed("items:\n  - a long\n    value\n\n  - b\nafter: 1\n"),
+        removed("items:\n  - a long value\n\n  - b\nafter: 1\n"),
+    );
+    assert_eq!(
+        removed("items:\n  - a long\n    value\n  - b\nafter: 1\n"),
+        "items:\n  - b\nafter: 1\n"
+    );
     let mut d = Document::parse("items:\n  - a\n  - b long\n    value\nafter: 1\n").unwrap();
     d.remove(&["items"], 1).unwrap();
     assert_eq!(d.text(), "items:\n  - a\nafter: 1\n");
