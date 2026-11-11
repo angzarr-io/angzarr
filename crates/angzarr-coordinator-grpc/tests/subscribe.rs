@@ -13,7 +13,7 @@ mod support;
 use std::collections::BTreeMap;
 use std::num::{NonZeroU32, NonZeroUsize};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -108,6 +108,35 @@ impl<R: Follows> Follows for Failing<R> {
             let failure = ReadError::from(StoreError::malformed_stream(cover(1)));
             return Box::pin(async move { Err(failure) });
         }
+        self.reads.change_token()
+    }
+}
+
+/// A read half that counts its catch-up reads.
+struct Counting<R> {
+    reads: R,
+    events: Arc<AtomicUsize>,
+}
+
+impl<R: Served> Served for Counting<R> {
+    fn reach(&self, domain: &str) -> Reach {
+        self.reads.reach(domain)
+    }
+}
+
+impl<R: Queries> Queries for Counting<R> {
+    fn events<'a>(&'a self, query: &'a Query) -> BoxFuture<'a, Result<Vec<EventBook>, ReadError>> {
+        self.events.fetch_add(1, Ordering::SeqCst);
+        self.reads.events(query)
+    }
+}
+
+impl<R: Follows> Follows for Counting<R> {
+    fn next_commit(&self) -> Option<CommitWait> {
+        self.reads.next_commit()
+    }
+
+    fn change_token(&self) -> BoxFuture<'_, Result<ChangeToken, ReadError>> {
         self.reads.change_token()
     }
 }
@@ -335,6 +364,29 @@ async fn a_commit_the_push_cannot_see_is_found_by_the_poll() {
     assert_eq!(sequences(&mut books, 2).await, vec![0, 1]);
     served.write(1, 1, "again").await;
     assert_eq!(sequences(&mut books, 1).await, vec![2]);
+}
+
+/// Why: a poll that finds the change token unchanged reads nothing: the
+/// stream is read again only when something was committed.
+#[tokio::test]
+async fn a_poll_that_sees_no_commit_reads_nothing() {
+    let events = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&events);
+    let served = serve_wrapped(
+        "sub-quiet-poll",
+        policy(Duration::from_millis(10), 1000, 16),
+        move |reads| Counting {
+            reads,
+            events: count,
+        },
+    )
+    .await;
+    let mut books = served.subscribe(WRITER, from(1, 0)).await.unwrap();
+    quiet(&mut books, "nothing committed").await;
+    assert_eq!(events.load(Ordering::SeqCst), 1, "the catch-up alone");
+    served.write(1, 1, "read").await;
+    assert_eq!(sequences(&mut books, 1).await, vec![0]);
+    assert!(events.load(Ordering::SeqCst) >= 2, "the commit is read");
 }
 
 /// Why: with neither a push nor a poll that comes round, nothing wakes the
