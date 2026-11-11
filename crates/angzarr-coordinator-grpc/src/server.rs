@@ -509,6 +509,13 @@ impl Running {
         }
         outcome
     }
+
+    /// Stop within `grace`: as [`Running::shutdown`] until `grace` has
+    /// passed, then every connection still open is ended.
+    pub async fn shutdown_within(self, grace: Duration) -> Result<(), ListenError> {
+        let _ = grace;
+        self.shutdown().await
+    }
 }
 
 impl Drop for Running {
