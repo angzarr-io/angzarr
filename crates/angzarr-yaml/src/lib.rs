@@ -1255,6 +1255,10 @@ mod tests;
 #[path = "block.test.rs"]
 mod block_tests;
 
+#[cfg(test)]
+#[path = "plain.test.rs"]
+mod plain_tests;
+
 // The property tests' seeded random stream.
 #[cfg(test)]
 #[path = "rng.test.rs"]
