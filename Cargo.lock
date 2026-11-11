@@ -44,6 +44,7 @@ dependencies = [
  "angzarr-proto-transport-distributed",
  "angzarr-reads",
  "angzarr-test-dir",
+ "http-body",
  "hyper-util",
  "prost",
  "prost-types",

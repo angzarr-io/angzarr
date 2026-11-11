@@ -99,6 +99,8 @@ fn the_listener_links_no_third_party_crate_outside_the_tonic_stack() {
         "angzarr-proto-transport-distributed",
         "angzarr-reads",
         "angzarr-test-dir",
+        // tonic's own body trait (a response body leased for its life).
+        "http-body",
         "hyper-util",
         "prost",
         "prost-types",

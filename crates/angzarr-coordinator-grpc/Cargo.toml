@@ -51,7 +51,8 @@ angzarr-reads = { path = "../angzarr-reads", optional = true }
 # (already in the lock, with `Any`).
 prost = "0.14"
 prost-types = "0.14"
-tokio = { version = "1", features = ["net", "rt", "sync"] }
+# A bounded stop's grace is a timer (time).
+tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
 # The listeners as streams of connections, for tonic's server.
 tokio-stream = { version = "0.1", features = ["net"] }
 # The server, its router (the services are added to it) and its codegen
@@ -59,6 +60,9 @@ tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server"] }
 # The grpc.health.v1 service.
 tonic-health = "0.14"
+# A response body leased for as long as it lives (tonic's own body trait,
+# already in the lock).
+http-body = "1"
 
 # The build writes the catalog's source under the crate's name
 # (angzarr_diagnostic::build): no catalog spells its crate's name.

@@ -5,7 +5,8 @@
 //! the call is in flight when the stop begins, and then judges what the
 //! services held by the reference counts and closed channels themselves:
 //! no sleep, no poll, every wait bounded by a guard far longer than the
-//! grace it forces.
+//! grace it forces. The runtime has several workers, as a server's does, so
+//! a copy released on another thread after the stop returned would show.
 
 mod support;
 
@@ -63,7 +64,7 @@ impl Parking {
             release: Arc::new(Notify::new()),
         };
         let park = Park {
-            held: parking.held.clone(),
+            _held: parking.held.clone(),
             _leased: leased,
             entered: parking.entered.clone(),
             release: parking.release.clone(),
@@ -77,7 +78,7 @@ impl Parking {
 /// lease.
 #[derive(Clone)]
 struct Park {
-    held: Arc<()>,
+    _held: Arc<()>,
     _leased: watch::Receiver<()>,
     entered: Arc<Notify>,
     release: Arc<Notify>,
@@ -177,7 +178,7 @@ async fn parked(
 /// the service, alive after the server said it had stopped. Once
 /// `shutdown_within` returns, nothing of the service is left but the
 /// test's own: the call was cut with its connection. Over plain TCP.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_bounded_stop_cuts_a_parked_call_and_releases_the_service() {
     let (parking, service) = Parking::new();
     let running = serve(service, loopback()).await;
@@ -207,7 +208,7 @@ async fn a_bounded_stop_cuts_a_parked_call_and_releases_the_service() {
 }
 
 /// Over a Unix socket.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_bounded_stop_cuts_a_parked_call_on_a_unix_socket() {
     let dir = TestDir::new("grpc-stop-uds");
     let socket = support::socket_in(&dir, "a.sock");
@@ -230,7 +231,7 @@ async fn a_bounded_stop_cuts_a_parked_call_on_a_unix_socket() {
 
 /// A call that ends within the grace is not cut: the stop is graceful
 /// until its grace runs out, and returns once the call is done.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_call_that_ends_within_the_grace_is_answered() {
     let (parking, service) = Parking::new();
     let running = serve(service, loopback()).await;
@@ -254,7 +255,7 @@ async fn a_call_that_ends_within_the_grace_is_answered() {
 
 /// The unbounded `shutdown` still waits for an open call, and releases
 /// everything once it ends.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_unbounded_stop_waits_for_the_call_then_releases_the_service() {
     let (parking, service) = Parking::new();
     let running = serve(service, loopback()).await;
@@ -281,7 +282,7 @@ async fn an_unbounded_stop_waits_for_the_call_then_releases_the_service() {
 /// Dropping the server leaves no connection behind either: the parked call
 /// is cut and the last copy of the service goes, though nobody awaits the
 /// drop (the lease closing is the event, awaited, not polled).
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dropping_the_server_cuts_a_parked_call_and_releases_the_service() {
     let (parking, service) = Parking::new();
     let running = serve(service, loopback()).await;
@@ -336,7 +337,7 @@ mod tls {
         (running, channel)
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn a_bounded_stop_cuts_a_parked_call_over_tls() {
         let (parking, service) = Parking::new();
         let (running, channel) = serve_tls(service).await;
@@ -353,7 +354,7 @@ mod tls {
             .expect_err("the call was cut");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn dropping_the_server_cuts_a_parked_call_over_tls() {
         let (parking, service) = Parking::new();
         let (running, channel) = serve_tls(service).await;

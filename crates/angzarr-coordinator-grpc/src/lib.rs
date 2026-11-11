@@ -39,7 +39,11 @@
 //!   [`Listener`]; `grpc.health.v1.Health` is always served (SERVING once
 //!   bound, NOT_SERVING when shutdown begins). [`Server::bind`] gives a
 //!   [`Running`] server, its [`Bound`] endpoints reported, stopped by
-//!   [`Running::shutdown`] or by dropping it.
+//!   [`Running::shutdown`] (graceful, unbounded), by
+//!   [`Running::shutdown_within`] (graceful for a grace, then every
+//!   connection still open is ended) or by dropping it (every connection
+//!   ended at once). No connection's task outlives a stop, so nothing a
+//!   service holds is kept by a call the stop cut.
 //! - Listener policy. A Unix socket is mode 0600 in a directory of mode
 //!   0700 that we own (created if missing); a stale socket file is replaced,
 //!   a live one refused, a file that is not a socket never touched; the
@@ -90,6 +94,7 @@ mod edge;
 mod error;
 mod limits;
 mod server;
+mod severance;
 mod status;
 #[cfg(unix)]
 mod uds;

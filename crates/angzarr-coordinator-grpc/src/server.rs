@@ -10,6 +10,7 @@ use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
+use tokio_stream::StreamExt;
 use tonic::codegen::http;
 use tonic::codegen::Service;
 use tonic::server::NamedService;
@@ -19,6 +20,7 @@ use tonic_health::ServingStatus;
 
 use crate::arrival::arrival_for_bind;
 use crate::limits::Limits;
+use crate::severance::{Lease, Leased, Severable, Severance};
 use crate::uds::{self, OwnedSocket};
 use crate::{Arrival, ListenError};
 
@@ -296,19 +298,24 @@ impl Bound {
 
 /// The server's services behind its listeners: every request carries its
 /// listener's declared [`Arrival`] as an extension ([`arrival_of`](crate::arrival_of)).
+/// Every copy of it, every request's future and every response's body holds
+/// a lease of the server's [`Severance`], so the server knows when the last
+/// of them is gone.
 #[derive(Clone)]
 struct Declared<S> {
     inner: S,
     arrival: Arrival,
+    // Last, so it is dropped after the services.
+    lease: Lease,
 }
 
-impl<S, B> Service<http::Request<B>> for Declared<S>
+impl<S, B, E> Service<http::Request<B>> for Declared<S>
 where
-    S: Service<http::Request<B>>,
+    S: Service<http::Request<B>, Response = http::Response<tonic::body::Body>, Error = E>,
 {
     type Response = S::Response;
-    type Error = S::Error;
-    type Future = S::Future;
+    type Error = E;
+    type Future = Leased<S::Future>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)
@@ -316,7 +323,7 @@ where
 
     fn call(&mut self, mut request: http::Request<B>) -> Self::Future {
         request.extensions_mut().insert(self.arrival);
-        self.inner.call(request)
+        Leased::new(self.inner.call(request), self.lease.clone())
     }
 }
 
@@ -379,6 +386,7 @@ impl Server {
             },
             health: self.health,
             stop,
+            severance: Severance::new(),
             tasks: Vec::new(),
             sockets: Vec::new(),
         };
@@ -391,6 +399,7 @@ impl Server {
             let service = Declared {
                 inner: routes.clone(),
                 arrival,
+                lease: running.severance.lease(),
             };
             match &listener.address {
                 Address::Uds(path) => {
@@ -427,13 +436,23 @@ impl Server {
     }
 }
 
-/// A server that is serving. Dropping it stops the listeners at once, not
-/// waiting for open calls, and removes its sockets; [`Running::shutdown`]
-/// stops it gracefully, health first.
+/// A server that is serving. [`Running::shutdown`] stops it gracefully,
+/// health first, waiting for open calls however long they take;
+/// [`Running::shutdown_within`] does the same for at most a grace, then
+/// ends every connection still open. Dropping it stops the listeners and
+/// ends every connection at once, not waiting for open calls, and removes
+/// its sockets: its fields do that as they drop (the stop's sender gone
+/// is the listeners' stop signal, the severance gone fails every
+/// connection's IO, the sockets' guards remove their files), so it needs
+/// no `Drop` of its own. However it stops, no connection's task outlives it: a
+/// call cut by the stop is cut with its connection, and what the services
+/// hold is released (at once after a shutdown returns; as the cut
+/// connections' tasks end, which nothing waits for, after a drop).
 pub struct Running {
     bound: Bound,
     health: HealthReporter,
     stop: watch::Sender<bool>,
+    severance: Severance,
     tasks: Vec<JoinHandle<Result<(), tonic::transport::Error>>>,
     sockets: Vec<OwnedSocket>,
 }
@@ -475,6 +494,8 @@ impl Running {
             _ => tonic::transport::Server::builder(),
         };
         let builder = limits.apply(builder);
+        let lease = self.severance.lease();
+        let incoming = incoming.map(move |io| io.map(|io| Severable::new(io, lease.clone())));
         self.tasks.push(tokio::spawn(
             builder.serve_with_incoming_shutdown(service, incoming, signal),
         ));
@@ -488,14 +509,51 @@ impl Running {
 
     /// Stop gracefully: health turns NOT_SERVING, the listeners stop
     /// accepting, open calls finish, and the sockets are removed. Returns
-    /// when every listener has stopped; the first one that failed says why.
-    pub async fn shutdown(mut self) -> Result<(), ListenError> {
+    /// when every listener has stopped and nothing the services hold is
+    /// left with the server, however long an open call takes; the first
+    /// listener that failed says why.
+    pub async fn shutdown(self) -> Result<(), ListenError> {
+        self.stop_within(None).await
+    }
+
+    /// Stop as [`Running::shutdown`] does for at most `grace`, then end
+    /// every connection still open: a call still in its handler is cut (its
+    /// caller sees the connection fail), and its handler's future is
+    /// dropped. Returns when every listener has stopped and nothing the
+    /// services hold is left with the server, so a store a handler held is
+    /// free once this returns; that takes `grace` and the moment the cut
+    /// connections take to end, never a parked handler's time.
+    pub async fn shutdown_within(self, grace: Duration) -> Result<(), ListenError> {
+        self.stop_within(Some(grace)).await
+    }
+
+    /// Stop, ending every connection once `grace` (if any) has passed.
+    async fn stop_within(mut self, grace: Option<Duration>) -> Result<(), ListenError> {
         self.health
             .set_service_status("", ServingStatus::NotServing)
             .await;
         let _ = self.stop.send(true);
         let mut outcome = Ok(());
-        for task in std::mem::take(&mut self.tasks) {
+        match grace {
+            None => self.stopped(&mut outcome).await,
+            Some(grace) => {
+                if tokio::time::timeout(grace, self.stopped(&mut outcome))
+                    .await
+                    .is_err()
+                {
+                    self.severance.sever();
+                    self.stopped(&mut outcome).await;
+                }
+            }
+        }
+        outcome
+    }
+
+    /// Returns once every listener's task has ended and every lease is
+    /// released, the first failure in `outcome`. Cancelled, it may be called
+    /// again: the tasks already joined are gone, their failure kept.
+    async fn stopped(&mut self, outcome: &mut Result<(), ListenError>) {
+        while let Some(task) = self.tasks.last_mut() {
             let result = match task.await {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(error)) => Err(ListenError::io("serve", "listener")(std::io::Error::other(
@@ -505,25 +563,11 @@ impl Running {
                     error,
                 ))),
             };
-            outcome = outcome.and(result);
+            self.tasks.pop();
+            if outcome.is_ok() {
+                *outcome = result;
+            }
         }
-        outcome
-    }
-
-    /// Stop within `grace`: as [`Running::shutdown`] until `grace` has
-    /// passed, then every connection still open is ended.
-    pub async fn shutdown_within(self, grace: Duration) -> Result<(), ListenError> {
-        let _ = grace;
-        self.shutdown().await
-    }
-}
-
-impl Drop for Running {
-    fn drop(&mut self) {
-        let _ = self.stop.send(true);
-        for task in &self.tasks {
-            task.abort();
-        }
-        // The sockets' guards remove their files as the fields drop.
+        self.severance.released().await;
     }
 }
