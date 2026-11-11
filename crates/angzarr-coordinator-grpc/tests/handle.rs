@@ -277,13 +277,13 @@ async fn get_events_hides_a_stream_the_gate_does_not_own_and_needs_a_credential(
     assert_eq!(status.code(), Code::Unauthenticated);
 }
 
-/// Why: only Handle and GetEvents are served; the other RPCs say so with a
+/// Why: only Handle, HandleSync and GetEvents are served; the other RPCs say so with a
 /// typed status (key and operation), never answering as if they had run.
 #[tokio::test]
 async fn the_other_rpcs_are_unimplemented_with_a_typed_status() {
     use angzarr_proto::v1::ReactionDelivery;
     use angzarr_proto_transport_distributed::v1::event_query_service_client::EventQueryServiceClient;
-    use angzarr_proto_transport_distributed::v1::{CorrelationQuery, HandleSyncRequest};
+    use angzarr_proto_transport_distributed::v1::CorrelationQuery;
 
     let dir = TestDir::new("unimplemented");
     let harness = serve(socket(&dir)).await;
@@ -295,12 +295,6 @@ async fn the_other_rpcs_are_unimplemented_with_a_typed_status() {
         (
             "handle_async",
             c.handle_async(bearing(CommandBook::default(), WRITER))
-                .await
-                .unwrap_err(),
-        ),
-        (
-            "handle_sync",
-            c.handle_sync(bearing(HandleSyncRequest::default(), WRITER))
                 .await
                 .unwrap_err(),
         ),

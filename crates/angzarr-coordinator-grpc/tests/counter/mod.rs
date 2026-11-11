@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use angzarr_coordinator::{
     Allowlist, Arrival, AuditSink, BodyKind, Caller, Commands, Coordinator, Credential, Denied,
-    Gate, Principal, Reach, ReadOp, Served, Trusted, Unauthenticated,
+    Gate, Principal, Reach, ReadOp, Served, Synced, Trusted, Unauthenticated,
 };
 use angzarr_coordinator_base::{Answered, Code, Coded};
 use angzarr_coordinator_grpc::{Edge, Listener, Running, ServedReads, Server};
@@ -20,7 +20,7 @@ use angzarr_proto::uuid::Uuid;
 use angzarr_proto::v1::event_meta::Causation;
 use angzarr_proto::v1::{
     command_page, event_page, Command, CommandBook, CommandPage, Cover, EventBook, EventMeta,
-    EventPage, Fact, FactCause, FactOrigin,
+    EventPage, Fact, FactCause, FactOrigin, Projection,
 };
 use angzarr_proto_transport_distributed::v1::command_handler_coordinator_service_client::CommandHandlerCoordinatorServiceClient;
 use angzarr_proto_transport_distributed::v1::event_query_service_client::EventQueryServiceClient;
@@ -148,7 +148,41 @@ impl Commands for Counter {
             }))
         })
     }
+
+    /// As `handle`, then one projection per named projector, each at the
+    /// stream's head after the command, its body the projector's name (so
+    /// a test sees the names reached the endpoint, in order).
+    fn handle_sync<'a>(
+        &'a self,
+        book: CommandBook,
+        projectors: Vec<String>,
+        caller: Caller,
+    ) -> BoxFuture<'a, Result<Synced, Coded>> {
+        Box::pin(async move {
+            let answered = self.handle(book, caller).await?;
+            let events = answered.events.clone().unwrap_or_default();
+            let projections = projectors
+                .into_iter()
+                .map(|projector| Projection {
+                    cover: events.cover.clone(),
+                    next_sequence: events.next_sequence,
+                    projection: Some(Any {
+                        type_url: PROJECTED.to_string(),
+                        value: projector.clone().into_bytes(),
+                    }),
+                    projector,
+                })
+                .collect();
+            Ok(Synced {
+                answered,
+                projections,
+            })
+        })
+    }
 }
+
+/// The type of the counter's projections.
+pub const PROJECTED: &str = "type.invalid/counter.v1.Projected";
 
 /// What the gate saw, and decided.
 #[derive(Default)]

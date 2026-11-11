@@ -1,5 +1,5 @@
-//! `CommandHandlerCoordinatorService`: `Handle` through the gate; the other
-//! RPCs are UNIMPLEMENTED with a typed status.
+//! `CommandHandlerCoordinatorService`: `Handle` and `HandleSync` through the
+//! gate; the other RPCs are UNIMPLEMENTED with a typed status.
 
 use angzarr_coordinator::{Commands, Gate, Served};
 use angzarr_proto::v1::{CommandBook, ReactionDelivery};
@@ -39,11 +39,27 @@ where
         Err(unimplemented("handle_async"))
     }
 
+    /// As `handle`, waiting for the named projectors: an absent command is
+    /// the empty book, refused by the gate as `Handle` refuses it.
     async fn handle_sync(
         &self,
-        _request: Request<HandleSyncRequest>,
+        request: Request<HandleSyncRequest>,
     ) -> Result<Response<CommandSyncResult>, Status> {
-        Err(unimplemented("handle_sync"))
+        let presented = Presented::of(&request)?;
+        let session = self.session(&presented).await?;
+        let HandleSyncRequest {
+            command,
+            projectors,
+        } = request.into_inner();
+        let synced = session
+            .handle_sync(command.unwrap_or_default(), projectors)
+            .await
+            .map_err(|failure| status_of(&failure))?;
+        Ok(Response::new(CommandSyncResult {
+            events: synced.answered.events,
+            delivery: synced.answered.delivery.into(),
+            projections: synced.projections,
+        }))
     }
 
     async fn deliver(
