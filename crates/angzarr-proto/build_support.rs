@@ -20,15 +20,46 @@ pub fn proto_root() -> PathBuf {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
     let submodule = manifest.join("../../angzarr-project/proto");
     if submodule.join("io/angzarr/v1/types.proto").exists() {
-        return submodule
-            .canonicalize()
-            .expect("canonicalize the proto root");
+        return without_verbatim(
+            submodule
+                .canonicalize()
+                .expect("canonicalize the proto root"),
+        );
     }
     panic!(
         "angzarr protos not found at {} (is the angzarr-project submodule checked out, at a \
          revision with proto/io/angzarr/v1?); set ANGZARR_PROJECT_PROTO",
         submodule.display()
     );
+}
+
+/// `path` without Windows' verbatim prefix (`\\?\`), which `canonicalize`
+/// gives there and in which `/` is not a separator, so protoc cannot join
+/// its file names to it: a drive's path (`\\?\C:\x`) is `C:\x`, a share's
+/// (`\\?\UNC\host\share\x`) is `\\host\share\x`. Any other path, a
+/// verbatim one naming no drive or share among them, is kept as it is.
+/// (Not checked: a verbatim path longer than `MAX_PATH`, or with a name
+/// Win32 reserves, which its plain form would not reach.)
+pub fn without_verbatim(path: PathBuf) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path;
+    };
+    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{share}"));
+    }
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) if names_a_drive(rest) => PathBuf::from(rest),
+        _ => path,
+    }
+}
+
+/// Whether `rest` begins with a drive (`C:`).
+fn names_a_drive(rest: &str) -> bool {
+    let mut chars = rest.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some(letter), Some(':')) if letter.is_ascii_alphabetic()
+    )
 }
 
 /// Every `.proto` of the package directory `package` (under `root`),
