@@ -2,6 +2,7 @@
 
 use std::fmt;
 use std::net::SocketAddr;
+#[cfg(unix)]
 use std::path::Path;
 
 use angzarr_diagnostic::{code, Arg, Diagnostic};
@@ -39,24 +40,28 @@ pub enum ListenError {
 }
 
 impl ListenError {
+    #[cfg(unix)]
     pub(crate) fn socket_in_use(path: &Path) -> ListenError {
         ListenError::SocketInUse {
             path: path.display().to_string(),
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn not_a_socket(path: &Path) -> ListenError {
         ListenError::NotASocket {
             path: path.display().to_string(),
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn directory_not_private(path: &Path) -> ListenError {
         ListenError::DirectoryNotPrivate {
             path: path.display().to_string(),
         }
     }
 
+    #[cfg(unix)]
     pub(crate) fn no_directory(path: &Path) -> ListenError {
         ListenError::NoDirectory {
             path: path.display().to_string(),

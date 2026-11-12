@@ -9,7 +9,9 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
-use tokio_stream::wrappers::{TcpListenerStream, UnixListenerStream};
+use tokio_stream::wrappers::TcpListenerStream;
+#[cfg(unix)]
+use tokio_stream::wrappers::UnixListenerStream;
 use tokio_stream::StreamExt;
 use tonic::codegen::http;
 use tonic::codegen::Service;
@@ -21,6 +23,7 @@ use tonic_health::ServingStatus;
 use crate::arrival::arrival_for_bind;
 use crate::limits::Limits;
 use crate::severance::{Lease, Leased, Severable, Severance};
+#[cfg(unix)]
 use crate::uds::{self, OwnedSocket};
 use crate::{Arrival, ListenError};
 
@@ -61,7 +64,8 @@ pub struct Listener {
 impl Listener {
     /// A Unix socket at `path`: mode 0600, in a directory of mode 0700 we
     /// own (created if missing), a stale socket file replaced and a live
-    /// one refused.
+    /// one refused. On a platform without Unix sockets its bind is refused,
+    /// [`ListenError::Io`] with the system's unsupported error.
     pub fn uds(path: impl Into<PathBuf>) -> Listener {
         Listener {
             address: Address::Uds(path.into()),
@@ -388,6 +392,7 @@ impl Server {
             stop,
             severance: Severance::new(),
             tasks: Vec::new(),
+            #[cfg(unix)]
             sockets: Vec::new(),
         };
         for listener in self.listeners {
@@ -402,6 +407,7 @@ impl Server {
                 lease: running.severance.lease(),
             };
             match &listener.address {
+                #[cfg(unix)]
                 Address::Uds(path) => {
                     let (bound, socket) = uds::bind(path)?;
                     running.sockets.push(socket);
@@ -411,6 +417,15 @@ impl Server {
                         path: path.clone(),
                         arrival,
                     });
+                }
+                // No Unix socket to bind: refused, and what is already
+                // bound is let go with `running`.
+                #[cfg(not(unix))]
+                Address::Uds(path) => {
+                    let _ = (service, tls);
+                    return Err(ListenError::io("bind", path.display())(
+                        std::io::ErrorKind::Unsupported.into(),
+                    ));
                 }
                 Address::Tcp(addr) => {
                     let bound = TcpListener::bind(addr)
@@ -454,6 +469,7 @@ pub struct Running {
     stop: watch::Sender<bool>,
     severance: Severance,
     tasks: Vec<JoinHandle<Result<(), tonic::transport::Error>>>,
+    #[cfg(unix)]
     sockets: Vec<OwnedSocket>,
 }
 
