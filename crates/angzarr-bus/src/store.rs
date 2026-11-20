@@ -310,16 +310,17 @@ impl State {
             .collect();
     }
 
-    /// Lane `key` seen at `head` (its next sequence, 0 if the store holds
-    /// nothing of it): a stream listed is kept; one not listed is kept only
-    /// if something of it was delivered or is out, and is owed its gone
-    /// delivery.
+    /// A stream the change feed named, at `head` (its next sequence, 0 if
+    /// the store holds nothing of it), `purged` if it was purged since the
+    /// feed was last read: what was delivered of it (or is out) is gone,
+    /// whatever its head now, and it is owed its gone delivery, then from its
+    /// start. A stream with no events is forgotten unless it is owed that.
     fn seen(&mut self, cover: Cover, head: u64, purged: bool) {
         let key = key(&cover);
         if purged {
             // What was delivered of it is gone, whatever its head now.
             if let Some(lane) = self.lanes.get_mut(&key) {
-                if lane.kept() && lane.out.is_none() {
+                if lane.kept() {
                     lane.gone = true;
                 }
             }
@@ -327,20 +328,14 @@ impl State {
         if head == 0 {
             if let Some(lane) = self.lanes.get_mut(&key) {
                 lane.listed = false;
-                match lane.kept() || lane.gone {
-                    true => lane.gone = true,
-                    false => {
-                        self.lanes.remove(&key);
-                    }
+                if !lane.gone {
+                    self.lanes.remove(&key);
                 }
             }
         } else {
             let lane = (self.lanes.entry(key.clone())).or_insert_with(|| Lane::new(cover, 0));
             lane.listed = true;
             lane.head = head;
-            if head < lane.cursor && lane.out.is_none() {
-                lane.gone = true;
-            }
         }
         self.sync(&key);
     }
