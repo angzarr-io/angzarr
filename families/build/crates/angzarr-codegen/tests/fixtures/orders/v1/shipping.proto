@@ -1,0 +1,52 @@
+syntax = "proto3";
+
+// A policy in a file of its own, reacting to an event whose owner, the
+// order aggregate, is declared in another file of the set (orders.proto):
+// its source is still derived from that owner.
+package orders.v1;
+
+import "io/angzarr/v1/options.proto";
+import "orders/v1/orders.proto";
+
+message OrderToShippingPolicy {
+  option (io.angzarr.v1.component) = {
+    component_name: "policy-order-shipping"
+    policy: {output_domain: "shipping"}
+  };
+}
+
+// An event of the order domain, as the shipping policy sees it: reached
+// from its own file's marker.
+message OrderShipped {
+  option (io.angzarr.v1.event) = {component: "orders.v1.OrderToShippingPolicy"};
+  option (io.angzarr.v1.event) = {component: "orders.v1.OrderState"};
+
+  string customer = 1;
+}
+
+// A second event of the order domain: its owner is the same, so the
+// shipping policy's source is still the one domain.
+message OrderPacked {
+  option (io.angzarr.v1.event) = {component: "orders.v1.OrderToShippingPolicy"};
+  option (io.angzarr.v1.event) = {component: "orders.v1.OrderState"};
+  option (io.angzarr.v1.event) = {component: "orders.v1.ShippingBoard"};
+
+  string customer = 1;
+}
+
+// A policy of a process manager's event: the owner is the process manager,
+// declared in fulfillment.proto, whose event names this policy there.
+message FulfillmentToShippingPolicy {
+  option (io.angzarr.v1.component) = {
+    component_name: "policy-fulfillment-shipping"
+    policy: {output_domain: "shipping"}
+  };
+}
+
+// A projector of two owners' events, and an event without one.
+message ShippingBoard {
+  option (io.angzarr.v1.component) = {
+    component_name: "projector-shipping-board"
+    projector: {}
+  };
+}

@@ -1,0 +1,6 @@
+{"event":"run.finished","counts":{"killed":3,"survived":1},"took_ms":"1234","exit":0,"status":"not-called","reason":"no tests","file":"src/lib.rs","end_line":9,"tests":null}
+{"event":"run.finished","counts":{"killed":3,"survived":1},"took_ms":"1234","exit":0,"status":"broke","reason":null,"tests":null}
+{"root":"/r","site":null}
+{"run":"07070707-0707-0707-0707-070707070707","event":"run.started","root":"/r","jobs":4,"site":{}}
+{"run":"07070707-0707-0707-0707-070707070707","event":"run.finished","counts":{"killed":3,"survived":1},"took_ms":"1234","exit":0,"status":"not-called","reason":"no tests","file":"src/lib.rs","end_line":9,"tests":null}
+{"event":"note","value":"n"}

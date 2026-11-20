@@ -1,0 +1,9 @@
+syntax = "proto3";
+package bad.v1;
+import "google/protobuf/struct.proto";
+
+// A map's values are reached as a field's are: a well-known type the
+// runtime does not write is refused there too.
+message Shelf {
+  map<string, google.protobuf.Struct> values = 1;
+}

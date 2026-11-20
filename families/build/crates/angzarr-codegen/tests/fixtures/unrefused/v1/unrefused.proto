@@ -1,0 +1,50 @@
+// A policy whose target cannot refuse: ReserveStock names no refusal, so
+// the policy needs no refusal callback (C-0861), and its source takes no
+// fact to translate one into.
+syntax = "proto3";
+package unrefused.v1;
+import "io/angzarr/v1/options.proto";
+
+message OrderState {
+  option (io.angzarr.v1.component) = {
+    component_name: "order"
+    aggregate: {domain: "order"}
+  };
+}
+
+message PlaceOrder {
+  option (io.angzarr.v1.command) = {
+    component: "unrefused.v1.OrderState"
+    emits: "unrefused.v1.OrderPlaced"
+  };
+}
+
+message OrderPlaced {
+  option (io.angzarr.v1.event) = {component: "unrefused.v1.OrderState"};
+  option (io.angzarr.v1.event) = {component: "unrefused.v1.OrderToInventoryPolicy"};
+}
+
+message InventoryState {
+  option (io.angzarr.v1.component) = {
+    component_name: "inventory"
+    aggregate: {domain: "inventory"}
+  };
+}
+
+message ReserveStock {
+  option (io.angzarr.v1.command) = {
+    component: "unrefused.v1.InventoryState"
+    emits: "unrefused.v1.StockReserved"
+  };
+}
+
+message StockReserved {
+  option (io.angzarr.v1.event) = {component: "unrefused.v1.InventoryState"};
+}
+
+message OrderToInventoryPolicy {
+  option (io.angzarr.v1.component) = {
+    component_name: "policy-order-inventory"
+    policy: {output_domain: "inventory"}
+  };
+}

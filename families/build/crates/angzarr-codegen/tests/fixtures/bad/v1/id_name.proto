@@ -1,0 +1,28 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/v1/options.proto";
+import "io/angzarr/v1/types.proto";
+import "io/angzarr/codegen/v1/codegen.proto";
+
+// An id newtype takes a name of the layer: a message's is taken.
+message TicketState {
+  option (io.angzarr.v1.component) = {
+    component_name: "tickets"
+    aggregate: {domain: "tickets"}
+  };
+}
+
+// The command carries it: the domain layer reaches it through the
+// component's inputs.
+message Ticket {
+  option (io.angzarr.v1.command) = {
+    component: "bad.v1.TicketState"
+    emits: ["bad.v1.Ticketed"]
+  };
+
+  io.angzarr.v1.UUID id = 1 [(io.angzarr.codegen.v1.field) = {id_type: "Ticket"}];
+}
+
+message Ticketed {
+  option (io.angzarr.v1.event) = {component: "bad.v1.TicketState"};
+}

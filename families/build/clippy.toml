@@ -1,0 +1,3 @@
+# Workspace clippy settings (architecture-fixes G2): the nesting threshold
+# for `excessive_nesting`, which Cargo.toml's [workspace.lints.clippy] turns on.
+excessive-nesting-threshold = 6

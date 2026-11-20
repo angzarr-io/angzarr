@@ -1,0 +1,23 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/v1/options.proto";
+
+message CrateState {
+  option (io.angzarr.v1.component) = {
+    component_name: "crates"
+    aggregate: {domain: "crates"}
+  };
+}
+
+// The crate takes no fact: it has no choice of facts, so a message named
+// as one would be is free.
+message Pack {
+  option (io.angzarr.v1.command) = {
+    component: "bad.v1.CrateState"
+    emits: "bad.v1.CrateFact"
+  };
+}
+
+message CrateFact {
+  option (io.angzarr.v1.event) = {component: "bad.v1.CrateState"};
+}

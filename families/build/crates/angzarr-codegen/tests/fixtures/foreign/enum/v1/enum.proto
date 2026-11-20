@@ -1,0 +1,27 @@
+// Another package's enum, held alone.
+syntax = "proto3";
+package foreign.enum.v1;
+import "io/angzarr/v1/options.proto";
+import "foreign/other/v1/other.proto";
+
+message HolderState {
+  option (io.angzarr.v1.component) = {
+    component_name: "holders"
+    aggregate: {domain: "holders"}
+  };
+}
+
+// The command carries it: the domain layer reaches it through the
+// component's inputs.
+message Holder {
+  option (io.angzarr.v1.command) = {
+    component: "foreign.enum.v1.HolderState"
+    emits: ["foreign.enum.v1.Held"]
+  };
+
+  foreign.other.v1.Colour colour = 1;
+}
+
+message Held {
+  option (io.angzarr.v1.event) = {component: "foreign.enum.v1.HolderState"};
+}

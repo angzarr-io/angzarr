@@ -1,0 +1,61 @@
+# The mutation full pass, weekly and by hand: `just mutants-all` mutates the
+# whole workspace and judges each crate by the justfile's mutation_thresholds.
+# No git hook runs mutation; this pass catches what has drifted, and measures
+# the thresholds still proposed. The toolchain is rust-toolchain.toml's; angzarr-proto's build
+# needs protoc. Tests needing the network or uv are #[ignore]d, so not run.
+name: mutation
+
+on:
+  schedule:
+    # Weekly, Monday 06:00 UTC.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  mutants-all:
+    runs-on: ubuntu-latest
+    # GitHub's cap for a hosted job; let the full pass finish rather than
+    # cancel it mid-run.
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - uses: extractions/setup-just@v2
+
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-mutants-registry-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-mutants
+        run: cargo install cargo-mutants --locked
+
+      - name: Mutation test (full pass)
+        run: just mutants-all
+
+      - name: cargo-mutants' log and surviving mutants
+        if: always()
+        run: |
+          for f in target/mutants-all/cargo-mutants.log target/mutants-all/mutants.out/missed.txt; do
+            [ -f "$f" ] || continue
+            echo "::group::$f"; cat "$f"; echo "::endgroup::"
+          done

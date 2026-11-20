@@ -1,0 +1,53 @@
+// One refusal message per status a refusal may declare: the domain layer
+// maps each to the business status of the same name.
+syntax = "proto3";
+package statuses.v1;
+import "io/angzarr/v1/options.proto";
+
+message GateState {
+  option (io.angzarr.v1.component) = {
+    component_name: "gate"
+    aggregate: {domain: "gate"}
+  };
+}
+
+message Try {
+  option (io.angzarr.v1.command) = {
+    component: "statuses.v1.GateState"
+    refuses: "statuses.v1.NotInRange"
+    refuses: "statuses.v1.BadInput"
+    refuses: "statuses.v1.Missing"
+    refuses: "statuses.v1.Taken"
+    refuses: "statuses.v1.Forbidden"
+    refuses: "statuses.v1.NotReady"
+    refuses: "statuses.v1.Stale"
+  };
+}
+
+message NotInRange {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_OUT_OF_RANGE;
+}
+
+message BadInput {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_INVALID_ARGUMENT;
+}
+
+message Missing {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_NOT_FOUND;
+}
+
+message Taken {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_ALREADY_EXISTS;
+}
+
+message Forbidden {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_PERMISSION_DENIED;
+}
+
+message NotReady {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+}
+
+message Stale {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_ABORTED;
+}

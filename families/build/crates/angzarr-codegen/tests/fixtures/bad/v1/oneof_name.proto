@@ -1,0 +1,34 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/v1/options.proto";
+
+message ThingState {
+  option (io.angzarr.v1.component) = {
+    component_name: "things"
+    aggregate: {domain: "things"}
+  };
+}
+
+// The choice of Poke's oneof `shape` is named `PokeShape`, the name of a
+// message the layer also holds.
+message Poke {
+  option (io.angzarr.v1.command) = {
+    component: "bad.v1.ThingState"
+    emits: ["bad.v1.Poked"]
+  };
+
+  oneof shape {
+    string round = 1;
+    string square = 2;
+  }
+}
+
+message PokeShape {
+  string sides = 1;
+}
+
+message Poked {
+  option (io.angzarr.v1.event) = {component: "bad.v1.ThingState"};
+
+  PokeShape shape = 1;
+}

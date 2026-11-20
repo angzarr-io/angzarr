@@ -1,0 +1,32 @@
+# The end-to-end fixture of angzarr-build's tests/local.rs: an application on
+# angzarr-embedded, its domain layer and register() generated from the
+# kinds fixture proto (a typed refusal of each field kind, a command
+# refusing several, inputs of several emits, a projector of two domains),
+# its components the scaffold with their bodies written, and a projector
+# written by hand beside them, run by angzarr-embedded-host.
+# Built and run by that test only; a workspace of its own, outside
+# angzarr-cli's. Its Cargo.lock is a build artifact, ignored.
+[package]
+name = "kinds-app"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+# angzarr-embedded at the rev that dispatches through angzarr-router and has
+# its entry point (angzarr-embedded-host's `run`), and the router at the rev
+# it names, so the app has one router and one angzarr-proto (angzarr core's,
+# at the rev angzarr-embedded and angzarr-cli both pin).
+[dependencies]
+angzarr-embedded = { git = "https://github.com/angzarr-io/angzarr-embedded", rev = "bce1ff2ed813c72b869bbbfcdb7ba9b426e47812" }
+angzarr-embedded-host = { git = "https://github.com/angzarr-io/angzarr-embedded", rev = "bce1ff2ed813c72b869bbbfcdb7ba9b426e47812" }
+angzarr-embedded-macros = { git = "https://github.com/angzarr-io/angzarr-embedded", rev = "bce1ff2ed813c72b869bbbfcdb7ba9b426e47812" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "fd7c87b9f5c9148d05d699b229153afed07ab534" }
+prost = "0.14"
+# The App is async, on the caller's runtime, which is tokio's
+# (angzarr-embedded-host), already in the graph through it.
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+
+[build-dependencies]
+angzarr-build = { path = "../../.." }

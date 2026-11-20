@@ -1,0 +1,9 @@
+// Types alone, no component: what the other shapes packages hold of
+// another package's. Its domain layer is its types and nothing else.
+syntax = "proto3";
+package shapes.common.v1;
+
+message Money {
+  int64 cents = 1;
+  string currency = 2;
+}

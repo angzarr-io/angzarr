@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+// A policy from naming.proto's domain to a domain nothing owns.
+package naming.v1;
+
+import "io/angzarr/v1/options.proto";
+
+// Its target domain is owned by no aggregate or process manager.
+message BooksNowherePolicy {
+  option (io.angzarr.v1.component) = {
+    component_name: "policy-books-nowhere"
+    policy: {output_domain: "nowhere"}
+  };
+}

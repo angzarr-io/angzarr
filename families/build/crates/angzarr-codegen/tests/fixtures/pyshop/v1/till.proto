@@ -1,0 +1,124 @@
+syntax = "proto3";
+
+// One aggregate whose commands refuse with typed refusals, several to a
+// command, one of them its domain's rejection codes as a Reason enum
+// (decision 14.50), and whose inputs return lists of events (decision 14.75).
+package pyshop.v1;
+
+import "google/protobuf/timestamp.proto";
+import "io/angzarr/v1/options.proto";
+
+message TillState {
+  option (io.angzarr.v1.component) = {
+    component_name: "till"
+    aggregate: {domain: "till"}
+  };
+
+  int64 balance = 1;
+  map<string, Drawer> drawers = 2;
+  map<string, int64> floats = 3;
+}
+
+enum Drawer {
+  DRAWER_UNSPECIFIED = 0;
+  DRAWER_OPEN = 1;
+}
+
+// Two refusals: the till's codes, and the card's own.
+message Charge {
+  option (io.angzarr.v1.command) = {
+    component: "pyshop.v1.TillState"
+    emits: "pyshop.v1.Charged"
+    refuses: "pyshop.v1.TillRefused"
+    refuses: "pyshop.v1.CardDeclined"
+  };
+
+  int64 amount = 1;
+}
+
+// A repeat charges nothing.
+message Refund {
+  option (io.angzarr.v1.command) = {
+    component: "pyshop.v1.TillState"
+    emits: "pyshop.v1.Refunded"
+    refuses: "pyshop.v1.TillRefused"
+  };
+
+  int64 amount = 1;
+}
+
+// Any number of either.
+message Settle {
+  option (io.angzarr.v1.command) = {
+    component: "pyshop.v1.TillState"
+    emits: "pyshop.v1.Charged"
+    emits: "pyshop.v1.Refunded"
+  };
+}
+
+// Both, in order.
+message Open {
+  option (io.angzarr.v1.command) = {
+    component: "pyshop.v1.TillState"
+    emits: "pyshop.v1.Charged"
+    emits: "pyshop.v1.Refunded"
+  };
+}
+
+// Both, or nothing; refused when the count is off.
+message Close {
+  option (io.angzarr.v1.command) = {
+    component: "pyshop.v1.TillState"
+    emits: "pyshop.v1.Charged"
+    emits: "pyshop.v1.Refunded"
+    refuses: "pyshop.v1.Unbalanced"
+  };
+}
+
+// A fact: recorded as received, flagged by the event it emits.
+message CashCounted {
+  option (io.angzarr.v1.fact) = {
+    component: "pyshop.v1.TillState"
+    emits: "pyshop.v1.Refunded"
+  };
+
+  int64 counted = 1;
+}
+
+message Charged {
+  option (io.angzarr.v1.event) = {component: "pyshop.v1.TillState"};
+
+  int64 amount = 1;
+  google.protobuf.Timestamp at = 2;
+}
+
+message Refunded {
+  option (io.angzarr.v1.event) = {component: "pyshop.v1.TillState"};
+
+  int64 amount = 1;
+}
+
+// The till's rejection codes: the reason, and an argument set only where
+// a code names one. Whatever the reason, the refusal is refused under the
+// status its message declares (OUT_OF_RANGE), never one of its code's.
+message TillRefused {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_OUT_OF_RANGE;
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    REASON_TILL_CLOSED = 1;
+    REASON_OVER_LIMIT = 2;
+  }
+  Reason reason = 1;
+  optional int64 limit = 2;
+}
+
+message CardDeclined {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+  string issuer = 1;
+}
+
+// A refusal whose reason is text, not a code.
+message Unbalanced {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+  string reason = 1;
+}

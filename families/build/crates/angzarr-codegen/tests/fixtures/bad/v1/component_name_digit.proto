@@ -1,0 +1,11 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/v1/options.proto";
+
+// A component_name that starts with a digit.
+message ThingState {
+  option (io.angzarr.v1.component) = {
+    component_name: "1-thing"
+    aggregate: {domain: "things"}
+  };
+}

@@ -1,0 +1,70 @@
+syntax = "proto3";
+
+// The descriptor fixture of spec features/codegen/descriptor.feature: the
+// "order" aggregate, the OrderToInventory policy and two projectors, one
+// whose events' owner folds them in the set and one whose event's owner is
+// outside it (named by the entry's domain override).
+package orders.v1;
+
+import "io/angzarr/v1/options.proto";
+
+message OrderState {
+  option (io.angzarr.v1.component) = {
+    component_name: "order"
+    aggregate: {domain: "order"}
+  };
+
+  string customer = 1;
+}
+
+message PlaceOrder {
+  option (io.angzarr.v1.command) = {
+    component: "orders.v1.OrderState"
+    emits: ["orders.v1.OrderPlaced"]
+  };
+
+  string customer = 1;
+}
+
+// Folded by the order, translated by OrderToInventory, viewed by
+// OrderSummary: its policy's and its projector's source is the order's
+// domain, derived from its owner.
+message OrderPlaced {
+  option (io.angzarr.v1.event) = {component: "orders.v1.OrderState"};
+  option (io.angzarr.v1.event) = {component: "orders.v1.OrderToInventoryPolicy"};
+  option (io.angzarr.v1.event) = {component: "orders.v1.OrderSummaryView"};
+
+  string customer = 1;
+}
+
+message OrderToInventoryPolicy {
+  option (io.angzarr.v1.component) = {
+    component_name: "policy-order-inventory"
+    policy: {output_domain: "inventory"}
+  };
+}
+
+message OrderSummaryView {
+  option (io.angzarr.v1.component) = {
+    component_name: "projector-order-summary-view"
+    projector: {}
+  };
+}
+
+// An event whose owner is not in the set: the audit domain, named by the
+// entry's override.
+message AuditEntry {
+  option (io.angzarr.v1.event) = {
+    component: "orders.v1.AuditTrailView"
+    domain: "audit"
+  };
+
+  string note = 1;
+}
+
+message AuditTrailView {
+  option (io.angzarr.v1.component) = {
+    component_name: "projector-audit-trail-view"
+    projector: {}
+  };
+}

@@ -1,0 +1,221 @@
+// Typed refusals of every field kind, a command refusing several of them,
+// inputs of several emits, a projector of two source domains, and
+// a policy between the two domains (decision 14.50). Each field set is
+// an arg (an integer its number,
+// a string itself, an enum its value's name without the enum's prefix,
+// bytes their hex, a bool or a float its text), a message, list or map
+// field is not, and only a nested Reason enum held as `reason` keys the
+// diagnostic by its value; a refusal is refused under the status its
+// message declares ((refusal_status), a message option).
+syntax = "proto3";
+package kinds.v1;
+import "io/angzarr/v1/options.proto";
+
+message LedgerState {
+  option (io.angzarr.v1.component) = {
+    component_name: "ledger"
+    aggregate: {domain: "ledger"}
+  };
+}
+
+message Post {
+  option (io.angzarr.v1.command) = {
+    component: "kinds.v1.LedgerState"
+    emits: "kinds.v1.Posted"
+    refuses: "kinds.v1.PostRefused"
+    refuses: "kinds.v1.Unreasoned"
+    refuses: "kinds.v1.Listed"
+    refuses: "kinds.v1.Elsewhere"
+    refuses: "kinds.v1.Mislabeled"
+  };
+}
+
+message Posted {
+  option (io.angzarr.v1.event) = {component: "kinds.v1.LedgerState"};
+  option (io.angzarr.v1.event) = {component: "kinds.v1.LedgerView"};
+}
+
+message Noted {
+  option (io.angzarr.v1.event) = {component: "kinds.v1.LedgerState"};
+  option (io.angzarr.v1.event) = {component: "kinds.v1.LedgerAuditPolicy"};
+}
+
+// Two emits types (every handling a list, decision 14.75).
+message Open {
+  option (io.angzarr.v1.command) = {
+    component: "kinds.v1.LedgerState"
+    emits: ["kinds.v1.Posted", "kinds.v1.Noted"]
+  };
+}
+
+// Four emits types.
+message Four {
+  option (io.angzarr.v1.command) = {
+    component: "kinds.v1.LedgerState"
+    emits: ["kinds.v1.Posted", "kinds.v1.Noted", "kinds.v1.Cleared", "kinds.v1.Closed"]
+  };
+}
+
+message Cleared {
+  option (io.angzarr.v1.event) = {component: "kinds.v1.LedgerState"};
+}
+
+message Closed {
+  option (io.angzarr.v1.event) = {component: "kinds.v1.LedgerState"};
+}
+
+// One emits type.
+message Maybe {
+  option (io.angzarr.v1.command) = {
+    component: "kinds.v1.LedgerState"
+    emits: "kinds.v1.Posted"
+  };
+}
+
+// Two emits types, or nothing.
+message MaybeBoth {
+  option (io.angzarr.v1.command) = {
+    component: "kinds.v1.LedgerState"
+    emits: ["kinds.v1.Posted", "kinds.v1.Noted"]
+  };
+}
+
+// Refusing: each step returns the handler's own failure.
+message Batch {
+  option (io.angzarr.v1.command) = {
+    component: "kinds.v1.LedgerState"
+    emits: ["kinds.v1.Posted", "kinds.v1.Noted"]
+    refuses: "kinds.v1.PostRefused"
+  };
+}
+
+// No emits: any of the component's events.
+message Raw {
+  option (io.angzarr.v1.command) = {component: "kinds.v1.LedgerState"};
+}
+
+// A fact of two emits types.
+message Arrived {
+  option (io.angzarr.v1.fact) = {
+    component: "kinds.v1.LedgerState"
+    emits: ["kinds.v1.Posted", "kinds.v1.Noted"]
+  };
+}
+
+// A fact of two emits types, again.
+message Swept {
+  option (io.angzarr.v1.fact) = {
+    component: "kinds.v1.LedgerState"
+    emits: ["kinds.v1.Posted", "kinds.v1.Noted"]
+  };
+}
+
+enum Tone {
+  TONE_UNSPECIFIED = 0;
+  TONE_LOUD = 1;
+}
+
+message Note {
+  string text = 1;
+}
+
+message PostRefused {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_OUT_OF_RANGE;
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    REASON_CLOSED = 1;
+    REASON_OVER_LIMIT = 2;
+  }
+  Reason reason = 1;
+  int32 small = 2;
+  int64 big = 3;
+  uint32 count = 4;
+  uint64 total = 5;
+  string text = 6;
+  bytes data = 7;
+  bool flag = 8;
+  double ratio = 9;
+  float share = 10;
+  Tone tone = 11;
+  optional int64 limit = 12;
+  optional Tone maybe = 13;
+  Note note = 14;
+  repeated int32 list = 15;
+  map<string, int32> table = 16;
+}
+
+// A `reason` of an enum not nested in it: an arg, not the key's.
+message Unreasoned {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+  Tone reason = 1;
+}
+
+// A repeated Reason: neither the key's nor an arg.
+message Listed {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    REASON_FULL = 1;
+  }
+  repeated Reason reason = 1;
+}
+
+// A nested Reason held under another name: an arg, not the key's.
+message Elsewhere {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    REASON_AWAY = 1;
+  }
+  Reason why = 1;
+}
+
+// A nested enum of another name held as `reason`: an arg, not the key's.
+message Mislabeled {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+  enum Cause {
+    CAUSE_UNSPECIFIED = 0;
+    CAUSE_LATE = 1;
+  }
+  Cause reason = 1;
+}
+
+// A second domain, a source of the projector.
+message AuditState {
+  option (io.angzarr.v1.component) = {
+    component_name: "audit"
+    aggregate: {domain: "audit"}
+  };
+}
+
+// Refusing two types: a policy translating it is handed their choice.
+message Audit {
+  option (io.angzarr.v1.command) = {
+    component: "kinds.v1.AuditState"
+    emits: "kinds.v1.Audited"
+    refuses: "kinds.v1.PostRefused"
+    refuses: "kinds.v1.Unreasoned"
+  };
+}
+
+message Audited {
+  option (io.angzarr.v1.event) = {component: "kinds.v1.AuditState"};
+  option (io.angzarr.v1.event) = {component: "kinds.v1.LedgerView"};
+}
+
+// One projector of both domains.
+message LedgerView {
+  option (io.angzarr.v1.component) = {
+    component_name: "projector-ledger-view"
+    projector: {}
+  };
+  int64 seen = 1;
+}
+
+// Each Noted on the ledger audits the same root.
+message LedgerAuditPolicy {
+  option (io.angzarr.v1.component) = {
+    component_name: "policy-ledger-audit"
+    policy: {output_domain: "audit"}
+  };
+}

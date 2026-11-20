@@ -1,0 +1,49 @@
+// An aggregate whose anchor's domain type has no `Default` (a singular
+// enum field, closed: its zero is no value), so its scaffold holds the
+// anchor's wire type; and a process manager, whose anchor does.
+syntax = "proto3";
+package gauge.v1;
+import "io/angzarr/v1/options.proto";
+
+enum Mode {
+  MODE_UNSPECIFIED = 0;
+  MODE_ON = 1;
+}
+
+message GaugeState {
+  option (io.angzarr.v1.component) = {
+    component_name: "gauge"
+    aggregate: {domain: "gauge"}
+  };
+  Mode mode = 1;
+}
+
+message SwitchOn {
+  option (io.angzarr.v1.command) = {
+    component: "gauge.v1.GaugeState"
+    emits: "gauge.v1.SwitchedOn"
+  };
+}
+
+message SwitchedOn {
+  option (io.angzarr.v1.event) = {component: "gauge.v1.GaugeState"};
+}
+
+message ReadingState {
+  option (io.angzarr.v1.component) = {
+    component_name: "pmg-reading"
+    process_manager: {domain: "reading", starting_types: ["gauge.v1.StartReading"]}
+  };
+  uint32 readings = 1;
+}
+
+message StartReading {
+  option (io.angzarr.v1.command) = {
+    component: "gauge.v1.ReadingState"
+    emits: "gauge.v1.ReadingStarted"
+  };
+}
+
+message ReadingStarted {
+  option (io.angzarr.v1.event) = {component: "gauge.v1.ReadingState"};
+}

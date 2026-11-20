@@ -1,0 +1,32 @@
+[package]
+name = "angzarr-build"
+version = "0.1.0"
+description = "build.rs helpers: angzarr's prost settings for wire crates, and the generated domain layer, written to OUT_DIR."
+edition.workspace = true
+authors.workspace = true
+# Apache-2.0 OR BSD-3-Clause: application build scripts depend on this crate.
+# See LICENSE-APACHE and LICENSE-BSD beside it.
+license = "Apache-2.0 OR BSD-3-Clause"
+publish.workspace = true
+rust-version.workspace = true
+
+# A build-time adapter: it runs protoc and writes OUT_DIR, and leaves
+# everything it generates to angzarr-codegen.
+[dependencies]
+angzarr-codegen.workspace = true
+angzarr-proto.workspace = true
+angzarr-diagnostic.workspace = true
+prost-build = "0.14"
+
+[dev-dependencies]
+angzarr-presentation.workspace = true
+angzarr-test-dir.workspace = true
+syn = { version = "3.0.9", features = ["full"] }
+
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { workspace = true, features = ["build"] }
+
+[lints]
+workspace = true

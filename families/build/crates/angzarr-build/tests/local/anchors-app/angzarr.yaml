@@ -1,0 +1,12 @@
+# The anchors app's components, for the scaffold alone: the orders'
+# implementation is written taking snapshots, the catalog's is not.
+schema_version: 4
+component:
+  - name: orders
+    kind: domain
+    language: rust
+    scaffold:
+      snapshots: true
+  - name: catalog
+    kind: domain
+    language: rust

@@ -1,0 +1,28 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/v1/options.proto";
+
+message SlotState {
+  option (io.angzarr.v1.component) = {
+    component_name: "slots"
+    aggregate: {domain: "slots"}
+  };
+}
+
+// Two refusals: the domain layer names their choice BookRefuses, which a
+// message here already is.
+message Book {
+  option (io.angzarr.v1.command) = {
+    component: "bad.v1.SlotState"
+    refuses: "bad.v1.Taken"
+    refuses: "bad.v1.BookRefuses"
+  };
+}
+
+message Taken {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+}
+
+message BookRefuses {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+}

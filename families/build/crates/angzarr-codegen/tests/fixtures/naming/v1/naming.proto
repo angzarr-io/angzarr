@@ -1,0 +1,47 @@
+syntax = "proto3";
+
+// One aggregate whose names exercise the case conversions (an acronym, a
+// digit, several words), with a command and a fact each emitting any number
+// of two events; policy.proto holds a policy from its domain.
+package naming.v1;
+
+import "io/angzarr/v1/options.proto";
+
+message OrderBookState {
+  option (io.angzarr.v1.component) = {
+    component_name: "books"
+    aggregate: {domain: "books"}
+  };
+
+  DeliveryStatus status = 1;
+}
+
+enum DeliveryStatus {
+  DELIVERY_STATUS_UNSPECIFIED = 0;
+  DELIVERY_STATUS_SHIPPED_LATE = 1;
+}
+
+message AssignTrackingID {
+  option (io.angzarr.v1.command) = {
+    component: "naming.v1.OrderBookState"
+    emits: ["naming.v1.TrackingIDAssigned", "naming.v1.Level2Reached"]
+  };
+}
+
+message ShipmentNoted {
+  option (io.angzarr.v1.fact) = {
+    component: "naming.v1.OrderBookState"
+    emits: ["naming.v1.TrackingIDAssigned", "naming.v1.Level2Reached"]
+  };
+}
+
+message TrackingIDAssigned {
+  option (io.angzarr.v1.event) = {component: "naming.v1.OrderBookState"};
+  option (io.angzarr.v1.event) = {component: "naming.v1.BooksNowherePolicy"};
+}
+
+message Level2Reached {
+  option (io.angzarr.v1.event) = {component: "naming.v1.OrderBookState"};
+
+  DeliveryStatus status = 1;
+}

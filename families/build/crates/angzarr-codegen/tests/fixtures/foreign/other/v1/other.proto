@@ -1,0 +1,13 @@
+// What the other foreign packages hold of another package's: a message
+// and an enum.
+syntax = "proto3";
+package foreign.other.v1;
+
+message Thing {
+  string name = 1;
+}
+
+enum Colour {
+  COLOUR_UNSPECIFIED = 0;
+  COLOUR_RED = 1;
+}

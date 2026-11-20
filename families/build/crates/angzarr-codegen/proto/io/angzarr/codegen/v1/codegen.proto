@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+// What angzarr's generators read besides the component options
+// (io/angzarr/v1/options.proto): how a message's domain type is generated
+// (`angzarr_build::markup_domain`), and how its prost type is written as
+// JSON (`angzarr_build::wire_with`, `json`). Every option is opt-in: a
+// proto declaring none generates exactly what it generates without this
+// file, and its JSON is the canonical proto3 mapping.
+//
+// The JSON options leave the canonical mapping where they say so, and only
+// there: `json_names: JSON_NAMES_PROTO` and `json_null` stay readable by any
+// proto3 JSON parser (it accepts proto field names and a null for an unset
+// field); a renamed key, a flattened field, a discriminator and a
+// kebab-case enum value are read back by the generated code alone.
+package io.angzarr.codegen.v1;
+
+import "google/protobuf/descriptor.proto";
+
+// region field
+
+// On a field.
+message FieldCodegen {
+  // The field's JSON key, in place of its `json_name` (or its proto name
+  // under JSON_NAMES_PROTO).
+  string json_key = 1;
+  // An unset field is written as `null` instead of being left out: a
+  // proto3 `optional` field or a message field. A set field is written as
+  // it always is.
+  bool json_null = 2;
+  // A singular message field's own fields are written into its parent's
+  // object, in its place, instead of as an object under its key; an unset
+  // one writes nothing. Its fields' keys must not collide with its
+  // parent's.
+  bool json_flatten = 3;
+  // On an `io.angzarr.v1.UUID` field: the name of the domain layer's
+  // newtype holding it (`RunId`), declared once per package, in place of
+  // the plain `Uuid`.
+  string id_type = 4;
+}
+
+extend google.protobuf.FieldOptions {
+  // angzarr's extension range is 50100-50199, numbered contiguously across
+  // every extended options message (io/angzarr/v1/options.proto holds
+  // 50100-50106): field 50107, message 50108, value 50109, enumeration 50110,
+  // choice 50111.
+  FieldCodegen field = 50107;
+}
+
+// endregion field
+
+// region message
+
+// How a message's fields are keyed in JSON.
+enum JsonNames {
+  // Each field's `json_name`: lowerCamelCase unless declared otherwise,
+  // the canonical proto3 mapping.
+  JSON_NAMES_UNSPECIFIED = 0;
+  // Each field's proto name, as declared (snake_case).
+  JSON_NAMES_PROTO = 1;
+}
+
+// On a message.
+message MessageCodegen {
+  // No option says whether a component takes snapshots: an aggregate's or
+  // a process manager's anchor is its state, and taking snapshots is its
+  // implementation's choice (angzarr's docs/design/snapshots.md).
+  reserved 1;
+  reserved "state";
+  // How the message's own fields are keyed in JSON.
+  JsonNames json_names = 2;
+  // Every field of the message that can be unset is written as `null` when
+  // it is (each as `FieldCodegen.json_null` says).
+  bool json_nulls = 3;
+  // The message's name as a discriminator: the value of `json_tag_key`
+  // when the message is written on its own, and of its oneof's
+  // `json_tag_key` when it is the arm set.
+  string json_tag = 4;
+  // When set, the message's JSON object opens with this key holding its
+  // `json_tag` (`{"event": "run.started", ...}`), when it is written on its
+  // own (as a oneof's arm, the oneof's key holds it).
+  string json_tag_key = 5;
+  // Every field without presence (a scalar, enum, list or map not
+  // `optional`) is written even when it holds its default.
+  bool json_defaults = 6;
+}
+
+extend google.protobuf.MessageOptions {
+  MessageCodegen message = 50108;
+}
+
+// endregion message
+
+// region enum
+
+// On an enum value.
+message EnumValueCodegen {
+  // The value's JSON name, in place of its proto name.
+  string json_name = 1;
+}
+
+extend google.protobuf.EnumValueOptions {
+  EnumValueCodegen value = 50109;
+}
+
+// How an enum's values are named in JSON.
+enum JsonCase {
+  // Each value's proto name (`VERDICT_NOT_CALLED`), the canonical mapping.
+  JSON_CASE_UNSPECIFIED = 0;
+  // Each value's name without the enum's prefix, lower-case, `_` as `-`
+  // (`VERDICT_NOT_CALLED` of `Verdict` as `not-called`).
+  JSON_CASE_KEBAB = 1;
+}
+
+// On an enum.
+message EnumCodegen {
+  JsonCase json_case = 1;
+}
+
+extend google.protobuf.EnumOptions {
+  EnumCodegen enumeration = 50110;
+}
+
+// endregion enum
+
+// region oneof
+
+// On a oneof.
+message OneofCodegen {
+  // The arm set is written into the message's object instead of under its
+  // own key: this key holding the arm's discriminator (its message's
+  // `json_tag`, else its field's JSON key), then the arm's value: a
+  // message arm's fields, flattened; a scalar arm's value under `value`.
+  // An unset oneof writes nothing. The arms' keys must not collide with the
+  // message's.
+  string json_tag_key = 1;
+}
+
+extend google.protobuf.OneofOptions {
+  OneofCodegen choice = 50111;
+}
+
+// endregion oneof

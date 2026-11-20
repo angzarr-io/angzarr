@@ -1,0 +1,41 @@
+// A command refusing with a typed refusal whose nested enum lists the
+// rejection codes, as table.proto declares its eighteen (decision 14.50,
+// TableRefused): the generated diagnostic
+// carries each field as an arg, an enum as its value's name without the
+// enum's prefix (`ALREADY_BET`, the ErrorInfo.reason on the wire).
+syntax = "proto3";
+package refusals.v1;
+import "io/angzarr/v1/options.proto";
+
+message SeatState {
+  option (io.angzarr.v1.component) = {
+    component_name: "seats"
+    aggregate: {domain: "seats"}
+  };
+  int64 stack = 1;
+}
+
+message PlaceBet {
+  option (io.angzarr.v1.command) = {
+    component: "refusals.v1.SeatState"
+    emits: "refusals.v1.BetPlaced"
+    refuses: "refusals.v1.BetRefused"
+  };
+  int64 amount = 1;
+}
+
+message BetPlaced {
+  option (io.angzarr.v1.event) = {component: "refusals.v1.SeatState"};
+  int64 amount = 1;
+}
+
+message BetRefused {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    REASON_ALREADY_BET = 1;
+    REASON_BET_OUT_OF_RANGE = 2;
+  }
+  Reason reason = 1;
+  int64 max_bet = 2;
+}

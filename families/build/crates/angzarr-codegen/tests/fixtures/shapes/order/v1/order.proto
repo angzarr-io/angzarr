@@ -1,0 +1,90 @@
+// Every shape the domain layer maps beyond scalars, lists and maps: another
+// package's types, angzarr's UUID (plain, optional, repeated and as an id
+// newtype), Duration, a oneof of each kind of arm, nested messages and a
+// nested enum; and a component anchored on its state.
+syntax = "proto3";
+package shapes.order.v1;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "io/angzarr/v1/options.proto";
+import "io/angzarr/v1/types.proto";
+import "io/angzarr/codegen/v1/codegen.proto";
+import "shapes/catalog/v1/catalog.proto";
+import "shapes/common/v1/common.proto";
+
+message OrderState {
+  option (io.angzarr.v1.component) = {
+    component_name: "orders"
+    aggregate: {domain: "orders"}
+  };
+
+  optional google.protobuf.Timestamp placed_at = 1;
+  repeated string skus = 2;
+  map<string, uint32> counts = 3;
+  optional io.angzarr.v1.UUID customer = 4 [(io.angzarr.codegen.v1.field) = {id_type: "CustomerId"}];
+}
+
+message PlaceOrder {
+  option (io.angzarr.v1.command) = {
+    component: "shapes.order.v1.OrderState"
+    emits: ["shapes.order.v1.OrderPlaced"]
+    refuses: "shapes.order.v1.OrderRefused"
+  };
+
+  repeated shapes.catalog.v1.Item items = 1;
+  io.angzarr.v1.UUID order = 2;
+  optional io.angzarr.v1.UUID customer = 3 [(io.angzarr.codegen.v1.field) = {id_type: "CustomerId"}];
+  repeated io.angzarr.v1.UUID related = 4;
+  google.protobuf.Duration wait = 5;
+  optional google.protobuf.Duration grace = 6;
+  oneof payment {
+    string card = 10;
+    shapes.common.v1.Money credit = 11;
+    Gift gift = 12;
+    Speed speed = 13;
+    google.protobuf.Timestamp deferred_until = 14;
+  }
+  Speed pace = 15;
+
+  message Gift {
+    string code = 1;
+    Wrap wrap = 2;
+
+    message Wrap {
+      string paper = 1;
+    }
+  }
+
+  enum Speed {
+    SPEED_UNSPECIFIED = 0;
+    SPEED_SLOW = 1;
+    SPEED_FAST = 2;
+  }
+}
+
+message OrderPlaced {
+  option (io.angzarr.v1.event) = {component: "shapes.order.v1.OrderState"};
+
+  repeated shapes.catalog.v1.Item items = 1;
+  optional io.angzarr.v1.UUID customer = 2 [(io.angzarr.codegen.v1.field) = {id_type: "CustomerId"}];
+  google.protobuf.Duration wait = 3;
+  optional google.protobuf.Timestamp at = 4;
+}
+
+// A type holding one with no Default (a required enum) has none either.
+message Shipment {
+  PlaceOrder.Gift gift = 1;
+  Label label = 2;
+}
+
+message Label {
+  PlaceOrder.Speed speed = 1;
+}
+
+message OrderRefused {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+
+  string kind = 1;
+  Shipment shipment = 2;
+}

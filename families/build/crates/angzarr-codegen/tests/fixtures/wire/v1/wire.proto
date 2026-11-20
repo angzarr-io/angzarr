@@ -1,0 +1,28 @@
+// Every field shape the prost settings decide: bytes (singular, optional,
+// repeated) and a map, held by a command's refusal and its event.
+syntax = "proto3";
+package wire.v1;
+import "io/angzarr/v1/options.proto";
+
+message VaultState {
+  option (io.angzarr.v1.component) = {
+    component_name: "vault"
+    aggregate: {domain: "vault"}
+  };
+}
+
+message Store {
+  option (io.angzarr.v1.command) = {
+    component: "wire.v1.VaultState"
+    emits: "wire.v1.Stored"
+  };
+  bytes blob = 1;
+  optional bytes maybe = 2;
+  repeated bytes many = 3;
+}
+
+message Stored {
+  option (io.angzarr.v1.event) = {component: "wire.v1.VaultState"};
+  map<string, int32> index = 1;
+  int32 count = 2;
+}

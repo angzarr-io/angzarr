@@ -1,0 +1,55 @@
+# Messages for this crate's diagnostics. Each id is a diagnostic's code
+# without the crate's name, which the build prefixes
+# (angzarr_diagnostic::build); the variables are its args.
+
+descriptors = the descriptor set does not decode: { $detail }
+file-not-in-set = { $file } is not in the descriptor set
+unknown-component = { $message } names the component { $component }, which no message declares
+unknown-emit = { $command } emits { $event }, which is not an event of its component
+unknown-refusal = { $command } refuses { $refusal }, which is not a message of the descriptor set
+unowned-domain = { $policy } names the domain { $domain }, which no aggregate or process manager owns
+unsupported-kind = { $component } is a component of kind { $kind }, which this generator does not emit
+json-flatten = { $message }.{ $field } declares json_flatten, but only a singular message field written as an object can be flattened
+name-taken = { $first } and { $second } both take the name { $name } in the domain layer; rename one
+well-known-type = { $message }.{ $field } is a { $type_name }; only google.protobuf.Timestamp and google.protobuf.Duration are mapped
+enum-zero = { $enum_name }'s zero value is { $value }; name it *_UNSPECIFIED
+no-wire-path = no Rust path is given for the prost types of package { $package }
+no-domain-path = { $message } holds types of package { $package }, but no Rust path is given for its domain layer
+scaffold-impl-not-found = { $path } holds no decorated impl of { $component }; it is left as it is
+reserved-name = { $message } is named { $name }, which the generated domain layer gives the runtime's own { $name }; rename it
+component-name = { $component }'s name "{ $name }" is not lower-case letters, digits and -, starting with a letter; every component declares its component_name
+source-takes-no-fact = { $policy } may send a command that can refuse, but its source domain { $domain } takes no fact to translate a refusal into; declare one of the source's inputs with (fact)
+refusal-choice-name = { $message } is named { $name }, which the generated domain layer gives the refusals of { $command }; rename it
+interface-name = { $message } is named { $name }, which the generated domain layer gives { $component }'s interface or its facts; rename it, or name the component (its component option's name)
+scaffold-no-component = the scaffold's configuration takes snapshots of { $component }, which the protos declare as a policy or a projector: it holds no state
+input-mismatch = { $path } takes { $message } as { $found }, but the proto declares it a { $expected }
+python-no-domain = the protos declare no component of the domain, or named, { $domain }
+app-config = the host config does not read as one: { $cause }
+app-refused = the host config has { $count } lints; nothing is written
+app-manifest = the manifest does not read as one: { $detail }
+app-domain-path = the domain crate's { $path } is no Rust path: name it as Rust does (examples_proto, not examples-proto)
+app-unknown-component = the { $kind } { $name } is no component of the protos
+app-duplicate-component = the component { $name } is listed more than once
+app-unlisted-domain = the protos declare the domain { $domain }, which the config does not list
+app-policy-source-absent = the policy { $policy } reads the domain { $domain }, which no component of the application owns
+app-policy-target-absent = the policy { $policy } sends to the domain { $domain }, which no component of the application owns; list it, remote if it runs elsewhere
+app-not-exposable = { $name } is a { $kind }, which cannot be exposed: only an aggregate is
+app-unknown-language = { $name } is in { $language }, which has no default launch; give it a launch
+app-empty-launch = { $name }'s launch names no program
+unapplied-emit = { $command } emits { $event }, which no (event) entry for its component names: nothing folds it
+unowned-target = { $policy } sends to the domain { $domain }, which no aggregate or process manager of the protos owns
+unproduced-source = { $policy } reacts to the domain { $domain }, which no aggregate or process manager of the protos produces
+idle-component = { $component } is named by no (command), (fact) or (event) entry: it handles nothing
+no-starting-input = { $component } is a process manager listing no starting_types: it can never start an instance
+no-output-domain = the policy { $component } declares no output_domain; declare its one destination
+foreign-refusal = { $command } refuses { $refusal }, a message of another domain's package; refuse with the command's own domain's types
+no-event = { $component } names no event: a policy or projector reacts to or folds the events its (event) entries name; add one
+policy-sources = the events { $policy } names come from more than one domain, { $first } and { $second }; a policy translates one source domain into one destination, so split it into one policy per source
+override-on-owned = the (event) entry of { $component } for { $event } sets the domain { $domain }, but the event has an owner in the descriptor set; the override is for an owner outside it, so remove it
+event-folded-twice = { $event } is folded by two stateful components, { $first } and { $second }; one aggregate or process manager folds an event, and other domains reach a process manager through a policy
+event-without-source = { $component } names { $event }, which no aggregate or process manager folds and whose entry sets no domain; set the domain of the entry
+starting-type-not-input = { $component } lists the starting type { $starting_type }, which is none of its own commands or facts; list one it declares with (command) or (fact)
+refusal-status-missing = { $refusal } is refused with by a command's refuses, but declares no (io.angzarr.v1.refusal_status), or sets REFUSAL_STATUS_UNSPECIFIED; every refusal declares its status
+refusal-status-misplaced = { $message } is marked (io.angzarr.v1.refusal_status), but no command's refuses names it; the option marks a refusal message alone
+command-and-fact = { $message } carries both (io.angzarr.v1.command) and (io.angzarr.v1.fact); a message is one or the other
+consumer-skipped = the consumer { $consumer } of { $event } is outside this generation and was skipped; cross-domain references generally should not exist, so check it

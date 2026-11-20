@@ -1,0 +1,28 @@
+// A domain with no events at all: its commands name no emits and there is
+// no event to return a list of, so a decision returns nothing (or its
+// refusal).
+syntax = "proto3";
+package bare.v1;
+import "io/angzarr/v1/options.proto";
+
+message BareState {
+  option (io.angzarr.v1.component) = {
+    component_name: "bare"
+    aggregate: {domain: "bare"}
+  };
+}
+
+message Touch {
+  option (io.angzarr.v1.command) = {component: "bare.v1.BareState"};
+}
+
+message Tap {
+  option (io.angzarr.v1.command) = {
+    component: "bare.v1.BareState"
+    refuses: "bare.v1.TapRefused"
+  };
+}
+
+message TapRefused {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+}

@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+// One aggregate exercising the field shapes the Python scaffold maps.
+package pyshop.v1;
+
+import "io/angzarr/v1/options.proto";
+import "pyshop/v1/mood.proto";
+
+message BasketState {
+  option (io.angzarr.v1.component) = {
+    component_name: "store"
+    aggregate: {domain: "store"}
+  };
+
+  string owner = 1;
+  double weight = 2;
+  float ratio = 3;
+  optional int32 discount = 4;
+  repeated int64 counts = 5;
+  Item last = 6;
+  repeated Item items = 7;
+  Mood mood = 8;
+  optional Mood feeling = 9;
+}
+
+message Item {
+  string sku = 1;
+  Mood mood = 2;
+}
+
+message AddItem {
+  option (io.angzarr.v1.command) = {
+    component: "pyshop.v1.BasketState"
+    emits: ["pyshop.v1.ItemAdded"]
+  };
+
+  Item item = 1;
+}
+
+// Named so its dispatch.on_command line is exactly 88 columns: black's
+// limit, at which the call stays on one line.
+message EmptyTheBasketShelves {
+  option (io.angzarr.v1.command) = {
+    component: "pyshop.v1.BasketState"
+    emits: ["pyshop.v1.ItemAdded"]
+  };
+}
+
+message ItemAdded {
+  option (io.angzarr.v1.event) = {component: "pyshop.v1.BasketState"};
+
+  Item item = 1;
+}

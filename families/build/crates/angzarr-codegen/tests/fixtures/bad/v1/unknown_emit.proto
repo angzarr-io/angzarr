@@ -1,0 +1,17 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/v1/options.proto";
+
+message ThingState {
+  option (io.angzarr.v1.component) = {
+    component_name: "things"
+    aggregate: {domain: "things"}
+  };
+}
+
+message Poke {
+  option (io.angzarr.v1.command) = {
+    component: "bad.v1.ThingState"
+    emits: ["bad.v1.Poke"]
+  };
+}

@@ -1,0 +1,143 @@
+// What the generated JSON is held to: every field kind in the canonical
+// proto3 mapping (Plain, Known, Choice), and each codegen JSON option
+// (Finished, Started, Output, Status).
+syntax = "proto3";
+package json.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/duration.proto";
+import "google/protobuf/timestamp.proto";
+import "io/angzarr/v1/types.proto";
+import "io/angzarr/codegen/v1/codegen.proto";
+
+// region canonical
+
+enum Tone {
+  TONE_UNSPECIFIED = 0;
+  TONE_SOFT = 1;
+  TONE_LOUD = 2;
+}
+
+// Every scalar kind, singular, optional, repeated and as a map's value.
+message Plain {
+  double f64 = 1;
+  float f32 = 2;
+  int32 i32 = 3;
+  int64 i64 = 4;
+  uint32 u32 = 5;
+  uint64 u64 = 6;
+  sint32 s32 = 7;
+  sint64 s64 = 8;
+  fixed32 x32 = 9;
+  fixed64 x64 = 10;
+  sfixed32 sx32 = 11;
+  sfixed64 sx64 = 12;
+  bool flag = 13;
+  string text = 14;
+  bytes data = 15;
+  Tone tone = 16;
+  optional int64 maybe = 17;
+  optional string note = 18;
+  repeated int64 counts = 19;
+  repeated double ratios = 20;
+  repeated Tone tones = 21;
+  repeated bytes blobs = 22;
+  map<string, int64> totals = 23;
+  map<string, Tone> moods = 24;
+  map<int64, string> names = 25;
+  map<uint32, Plain> nested = 26;
+  map<bool, double> switches = 27;
+  Plain child = 28;
+  repeated Plain children = 29;
+  string snake_case_field = 30;
+  string renamed = 31 [json_name = "otherName"];
+}
+
+// The well-known types and angzarr's UUID.
+message Known {
+  google.protobuf.Timestamp at = 1;
+  google.protobuf.Duration took = 2;
+  io.angzarr.v1.UUID id = 3;
+  google.protobuf.Any payload = 4;
+  repeated google.protobuf.Any payloads = 5;
+  repeated io.angzarr.v1.UUID ids = 6;
+}
+
+// A oneof of each kind of arm.
+message Choice {
+  oneof pick {
+    string word = 1;
+    int64 big = 2;
+    Tone tone = 3;
+    Plain plain = 4;
+    google.protobuf.Timestamp when = 5;
+  }
+}
+
+// endregion canonical
+
+// region options
+
+enum Status {
+  option (io.angzarr.codegen.v1.enumeration) = {json_case: JSON_CASE_KEBAB};
+
+  STATUS_UNSPECIFIED = 0;
+  STATUS_COMPLETE = 1;
+  STATUS_NOT_CALLED = 2;
+  STATUS_FAILED = 3 [(io.angzarr.codegen.v1.value) = {json_name: "broke"}];
+}
+
+message Site {
+  option (io.angzarr.codegen.v1.message) = {json_names: JSON_NAMES_PROTO};
+
+  string file = 1;
+  uint32 end_line = 2;
+}
+
+// An event on its own: its tag first, snake_case keys, every default
+// written, unset fields null, a renamed key and a flattened field.
+message Finished {
+  option (io.angzarr.codegen.v1.message) = {
+    json_names: JSON_NAMES_PROTO
+    json_tag: "run.finished"
+    json_tag_key: "event"
+    json_nulls: true
+    json_defaults: true
+  };
+
+  map<string, uint32> counts = 1;
+  uint64 took_ms = 2;
+  int32 exit = 3;
+  Status status = 4;
+  optional string why = 5 [(io.angzarr.codegen.v1.field) = {json_key: "reason"}];
+  Site site = 6 [(io.angzarr.codegen.v1.field) = {json_flatten: true}];
+  optional uint32 tests = 7;
+}
+
+message Started {
+  option (io.angzarr.codegen.v1.message) = {
+    json_names: JSON_NAMES_PROTO
+    json_tag: "run.started"
+  };
+
+  string root = 1;
+  uint32 jobs = 2;
+  optional Site site = 3 [(io.angzarr.codegen.v1.field) = {json_null: true}];
+}
+
+// A stream's document: its oneof tagged under `event`, the arm's fields
+// beside the tag.
+message Output {
+  option (io.angzarr.codegen.v1.message) = {json_names: JSON_NAMES_PROTO};
+
+  io.angzarr.v1.UUID run = 1;
+  oneof event {
+    option (io.angzarr.codegen.v1.choice) = {json_tag_key: "event"};
+
+    Started started = 2;
+    Finished finished = 3;
+    string note = 4;
+  }
+}
+
+// endregion options

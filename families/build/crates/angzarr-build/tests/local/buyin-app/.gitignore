@@ -1,0 +1,2 @@
+# Written by the tests/local.rs builds; the pins are in Cargo.toml.
+/Cargo.lock

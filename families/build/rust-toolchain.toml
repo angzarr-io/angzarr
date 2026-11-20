@@ -1,0 +1,5 @@
+# Scoped to this repo so the global default is untouched; pinned to the same
+# toolchain as angzarr-embedded.
+[toolchain]
+channel = "1.96.1"
+components = ["clippy", "rustfmt"]

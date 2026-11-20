@@ -1,0 +1,53 @@
+syntax = "proto3";
+
+// The process manager of spec features/codegen C-0607 and C-0716: started
+// by StartFulfillment only.
+package fulfillment;
+
+import "io/angzarr/v1/options.proto";
+
+message FulfillmentState {
+  option (io.angzarr.v1.component) = {
+    component_name: "pmg-fulfillment"
+    process_manager: {
+      domain: "fulfillment"
+      starting_types: ["fulfillment.StartFulfillment"]
+    }
+  };
+
+  bool started = 1;
+}
+
+message StartFulfillment {
+  option (io.angzarr.v1.command) = {
+    component: "fulfillment.FulfillmentState"
+    emits: ["fulfillment.FulfillmentStarted"]
+  };
+
+  string order = 1;
+}
+
+message RecordStockReserved {
+  option (io.angzarr.v1.fact) = {
+    component: "fulfillment.FulfillmentState"
+    emits: ["fulfillment.StockReserved"]
+  };
+
+  string sku = 1;
+}
+
+message FulfillmentStarted {
+  option (io.angzarr.v1.event) = {component: "fulfillment.FulfillmentState"};
+  // Translated by a policy declared in orders/v1/shipping.proto: a
+  // reference, skipped where that file is not generated.
+  option (io.angzarr.v1.event) = {component: "orders.v1.FulfillmentToShippingPolicy"};
+  option (io.angzarr.v1.event) = {component: "orders.v1.ShippingBoard"};
+
+  string order = 1;
+}
+
+message StockReserved {
+  option (io.angzarr.v1.event) = {component: "fulfillment.FulfillmentState"};
+
+  string sku = 1;
+}

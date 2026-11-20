@@ -1,0 +1,4 @@
+# Written by the tests/local.rs builds: the pins are in Cargo.toml.
+/Cargo.lock
+# The scaffold of the day, written by the test before it builds.
+/src/*_impl.rs

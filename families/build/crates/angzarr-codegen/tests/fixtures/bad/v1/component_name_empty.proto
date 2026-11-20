@@ -1,0 +1,10 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/v1/options.proto";
+
+// No component_name: it is required, with no default (decision 14.87).
+message ThingState {
+  option (io.angzarr.v1.component) = {
+    aggregate: {domain: "things"}
+  };
+}

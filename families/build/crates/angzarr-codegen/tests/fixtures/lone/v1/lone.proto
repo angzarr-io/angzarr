@@ -1,0 +1,38 @@
+// A command refusing one type named as a choice would be (BookRefuses):
+// with one refusal there is no choice, so nothing collides.
+syntax = "proto3";
+package lone.v1;
+import "io/angzarr/v1/options.proto";
+
+message SlotState {
+  option (io.angzarr.v1.component) = {
+    component_name: "slots"
+    aggregate: {domain: "slots"}
+  };
+}
+
+message Book {
+  option (io.angzarr.v1.command) = {
+    component: "lone.v1.SlotState"
+    emits: "lone.v1.Booked"
+    refuses: "lone.v1.BookRefuses"
+  };
+}
+
+message BookRefuses {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+}
+
+// Folded by the slot, and projected by the view.
+message Booked {
+  option (io.angzarr.v1.event) = {component: "lone.v1.SlotState"};
+  option (io.angzarr.v1.event) = {component: "lone.v1.SlotView"};
+}
+
+// A projector of one source.
+message SlotView {
+  option (io.angzarr.v1.component) = {
+    component_name: "projector-slot-view"
+    projector: {}
+  };
+}

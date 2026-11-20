@@ -1,0 +1,25 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/v1/options.proto";
+
+message ShelfStateInterface {
+  option (io.angzarr.v1.event) = {component: "bad.v1.ShelfState"};
+}
+
+message ShelfState {
+  option (io.angzarr.v1.component) = {
+    component_name: "shelves"
+    aggregate: {domain: "shelves"}
+  };
+}
+
+// The shelf's interface is the domain layer's trait `ShelfStateInterface`,
+// which a message here already is: one of its events.
+message Stock {
+  option (io.angzarr.v1.command) = {
+    component: "bad.v1.ShelfState"
+    emits: "bad.v1.ShelfStateInterface"
+  };
+}
+
+

@@ -1,0 +1,12 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/codegen/v1/codegen.proto";
+
+// A map cannot be flattened: its entries are not one message's fields.
+message Flat {
+  map<string, Inner> inner = 1 [(io.angzarr.codegen.v1.field) = {json_flatten: true}];
+}
+
+message Inner {
+  string text = 1;
+}

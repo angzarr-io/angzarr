@@ -1,0 +1,20 @@
+# The buy-in app's config, as `angzarr_embedded_host::run` reads it: every
+# component in process (the generated register()), each listed, and the
+# store in memory, so a run leaves nothing behind. The process manager is
+# listed by its component name (decision 14.50: pmg- and its domain).
+schema_version: 1
+component:
+  - name: wallet
+    language: rust
+    kind: domain
+  - name: pmg-buyin
+    language: rust
+    kind: domain
+  - name: policy-buyin-wallet
+    language: rust
+    kind: policy
+  - name: policy-wallet-buyin
+    language: rust
+    kind: policy
+store:
+  in_memory: true

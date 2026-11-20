@@ -1,0 +1,11 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/v1/options.proto";
+
+// A well-formed component_name.
+message ThingState {
+  option (io.angzarr.v1.component) = {
+    component_name: "a1-b"
+    aggregate: {domain: "things"}
+  };
+}

@@ -1,0 +1,28 @@
+# The end-to-end fixture of angzarr-build's tests/local.rs for state
+# anchors: the shapes fixtures' two packages with components
+# (shapes.catalog.v1 and shapes.order.v1, each anchored on its state) and
+# one of types alone, each package's domain layer at its own path. The
+# generated adapters, register() and the scaffold of the day (written there
+# by the test, never committed) type-check; the orders, whose angzarr.yaml
+# entry sets `scaffold.snapshots`, snapshot as their anchor's wire type and
+# resume from it, and the catalog takes none. A workspace of its own,
+# outside angzarr-build's. Its Cargo.lock is a build artifact, ignored.
+[package]
+name = "anchors-app"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+# The family's pins, as the other fixtures'.
+[dependencies]
+angzarr-embedded = { git = "https://github.com/angzarr-io/angzarr-embedded", rev = "bce1ff2ed813c72b869bbbfcdb7ba9b426e47812" }
+angzarr-embedded-macros = { git = "https://github.com/angzarr-io/angzarr-embedded", rev = "bce1ff2ed813c72b869bbbfcdb7ba9b426e47812" }
+angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "3535a54a25e95b57dabbcbaea5f3603b1ac13f5c" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "fd7c87b9f5c9148d05d699b229153afed07ab534" }
+prost = "0.14"
+prost-types = "0.14"
+
+[build-dependencies]
+angzarr-build = { path = "../../.." }

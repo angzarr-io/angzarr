@@ -1,0 +1,27 @@
+// Another package's message, held as a map's values only.
+syntax = "proto3";
+package foreign.map.v1;
+import "io/angzarr/v1/options.proto";
+import "foreign/other/v1/other.proto";
+
+message HolderState {
+  option (io.angzarr.v1.component) = {
+    component_name: "holders"
+    aggregate: {domain: "holders"}
+  };
+}
+
+// The command carries it: the domain layer reaches it through the
+// component's inputs.
+message Holder {
+  option (io.angzarr.v1.command) = {
+    component: "foreign.map.v1.HolderState"
+    emits: ["foreign.map.v1.Held"]
+  };
+
+  map<string, foreign.other.v1.Thing> things = 1;
+}
+
+message Held {
+  option (io.angzarr.v1.event) = {component: "foreign.map.v1.HolderState"};
+}

@@ -1,0 +1,27 @@
+syntax = "proto3";
+
+// A message named as a name the generated domain layer reserves for the
+// runtime (its `Context`, re-exported for the user's handlers).
+package bad.v1;
+
+import "io/angzarr/v1/options.proto";
+
+message ThingState {
+  option (io.angzarr.v1.component) = {
+    component_name: "things"
+    aggregate: {domain: "things"}
+  };
+}
+
+message Context {
+  option (io.angzarr.v1.command) = {
+    component: "bad.v1.ThingState"
+    emits: "bad.v1.Done"
+  };
+}
+
+message Done {
+  option (io.angzarr.v1.event) = {
+    component: "bad.v1.ThingState"
+  };
+}

@@ -1,0 +1,17 @@
+syntax = "proto3";
+package duo.v1;
+import "io/angzarr/v1/options.proto";
+
+message RightState {
+  option (io.angzarr.v1.component) = {
+    component_name: "right"
+    aggregate: {domain: "right"}
+  };
+}
+
+// The projector of both domains' events: named by string, so this file
+// does not import the one that declares it.
+message RightMoved {
+  option (io.angzarr.v1.event) = {component: "duo.v1.RightState"};
+  option (io.angzarr.v1.event) = {component: "duo.v1.DuoView"};
+}

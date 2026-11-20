@@ -1,0 +1,10 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/v1/options.proto";
+
+// A component of no kind: the kind oneof unset.
+message ThingState {
+  option (io.angzarr.v1.component) = {
+    component_name: "thing"
+  };
+}

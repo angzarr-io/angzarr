@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+// The wallet: an aggregate whose Hold may refuse with a typed refusal.
+package buyin.v1;
+
+import "io/angzarr/v1/options.proto";
+
+message WalletState {
+  option (io.angzarr.v1.component) = {
+    component_name: "wallet"
+    aggregate: {domain: "wallet"}
+  };
+
+  int64 balance = 1;
+  int64 held = 2;
+}
+
+message Deposit {
+  option (io.angzarr.v1.command) = {
+    component: "buyin.v1.WalletState"
+    emits: ["buyin.v1.Deposited"]
+    refuses: ["buyin.v1.DepositRefused"]
+  };
+
+  int64 cents = 1;
+}
+
+message Hold {
+  option (io.angzarr.v1.command) = {
+    component: "buyin.v1.WalletState"
+    emits: ["buyin.v1.Held"]
+    refuses: ["buyin.v1.InsufficientFunds"]
+  };
+
+  int64 cents = 1;
+  // The buy-in holding: a policy names its target root from a field of
+  // the source event (decision 14.36).
+  bytes buy_in = 2;
+}
+
+// Deposit's typed refusal: every command a policy may send names one
+// (decision 14.76).
+message DepositRefused {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+  string reason = 1;
+}
+
+// The domestic fact WalletBuyIn's refusal callback hands the wallet when the
+// buy-in refuses one of its commands (decision 14.76): a fact, recorded,
+// never refused.
+message RecordBuyInRefused {
+  option (io.angzarr.v1.fact) = {
+    component: "buyin.v1.WalletState"
+    emits: ["buyin.v1.BuyInRefusalRecorded"]
+  };
+
+  string reason = 1;
+}
+
+message BuyInRefusalRecorded {
+  option (io.angzarr.v1.event) = {component: "buyin.v1.WalletState"};
+
+  string reason = 1;
+}
+
+// Hold's typed refusal: a message of the wallet's domain, never an event.
+message InsufficientFunds {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+  int64 short = 1;
+}
+
+message Deposited {
+  option (io.angzarr.v1.event) = {component: "buyin.v1.WalletState"};
+
+  int64 cents = 1;
+}
+
+// Folded by the wallet, and translated into the buy-in by WalletBuyIn.
+message Held {
+  option (io.angzarr.v1.event) = {component: "buyin.v1.WalletState"};
+  option (io.angzarr.v1.event) = {component: "buyin.v1.WalletBuyInPolicy"};
+
+  int64 cents = 1;
+  bytes buy_in = 2;
+}

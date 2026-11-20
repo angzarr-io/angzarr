@@ -1,0 +1,77 @@
+syntax = "proto3";
+
+// A projector naming no component_name or input_domains: its name is its
+// anchor's in kebab case, its sources its events' domains.
+package pyshop.v1;
+
+import "io/angzarr/v1/options.proto";
+
+message PageState {
+  option (io.angzarr.v1.component) = {
+    component_name: "pages"
+    aggregate: {domain: "pages"}
+  };
+
+  int64 views = 1;
+}
+
+message ViewPage {
+  option (io.angzarr.v1.command) = {
+    component: "pyshop.v1.PageState"
+    emits: "pyshop.v1.PageViewed"
+  };
+}
+
+message PageViewed {
+  option (io.angzarr.v1.event) = {component: "pyshop.v1.PageState"};
+  option (io.angzarr.v1.event) = {component: "pyshop.v1.HTTPServerView"};
+  // PageCounter's one source is its input_domain: the entry leaves it
+  // unset.
+  option (io.angzarr.v1.event) = {component: "pyshop.v1.PageCounter"};
+  option (io.angzarr.v1.event) = {component: "pyshop.v1.PagesTallyPolicy"};
+
+  string path = 1;
+}
+
+message HTTPServerView {
+  option (io.angzarr.v1.component) = {
+    component_name: "projector-http-server-view"
+    projector: {}
+  };
+
+  int64 views = 1;
+}
+
+// A projector reading the one domain its input_domain names.
+message PageCounter {
+  option (io.angzarr.v1.component) = {
+    component_name: "projector-page-counter"
+    projector: {}
+  };
+
+  int64 views = 1;
+}
+
+// An aggregate taking facts only, and a policy sending it nothing it can
+// type: its reactions' commands are any object.
+message TallyState {
+  option (io.angzarr.v1.component) = {
+    component_name: "tally"
+    aggregate: {domain: "tally"}
+  };
+
+  int64 count = 1;
+}
+
+message Tallied {
+  option (io.angzarr.v1.fact) = {
+    component: "pyshop.v1.TallyState"
+  };
+}
+
+message PagesTallyPolicy {
+  option (io.angzarr.v1.component) = {
+    component_name: "policy-pages-tally"
+    policy: {output_domain: "tally"}
+  };
+}

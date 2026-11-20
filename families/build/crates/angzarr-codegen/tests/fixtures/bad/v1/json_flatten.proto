@@ -1,0 +1,8 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/codegen/v1/codegen.proto";
+
+// A scalar cannot be flattened: it has no fields of its own.
+message Flat {
+  string text = 1 [(io.angzarr.codegen.v1.field) = {json_flatten: true}];
+}

@@ -1,0 +1,24 @@
+syntax = "proto3";
+
+// The two policies (stateless event-to-command mappers): one per (source
+// domain, target domain) pair, each on an empty marker message. Their
+// events are wired by the (event) entries on the events they consume.
+package buyin.v1;
+
+import "io/angzarr/v1/options.proto";
+
+// A started buy-in holds its stake on the wallet it names.
+message BuyInWalletPolicy {
+  option (io.angzarr.v1.component) = {
+    component_name: "policy-buyin-wallet"
+    policy: {output_domain: "wallet"}
+  };
+}
+
+// A hold on the wallet is recorded on the buy-in of its correlation.
+message WalletBuyInPolicy {
+  option (io.angzarr.v1.component) = {
+    component_name: "policy-wallet-buyin"
+    policy: {output_domain: "buyin"}
+  };
+}

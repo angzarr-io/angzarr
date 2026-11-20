@@ -1,0 +1,45 @@
+syntax = "proto3";
+package split.v1;
+import "io/angzarr/v1/options.proto";
+
+// A depot, whose policy (split/policy/v1) is declared in another package.
+message DepotState {
+  option (io.angzarr.v1.component) = {
+    component_name: "depot"
+    aggregate: {domain: "depot"}
+  };
+}
+
+message Ship {
+  option (io.angzarr.v1.command) = {
+    component: "split.v1.DepotState"
+    emits: "split.v1.Shipped"
+    refuses: "split.v1.ShipRefused"
+  };
+}
+
+// Ship's typed refusal: every command a policy may send names one
+// (decision 14.76).
+message ShipRefused {
+  option (io.angzarr.v1.refusal_status) = REFUSAL_STATUS_FAILED_PRECONDITION;
+  string reason = 1;
+}
+
+// What RoutePolicy translates a refused Ship into: a fact of its source.
+message RecordShipRefused {
+  option (io.angzarr.v1.fact) = {
+    component: "split.v1.DepotState"
+    emits: "split.v1.ShipRefusalRecorded"
+  };
+  string reason = 1;
+}
+
+message ShipRefusalRecorded {
+  option (io.angzarr.v1.event) = {component: "split.v1.DepotState"};
+  string reason = 1;
+}
+
+message Shipped {
+  option (io.angzarr.v1.event) = {component: "split.v1.DepotState"};
+  option (io.angzarr.v1.event) = {component: "split.policy.v1.RoutePolicy"};
+}

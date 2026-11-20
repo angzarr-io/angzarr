@@ -1,0 +1,24 @@
+# The compile fixture of angzarr-build's tests/local.rs: a domain with no
+# events at all (the bare fixture), its wire types, domain layer, adapters
+# and register() generated, its component the scaffold of the day,
+# type-checked against angzarr-embedded and angzarr-router. Never run; a
+# workspace of its own, outside angzarr-build's. Its Cargo.lock is a build
+# artifact, ignored.
+[package]
+name = "bare-app"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+# The family's pins, as the other fixtures': angzarr-embedded and the router
+# it names, so the app has one router and one angzarr-proto.
+[dependencies]
+angzarr-embedded = { git = "https://github.com/angzarr-io/angzarr-embedded", rev = "bce1ff2ed813c72b869bbbfcdb7ba9b426e47812" }
+angzarr-embedded-macros = { git = "https://github.com/angzarr-io/angzarr-embedded", rev = "bce1ff2ed813c72b869bbbfcdb7ba9b426e47812" }
+angzarr-router = { git = "https://github.com/angzarr-io/angzarr-router", rev = "fd7c87b9f5c9148d05d699b229153afed07ab534" }
+prost = "0.14"
+
+[build-dependencies]
+angzarr-build = { path = "../../.." }

@@ -1,0 +1,23 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/v1/options.proto";
+
+message BinState {
+  option (io.angzarr.v1.component) = {
+    component_name: "bins"
+    aggregate: {domain: "bins"}
+  };
+}
+
+// The bin takes a fact: the domain layer names their choice BinStateFact, which
+// a message here already is.
+message Fill {
+  option (io.angzarr.v1.fact) = {
+    component: "bad.v1.BinState"
+    emits: "bad.v1.BinStateFact"
+  };
+}
+
+message BinStateFact {
+  option (io.angzarr.v1.event) = {component: "bad.v1.BinState"};
+}

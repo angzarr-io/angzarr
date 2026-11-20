@@ -1,0 +1,71 @@
+syntax = "proto3";
+
+// One component whose events exercise every field shape the Rust emitter
+// maps.
+package shop.v1;
+
+import "google/protobuf/timestamp.proto";
+import "io/angzarr/v1/options.proto";
+
+message CartState {
+  option (io.angzarr.v1.component) = {
+    component_name: "carts"
+    aggregate: {domain: "carts"}
+  };
+
+  string owner = 1;
+  repeated Line lines = 2;
+  map<string, int64> totals = 3;
+  optional int32 discount = 4;
+  google.protobuf.Timestamp opened_at = 5;
+  map<string, Line> by_sku = 6;
+}
+
+message Line {
+  string sku = 1;
+  int64 count = 2;
+  Status status = 3;
+  repeated Status history = 4;
+  optional Status last = 5;
+  bytes note = 6;
+}
+
+enum Status {
+  STATUS_UNSPECIFIED = 0;
+  STATUS_OPEN = 1;
+  STATUS_SHIPPED = 2;
+}
+
+message AddLine {
+  option (io.angzarr.v1.command) = {
+    component: "shop.v1.CartState"
+    emits: ["shop.v1.LineAdded"]
+  };
+
+  Line line = 1;
+}
+
+message Checkout {
+  option (io.angzarr.v1.command) = {
+    component: "shop.v1.CartState"
+    emits: ["shop.v1.CheckedOut"]
+  };
+}
+
+message LineAdded {
+  option (io.angzarr.v1.event) = {component: "shop.v1.CartState"};
+
+  Line line = 1;
+  google.protobuf.Timestamp at = 2;
+}
+
+message CheckedOut {
+  option (io.angzarr.v1.event) = {component: "shop.v1.CartState"};
+
+  string owner = 1;
+  repeated Line lines = 2;
+  map<string, int64> totals = 3;
+  optional int32 discount = 4;
+  google.protobuf.Timestamp opened_at = 5;
+  map<string, Line> by_sku = 6;
+}

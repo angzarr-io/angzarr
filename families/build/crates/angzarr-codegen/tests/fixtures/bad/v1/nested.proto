@@ -1,0 +1,28 @@
+syntax = "proto3";
+package bad.v1;
+import "io/angzarr/v1/options.proto";
+
+message ThingState {
+  option (io.angzarr.v1.component) = {
+    component_name: "things"
+    aggregate: {domain: "things"}
+  };
+}
+
+// The command carries the shape the generator refuses: the domain layer
+// reaches it through the component's inputs.
+message Poke {
+  option (io.angzarr.v1.command) = {
+    component: "bad.v1.ThingState"
+    emits: ["bad.v1.Poked"]
+  };
+
+  Inner inner = 1;
+  message Inner {
+    string x = 1;
+  }
+}
+
+message Poked {
+  option (io.angzarr.v1.event) = {component: "bad.v1.ThingState"};
+}

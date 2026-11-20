@@ -1,0 +1,14 @@
+// A projector of two domains, whose two sources are declared by the events
+// of two other protos: an application generating only one of them does not
+// list it.
+syntax = "proto3";
+package duo.v1;
+import "io/angzarr/v1/options.proto";
+
+message DuoView {
+  option (io.angzarr.v1.component) = {
+    component_name: "projector-duo-view"
+    projector: {}
+  };
+  int64 seen = 1;
+}

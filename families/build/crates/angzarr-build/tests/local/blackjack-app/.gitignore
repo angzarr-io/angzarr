@@ -1,0 +1,4 @@
+# Written by the tests/local.rs builds: the pins are in Cargo.toml, and the
+# components' implementations are the scaffold of the day, written there.
+/Cargo.lock
+/src/*_impl.rs
