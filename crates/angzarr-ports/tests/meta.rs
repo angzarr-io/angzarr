@@ -3382,7 +3382,7 @@ fn feed(bug: Bug) -> BrokenFeed {
 impl angzarr_ports::contract::changes::ChangesFixture for BrokenFeed {
     type Store = Broken;
 
-    fn handle(&self) -> Broken {
+    async fn handle(&self) -> Broken {
         Broken {
             local: Arc::default(),
             ..self.broken.clone()

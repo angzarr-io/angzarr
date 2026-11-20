@@ -44,7 +44,7 @@ pub trait ChangesFixture {
     /// A handle on the fixture's one store: each call another handle over
     /// the same state (the checks race two writers), the first on a fresh,
     /// empty store.
-    fn handle(&self) -> Self::Store;
+    fn handle(&self) -> impl Future<Output = Self::Store>;
 
     /// Age the feed so that a cursor taken before this call is older than
     /// what it keeps (commit as many touches as its retention, or its
@@ -130,7 +130,7 @@ fn covers(changes: &[StreamChange]) -> Vec<Cover> {
 pub async fn a_commit_to_one_stream_is_reported_as_that_stream_and_no_other<F: ChangesFixture>(
     fixture: F,
 ) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     commit(&store, 1, 1).await;
     commit(&store, 2, 1).await;
     let since = cursor(&store).await;
@@ -147,7 +147,7 @@ pub async fn a_commit_to_one_stream_is_reported_as_that_stream_and_no_other<F: C
 pub async fn many_commits_to_one_stream_are_reported_once_at_its_latest_head<F: ChangesFixture>(
     fixture: F,
 ) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     let since = cursor(&store).await;
     for _ in 0..5 {
         commit(&store, 1, 1).await;
@@ -159,7 +159,7 @@ pub async fn many_commits_to_one_stream_are_reported_once_at_its_latest_head<F: 
 /// Streams are reported in the order each was first touched, though one is
 /// touched again later.
 pub async fn streams_are_reported_in_the_order_first_touched<F: ChangesFixture>(fixture: F) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     let since = cursor(&store).await;
     commit(&store, 3, 1).await;
     commit(&store, 1, 1).await;
@@ -181,7 +181,7 @@ pub async fn commits_to_several_streams_are_all_reported_none_dropped_none_inven
 >(
     fixture: F,
 ) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     let since = cursor(&store).await;
     for n in 1..=20 {
         commit(&store, n, u64::from(n)).await;
@@ -193,7 +193,7 @@ pub async fn commits_to_several_streams_are_all_reported_none_dropped_none_inven
 
 /// A stream written before the cursor and not since is not reported.
 pub async fn a_stream_that_did_not_change_is_not_reported<F: ChangesFixture>(fixture: F) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     commit(&store, 1, 3).await;
     commit(&store, 2, 1).await;
     let since = cursor(&store).await;
@@ -208,7 +208,7 @@ pub async fn a_stream_that_did_not_change_is_not_reported<F: ChangesFixture>(fix
 
 /// A purge is reported, purged, with no head: a follower cannot miss it.
 pub async fn a_purge_is_reported_purged_with_no_head<F: ChangesFixture>(fixture: F) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     commit(&store, 1, 2).await;
     let since = cursor(&store).await;
     store.purge(stream(1), 2).await.expect("the purge lands");
@@ -221,7 +221,7 @@ pub async fn a_purge_is_reported_purged_with_no_head<F: ChangesFixture>(fixture:
 pub async fn a_purge_then_rewrite_is_reported_purged_with_its_new_head<F: ChangesFixture>(
     fixture: F,
 ) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     commit(&store, 1, 3).await;
     let since = cursor(&store).await;
     store.purge(stream(1), 3).await.expect("the purge lands");
@@ -238,7 +238,7 @@ pub async fn a_purge_then_rewrite_is_reported_purged_with_its_new_head<F: Change
 pub async fn a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor<F: ChangesFixture>(
     fixture: F,
 ) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     commit(&store, 1, 2).await;
     store.purge(stream(1), 2).await.expect("the purge lands");
     let since = cursor(&store).await;
@@ -255,7 +255,7 @@ pub async fn a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor<F: C
 pub async fn a_cursor_taken_now_reports_nothing_until_the_next_commit<F: ChangesFixture>(
     fixture: F,
 ) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     commit(&store, 1, 1).await;
     let since = cursor(&store).await;
     let (none, next) = changed(&store, &since).await;
@@ -274,7 +274,7 @@ pub async fn the_next_cursor_neither_skips_nor_repeats_a_change_used_back_to_bac
 >(
     fixture: F,
 ) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     let mut at = cursor(&store).await;
     let mut seen: Vec<Cover> = Vec::new();
     for round in 1u8..=6 {
@@ -300,7 +300,7 @@ pub async fn the_next_cursor_neither_skips_nor_repeats_a_change_used_back_to_bac
 /// Two handles committing in turns lose no change: the union of what is
 /// reported since the first cursor is what both wrote.
 pub async fn two_writers_racing_lose_no_change<F: ChangesFixture>(fixture: F) {
-    let (a, b) = (fixture.handle(), fixture.handle());
+    let (a, b) = (fixture.handle().await, fixture.handle().await);
     let since = cursor(&a).await;
     for round in 0u8..5 {
         commit(&a, 10 + round, 1).await;
@@ -325,7 +325,7 @@ pub async fn a_cursor_older_than_the_feeds_memory_is_an_overflow_and_next_contin
 >(
     fixture: F,
 ) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     let old = cursor(&store).await;
     commit(&store, 1, 1).await;
     if !fixture.expire().await {
@@ -347,7 +347,7 @@ pub async fn a_cursor_older_than_the_feeds_memory_is_an_overflow_and_next_contin
 /// A cursor the feed does not understand (garbage, empty, another store's)
 /// is an overflow: never "nothing changed".
 pub async fn an_unknown_cursor_is_an_overflow_never_nothing_changed<F: ChangesFixture>(fixture: F) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     commit(&store, 1, 1).await;
     for bytes in [
         vec![],
@@ -367,7 +367,7 @@ pub async fn an_unknown_cursor_is_an_overflow_never_nothing_changed<F: ChangesFi
 
 /// A write that lands no event (a position) touches no stream.
 pub async fn a_write_that_lands_no_event_reports_nothing<F: ChangesFixture>(fixture: F) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     commit(&store, 1, 1).await;
     let since = cursor(&store).await;
     let key = PositionKey {
@@ -384,7 +384,7 @@ pub async fn a_write_that_lands_no_event_reports_nothing<F: ChangesFixture>(fixt
 
 /// A refused write (a stale expected head) reports nothing.
 pub async fn a_refused_write_reports_nothing<F: ChangesFixture>(fixture: F) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     commit(&store, 1, 2).await;
     let since = cursor(&store).await;
     let stale = [page(0, 9)];
@@ -401,7 +401,7 @@ pub async fn a_refused_write_reports_nothing<F: ChangesFixture>(fixture: F) {
 /// from it, nothing; and what committed after it is what the next answer
 /// tells.
 pub async fn the_cursor_now_is_consistent_with_changed_since<F: ChangesFixture>(fixture: F) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     let first = cursor(&store).await;
     commit(&store, 1, 1).await;
     let (_, next) = changed(&store, &first).await;
@@ -423,7 +423,7 @@ pub async fn the_cursor_now_is_consistent_with_changed_since<F: ChangesFixture>(
 /// tells what changed since, or answers an overflow: a follower never
 /// misses a commit silently.
 pub async fn the_feed_survives_a_reopen_or_overflows<F: ChangesFixture>(fixture: F) {
-    let store = fixture.handle();
+    let store = fixture.handle().await;
     commit(&store, 1, 1).await;
     let since = cursor(&store).await;
     commit(&store, 2, 1).await;

@@ -40,7 +40,7 @@ struct Memory {
 impl ChangesFixture for Memory {
     type Store = MemoryStore;
 
-    fn handle(&self) -> MemoryStore {
+    async fn handle(&self) -> MemoryStore {
         self.store.clone()
     }
 
@@ -68,7 +68,7 @@ struct Faulty {
 impl ChangesFixture for Faulty {
     type Store = FaultyStore<MemoryStore>;
 
-    fn handle(&self) -> FaultyStore<MemoryStore> {
+    async fn handle(&self) -> FaultyStore<MemoryStore> {
         self.store.clone()
     }
 
