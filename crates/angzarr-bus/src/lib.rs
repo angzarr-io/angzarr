@@ -88,7 +88,7 @@ pub use pump::Pumped;
 pub use recovery::{Pages, Recover, Recovered, Resolve, StorePages, StoreRead};
 pub use retry::{Delayed, RetryPolicy};
 pub use served::{Failed, Outcome, Served};
-pub use store::{StoreFeed, StoreToken, StoreTransport};
+pub use store::{ChangeSource, StoreFeed, StoreToken, StoreTransport};
 pub use subscription::{Credit, Handler, Scope, Subscription};
 pub use transport::{
     Body, Delivery, Feed, Flow, Next, Opening, OrderingKey, PullTransport, Settle, Sink, Timer,
