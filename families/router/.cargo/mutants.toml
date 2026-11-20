@@ -1,5 +1,0 @@
-# cargo-mutants configuration (read by `just mutation-test`).
-#
-# Only genuinely equivalent mutants are excluded here: ones no input can tell
-# apart from the original. Each carries its argument.
-exclude_re = []
