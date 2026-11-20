@@ -1,0 +1,9 @@
+remotes:
+    ctxloom-default:
+        name: ""
+        url: https://github.com/ctxloom/ctxloom-default
+        trust_bundles: true
+    personal:
+        name: ""
+        url: https://github.com/benjaminabbitt/ctxloom-personal
+        trust_bundles: true

@@ -1,0 +1,7 @@
+description: 'angzarr-router: Rust router (prost/buf, FFI) with cucumber conformance suite and devcontainer'
+parents:
+    - https://github.com/benjaminabbitt/ctxloom-personal@profiles/rust-developer
+bundles:
+    - https://github.com/ctxloom/ctxloom-default@bundles/bdd
+    - https://github.com/benjaminabbitt/ctxloom-personal@bundles/containers
+    - https://github.com/ctxloom/ctxloom-default@bundles/rust-ai-practices

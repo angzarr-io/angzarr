@@ -1,0 +1,30 @@
+# Devcontainer for angzarr-router.
+#
+# Built on the org's pinned Rust toolchain image, which carries the whole
+# proto toolchain (rustc/cargo/clippy/rustfmt, mold, protoc +
+# protoc-gen-prost/tonic, and buf — the SAME pinned buf the rest of the
+# org uses). Developing in here is how buf runs "through the container":
+# `buf lint` / `just buf-lint` use the pinned plugins, no host install.
+#
+# RUST_IMAGE can be overridden (e.g. a git-SHA tag) for reproducibility.
+ARG RUST_IMAGE=ghcr.io/angzarr-io/angzarr-rust:latest
+FROM ${RUST_IMAGE}
+
+# sudo for in-container convenience; everything else is already in the image.
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user (matches devcontainer.json remoteUser).
+ARG USERNAME=vscode
+ARG USER_UID=1000
+ARG USER_GID=$USER_UID
+RUN groupadd --gid $USER_GID $USERNAME \
+    && useradd --uid $USER_UID --gid $USER_GID -m $USERNAME \
+    && echo $USERNAME ALL=\(root\) NOPASSWD:ALL > /etc/sudoers.d/$USERNAME \
+    && chmod 0440 /etc/sudoers.d/$USERNAME
+
+# Mark as devcontainer (justfile recipes run directly in-container).
+ENV DEVCONTAINER=true
+
+USER $USERNAME

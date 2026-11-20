@@ -1,0 +1,20 @@
+config:
+    use_distilled: true
+llm:
+    configs:
+        claude-code:
+            type: claude-code
+            model: claude-opus-4-8
+        claude-fast:
+            type: claude-code
+            model: claude-haiku-4-5-20251001
+    defaults:
+        primary: claude-code
+        fast: claude-fast
+mcp:
+    auto_register_ctxloom: true
+profiles:
+    defaults:
+        - https://github.com/ctxloom/ctxloom-default@profiles/default
+        - angzarr-router
+version: 4

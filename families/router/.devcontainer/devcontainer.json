@@ -1,0 +1,25 @@
+{
+  "name": "angzarr-router",
+  "build": {
+    "dockerfile": "Containerfile",
+    "context": "."
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates"
+      ],
+      "settings": {
+        "rust-analyzer.check.command": "clippy",
+        "editor.formatOnSave": true
+      }
+    }
+  },
+  "mounts": [
+    "source=${localWorkspaceFolder}/.devcontainer/cargo-cache,target=/usr/local/cargo/registry,type=bind,consistency=cached"
+  ],
+  "postCreateCommand": ".devcontainer/post-create.sh",
+  "remoteUser": "vscode"
+}

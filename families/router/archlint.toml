@@ -1,0 +1,99 @@
+# Architecture rules for angzarr-router, checked by `just archlint`
+# (tools/archlint; pattern syntax and rule semantics in
+# tools/archlint/src/rules.rs). `cargo run -p archlint -- --edges` prints the
+# module graph these rules are checked against.
+#
+# Crate layers, bottom to top:
+#   angzarr-proto               the io.angzarr.v1 wire types (angzarr-core's
+#                               crates/angzarr-proto, a git dependency: an
+#                               external crate, constrained by `deny` alone)
+#   angzarr-proto-handler       the handler layer's messages
+#                               (io.angzarr.handler.v1; the same core rev,
+#                               external, like angzarr-proto)
+#   angzarr-ports               `MaybeSend`/`MaybeSync`/`BoxFuture` only
+#                               (core's crates/angzarr-ports, the same git
+#                               rev; external, like angzarr-proto)
+#   angzarr_router              the engine: dispatch, component model, rebuild
+#   angzarr_router_conformance  the harness: drives the engine's public API
+#   archlint                    tooling; no product crate depends on it
+#
+# `allow` lists the ONLY workspace targets a module may reference (external
+# crates are constrained by `deny` alone); `self::**` is the module's own
+# subtree.
+
+# ---- crate layers ----------------------------------------------------------
+
+[[rule]]
+name = "engine-is-the-bottom"
+why = "the engine never depends on the conformance harness, tooling, or C FFI types; its wire types come from angzarr-core's angzarr-proto crate"
+from = ["angzarr_router::**"]
+allow = ["angzarr_router::**"]
+deny = ["std::ffi::**", "core::ffi::**", "std::os::raw::**", "libc::**"]
+
+[[rule]]
+name = "conformance-drives-the-public-engine"
+why = "the harness library exercises the engine's public API and the tier's fixtures"
+from = ["angzarr_router_conformance::**"]
+scope = "lib"
+allow = [
+    "angzarr_router_conformance::**",
+    "angzarr_router::**",
+    # the handler-contract tier's fixtures (decision 14.42)
+    "path:angzarr-project/features/handler-contract/fixture/**",
+]
+
+[[rule]]
+name = "conformance-tests-use-public-surfaces"
+why = "conformance tests drive the engine's public API"
+from = ["angzarr_router_conformance::**"]
+scope = "test"
+allow = [
+    "angzarr_router_conformance::**",
+    "angzarr_router::**",
+]
+
+# ---- engine internals (library code) ----------------------------------------
+
+[[rule]]
+name = "engine-send-is-a-leaf"
+why = "the target-dependent Send bounds and the boxed future reference nothing else in the engine"
+from = ["angzarr_router::send::**"]
+scope = "lib"
+allow = ["angzarr_router::send::**"]
+
+[[rule]]
+name = "engine-error-is-a-leaf"
+why = "the coded-error vocabulary references nothing else in the engine"
+from = ["angzarr_router::error::**"]
+scope = "lib"
+allow = ["angzarr_router::error::**"]
+
+[[rule]]
+name = "engine-kernel-below-components"
+why = "the shared kernel (crate-root helpers, rebuild, context) sits below the component dispatchers and the router"
+from = ["angzarr_router", "angzarr_router::rebuild::**", "angzarr_router::context::**"]
+scope = "lib"
+allow = [
+    "angzarr_router",
+    "angzarr_router::error::**",
+    "angzarr_router::rebuild::**",
+    "angzarr_router::context::**",
+]
+
+[[rule]]
+name = "engine-components-are-independent"
+why = "each component dispatcher builds on the kernel only, never on another component or the router that composes them"
+from = [
+    "angzarr_router::domain::**",
+    "angzarr_router::policy::**",
+    "angzarr_router::projector::**",
+    "angzarr_router::upcaster::**",
+]
+scope = "lib"
+allow = [
+    "self::**",
+    "angzarr_router",
+    "angzarr_router::error::**",
+    "angzarr_router::rebuild::**",
+    "angzarr_router::context::**",
+]

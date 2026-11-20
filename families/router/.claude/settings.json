@@ -1,0 +1,75 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "ctxloom hook stamp-plan",
+            "type": "command"
+          }
+        ],
+        "matcher": "Edit|Write"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "command": "ltk evaluate",
+            "type": "command"
+          }
+        ],
+        "matcher": "Bash|PowerShell|Edit|Write|MultiEdit|NotebookEdit"
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "command": "ctxloom hook session-bind",
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/angzarr-router/main' --part 1 --of 7 25fa8a9e59cf7866",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/angzarr-router/main' --part 2 --of 7 25fa8a9e59cf7866",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/angzarr-router/main' --part 3 --of 7 25fa8a9e59cf7866",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/angzarr-router/main' --part 4 --of 7 25fa8a9e59cf7866",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/angzarr-router/main' --part 5 --of 7 25fa8a9e59cf7866",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/angzarr-router/main' --part 6 --of 7 25fa8a9e59cf7866",
+            "timeout": 60,
+            "type": "command"
+          },
+          {
+            "command": "ctxloom hook inject-context --project '/home/babbitt/workspace/angzarr/angzarr-router/main' --part 7 --of 7 25fa8a9e59cf7866",
+            "timeout": 60,
+            "type": "command"
+          }
+        ]
+      }
+    ]
+  },
+  "statusLine": {
+    "command": "ctxloom hook hud",
+    "type": "command"
+  }
+}

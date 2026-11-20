@@ -1,0 +1,96 @@
+version: 1
+locked_at: 2026-06-15T18:54:23.43488471Z
+bundles:
+    https://github.com/benjaminabbitt/ctxloom-personal@bundles/containers:
+        sha: c26271e32d5c78d44ec8acc660c1cb4f2be8b748
+        url: https://github.com/benjaminabbitt/ctxloom-personal
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/benjaminabbitt/ctxloom-personal@bundles/core-practices:
+        sha: c26271e32d5c78d44ec8acc660c1cb4f2be8b748
+        url: https://github.com/benjaminabbitt/ctxloom-personal
+        requested_version: c26271e32d5c78d44ec8acc660c1cb4f2be8b748
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/benjaminabbitt/ctxloom-personal@bundles/developer-mindset:
+        sha: c26271e32d5c78d44ec8acc660c1cb4f2be8b748
+        url: https://github.com/benjaminabbitt/ctxloom-personal
+        requested_version: c26271e32d5c78d44ec8acc660c1cb4f2be8b748
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/benjaminabbitt/ctxloom-personal@bundles/just:
+        sha: c26271e32d5c78d44ec8acc660c1cb4f2be8b748
+        url: https://github.com/benjaminabbitt/ctxloom-personal
+        requested_version: c26271e32d5c78d44ec8acc660c1cb4f2be8b748
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/benjaminabbitt/ctxloom-personal@bundles/rust-test-support-pattern:
+        sha: c26271e32d5c78d44ec8acc660c1cb4f2be8b748
+        url: https://github.com/benjaminabbitt/ctxloom-personal
+        requested_version: c26271e32d5c78d44ec8acc660c1cb4f2be8b748
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/ai-coding-general:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/ai-developer:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/bdd:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/code-quality:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/default:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/git:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/lsp:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/ltk:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/rust-ai-practices:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/rust-development:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/sequential-thinking:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/testing:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@bundles/versionator:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+profiles:
+    https://github.com/benjaminabbitt/ctxloom-personal@profiles/rust-developer:
+        sha: c26271e32d5c78d44ec8acc660c1cb4f2be8b748
+        url: https://github.com/benjaminabbitt/ctxloom-personal
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@profiles/default:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@profiles/developer:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
+    https://github.com/ctxloom/ctxloom-default@profiles/rust-developer:
+        sha: 28a5622afa532ebf350e1d6d2a6f53b183ff38ae
+        url: https://github.com/ctxloom/ctxloom-default
+        fetched_at: 0001-01-01T00:00:00Z
