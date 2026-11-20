@@ -156,7 +156,7 @@ println!("Client version: {}", VERSION);
 
 **Go:**
 ```go
-import angzarr "github.com/benjaminabbitt/angzarr/client/go"
+import angzarr "github.com/angzarr-io/angzarr-client-go"
 fmt.Println("Client version:", angzarr.Version)
 ```
 
