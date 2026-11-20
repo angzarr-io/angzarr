@@ -28,6 +28,10 @@ pub trait Changes {
   `Overflow`: the follower reads everything once and continues from its
   `next`. A store never answers it with a partial list or with "nothing
   changed".
+- A feed is as durable as its store: SQLite's and the journal's are checked
+  across a reopen (continue or overflow, never a silent miss); the in-memory
+  store has no persistence, no reopen, and a cursor of another instance is
+  foreign. A follower that outlived its store resyncs with a full scan.
 - A store with no feed has no `Changes`; its follower scans in full, and
   chooses that explicitly (`angzarr-bus`'s `Following::FullScan`).
 - The in-memory store, SQLite (`angzarr-store-sqlite`) and the journal store

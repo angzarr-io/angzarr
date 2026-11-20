@@ -53,9 +53,14 @@ pub trait ChangesFixture {
     fn expire(&self) -> impl Future<Output = bool>;
 
     /// Close every handle and open the store again from what it kept:
-    /// `Some(handle)` if the store is durable, `None` if a reopen is not
-    /// one it survives (in memory).
-    fn reopen(&self) -> impl Future<Output = Option<Self::Store>>;
+    /// `Some(handle)` for a durable store (the reopen checks run), `None`,
+    /// the default, for one with no persistence, which has no reopen and
+    /// no restart to survive: a follower that outlived it holds a foreign
+    /// cursor, which [`an_unknown_cursor_is_an_overflow_never_nothing_changed`]
+    /// covers.
+    fn reopen(&self) -> impl Future<Output = Option<Self::Store>> {
+        async { None }
+    }
 }
 
 /// Every check's name, in [`changes_contract!`](crate::changes_contract)'s

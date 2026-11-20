@@ -18,6 +18,15 @@
 //! gives. A follower never guesses, and a store never answers a cursor it
 //! does not understand with a partial list.
 //!
+//! **Durability is the store's.** A store with persistence (SQLite, the
+//! journal) keeps its feed as it keeps its events, or an overflow says it did
+//! not: a follower never misses a commit silently across a reopen. A store
+//! with none (the in-memory store) has no reopen and no restart; its feed is
+//! as non-durable as its events, on purpose. A follower that outlives such a
+//! store (a remote store, a coordinator that restarted) holds a cursor of a
+//! feed that is gone: foreign, so an overflow, and it resyncs with a full
+//! scan, correctly.
+//!
 //! **Distribution.** The feed is a read (`changed_since`), not a callback, so
 //! a store held by a coordinator serves it over the wire as it serves a
 //! read: a request of a cursor and a limit, an answer of changes and the next

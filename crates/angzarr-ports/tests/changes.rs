@@ -48,10 +48,6 @@ impl ChangesFixture for Memory {
         age(&self.store).await;
         true
     }
-
-    async fn reopen(&self) -> Option<MemoryStore> {
-        None
-    }
 }
 
 mod memory {
@@ -75,10 +71,6 @@ impl ChangesFixture for Faulty {
     async fn expire(&self) -> bool {
         age(self.store.inner()).await;
         true
-    }
-
-    async fn reopen(&self) -> Option<FaultyStore<MemoryStore>> {
-        None
     }
 }
 
