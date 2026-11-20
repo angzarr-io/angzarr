@@ -5,7 +5,9 @@
 # images, per-crate justfiles, lsp) are the `core` module: `just core::buf-lint`.
 # Needs protoc on PATH and the angzarr-project submodule checked out.
 
-set windows-shell := ["bash", "-cu"]
+# Git for Windows' bash by path: a bare `bash` is System32's WSL launcher, which the
+# process search finds first and which fails on a host without a distribution.
+set windows-shell := ["C:/Program Files/Git/bin/bash.exe", "-cu"]
 
 import 'gates/gates.just'
 import? 'angzarr-project/submodule.just'

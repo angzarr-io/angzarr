@@ -26,7 +26,10 @@ fn a_post_is_read_whole_then_its_end() {
     let (read, got) = mpsc::channel();
     std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
-        stream.set_read_timeout(Some(TIMEOUT)).unwrap();
+        // macOS refuses a timeout (EINVAL) on a stream whose peer has already
+        // posted and closed; the read then ends at once, and the receiver's own
+        // `recv_timeout` bounds the test.
+        let _ = stream.set_read_timeout(Some(TIMEOUT));
         let mut bytes = Vec::new();
         let whole = stream.read_to_end(&mut bytes).map(|_| bytes).ok();
         read.send(whole).unwrap();
