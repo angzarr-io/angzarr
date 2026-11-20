@@ -519,6 +519,7 @@ async fn commit_cost(n: usize, incremental: bool) -> (usize, usize, usize, usize
     assert_eq!((next.stream, next.sequence), (touched, 1));
     let (covers, heads, tokens) = counting.ops.take();
     let used = feed.lock().visits - visits;
+    assert!(used >= 1, "the touched lane was looked at");
     (covers, heads, tokens, used)
 }
 
@@ -537,4 +538,123 @@ async fn a_commit_costs_the_feed_nothing_for_the_streams_it_did_not_touch() {
 async fn without_a_change_feed_a_commit_lists_and_reads_every_stream() {
     let (covers, heads, _, _) = commit_cost(100, false).await;
     assert_eq!((covers, heads), (1, 100), "the fallback is the full scan");
+}
+
+// ---------------------------------------------------------------- the same, told what a commit touched
+
+fn incremental<'s>(store: &'s MemoryStore) -> StoreTransport<'s, MemoryStore, Clock> {
+    StoreTransport::new(store, &Clock, Duration::from_secs(3600))
+        .pushed_by(store)
+        .changes_from(store)
+}
+
+#[tokio::test]
+async fn told_what_a_commit_touched_a_new_stream_is_delivered_from_its_start() {
+    let store = MemoryStore::default();
+    let transport = incremental(&store);
+    let feed = open(&transport, &scope(), 2).await;
+    let commit = async {
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        append(&store, &stream(4), 2).await;
+    };
+    let (_, (_, first)) = tokio::join!(commit, delivery(&feed));
+    assert_eq!((first.stream, first.sequence), (stream(4), 0));
+}
+
+#[tokio::test]
+async fn told_what_a_commit_touched_a_stream_delivered_and_purged_is_delivered_gone() {
+    let store = MemoryStore::default();
+    append(&store, &stream(1), 1).await;
+    let transport = incremental(&store);
+    let feed = open(&transport, &scope(), 1).await;
+    let (token, _) = delivery(&feed).await;
+    feed.settle(token, Settle::Handled).await.unwrap();
+    let purging = async {
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        purge(&store, &stream(1)).await;
+    };
+    let (_, (_, gone)) = tokio::join!(purging, delivery(&feed));
+    assert_eq!((gone.stream, gone.body), (stream(1), Body::Gone));
+}
+
+#[tokio::test]
+async fn told_what_a_commit_touched_a_purged_and_written_again_stream_starts_over() {
+    let store = MemoryStore::default();
+    append(&store, &stream(1), 3).await;
+    let transport = incremental(&store);
+    let feed = open(&transport, &scope(), 1).await;
+    for _ in 0..3 {
+        let (token, _) = delivery(&feed).await;
+        feed.settle(token, Settle::Handled).await.unwrap();
+    }
+    let rewriting = async {
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        purge(&store, &stream(1)).await;
+        append(&store, &stream(1), 1).await;
+    };
+    let (_, (token, gone)) = tokio::join!(rewriting, delivery(&feed));
+    assert_eq!(
+        gone.body,
+        Body::Gone,
+        "its head is below what was delivered"
+    );
+    feed.settle(token, Settle::Handled).await.unwrap();
+    let (_, again) = delivery(&feed).await;
+    assert_eq!(
+        (again.stream, again.sequence),
+        (stream(1), 0),
+        "from its start"
+    );
+}
+
+#[tokio::test]
+async fn told_what_a_commit_touched_a_rewrite_as_long_as_what_was_delivered_is_not_told_from_it() {
+    let store = MemoryStore::default();
+    append(&store, &stream(1), 1).await;
+    let transport = incremental(&store);
+    let feed = open(&transport, &scope(), 1).await;
+    let (token, _) = delivery(&feed).await;
+    feed.settle(token, Settle::Handled).await.unwrap();
+    let rewriting = async {
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        purge(&store, &stream(1)).await;
+        append(&store, &stream(1), 1).await;
+    };
+    let nothing = async {
+        // Idle, not gone: the head is where the cursor is, as in a scan.
+        let idle = tokio::time::timeout(Duration::from_millis(300), delivery(&feed)).await;
+        assert!(idle.is_err(), "nothing is delivered");
+    };
+    tokio::join!(rewriting, nothing);
+}
+
+#[tokio::test]
+async fn told_what_a_commit_touched_a_stream_never_delivered_that_is_purged_is_not_delivered_gone()
+{
+    let store = MemoryStore::default();
+    let transport = incremental(&store);
+    let feed = open(&transport, &scope(), 1).await;
+    let churn = async {
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        append(&store, &stream(1), 1).await;
+        purge(&store, &stream(1)).await;
+    };
+    let nothing = async {
+        let delivered = tokio::time::timeout(Duration::from_millis(300), delivery(&feed)).await;
+        assert!(
+            delivered.is_err(),
+            "it was never delivered, so is never gone"
+        );
+    };
+    tokio::join!(churn, nothing);
 }

@@ -951,6 +951,15 @@ mod bus_checks {
     }
 
     #[tokio::test]
+    async fn the_policy_outcome_check_allows_a_bus_that_holds_the_bug() {
+        allows(
+            Flaw::HoldsBugs,
+            kit::a_policys_failure_is_reported_by_what_became_of_its_position,
+        )
+        .await;
+    }
+
+    #[tokio::test]
     async fn the_policy_outcome_check_fails_a_bus_that_mislabels_failures() {
         let check = kit::a_policys_failure_is_reported_by_what_became_of_its_position;
         catches(Flaw::Mislabels, "outcome", check).await;

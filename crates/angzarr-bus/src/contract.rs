@@ -1010,8 +1010,9 @@ pub async fn a_policys_failure_is_reported_by_what_became_of_its_position<H: Har
     relay.lock().failing = true;
     let mut bus = harness.bus(Wake::Poll);
     react(&harness, &mut bus, RELAY, &domains.first, &relay);
-    let enough = |t: &Tally| !t.failures.is_empty() && t.idles >= 3;
+    let enough = |t: &Tally| !t.failures.is_empty();
     let tally = serve(&harness, &mut bus, "a policy's bug", enough).await;
+    assert!(!tally.failures.is_empty(), "its bug is reported");
     let expected = match harness.position(RELAY, &a).await {
         0 => Outcome::Held,
         _ => Outcome::Passed,

@@ -1,7 +1,6 @@
 //! The in-memory store's change feed: which streams a commit touched.
 
-use angzarr_proto::v1::{event_page, Cover, EventPage, Uuid};
-use prost_types::Any;
+use angzarr_proto::v1::{Cover, EventPage, Uuid};
 
 use crate::memory::MemoryStore;
 use crate::{ChangeCursor, Changed, Changes, EventStore, Purge, StreamRef, Write};
@@ -20,10 +19,6 @@ async fn append(store: &MemoryStore, stream: &Cover, count: u64) {
     let pages: Vec<EventPage> = (head..head + count)
         .map(|sequence| EventPage {
             sequence,
-            body: Some(event_page::Body::Event(Any {
-                type_url: "type.googleapis.com/angzarr.test.Happened".to_string(),
-                value: Vec::new(),
-            })),
             ..EventPage::default()
         })
         .collect();
@@ -125,4 +120,36 @@ async fn a_cursor_from_the_future_overflows() {
         since(&store, ahead).await,
         Changed::Overflow { .. }
     ));
+}
+
+#[tokio::test]
+async fn a_feed_keeps_exactly_what_it_says_it_does_and_one_touch_more_overflows() {
+    let store = MemoryStore::default();
+    let cursor = store.changes_cursor().await.unwrap();
+    for _ in 0..65_536 {
+        append(&store, &stream(1), 1).await;
+    }
+    assert!(
+        matches!(since(&store, cursor).await, Changed::Streams { .. }),
+        "65,536 touches are all kept"
+    );
+    append(&store, &stream(1), 1).await;
+    assert!(matches!(
+        since(&store, cursor).await,
+        Changed::Overflow { .. }
+    ));
+}
+
+#[tokio::test]
+async fn a_cursor_inside_what_a_trimmed_feed_keeps_names_the_streams_after_it() {
+    let store = MemoryStore::default();
+    for _ in 0..65_540 {
+        append(&store, &stream(1), 1).await;
+    }
+    let cursor = store.changes_cursor().await.unwrap();
+    append(&store, &stream(2), 1).await;
+    let Changed::Streams { streams, .. } = since(&store, cursor).await else {
+        panic!("the cursor is inside what it keeps");
+    };
+    assert_eq!(streams, [stream(2)]);
 }
