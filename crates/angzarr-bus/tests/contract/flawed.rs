@@ -487,7 +487,7 @@ impl Harness for Broken {
             Wake::Poll => &Soon,
             Wake::CommitOnly => &Never,
         };
-        let mut transport = StoreTransport::new(&self.run.store, timer, EVERY);
+        let mut transport = StoreTransport::new(&self.run.store, timer, EVERY, Following::FullScan);
         if !self.is(Flaw::Deaf) {
             transport = transport.pushed_by(self.run.memory());
         }

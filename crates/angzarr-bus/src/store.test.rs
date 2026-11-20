@@ -15,7 +15,7 @@ use angzarr_proto::v1::{event_page, EventPage, Uuid};
 use prost_types::Any;
 
 use super::*;
-use crate::Credit;
+use crate::{Credit, Following};
 
 const NAME: &str = "feed";
 const DOMAIN: &str = "stored";
@@ -165,7 +165,12 @@ where
 async fn a_stream_delivered_and_then_purged_is_delivered_gone() {
     let store = MemoryStore::default();
     append(&store, &stream(1), 1).await;
-    let transport = StoreTransport::new(&store, &Clock, Duration::from_millis(1));
+    let transport = StoreTransport::new(
+        &store,
+        &Clock,
+        Duration::from_millis(1),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 1).await;
     let (token, first) = delivery(&feed).await;
     assert_eq!((first.sequence, first.body), (0, Body::Reference));
@@ -180,7 +185,12 @@ async fn a_stream_with_no_position_and_no_events_is_not_delivered_gone() {
     let store = MemoryStore::default();
     append(&store, &stream(1), 1).await;
     purge(&store, &stream(1)).await;
-    let transport = StoreTransport::new(&store, &Clock, Duration::from_millis(1));
+    let transport = StoreTransport::new(
+        &store,
+        &Clock,
+        Duration::from_millis(1),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 1).await;
     assert!(stays_idle(&feed, 3).await, "nothing was ever kept of it");
 }
@@ -191,7 +201,12 @@ async fn a_stream_forgotten_is_not_delivered_gone_again() {
     append(&store, &stream(1), 1).await;
     record(&store, &stream(1), 1).await;
     purge(&store, &stream(1)).await;
-    let transport = StoreTransport::new(&store, &Clock, Duration::from_millis(1));
+    let transport = StoreTransport::new(
+        &store,
+        &Clock,
+        Duration::from_millis(1),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 1).await;
     let (token, gone) = delivery(&feed).await;
     assert_eq!(gone.body, Body::Gone);
@@ -206,7 +221,12 @@ async fn a_purged_and_written_again_stream_is_delivered_gone_then_from_its_start
     record(&store, &stream(1), 2).await;
     purge(&store, &stream(1)).await;
     append(&store, &stream(1), 1).await;
-    let transport = StoreTransport::new(&store, &Clock, Duration::from_millis(1));
+    let transport = StoreTransport::new(
+        &store,
+        &Clock,
+        Duration::from_millis(1),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 1).await;
     let (token, gone) = delivery(&feed).await;
     assert_eq!(gone.body, Body::Gone);
@@ -225,7 +245,12 @@ async fn a_stream_owing_new_events_while_the_credit_is_full_keeps_the_feed_from_
     let store = MemoryStore::default();
     append(&store, &stream(1), 1).await;
     append(&store, &stream(2), 1).await;
-    let transport = StoreTransport::new(&store, &Frozen, Duration::from_secs(3600));
+    let transport = StoreTransport::new(
+        &store,
+        &Frozen,
+        Duration::from_secs(3600),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 1).await;
     let _out = delivery(&feed).await;
     assert!(
@@ -240,7 +265,12 @@ async fn a_stream_owing_a_redelivery_while_the_credit_is_full_keeps_the_feed_fro
     for n in 1..=3 {
         append(&store, &stream(n), 1).await;
     }
-    let transport = StoreTransport::new(&store, &Frozen, Duration::from_secs(3600));
+    let transport = StoreTransport::new(
+        &store,
+        &Frozen,
+        Duration::from_secs(3600),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 2).await;
     let (first, a) = delivery(&feed).await;
     let (second, _) = delivery(&feed).await;
@@ -261,7 +291,12 @@ async fn a_stream_owing_its_gone_delivery_while_the_credit_is_full_keeps_the_fee
     append(&store, &stream(2), 1).await;
     record(&store, &stream(2), 1).await;
     purge(&store, &stream(2)).await;
-    let transport = StoreTransport::new(&store, &Frozen, Duration::from_secs(3600));
+    let transport = StoreTransport::new(
+        &store,
+        &Frozen,
+        Duration::from_secs(3600),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 1).await;
     let (_token, out) = delivery(&feed).await;
     assert!(
@@ -275,7 +310,12 @@ async fn a_stream_owing_its_gone_delivery_while_the_credit_is_full_keeps_the_fee
 async fn a_delivery_held_with_no_delay_is_delivered_again_at_the_next_poll() {
     let store = MemoryStore::default();
     append(&store, &stream(1), 2).await;
-    let transport = StoreTransport::new(&store, &Clock, Duration::from_millis(1));
+    let transport = StoreTransport::new(
+        &store,
+        &Clock,
+        Duration::from_millis(1),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 1).await;
     let (token, first) = delivery(&feed).await;
     feed.settle(token, Settle::Held { after: None })
@@ -292,7 +332,12 @@ async fn a_delivery_held_with_no_delay_is_delivered_again_at_the_next_poll() {
 async fn a_delivery_held_for_a_delay_is_not_released_by_the_poll() {
     let store = MemoryStore::default();
     append(&store, &stream(1), 2).await;
-    let transport = StoreTransport::new(&store, &Clock, Duration::from_millis(1));
+    let transport = StoreTransport::new(
+        &store,
+        &Clock,
+        Duration::from_millis(1),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 1).await;
     let (token, _) = delivery(&feed).await;
     let held = Settle::Held {
@@ -309,7 +354,12 @@ async fn a_delivery_held_for_a_delay_is_not_released_by_the_poll() {
 async fn a_delivery_held_for_a_short_delay_is_delivered_again_when_it_passes() {
     let store = MemoryStore::default();
     append(&store, &stream(1), 1).await;
-    let transport = StoreTransport::new(&store, &Clock, Duration::from_secs(3600));
+    let transport = StoreTransport::new(
+        &store,
+        &Clock,
+        Duration::from_secs(3600),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 1).await;
     let (token, first) = delivery(&feed).await;
     let held = Settle::Held {
@@ -324,7 +374,12 @@ async fn a_delivery_held_for_a_short_delay_is_delivered_again_when_it_passes() {
 async fn a_delivery_held_for_no_time_is_delivered_again_at_once() {
     let store = MemoryStore::default();
     append(&store, &stream(1), 1).await;
-    let transport = StoreTransport::new(&store, &Frozen, Duration::from_secs(3600));
+    let transport = StoreTransport::new(
+        &store,
+        &Frozen,
+        Duration::from_secs(3600),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 1).await;
     let (token, first) = delivery(&feed).await;
     let held = Settle::Held {
@@ -341,7 +396,12 @@ async fn a_delivery_held_for_no_time_is_delivered_again_at_once() {
 async fn a_poll_without_a_push_notices_what_was_committed_by_the_change_token() {
     let store = MemoryStore::default();
     append(&store, &stream(1), 1).await;
-    let transport = StoreTransport::new(&store, &Clock, Duration::from_millis(1));
+    let transport = StoreTransport::new(
+        &store,
+        &Clock,
+        Duration::from_millis(1),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 1).await;
     let (token, _) = delivery(&feed).await;
     feed.settle(token, Settle::Handled).await.unwrap();
@@ -355,7 +415,12 @@ async fn a_poll_without_a_push_notices_what_was_committed_by_the_change_token() 
 async fn a_settlement_of_a_delivery_not_out_changes_nothing() {
     let store = MemoryStore::default();
     append(&store, &stream(1), 1).await;
-    let transport = StoreTransport::new(&store, &Clock, Duration::from_millis(1));
+    let transport = StoreTransport::new(
+        &store,
+        &Clock,
+        Duration::from_millis(1),
+        Following::FullScan,
+    );
     let feed = open(&transport, &scope(), 1).await;
     let (token, first) = delivery(&feed).await;
     feed.settle(token.clone(), Settle::Handled).await.unwrap();
@@ -374,7 +439,12 @@ async fn a_feed_that_does_not_resume_starts_at_the_beginning_whatever_is_stored(
     let store = MemoryStore::default();
     append(&store, &stream(1), 3).await;
     record(&store, &stream(1), 2).await;
-    let transport = StoreTransport::new(&store, &Clock, Duration::from_millis(1));
+    let transport = StoreTransport::new(
+        &store,
+        &Clock,
+        Duration::from_millis(1),
+        Following::FullScan,
+    );
     let scope = scope();
     let resuming = open(&transport, &scope, 1).await;
     let (_, from_mark) = delivery(&resuming).await;
@@ -492,11 +562,12 @@ async fn commit_cost(n: usize, incremental: bool) -> (usize, usize, usize, usize
         };
         append(&counting.inner, &cover, 1).await;
     }
-    let mut transport = StoreTransport::new(&counting, &Frozen, Duration::from_secs(3600))
+    let following = match incremental {
+        true => Following::Changes(&counting.inner),
+        false => Following::FullScan,
+    };
+    let transport = StoreTransport::new(&counting, &Frozen, Duration::from_secs(3600), following)
         .pushed_by(&counting.inner);
-    if incremental {
-        transport = transport.changes_from(&counting.inner);
-    }
     let feed = open(&transport, &scope(), 4).await;
     for _ in 0..n {
         let (token, _) = delivery(&feed).await;
@@ -528,8 +599,8 @@ async fn a_commit_costs_the_feed_nothing_for_the_streams_it_did_not_touch() {
     for n in [100, 2000] {
         let (covers, heads, tokens, visits) = commit_cost(n, true).await;
         assert!(
-            covers == 0 && heads <= 2 && tokens <= 2 && visits <= 6,
-            "{n} streams, one touched: {covers} listings, {heads} head reads, {tokens} tokens, {visits} lane visits"
+            covers == 0 && heads == 0 && tokens <= 2 && visits <= 6,
+            "{n} streams, one touched: {covers} listings, {heads} head reads (the feed carries the head), {tokens} tokens, {visits} lane visits"
         );
     }
 }
@@ -543,9 +614,13 @@ async fn without_a_change_feed_a_commit_lists_and_reads_every_stream() {
 // ---------------------------------------------------------------- the same, told what a commit touched
 
 fn incremental<'s>(store: &'s MemoryStore) -> StoreTransport<'s, MemoryStore, Clock> {
-    StoreTransport::new(store, &Clock, Duration::from_secs(3600))
-        .pushed_by(store)
-        .changes_from(store)
+    StoreTransport::new(
+        store,
+        &Clock,
+        Duration::from_secs(3600),
+        Following::Changes(store),
+    )
+    .pushed_by(store)
 }
 
 #[tokio::test]
@@ -614,7 +689,7 @@ async fn told_what_a_commit_touched_a_purged_and_written_again_stream_starts_ove
 }
 
 #[tokio::test]
-async fn told_what_a_commit_touched_a_rewrite_as_long_as_what_was_delivered_is_not_told_from_it() {
+async fn told_what_a_commit_touched_a_rewrite_as_long_as_what_was_delivered_is_still_noticed() {
     let store = MemoryStore::default();
     append(&store, &stream(1), 1).await;
     let transport = incremental(&store);
@@ -628,12 +703,15 @@ async fn told_what_a_commit_touched_a_rewrite_as_long_as_what_was_delivered_is_n
         purge(&store, &stream(1)).await;
         append(&store, &stream(1), 1).await;
     };
-    let nothing = async {
-        // Idle, not gone: the head is where the cursor is, as in a scan.
-        let idle = tokio::time::timeout(Duration::from_millis(300), delivery(&feed)).await;
-        assert!(idle.is_err(), "nothing is delivered");
-    };
-    tokio::join!(rewriting, nothing);
+    let (_, (token, gone)) = tokio::join!(rewriting, delivery(&feed));
+    assert_eq!(
+        gone.body,
+        Body::Gone,
+        "the feed says it was purged, whatever its head"
+    );
+    feed.settle(token, Settle::Handled).await.unwrap();
+    let (_, again) = delivery(&feed).await;
+    assert_eq!((again.stream, again.sequence), (stream(1), 0));
 }
 
 #[tokio::test]

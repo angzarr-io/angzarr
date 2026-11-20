@@ -53,16 +53,21 @@ pub struct StoreTransport<'s, S, W: ?Sized = dyn Timer> {
     timer: &'s W,
     every: Duration,
     push: Option<&'s dyn CommitNotify>,
-    changes: Option<&'s dyn ChangeSource>,
+    following: Following<'s>,
 }
 
 /// Where a store's commits are told apart by stream: [`Changes`], as a trait
-/// object, so a transport takes it beside its other optional sources.
+/// object, so a transport takes the feed of a local store or a remote one
+/// alike.
 pub trait ChangeSource: angzarr_ports::MaybeSend + angzarr_ports::MaybeSync {
     /// The feed's cursor now.
     fn cursor(&self) -> BoxFuture<'_, Result<ChangeCursor, StoreError>>;
-    /// The streams touched after `since`.
-    fn since(&self, since: ChangeCursor) -> BoxFuture<'_, Result<Changed, StoreError>>;
+    /// The streams touched after `since`, at most `limit` touches' worth.
+    fn since<'a>(
+        &'a self,
+        since: &'a ChangeCursor,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Changed, StoreError>>;
 }
 
 impl<T: Changes> ChangeSource for T {
@@ -70,34 +75,52 @@ impl<T: Changes> ChangeSource for T {
         Box::pin(self.changes_cursor())
     }
 
-    fn since(&self, since: ChangeCursor) -> BoxFuture<'_, Result<Changed, StoreError>> {
-        Box::pin(self.changed_since(since))
+    fn since<'a>(
+        &'a self,
+        since: &'a ChangeCursor,
+        limit: usize,
+    ) -> BoxFuture<'a, Result<Changed, StoreError>> {
+        Box::pin(self.changed_since(since, limit))
     }
 }
 
+/// How a feed learns what a commit changed. Chosen when the transport is
+/// made, never silently.
+#[derive(Clone, Copy)]
+pub enum Following<'s> {
+    /// Told by the store's change feed which streams a commit touched, with
+    /// their heads: a commit costs the streams it touched, not the streams
+    /// in scope. A cursor the feed does not understand (too old, unknown)
+    /// is an overflow, and the feed reads everything once, correctly.
+    Changes(&'s dyn ChangeSource),
+    /// The store has no change feed: a commit, or a poll that finds the
+    /// store changed, lists the scope's streams and reads every head. Slower
+    /// (a commit costs every stream in scope), correct, and the caller's
+    /// explicit choice.
+    FullScan,
+}
+
 impl<'s, S, W: Timer + ?Sized> StoreTransport<'s, S, W> {
-    /// Deliveries from `store`, polled every `every` on `timer`.
-    pub fn new(store: &'s S, timer: &'s W, every: Duration) -> StoreTransport<'s, S, W> {
+    /// Deliveries from `store`, polled every `every` on `timer`, learning
+    /// what a commit changed as `following` says.
+    pub fn new(
+        store: &'s S,
+        timer: &'s W,
+        every: Duration,
+        following: Following<'s>,
+    ) -> StoreTransport<'s, S, W> {
         StoreTransport {
             store,
             timer,
             every,
             push: None,
-            changes: None,
+            following,
         }
     }
 
     /// Woken by every commit `notify` pushes too.
     pub fn pushed_by(mut self, notify: &'s dyn CommitNotify) -> StoreTransport<'s, S, W> {
         self.push = Some(notify);
-        self
-    }
-
-    /// Told by `changes` which streams a commit touched, so a commit (or a
-    /// poll) refreshes those streams alone and not every stream in scope.
-    /// Without it, a commit lists the scope's streams and reads every head.
-    pub fn changes_from(mut self, changes: &'s dyn ChangeSource) -> StoreTransport<'s, S, W> {
-        self.changes = Some(changes);
         self
     }
 }
@@ -131,9 +154,9 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> PullTransport
             .collect();
         // Taken before the first scan: what is committed between them is
         // told again, which is harmless.
-        let cursor = match self.changes {
-            Some(changes) => Some(changes.cursor().await?),
-            None => None,
+        let cursor = match self.following {
+            Following::Changes(changes) => Some(changes.cursor().await?),
+            Following::FullScan => None,
         };
         Ok(StoreFeed {
             transport: self,
@@ -154,6 +177,9 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> PullTransport
         })
     }
 }
+
+/// How many touches a change-feed answer is asked for at most.
+const CHANGES_PAGE: usize = 1024;
 
 /// A stream as the feed tells streams apart.
 type Key = (String, Vec<u8>, Option<String>);
@@ -288,8 +314,16 @@ impl State {
     /// nothing of it): a stream listed is kept; one not listed is kept only
     /// if something of it was delivered or is out, and is owed its gone
     /// delivery.
-    fn seen(&mut self, cover: Cover, head: u64) {
+    fn seen(&mut self, cover: Cover, head: u64, purged: bool) {
         let key = key(&cover);
+        if purged {
+            // What was delivered of it is gone, whatever its head now.
+            if let Some(lane) = self.lanes.get_mut(&key) {
+                if lane.kept() && lane.out.is_none() {
+                    lane.gone = true;
+                }
+            }
+        }
         if head == 0 {
             if let Some(lane) = self.lanes.get_mut(&key) {
                 lane.listed = false;
@@ -381,40 +415,38 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> StoreFeed<'_, S, W> {
     /// the last refresh, reading each head and nothing else; everything, as
     /// a scan, if the feed cannot say. Without a feed, everything is stale.
     async fn refresh(&self) -> Result<(), StoreError> {
-        let Some(changes) = self.transport.changes else {
+        let Following::Changes(changes) = self.transport.following else {
             self.lock().stale = true;
             return Ok(());
         };
-        let Some(since) = self.lock().cursor else {
+        let Some(mut since) = self.lock().cursor.clone() else {
             self.lock().stale = true;
             return Ok(());
         };
-        match changes.since(since).await? {
-            Changed::Overflow { next } => {
-                let mut state = self.lock();
-                state.stale = true;
-                state.cursor = Some(next);
-            }
-            Changed::Streams { streams, next } => {
-                let touched: Vec<Cover> = (streams.into_iter())
-                    .filter(|stream| self.scope.holds(stream))
-                    .collect();
-                let mut heads = Vec::with_capacity(touched.len());
-                if !touched.is_empty() {
-                    let mut reads = self.transport.store.begin_read().await?;
-                    for cover in touched {
-                        let head = reads.head(StreamRef::try_from(&cover)?).await?;
-                        heads.push((cover, head.next_sequence));
-                    }
+        loop {
+            match changes.since(&since, CHANGES_PAGE).await? {
+                Changed::Overflow { next } => {
+                    let mut state = self.lock();
+                    state.stale = true;
+                    state.cursor = Some(next);
+                    return Ok(());
                 }
-                let mut state = self.lock();
-                state.cursor = Some(next);
-                for (cover, head) in heads {
-                    state.seen(cover, head);
+                Changed::Streams { changes, next } => {
+                    let caught_up = changes.is_empty();
+                    let mut state = self.lock();
+                    for change in changes {
+                        if self.scope.holds(&change.stream) {
+                            state.seen(change.stream, change.head, change.purged);
+                        }
+                    }
+                    state.cursor = Some(next.clone());
+                    since = next;
+                    if caught_up {
+                        return Ok(());
+                    }
                 }
             }
         }
-        Ok(())
     }
 
     /// The first delivery owed within the credit, taken out.
@@ -544,9 +576,9 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> Feed for StoreFeed<'_,
                 Woken::Tick => {
                     timer = transport.timer.after(transport.every);
                     self.release(None);
-                    match transport.changes {
-                        Some(_) => self.refresh().await?,
-                        None => {
+                    match transport.following {
+                        Following::Changes(_) => self.refresh().await?,
+                        Following::FullScan => {
                             let token = transport.store.change_token().await?;
                             let mut state = self.lock();
                             state.stale |= state.token != Some(token);

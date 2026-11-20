@@ -83,6 +83,9 @@ struct Seen {
     letters: Vec<(u64, u64)>,
     /// Calls made.
     calls: usize,
+    /// Each event handed, by the stream's first root byte and its sequence;
+    /// a gone stream as `u64::MAX`.
+    trail: Vec<(u8, u64)>,
 }
 
 /// A dispatch that records what it is handed and answers handled, unless
@@ -131,6 +134,12 @@ impl Spy {
         }
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
         let marker = item.page.map_or("gone".to_string(), marker_of);
+        let root = item.stream.root.as_ref().map_or(0, |root| root.value[0]);
+        let at = if item.page.is_some() {
+            item.sequence
+        } else {
+            u64::MAX
+        };
         let fails = {
             let mut failing = self.failing.lock().unwrap();
             match failing
@@ -149,6 +158,7 @@ impl Spy {
         }
         let mut seen = self.seen.lock().unwrap();
         seen.handed.push((item.sequence, marker));
+        seen.trail.push((root, at));
         Answer::Handled
     }
 }
@@ -752,4 +762,66 @@ async fn a_policy_on_a_tracker_that_cannot_commit_with_outputs_is_refused_and_a_
     let projector = Subscription::projector(Scope::domain(DOMAIN), credit(1), "p".to_string())
         .positions(tracker);
     assert!(hub.subscribe(projector).is_ok());
+}
+
+// ------------------------------------------------ the two ways of following agree
+
+/// A small deterministic generator: each seed one history.
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self, below: u64) -> u64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        (self.0 >> 33) % below
+    }
+}
+
+/// What a projector is handed, per stream and in order, when the history of
+/// `seed` (commits, purges and rewrites of five streams) is followed with
+/// `run`'s store transport, served to idle after each step.
+async fn trail(run: Run, seed: u64) -> Vec<(u8, u64)> {
+    let rig = Rig {
+        run,
+        spy: Arc::default(),
+        probe: Arc::default(),
+    };
+    let mut hub = rig.hub(rig.run.transport(&Soon));
+    rig.project(&mut hub, "projector", 3);
+    let mut random = Lcg(seed);
+    for _ in 0..25 {
+        let n = random.next(5) as u8 + 1;
+        let cover = Cover {
+            root: Some(angzarr_proto::v1::Uuid::from_bytes([n; 16])),
+            ..stream()
+        };
+        let head = rig.run.landed(&cover).await.len() as u64;
+        match (random.next(4), head) {
+            (0, 1..) => Harness::purge(&rig.run, &cover).await,
+            (1, _) => {}
+            _ => {
+                for _ in 0..=random.next(3) {
+                    Harness::append(&rig.run, &cover).await;
+                }
+            }
+        }
+        serve(&mut hub, |_| false).await;
+    }
+    let trail = rig.spy.seen.lock().unwrap().trail.clone();
+    trail
+}
+
+#[tokio::test]
+async fn following_a_random_history_by_the_feed_or_by_a_full_scan_hands_the_same_events() {
+    for seed in 1..=25 {
+        let scanned = trail(Run::default(), seed).await;
+        let followed = trail(Run::incremental(), seed).await;
+        assert!(!scanned.is_empty(), "seed {seed} handed something");
+        assert_eq!(
+            followed, scanned,
+            "seed {seed}: the same events in the same order"
+        );
+    }
 }

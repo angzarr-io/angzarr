@@ -16,8 +16,8 @@ use angzarr_bus::angzarr_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_bus::contract::transport::TransportHarness;
 use angzarr_bus::contract::{Delivery, Domains, Failing, Harness, React, Scripted, Sink, Wake};
 use angzarr_bus::{
-    Admitted, Answer, Dispatch, Handler, Hub, Item, Pumped, RetryPolicy, Scope, StoreRead,
-    StoreTransport, Timer,
+    Admitted, Answer, Dispatch, Following, Handler, Hub, Item, Pumped, RetryPolicy, Scope,
+    StoreRead, StoreTransport, Timer,
 };
 use angzarr_ports::faulty::{Fault, FaultyStore};
 use angzarr_ports::memory::MemoryStore;
@@ -328,11 +328,11 @@ impl Run {
     }
 
     fn transport(&self, timer: &'static dyn Timer) -> StoreTransport<'_, Store> {
-        let transport = StoreTransport::new(&self.store, timer, EVERY).pushed_by(self.memory());
-        match self.incremental {
-            true => transport.changes_from(self.memory()),
-            false => transport,
-        }
+        let following = match self.incremental {
+            true => Following::Changes(self.memory()),
+            false => Following::FullScan,
+        };
+        StoreTransport::new(&self.store, timer, EVERY, following).pushed_by(self.memory())
     }
 
     async fn pages(&self, stream: &Cover) -> Vec<EventPage> {

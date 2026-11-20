@@ -87,7 +87,7 @@ pub mod faulty;
 #[cfg(feature = "memory")]
 pub mod memory;
 
-pub use changes::{ChangeCursor, Changed, Changes};
+pub use changes::{ChangeCursor, Changed, Changes, StreamChange};
 pub use dyn_store::{
     BoxFuture, DynEditionKnown, DynEditions, DynEventStore, DynListStreams, DynOutbox,
     DynPositionStore, DynReadByCorrelation, DynReadUntilTime, DynSnapshotStore, DynStore, DynWatch,

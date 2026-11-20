@@ -37,7 +37,7 @@ use angzarr_proto::v1::{Cover, EditionSummary, EventBook, EventPage, EventRef, S
 use prost::Message;
 use prost_types::Timestamp;
 
-use crate::changes::{ChangeCursor, Changed, Changes};
+use crate::changes::{ChangeCursor, Changed, Changes, StreamChange};
 use crate::error::StoreError;
 use crate::migrate::{plan_run, plan_undo, AppliedMigration, Backup, Migration, Migrations};
 use crate::notify::{CommitNotify, CommitSignal, CommitWait};
@@ -548,42 +548,76 @@ struct State {
 const CHANGES_KEPT: usize = 65_536;
 
 /// The streams touched, oldest first, bounded.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 struct ChangeLog {
-    /// The cursor of the first entry kept.
+    /// Which store's feed this is: a cursor of another's is an overflow.
+    identity: u64,
+    /// The position of the first entry kept.
     oldest: u64,
-    entries: std::collections::VecDeque<Cover>,
+    /// Each touch: the stream, and whether it was a purge.
+    entries: std::collections::VecDeque<(Cover, bool)>,
+}
+
+impl Default for ChangeLog {
+    fn default() -> Self {
+        static STORES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        ChangeLog {
+            identity: STORES.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            oldest: 0,
+            entries: std::collections::VecDeque::new(),
+        }
+    }
 }
 
 impl ChangeLog {
-    /// The cursor after the last entry.
+    /// The position after the last entry.
     fn head(&self) -> u64 {
         self.oldest + self.entries.len() as u64
     }
 
-    fn record(&mut self, stream: Cover) {
-        self.entries.push_back(stream);
+    fn cursor(&self, position: u64) -> ChangeCursor {
+        ChangeCursor::at(self.identity, position)
+    }
+
+    fn record(&mut self, stream: Cover, purged: bool) {
+        self.entries.push_back((stream, purged));
         if self.entries.len() > CHANGES_KEPT {
             self.entries.pop_front();
             self.oldest += 1;
         }
     }
 
-    /// The streams touched since `since`, each once.
-    fn since(&self, since: u64) -> Changed {
-        let next = ChangeCursor::new(self.head());
-        if since < self.oldest || since > self.head() {
-            return Changed::Overflow { next };
+    /// The streams touched by the `limit` entries after `since` (each once,
+    /// in the order first touched, purged if any touch was) and the cursor
+    /// after them; `None` if `since` is not this feed's, or is older than
+    /// what it keeps.
+    fn since(
+        &self,
+        since: &ChangeCursor,
+        limit: usize,
+    ) -> Option<(Vec<(Cover, bool)>, ChangeCursor)> {
+        let (identity, position) = since.parts()?;
+        if identity != self.identity || position < self.oldest || position > self.head() {
+            return None;
         }
-        let skip = usize::try_from(since - self.oldest).unwrap_or(usize::MAX);
-        let mut streams: Vec<Cover> = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-        for stream in self.entries.iter().skip(skip) {
-            if seen.insert(stream.encode_to_vec()) {
-                streams.push(stream.clone());
+        let skip = usize::try_from(position - self.oldest).unwrap_or(usize::MAX);
+        let taken = self.entries.iter().skip(skip).take(limit.max(1));
+        let mut streams: Vec<(Cover, bool)> = Vec::new();
+        let mut at: std::collections::BTreeMap<Vec<u8>, usize> = std::collections::BTreeMap::new();
+        let mut counted = 0;
+        for (stream, purged) in taken {
+            counted += 1;
+            match at.entry(stream.encode_to_vec()) {
+                std::collections::btree_map::Entry::Occupied(seen) => {
+                    streams[*seen.get()].1 |= *purged
+                }
+                std::collections::btree_map::Entry::Vacant(vacant) => {
+                    vacant.insert(streams.len());
+                    streams.push((stream.clone(), *purged));
+                }
             }
         }
-        Changed::Streams { streams, next }
+        Some((streams, self.cursor(position + counted)))
     }
 }
 
@@ -596,7 +630,7 @@ impl State {
                 .entry(k.clone())
                 .or_default(),
         );
-        self.changes.record(cover(&k));
+        self.changes.record(cover(&k), false);
         let by_id = self.commands.entry(k).or_default();
         for page in pages {
             if let Some(id) = cause(page) {
@@ -608,7 +642,7 @@ impl State {
 
     /// Purge stream `k` (see [`Data::purge`]), its commands with it.
     fn purge(&mut self, k: &Key) -> u64 {
-        self.changes.record(cover(k));
+        self.changes.record(cover(k), true);
         self.commands.remove(k);
         Arc::make_mut(&mut self.data).purge(k)
     }
@@ -616,7 +650,7 @@ impl State {
     /// Remove edition stream `k` (see [`Data::remove`]), its commands with
     /// it.
     fn remove(&mut self, k: &Key) -> u64 {
-        self.changes.record(cover(k));
+        self.changes.record(cover(k), true);
         self.commands.remove(k);
         Arc::make_mut(&mut self.data).remove(k)
     }
@@ -899,11 +933,34 @@ impl CommitNotify for MemoryStore {
 impl Changes for MemoryStore {
     /// The streams written or purged, kept for the last 65,536 touches.
     async fn changes_cursor(&self) -> Result<ChangeCursor, StoreError> {
-        Ok(ChangeCursor::new(self.lock().changes.head()))
+        let state = self.lock();
+        Ok(state.changes.cursor(state.changes.head()))
     }
 
-    async fn changed_since(&self, since: ChangeCursor) -> Result<Changed, StoreError> {
-        Ok(self.lock().changes.since(since.position()))
+    async fn changed_since(
+        &self,
+        since: &ChangeCursor,
+        limit: usize,
+    ) -> Result<Changed, StoreError> {
+        let state = self.lock();
+        let Some((touched, next)) = state.changes.since(since, limit) else {
+            return Ok(Changed::Overflow {
+                next: state.changes.cursor(state.changes.head()),
+            });
+        };
+        let changes = (touched.into_iter())
+            .map(|(stream, purged)| {
+                let head = StreamRef::try_from(&stream)
+                    .map(|sref| state.data.view(&key(sref)).len() as u64)
+                    .unwrap_or_default();
+                StreamChange {
+                    stream,
+                    head,
+                    purged,
+                }
+            })
+            .collect();
+        Ok(Changed::Streams { changes, next })
     }
 }
 

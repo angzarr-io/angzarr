@@ -33,7 +33,7 @@ use crate::store::{
     Watch, Write, Written,
 };
 use crate::stream::{PositionKey, Slice, StreamRef};
-use crate::{Cause, StoreError, Uuid};
+use crate::{Cause, ChangeCursor, Changed, Changes, StoreError, Uuid};
 
 /// How one write (or purge) goes wrong.
 #[derive(Clone, PartialEq, Debug)]
@@ -136,6 +136,10 @@ struct Script<S> {
     attempts: u32,
     reads: u32,
     failing_reads: BTreeSet<u32>,
+    /// Calls of the change feed made, and which fail or overflow.
+    changes: u32,
+    failing_changes: BTreeSet<u32>,
+    overflowing_changes: BTreeSet<u32>,
     hollow: bool,
     units: u32,
     unit_pages: u32,
@@ -150,6 +154,9 @@ impl<S> Default for Script<S> {
             attempts: 0,
             reads: 0,
             failing_reads: BTreeSet::new(),
+            changes: 0,
+            failing_changes: BTreeSet::new(),
+            overflowing_changes: BTreeSet::new(),
             hollow: false,
             units: 0,
             unit_pages: 0,
@@ -206,6 +213,23 @@ impl<S> FaultyStore<S> {
         let mut script = self.script();
         let at = script.reads + nth.max(1) - 1;
         script.failing_reads.insert(at);
+    }
+
+    /// The `nth` call of the change feed from now (1: the next) fails: the
+    /// store could not say.
+    pub fn fail_changes(&self, nth: u32) {
+        let mut script = self.script();
+        let at = script.changes + nth.max(1) - 1;
+        script.failing_changes.insert(at);
+    }
+
+    /// The `nth` call of the change feed from now (1: the next) answers an
+    /// overflow: the feed has lost what it kept, and a follower must read
+    /// everything.
+    pub fn overflow_changes(&self, nth: u32) {
+        let mut script = self.script();
+        let at = script.changes + nth.max(1) - 1;
+        script.overflowing_changes.insert(at);
     }
 
     /// Run `meanwhile` just before the next call `at`.
@@ -413,6 +437,45 @@ impl<S: Purge> Purge for FaultyStore<S> {
             true => Err(unavailable()),
             false => Ok(purged),
         }
+    }
+}
+
+impl<S: Changes> Changes for FaultyStore<S> {
+    /// The feed underneath, forwarded; it fails when
+    /// [`FaultyStore::fail_changes`] says.
+    async fn changes_cursor(&self) -> Result<ChangeCursor, StoreError> {
+        self.changes_call()?;
+        self.inner.changes_cursor().await
+    }
+
+    /// The feed underneath, forwarded, failing or answering an overflow when
+    /// [`FaultyStore::fail_changes`] or [`FaultyStore::overflow_changes`]
+    /// say.
+    async fn changed_since(
+        &self,
+        since: &ChangeCursor,
+        limit: usize,
+    ) -> Result<Changed, StoreError> {
+        let overflow = self.changes_call()?;
+        if overflow {
+            return Ok(Changed::Overflow {
+                next: self.inner.changes_cursor().await?,
+            });
+        }
+        self.inner.changed_since(since, limit).await
+    }
+}
+
+impl<S> FaultyStore<S> {
+    /// One call of the change feed: whether it overflows, or its failure.
+    fn changes_call(&self) -> Result<bool, StoreError> {
+        let mut script = self.script();
+        let made = script.changes;
+        script.changes += 1;
+        if script.failing_changes.remove(&made) {
+            return Err(unavailable());
+        }
+        Ok(script.overflowing_changes.remove(&made))
     }
 }
 

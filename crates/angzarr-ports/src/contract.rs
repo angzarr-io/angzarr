@@ -128,6 +128,9 @@ use crate::store::{
 };
 use crate::stream::{PositionKey, StreamRef};
 
+#[path = "changes_contract.rs"]
+pub mod changes;
+
 // ------------------------------------------------------------- the fixtures
 
 /// The instant `page(sequence, _)` records.

@@ -27,11 +27,11 @@ use angzarr_ports::angzarr_proto::v1::{Cover, EditionSummary, EventBook, EventPa
 use angzarr_ports::contract;
 use angzarr_ports::memory::{MemoryRead, MemoryStore};
 use angzarr_ports::{
-    Append, ChangeToken, CommitNotify, CommitSignal, CommitWait, DeadLetter, DeadLetterKey,
-    DeadLetterStore, Editions, EventStore, Export, ExportRow, Head, ListStreams, Outbox,
-    OutboxEntry, PositionKey, PositionStore, Processed, Purge, ReadByCorrelation, ReadStore,
-    ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Uuid, Watch, Write,
-    Written,
+    Append, ChangeCursor, ChangeToken, Changed, Changes, CommitNotify, CommitSignal, CommitWait,
+    DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore, Export, ExportRow, Head,
+    ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge,
+    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
+    StreamChange, StreamRef, Uuid, Watch, Write, Written,
 };
 use prost_types::Timestamp;
 
@@ -79,6 +79,37 @@ enum Bug {
     PositionIgnoresHandler,
     /// A snapshot write lands an event on its stream too.
     SnapshotIsAnEvent,
+    // ---- the change feed
+    /// It misses the first stream of an answer.
+    ChangesMissesWrite,
+    /// It reports a stream that did not change.
+    ChangesReportsUnchanged,
+    /// It drops a purge from its answer.
+    ChangesDropsPurge,
+    /// It reports a purged and rewritten stream as only written to.
+    ChangesDropsRewrite,
+    /// It reports a stream twice.
+    ChangesReportsTwice,
+    /// Its next cursor skips a change when it answers a page of one.
+    ChangesLosesBetweenReads,
+    /// It answers an empty list to a cursor it does not understand.
+    ChangesEmptyForOld,
+    /// It reports a write it refused.
+    ChangesReportsRefusedWrite,
+    /// It reports a write that landed no event.
+    ChangesReportsPositionWrite,
+    /// It loses its feed when reopened, and answers nothing changed.
+    ChangesLosesStateAtReopen,
+    /// It reports a stream's head one short.
+    ChangesStaleHead,
+    /// It reports streams last touched first.
+    ChangesMisorders,
+    /// Each handle keeps a feed of its own commits alone.
+    ChangesPerHandle,
+    /// A stream once purged is reported purged for ever.
+    ChangesPurgedForever,
+    /// Its cursor now is one behind where its answers end.
+    ChangesCursorBehind,
     // ---- the write
     /// A refused write still lands its positions.
     ConflictLandsPositions,
@@ -288,6 +319,10 @@ struct Local {
     signal: CommitSignal,
     /// Reads of the change token.
     token_reads: AtomicU64,
+    /// What this handle committed, for a feed of its own.
+    touched: Mutex<Vec<(Cover, bool)>>,
+    /// This handle was opened again.
+    reopened: std::sync::atomic::AtomicBool,
 }
 
 /// What every handle on one broken store shares.
@@ -301,6 +336,10 @@ struct Shared {
     cleared: Mutex<Vec<Uuid>>,
     /// Every edition a stream was removed from.
     removed_from: Mutex<Vec<String>>,
+    /// Every stream ever purged.
+    purged_ever: Mutex<Vec<Cover>>,
+    /// Streams a feed reports that did not change: refused writes, positions.
+    phantoms: Mutex<Vec<Cover>>,
 }
 
 /// A stream key that owns its strings.
@@ -644,6 +683,11 @@ impl Broken {
                 if let Some(landed) = self.landed_despite(bent) {
                     self.inner.write(landed).await?;
                 }
+                if let (true, Some((stream, _))) =
+                    (self.is(Bug::ChangesReportsRefusedWrite), bent.stream)
+                {
+                    self.shared.phantoms.lock().unwrap().push(stream.to_cover());
+                }
                 Err(refused)
             }
             StoreError::EditionNotFound { .. }
@@ -693,6 +737,23 @@ impl Broken {
         }
         if bent.stream.is_some() && !bent.pages.is_empty() {
             self.local.commits.fetch_add(1, Ordering::SeqCst);
+        }
+        if let Some((stream, _)) = bent.stream {
+            if !bent.pages.is_empty() {
+                self.local
+                    .touched
+                    .lock()
+                    .unwrap()
+                    .push((stream.to_cover(), false));
+            }
+        } else if self.is(Bug::ChangesReportsPositionWrite) {
+            for (key, _) in &bent.positions {
+                self.shared
+                    .phantoms
+                    .lock()
+                    .unwrap()
+                    .push(key.stream.to_cover());
+            }
         }
     }
 }
@@ -1003,6 +1064,16 @@ impl Purge for Broken {
             }
             deleted => deleted?,
         };
+        self.shared
+            .purged_ever
+            .lock()
+            .unwrap()
+            .push(stream.to_cover());
+        self.local
+            .touched
+            .lock()
+            .unwrap()
+            .push((stream.to_cover(), true));
         if let (Bug::PurgeKeepsSnapshot, Some(s)) = (self.bug, snapshot) {
             self.inner.write_snapshot(stream, &s).await?;
         }
@@ -1010,6 +1081,163 @@ impl Purge for Broken {
         let zeroed = taken.into_iter().map(|(handler, _)| (handler, 0));
         self.put_positions(stream, zeroed.collect()).await?;
         Ok(deleted)
+    }
+}
+
+impl Changes for Broken {
+    async fn changes_cursor(&self) -> Result<ChangeCursor, StoreError> {
+        if self.is(Bug::ChangesPerHandle) {
+            return Ok(ChangeCursor::at(
+                1,
+                self.local.touched.lock().unwrap().len() as u64,
+            ));
+        }
+        let cursor = self.inner.changes_cursor().await?;
+        match (self.is(Bug::ChangesCursorBehind), cursor.parts()) {
+            (true, Some((identity, position))) => {
+                Ok(ChangeCursor::at(identity, position.saturating_sub(1)))
+            }
+            _ => Ok(cursor),
+        }
+    }
+
+    async fn changed_since(
+        &self,
+        since: &ChangeCursor,
+        limit: usize,
+    ) -> Result<Changed, StoreError> {
+        if self.is(Bug::ChangesPerHandle) {
+            return self.own_changes(since, limit).await;
+        }
+        if self.is(Bug::ChangesLosesStateAtReopen) && self.local.reopened.load(Ordering::SeqCst) {
+            return Ok(Changed::Streams {
+                changes: Vec::new(),
+                next: since.clone(),
+            });
+        }
+        match self.inner.changed_since(since, limit).await? {
+            Changed::Overflow { next } if self.is(Bug::ChangesEmptyForOld) => {
+                Ok(Changed::Streams {
+                    changes: Vec::new(),
+                    next,
+                })
+            }
+            overflow @ Changed::Overflow { .. } => Ok(overflow),
+            Changed::Streams { changes, next } => Ok(self.bent_changes(changes, next, limit)),
+        }
+    }
+}
+
+impl Broken {
+    /// A handle's own commits as a feed: what only it wrote.
+    async fn own_changes(&self, since: &ChangeCursor, limit: usize) -> Result<Changed, StoreError> {
+        let touched = self.local.touched.lock().unwrap().clone();
+        let at = match since.parts() {
+            Some((1, position)) if position as usize <= touched.len() => position as usize,
+            _ => {
+                return Ok(Changed::Overflow {
+                    next: ChangeCursor::at(1, touched.len() as u64),
+                })
+            }
+        };
+        let taken: Vec<_> = touched
+            .iter()
+            .skip(at)
+            .take(limit.max(1))
+            .cloned()
+            .collect();
+        let mut changes: Vec<StreamChange> = Vec::new();
+        for (stream, purged) in &taken {
+            if changes.iter().any(|c| &c.stream == stream) {
+                continue;
+            }
+            let head = self
+                .inner
+                .head(StreamRef::try_from(stream)?)
+                .await?
+                .next_sequence;
+            changes.push(StreamChange {
+                stream: stream.clone(),
+                head,
+                purged: *purged,
+            });
+        }
+        Ok(Changed::Streams {
+            changes,
+            next: ChangeCursor::at(1, (at + taken.len()) as u64),
+        })
+    }
+
+    /// An honest answer, as the bug bends it.
+    fn bent_changes(
+        &self,
+        mut changes: Vec<StreamChange>,
+        mut next: ChangeCursor,
+        limit: usize,
+    ) -> Changed {
+        if self.is(Bug::ChangesMissesWrite) && !changes.is_empty() {
+            changes.remove(0);
+        }
+        if self.is(Bug::ChangesReportsUnchanged) {
+            let bogus = StreamRef::main("feed", Uuid::from_bytes([1; 16])).to_cover();
+            if !changes.iter().any(|c| c.stream == bogus) {
+                changes.push(StreamChange {
+                    stream: bogus,
+                    head: 1,
+                    purged: false,
+                });
+            }
+        }
+        if self.is(Bug::ChangesReportsTwice) {
+            changes = changes
+                .iter()
+                .flat_map(|c| [c.clone(), c.clone()])
+                .collect();
+        }
+        if self.is(Bug::ChangesDropsPurge) {
+            changes.retain(|c| !(c.purged && c.head == 0));
+        }
+        if self.is(Bug::ChangesDropsRewrite) {
+            for change in &mut changes {
+                if change.head > 0 {
+                    change.purged = false;
+                }
+            }
+        }
+        if self.is(Bug::ChangesPurgedForever) {
+            let purged = self.shared.purged_ever.lock().unwrap();
+            for change in &mut changes {
+                change.purged |= purged.contains(&change.stream);
+            }
+        }
+        if self.is(Bug::ChangesStaleHead) {
+            for change in &mut changes {
+                change.head = change.head.saturating_sub(1);
+            }
+        }
+        if self.is(Bug::ChangesMisorders) {
+            changes.reverse();
+        }
+        if self.is(Bug::ChangesReportsRefusedWrite) || self.is(Bug::ChangesReportsPositionWrite) {
+            for phantom in self.shared.phantoms.lock().unwrap().iter() {
+                if !changes.iter().any(|c| &c.stream == phantom) {
+                    changes.push(StreamChange {
+                        stream: phantom.clone(),
+                        head: 1,
+                        purged: false,
+                    });
+                }
+            }
+        }
+        if let (true, 1, false, Some((identity, position))) = (
+            self.is(Bug::ChangesLosesBetweenReads),
+            limit,
+            changes.is_empty(),
+            next.parts(),
+        ) {
+            next = ChangeCursor::at(identity, position + 1);
+        }
+        Changed::Streams { changes, next }
     }
 }
 
@@ -3136,4 +3364,147 @@ fn the_one_moment_export_check_catches_two_moments() {
         broken_pair,
         ExportTwoMoments,
     );
+}
+
+// -------------------------------------------------- the change feed's kit
+
+/// A broken store as the change feed's checks drive it.
+struct BrokenFeed {
+    broken: Broken,
+}
+
+fn feed(bug: Bug) -> BrokenFeed {
+    BrokenFeed {
+        broken: broken(bug),
+    }
+}
+
+impl angzarr_ports::contract::changes::ChangesFixture for BrokenFeed {
+    type Store = Broken;
+
+    fn handle(&self) -> Broken {
+        Broken {
+            local: Arc::default(),
+            ..self.broken.clone()
+        }
+    }
+
+    async fn expire(&self) -> bool {
+        use angzarr_ports::contract::{main_stream, page};
+        let stream = main_stream("aging", 1);
+        for sequence in 0..=65_536u64 {
+            let pages = [page(sequence, 255)];
+            self.broken
+                .inner
+                .write(Write::append(stream, sequence, &pages))
+                .await
+                .unwrap();
+        }
+        true
+    }
+
+    async fn reopen(&self) -> Option<Broken> {
+        let local = Local::default();
+        local.reopened.store(true, Ordering::SeqCst);
+        Some(Broken {
+            local: Arc::new(local),
+            ..self.broken.clone()
+        })
+    }
+}
+
+macro_rules! catches_feed {
+    ($check:ident, $($bug:ident),+ $(,)?) => {
+        honest_passed(
+            stringify!($check),
+            run(angzarr_ports::contract::changes::$check(feed(Bug::Honest))),
+        );
+        $(
+            bug_caught(
+                stringify!($check),
+                Bug::$bug,
+                caught(angzarr_ports::contract::changes::$check(feed(Bug::$bug))),
+            );
+        )+
+    };
+}
+
+#[test]
+fn the_change_feed_checks_catch_a_feed_that_misses_invents_or_misreports() {
+    use angzarr_ports::contract::changes as kit;
+    catches_feed!(
+        a_commit_to_one_stream_is_reported_as_that_stream_and_no_other,
+        ChangesMissesWrite,
+        ChangesReportsUnchanged,
+        ChangesStaleHead
+    );
+    catches_feed!(
+        many_commits_to_one_stream_are_reported_once_at_its_latest_head,
+        ChangesReportsTwice,
+        ChangesStaleHead
+    );
+    catches_feed!(
+        streams_are_reported_in_the_order_first_touched,
+        ChangesMisorders
+    );
+    catches_feed!(
+        commits_to_several_streams_are_all_reported_none_dropped_none_invented,
+        ChangesMissesWrite
+    );
+    catches_feed!(
+        a_stream_that_did_not_change_is_not_reported,
+        ChangesReportsUnchanged
+    );
+    catches_feed!(a_purge_is_reported_purged_with_no_head, ChangesDropsPurge);
+    catches_feed!(
+        a_purge_then_rewrite_is_reported_purged_with_its_new_head,
+        ChangesDropsRewrite
+    );
+    catches_feed!(
+        a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor,
+        ChangesPurgedForever
+    );
+    catches_feed!(
+        a_cursor_taken_now_reports_nothing_until_the_next_commit,
+        ChangesReportsUnchanged
+    );
+    catches_feed!(
+        the_next_cursor_neither_skips_nor_repeats_a_change_used_back_to_back,
+        ChangesLosesBetweenReads
+    );
+    catches_feed!(two_writers_racing_lose_no_change, ChangesPerHandle);
+    catches_feed!(
+        a_cursor_older_than_the_feeds_memory_is_an_overflow_and_next_continues_correctly,
+        ChangesEmptyForOld
+    );
+    catches_feed!(
+        an_unknown_cursor_is_an_overflow_never_nothing_changed,
+        ChangesEmptyForOld
+    );
+    catches_feed!(
+        a_write_that_lands_no_event_reports_nothing,
+        ChangesReportsPositionWrite
+    );
+    catches_feed!(a_refused_write_reports_nothing, ChangesReportsRefusedWrite);
+    catches_feed!(
+        the_cursor_now_is_consistent_with_changed_since,
+        ChangesCursorBehind
+    );
+    catches_feed!(
+        the_feed_survives_a_reopen_or_overflows,
+        ChangesLosesStateAtReopen
+    );
+    let _ = kit::CHECKS;
+}
+
+#[test]
+fn every_change_feed_check_has_a_broken_feed_that_fails_it() {
+    let source = include_str!("meta.rs");
+    for check in angzarr_ports::contract::changes::CHECKS {
+        assert!(
+            source.contains(&format!("catches_feed!({check},"))
+                || source.contains(&format!("catches_feed!(\n        {check},")),
+            "{check} has no broken feed"
+        );
+    }
 }
