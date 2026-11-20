@@ -89,6 +89,9 @@ jobs:
           submodules: true
       - name: Toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
+      - name: Git's bash first on PATH (just runs recipes with `bash`, which is WSL's launcher on a Windows runner)
+        if: runner.os == 'Windows'
+        run: echo 'C:\Program Files\Git\bin' >> "$GITHUB_PATH"
       - uses: ctxloom/ci/.github/actions/setup-protoc@fa01764571615bd3174313e84631bdd5c13a02e6 # main 2026-11-12, protoc 3.21.12 by checksum
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:

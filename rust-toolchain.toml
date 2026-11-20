@@ -5,3 +5,6 @@
 [toolchain]
 channel = "1.96.1"
 components = ["clippy", "rustfmt"]
+# The kernel and the router build for the browser (`just wasm`, `just wasm-router`,
+# the crates' wasm.rs tests): every toolchain install carries the target.
+targets = ["wasm32-unknown-unknown"]

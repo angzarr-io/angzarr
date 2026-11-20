@@ -317,6 +317,8 @@ _tests +packages:
     root='{{gates_root}}'
     terse=(--status-level fail --final-status-level fail --success-output never --failure-output final
         --hide-progress-bar --cargo-quiet)
+    # Empty arrays are expanded as ${a[@]+"${a[@]}"}: macOS ships bash 3.2, where an
+    # empty one is unbound under `set -u`.
     cargo_terse=(-q --message-format=short)
     if [ "${VERBOSE:-}" = 1 ]; then terse=(); cargo_terse=(); fi
     read -ra rules <<< "{{feature_rules}}"
@@ -324,12 +326,12 @@ _tests +packages:
     if [ "$1" = --workspace ]; then
         selection=(--workspace)
         doc=(--workspace)
-        for rule in "${rules[@]}"; do features+=(--features "${rule#*=}"); done
+        for rule in ${rules[@]+"${rules[@]}"}; do features+=(--features "${rule#*=}"); done
     else
         selection=() doc=()
         for name in "$@"; do
             selection+=(--package "$name")
-            for rule in "${rules[@]}"; do
+            for rule in ${rules[@]+"${rules[@]}"}; do
                 [ "${rule%%=*}" = "$name" ] && features+=(--features "${rule#*=}")
             done
         done
@@ -342,7 +344,7 @@ _tests +packages:
     if [ "${#features[@]}" -gt 0 ] && [ -n "{{features_prepare}}" ]; then
         just --justfile "$root/justfile" {{features_prepare}}
     fi
-    cargo test --manifest-path "$root/Cargo.toml" --no-run "${cargo_terse[@]}" "${selection[@]}" "${features[@]}"
+    cargo test --manifest-path "$root/Cargo.toml" --no-run ${cargo_terse[@]+"${cargo_terse[@]}"} "${selection[@]}" ${features[@]+"${features[@]}"}
     # A test target with `harness = false` (a cucumber runner) cannot be listed by
     # nextest (it has no `--list`): nextest skips it by binary id and `cargo test`
     # runs it after the rest (gates/harnessless.py names them).
@@ -360,18 +362,18 @@ _tests +packages:
         filter=(-E "not (${joined# | })")
     fi
     rc=0
-    cargo nextest run --manifest-path "$root/Cargo.toml" --no-fail-fast --no-tests=pass "${terse[@]}" \
-        "${selection[@]}" "${features[@]}" "${filter[@]}" || rc=$?
+    cargo nextest run --manifest-path "$root/Cargo.toml" --no-fail-fast --no-tests=pass ${terse[@]+"${terse[@]}"} \
+        "${selection[@]}" ${features[@]+"${features[@]}"} ${filter[@]+"${filter[@]}"} || rc=$?
     # They were built above, so a failure here is a red test, not a build failure: 100.
-    for pair in "${harnessless[@]}"; do
+    for pair in ${harnessless[@]+"${harnessless[@]}"}; do
         IFS=$'\t' read -r pkg target <<< "$pair"
-        cargo test --manifest-path "$root/Cargo.toml" "${cargo_terse[@]}" --package "$pkg" --test "$target" "${features[@]}" || rc=100
+        cargo test --manifest-path "$root/Cargo.toml" ${cargo_terse[@]+"${cargo_terse[@]}"} --package "$pkg" --test "$target" ${features[@]+"${features[@]}"} || rc=100
     done
     # After a failed test, the doc tests would only bury it. Everything they
     # need was built above, so their failing is a red doc test (one that does
     # not compile included), not a build failure: 102, not cargo's 101.
     if [ "$rc" -eq 0 ] && [ "${#doc[@]}" -gt 0 ]; then
-        cargo test --manifest-path "$root/Cargo.toml" --doc "${cargo_terse[@]}" "${doc[@]}" "${features[@]}" || rc=102
+        cargo test --manifest-path "$root/Cargo.toml" --doc ${cargo_terse[@]+"${cargo_terse[@]}"} "${doc[@]}" ${features[@]+"${features[@]}"} || rc=102
     fi
     exit "$rc"
 

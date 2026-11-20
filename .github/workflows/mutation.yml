@@ -31,32 +31,51 @@ env:
   MOLD_VERSION: '2.42.1'
 
 jobs:
+  # A job's `if` cannot read the matrix, so the matrix is chosen here: every
+  # group, or the one named by the `group` input.
+  plan:
+    name: groups
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        env:
+          GROUP: ${{ inputs.group }}
+          GROUP_TABLE: |
+            [
+              {"name": "ports", "crates": "angzarr-ports"},
+              {"name": "bus", "crates": "angzarr-bus"},
+              {"name": "diagnostic", "crates": "angzarr-diagnostic"},
+              {"name": "yaml", "crates": "angzarr-yaml"},
+              {"name": "presentation", "crates": "angzarr-presentation"},
+              {"name": "test-dir", "crates": "angzarr-test-dir"},
+              {"name": "proto-jsonl", "crates": "angzarr-proto-jsonl"},
+              {"name": "store-transfer", "crates": "angzarr-store-transfer"},
+              {"name": "coordinator-base", "crates": "angzarr-coordinator-base"},
+              {"name": "reads", "crates": "angzarr-reads"},
+              {"name": "coordinator", "crates": "angzarr-coordinator"},
+              {"name": "coordinator-grpc", "crates": "angzarr-coordinator-grpc"},
+              {"name": "router", "crates": "angzarr-router"},
+              {"name": "build", "crates": "angzarr-build angzarr-codegen"},
+              {"name": "embedded", "crates": "angzarr-embedded angzarr-embedded-catalog-check angzarr-embedded-conformance angzarr-embedded-host angzarr-embedded-host-config angzarr-embedded-macros angzarr-embedded-runner angzarr-store-sqlite"},
+              {"name": "platform", "crates": "os file-system file-lock store-jsonl"}
+            ]
+        run: |
+          matrix=$(jq -c --arg group "$GROUP" '{include: map(select($group == "" or .name == $group))}' <<< "$GROUP_TABLE")
+          echo "$matrix"
+          [ "$(jq '.include | length' <<< "$matrix")" -gt 0 ] || { echo "no group named '$GROUP'" >&2; exit 1; }
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+
   mutants:
     name: mutation (${{ matrix.name }})
-    if: ${{ inputs.group == '' || inputs.group == matrix.name }}
+    needs: [plan]
     runs-on: ubuntu-24.04
     # GitHub's cap for a hosted job; let the pass finish rather than cancel it.
     timeout-minutes: 360
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - { name: ports, crates: angzarr-ports }
-          - { name: bus, crates: angzarr-bus }
-          - { name: diagnostic, crates: angzarr-diagnostic }
-          - { name: yaml, crates: angzarr-yaml }
-          - { name: presentation, crates: angzarr-presentation }
-          - { name: test-dir, crates: angzarr-test-dir }
-          - { name: proto-jsonl, crates: angzarr-proto-jsonl }
-          - { name: store-transfer, crates: angzarr-store-transfer }
-          - { name: coordinator-base, crates: angzarr-coordinator-base }
-          - { name: reads, crates: angzarr-reads }
-          - { name: coordinator, crates: angzarr-coordinator }
-          - { name: coordinator-grpc, crates: angzarr-coordinator-grpc }
-          - { name: router, crates: angzarr-router }
-          - { name: build, crates: 'angzarr-build angzarr-codegen' }
-          - { name: embedded, crates: 'angzarr-embedded angzarr-embedded-catalog-check angzarr-embedded-conformance angzarr-embedded-host angzarr-embedded-host-config angzarr-embedded-macros angzarr-embedded-runner angzarr-store-sqlite' }
-          - { name: platform, crates: 'os file-system file-lock store-jsonl' }
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     defaults:
       run:
         shell: bash
