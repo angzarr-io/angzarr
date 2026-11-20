@@ -52,6 +52,7 @@ use angzarr_proto::v1::{Cover, EventPage};
 use super::positions::{DurablePositions, Positions};
 use super::recovery::{Pages, Recover, Resolve, StoreRead};
 use super::retry::RetryPolicy;
+use super::served::Outcome;
 use super::transport::{Body, Delivery, Flow, Opening, Settle, Sink, Transport};
 use super::{Bus, Credit, Failed, Handler, Scope, Served, Subscription};
 
@@ -401,12 +402,13 @@ impl<P, Q> Run<'_, P, Q> {
         state.idle && state.calls == 0
     }
 
-    fn fail(&self, stream: &Cover, sequence: Option<u64>, cause: Report) {
+    fn fail(&self, stream: &Cover, sequence: Option<u64>, cause: Report, outcome: Outcome) {
         self.lock().failures.push(Failed {
             subscription: self.pool.name.clone(),
             stream: stream.clone(),
             sequence,
             cause,
+            outcome,
         });
     }
 
@@ -547,7 +549,7 @@ where
         let settle = match self.serve.place(self.at, delivery).await {
             Ok(settle) => settle,
             Err(cause) => {
-                run.fail(&stream, None, cause);
+                run.fail(&stream, None, cause, Outcome::Held);
                 Settle::Held { after: None }
             }
         };
@@ -748,7 +750,7 @@ where
                 Some(Ok(recovered)) if recovered.sequence == expected => recovered,
                 Some(Err(error)) => {
                     let error: D::Error = error.into();
-                    run.fail(stream, Some(expected), Report::of(&error));
+                    run.fail(stream, Some(expected), Report::of(&error), Outcome::Held);
                     let attempt = run.attempt(stream, expected);
                     run.attempted(stream, expected);
                     let after = Some(self.after(attempt));
@@ -798,8 +800,12 @@ where
             page: Some(page),
         };
         let answer = self.hand(at, item).await;
-        if let Answer::Passed(cause) | Answer::Held(cause) = &answer {
-            run.fail(stream, Some(sequence), cause.clone());
+        match &answer {
+            Answer::Passed(cause) => {
+                run.fail(stream, Some(sequence), cause.clone(), Outcome::Passed)
+            }
+            Answer::Held(cause) => run.fail(stream, Some(sequence), cause.clone(), Outcome::Held),
+            Answer::Handled => {}
         }
         if let Answer::Held(_) = answer {
             run.attempted(stream, sequence);
@@ -874,7 +880,11 @@ where
         let attempt = run.attempt(stream, missing);
         run.attempted(stream, missing);
         let cause = Report::new(MISSING).arg("sequence", missing);
-        run.fail(stream, Some(missing), cause);
+        let outcome = match self.shared.retry.last(attempt) {
+            true => Outcome::DeadLettered,
+            false => Outcome::Held,
+        };
+        run.fail(stream, Some(missing), cause, outcome);
         let waiting = run.with_lane(stream, |lane| std::mem::take(&mut lane.waiting));
         let mut all: Vec<(u64, Waiter)> = (waiters.into_iter())
             .map(|waiter| (missing, waiter))
@@ -953,7 +963,8 @@ where
         };
         match &answer {
             Answer::Handled => run.lock().handled += 1,
-            Answer::Passed(cause) | Answer::Held(cause) => run.fail(stream, None, cause.clone()),
+            Answer::Passed(cause) => run.fail(stream, None, cause.clone(), Outcome::Passed),
+            Answer::Held(cause) => run.fail(stream, None, cause.clone(), Outcome::Held),
         }
         if matches!(answer, Answer::Held(_)) {
             return Ok(Settle::Held { after: None });

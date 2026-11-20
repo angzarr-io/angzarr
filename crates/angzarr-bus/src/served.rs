@@ -12,8 +12,23 @@ pub struct Served {
     failures: Vec<Failed>,
 }
 
-/// One item that failed: held and handed again, or, for a policy, what its
-/// router's bug setting says.
+/// What became of an item that failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Outcome {
+    /// Held: it will be handed again, after its retry delay. A held item
+    /// holds its stream: nothing after it is handed meanwhile.
+    Held,
+    /// Dead-lettered and passed: its letter is kept and the stream's
+    /// position is past it; it is not handed again, and the stream goes on.
+    Passed,
+    /// Dead-lettered, and its stream stays held where it was: a delivery
+    /// waiting on a sequence no source has, given up at the retry cap. It is
+    /// not handed again until an operator repairs the stream.
+    DeadLettered,
+}
+
+/// One item that failed, and what became of it: held and handed again, or
+/// dead-lettered (passed, or its stream held).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Failed {
     /// The subscription's name.
@@ -24,6 +39,8 @@ pub struct Failed {
     pub sequence: Option<u64>,
     /// Why.
     pub cause: Report,
+    /// What became of it.
+    pub outcome: Outcome,
 }
 
 impl Served {

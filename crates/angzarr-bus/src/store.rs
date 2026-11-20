@@ -27,7 +27,7 @@
 //!   read), and by the poll on the caller's [`Timer`], comparing the
 //!   store's [`Watch`] token: a store without push has the poll alone.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -35,8 +35,8 @@ use std::task::Poll;
 use std::time::Duration;
 
 use angzarr_ports::{
-    BoxFuture, ChangeToken, CommitNotify, CommitSignal, CommitWait, Processed, ReadStore, ReadUnit,
-    StoreError, StreamRef, Watch,
+    BoxFuture, ChangeCursor, ChangeToken, Changed, Changes, CommitNotify, CommitSignal, CommitWait,
+    Processed, ReadStore, ReadUnit, StoreError, StreamRef, Watch,
 };
 use angzarr_proto::v1::Cover;
 
@@ -53,6 +53,26 @@ pub struct StoreTransport<'s, S, W: ?Sized = dyn Timer> {
     timer: &'s W,
     every: Duration,
     push: Option<&'s dyn CommitNotify>,
+    changes: Option<&'s dyn ChangeSource>,
+}
+
+/// Where a store's commits are told apart by stream: [`Changes`], as a trait
+/// object, so a transport takes it beside its other optional sources.
+pub trait ChangeSource: angzarr_ports::MaybeSend + angzarr_ports::MaybeSync {
+    /// The feed's cursor now.
+    fn cursor(&self) -> BoxFuture<'_, Result<ChangeCursor, StoreError>>;
+    /// The streams touched after `since`.
+    fn since(&self, since: ChangeCursor) -> BoxFuture<'_, Result<Changed, StoreError>>;
+}
+
+impl<T: Changes> ChangeSource for T {
+    fn cursor(&self) -> BoxFuture<'_, Result<ChangeCursor, StoreError>> {
+        Box::pin(self.changes_cursor())
+    }
+
+    fn since(&self, since: ChangeCursor) -> BoxFuture<'_, Result<Changed, StoreError>> {
+        Box::pin(self.changed_since(since))
+    }
 }
 
 impl<'s, S, W: Timer + ?Sized> StoreTransport<'s, S, W> {
@@ -63,12 +83,21 @@ impl<'s, S, W: Timer + ?Sized> StoreTransport<'s, S, W> {
             timer,
             every,
             push: None,
+            changes: None,
         }
     }
 
     /// Woken by every commit `notify` pushes too.
     pub fn pushed_by(mut self, notify: &'s dyn CommitNotify) -> StoreTransport<'s, S, W> {
         self.push = Some(notify);
+        self
+    }
+
+    /// Told by `changes` which streams a commit touched, so a commit (or a
+    /// poll) refreshes those streams alone and not every stream in scope.
+    /// Without it, a commit lists the scope's streams and reads every head.
+    pub fn changes_from(mut self, changes: &'s dyn ChangeSource) -> StoreTransport<'s, S, W> {
+        self.changes = Some(changes);
         self
     }
 }
@@ -100,15 +129,25 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> PullTransport
             .filter(|(cover, _)| opening.scope.holds(cover))
             .map(|(cover, mark)| (key(&cover), Lane::new(cover, mark)))
             .collect();
+        // Taken before the first scan: what is committed between them is
+        // told again, which is harmless.
+        let cursor = match self.changes {
+            Some(changes) => Some(changes.cursor().await?),
+            None => None,
+        };
         Ok(StoreFeed {
             transport: self,
             scope: opening.scope.clone(),
             state: Mutex::new(State {
                 lanes,
+                owed: BTreeSet::new(),
+                held: BTreeSet::new(),
                 gate: CreditGate::new(opening.credit),
                 stale: true,
                 told_idle: false,
                 token: None,
+                cursor,
+                visits: 0,
             }),
             delayed: Mutex::default(),
             settled: CommitSignal::new(),
@@ -195,6 +234,11 @@ impl Lane {
 
 struct State {
     lanes: BTreeMap<Key, Lane>,
+    /// The lanes that owe a delivery now ([`Lane::owes`]), in the order they
+    /// are picked: kept as lanes change, so a pick looks at one.
+    owed: BTreeSet<Key>,
+    /// The lanes with a held delivery, so a poll releases those alone.
+    held: BTreeSet<Key>,
     gate: CreditGate,
     /// Something may have been committed since the streams were read.
     stale: bool,
@@ -202,6 +246,68 @@ struct State {
     told_idle: bool,
     /// The store's change token at the last read.
     token: Option<ChangeToken>,
+    /// Where the store's change feed was at the last refresh, if it has one.
+    cursor: Option<ChangeCursor>,
+    /// How many lanes the feed has looked at (a test reads it).
+    visits: usize,
+}
+
+impl State {
+    /// Bring `key`'s place in the owed and held sets up to its lane.
+    fn sync(&mut self, key: &Key) {
+        self.visits += 1;
+        let Some(lane) = self.lanes.get(key) else {
+            self.owed.remove(key);
+            self.held.remove(key);
+            return;
+        };
+        match lane.owes() {
+            true => self.owed.insert(key.clone()),
+            false => self.owed.remove(key),
+        };
+        match lane.held.is_some() {
+            true => self.held.insert(key.clone()),
+            false => self.held.remove(key),
+        };
+    }
+
+    /// Rebuild the owed and held sets from every lane.
+    fn sync_all(&mut self) {
+        self.owed = (self.lanes.iter())
+            .filter(|(_, lane)| lane.owes())
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.held = (self.lanes.iter())
+            .filter(|(_, lane)| lane.held.is_some())
+            .map(|(key, _)| key.clone())
+            .collect();
+        self.visits += self.lanes.len();
+    }
+
+    /// Lane `key` seen at `head` (its next sequence, 0 if the store holds
+    /// nothing of it): a stream listed is kept; one not listed is kept only
+    /// if something of it was delivered or is out, and is owed its gone
+    /// delivery.
+    fn seen(&mut self, cover: Cover, head: u64) {
+        let key = key(&cover);
+        if head > 0 {
+            let lane = (self.lanes.entry(key.clone())).or_insert_with(|| Lane::new(cover, 0));
+            lane.listed = true;
+            lane.head = head;
+            if head < lane.cursor && lane.out.is_none() {
+                lane.gone = true;
+            }
+        } else if let Some(lane) = self.lanes.get_mut(&key) {
+            lane.listed = false;
+            match lane.kept() || lane.gone {
+                true => lane.gone = true,
+                false => {
+                    self.lanes.remove(&key);
+                }
+            }
+        }
+        self.sync(&key);
+    }
 }
 
 /// One subscription's deliveries from the store.
@@ -265,6 +371,47 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> StoreFeed<'_, S, W> {
         for lane in state.lanes.values_mut().filter(|lane| !lane.listed) {
             lane.gone = true;
         }
+        state.sync_all();
+        Ok(())
+    }
+
+    /// Refresh the streams the store's change feed names as touched since
+    /// the last refresh, reading each head and nothing else; everything, as
+    /// a scan, if the feed cannot say. Without a feed, everything is stale.
+    async fn refresh(&self) -> Result<(), StoreError> {
+        let Some(changes) = self.transport.changes else {
+            self.lock().stale = true;
+            return Ok(());
+        };
+        let Some(since) = self.lock().cursor else {
+            self.lock().stale = true;
+            return Ok(());
+        };
+        match changes.since(since).await? {
+            Changed::Overflow { next } => {
+                let mut state = self.lock();
+                state.stale = true;
+                state.cursor = Some(next);
+            }
+            Changed::Streams { streams, next } => {
+                let touched: Vec<Cover> = (streams.into_iter())
+                    .filter(|stream| self.scope.holds(stream))
+                    .collect();
+                let mut heads = Vec::with_capacity(touched.len());
+                if !touched.is_empty() {
+                    let mut reads = self.transport.store.begin_read().await?;
+                    for cover in touched {
+                        let head = reads.head(StreamRef::try_from(&cover)?).await?;
+                        heads.push((cover, head.next_sequence));
+                    }
+                }
+                let mut state = self.lock();
+                state.cursor = Some(next);
+                for (cover, head) in heads {
+                    state.seen(cover, head);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -272,10 +419,14 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> StoreFeed<'_, S, W> {
     fn pick(&self) -> Option<(StoreToken, Box<Delivery>)> {
         let mut guard = self.lock();
         let state = &mut *guard;
-        let gate = &state.gate;
-        let (lane, (sequence, gone)) = (state.lanes.values_mut())
-            .filter(|lane| gate.admits(&OrderingKey::of(&lane.cover)))
-            .find_map(|lane| lane.owed().map(|owed| (lane, owed)))?;
+        state.visits += 1;
+        // A lane that owes has nothing out, so only a full gate keeps it.
+        if state.gate.full() {
+            return None;
+        }
+        let at = state.owed.iter().next()?.clone();
+        let lane = state.lanes.get_mut(&at)?;
+        let (sequence, gone) = lane.owed()?;
         let body = match gone {
             true => Body::Gone,
             false => {
@@ -286,15 +437,16 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> StoreFeed<'_, S, W> {
         };
         lane.out = Some(sequence);
         let stream = lane.cover.clone();
-        let key = OrderingKey::of(&stream);
-        state.gate.take(&key);
+        let ordering = OrderingKey::of(&stream);
+        state.gate.take(&ordering);
+        state.sync(&at);
         let token = StoreToken {
             stream: stream.clone(),
             sequence,
             gone,
         };
         let delivery = Delivery {
-            key,
+            key: ordering,
             attempt: None,
             stream,
             sequence,
@@ -305,23 +457,31 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> StoreFeed<'_, S, W> {
 
     /// Whether anything is owed, credit aside.
     fn owes(&self) -> bool {
-        self.lock().lanes.values().any(Lane::owes)
+        !self.lock().owed.is_empty()
     }
 
     /// Release every stream held with no delay (`due` `None`: a poll), or
     /// those of `due`, whose delay passed.
     fn release(&self, due: Option<&[Key]>) {
         let mut state = self.lock();
-        for (key, lane) in state.lanes.iter_mut() {
+        let candidates: Vec<Key> = match due {
+            None => state.held.iter().cloned().collect(),
+            Some(due) => due.to_vec(),
+        };
+        for key in candidates {
+            let Some(lane) = state.lanes.get_mut(&key) else {
+                continue;
+            };
             let released = match due {
                 None => !lane.delayed,
-                Some(due) => due.contains(key),
+                Some(_) => true,
             };
             if released {
                 if let Some(held) = lane.held.take() {
                     lane.again = Some(held);
                 }
             }
+            state.sync(&key);
         }
     }
 
@@ -377,17 +537,21 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> Feed for StoreFeed<'_,
             }
             match self.woken(&mut timer, &mut settled, &mut commit).await {
                 Woken::Commit => {
-                    let mut state = self.lock();
-                    state.stale = true;
-                    state.told_idle = false;
+                    self.refresh().await?;
+                    self.lock().told_idle = false;
                 }
                 Woken::Tick => {
                     timer = transport.timer.after(transport.every);
-                    let token = transport.store.change_token().await?;
                     self.release(None);
-                    let mut state = self.lock();
-                    state.stale |= state.token != Some(token);
-                    state.told_idle = false;
+                    match transport.changes {
+                        Some(_) => self.refresh().await?,
+                        None => {
+                            let token = transport.store.change_token().await?;
+                            let mut state = self.lock();
+                            state.stale |= state.token != Some(token);
+                        }
+                    }
+                    self.lock().told_idle = false;
                 }
                 Woken::Due(due) => {
                     self.release(Some(&due));
@@ -427,6 +591,7 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> Feed for StoreFeed<'_,
                     (false, _) => {}
                 }
             }
+            state.sync(&key);
             delay
         };
         if let Some(after) = delay {

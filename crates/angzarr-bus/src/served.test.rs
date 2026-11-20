@@ -15,6 +15,7 @@ fn failed(subscription: &str, sequence: Option<u64>) -> Failed {
         },
         sequence,
         cause: Report::new("angzarr-bus-test-failed"),
+        outcome: Outcome::Held,
     }
 }
 

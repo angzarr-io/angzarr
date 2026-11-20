@@ -70,6 +70,7 @@
 //!   process" between its calls: for a caller's tests of its retries,
 //!   races and lost answers.
 
+mod changes;
 mod error;
 mod notify;
 mod send;
@@ -86,6 +87,7 @@ pub mod faulty;
 #[cfg(feature = "memory")]
 pub mod memory;
 
+pub use changes::{ChangeCursor, Changed, Changes};
 pub use dyn_store::{
     BoxFuture, DynEditionKnown, DynEditions, DynEventStore, DynListStreams, DynOutbox,
     DynPositionStore, DynReadByCorrelation, DynReadUntilTime, DynSnapshotStore, DynStore, DynWatch,

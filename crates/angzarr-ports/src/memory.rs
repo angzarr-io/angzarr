@@ -37,6 +37,7 @@ use angzarr_proto::v1::{Cover, EditionSummary, EventBook, EventPage, EventRef, S
 use prost::Message;
 use prost_types::Timestamp;
 
+use crate::changes::{ChangeCursor, Changed, Changes};
 use crate::error::StoreError;
 use crate::migrate::{plan_run, plan_undo, AppliedMigration, Backup, Migration, Migrations};
 use crate::notify::{CommitNotify, CommitSignal, CommitWait};
@@ -538,6 +539,52 @@ fn check_events<'a>(
 struct State {
     data: Arc<Data>,
     commands: Commands,
+    /// The streams recently written or purged, for [`Changes`].
+    changes: ChangeLog,
+}
+
+/// How many touches of streams a store keeps for [`Changes`]; a cursor
+/// older than that is an overflow.
+const CHANGES_KEPT: usize = 65_536;
+
+/// The streams touched, oldest first, bounded.
+#[derive(Clone, Default)]
+struct ChangeLog {
+    /// The cursor of the first entry kept.
+    oldest: u64,
+    entries: std::collections::VecDeque<Cover>,
+}
+
+impl ChangeLog {
+    /// The cursor after the last entry.
+    fn head(&self) -> u64 {
+        self.oldest + self.entries.len() as u64
+    }
+
+    fn record(&mut self, stream: Cover) {
+        self.entries.push_back(stream);
+        if self.entries.len() > CHANGES_KEPT {
+            self.entries.pop_front();
+            self.oldest += 1;
+        }
+    }
+
+    /// The streams touched since `since`, each once.
+    fn since(&self, since: u64) -> Changed {
+        let next = ChangeCursor::new(self.head());
+        if since < self.oldest || since > self.head() {
+            return Changed::Overflow { next };
+        }
+        let skip = usize::try_from(since - self.oldest).unwrap_or(usize::MAX);
+        let mut streams: Vec<Cover> = Vec::new();
+        let mut seen = std::collections::BTreeSet::new();
+        for stream in self.entries.iter().skip(skip) {
+            if seen.insert(stream.encode_to_vec()) {
+                streams.push(stream.clone());
+            }
+        }
+        Changed::Streams { streams, next }
+    }
 }
 
 impl State {
@@ -549,6 +596,7 @@ impl State {
                 .entry(k.clone())
                 .or_default(),
         );
+        self.changes.record(cover(&k));
         let by_id = self.commands.entry(k).or_default();
         for page in pages {
             if let Some(id) = cause(page) {
@@ -560,6 +608,7 @@ impl State {
 
     /// Purge stream `k` (see [`Data::purge`]), its commands with it.
     fn purge(&mut self, k: &Key) -> u64 {
+        self.changes.record(cover(k));
         self.commands.remove(k);
         Arc::make_mut(&mut self.data).purge(k)
     }
@@ -567,6 +616,7 @@ impl State {
     /// Remove edition stream `k` (see [`Data::remove`]), its commands with
     /// it.
     fn remove(&mut self, k: &Key) -> u64 {
+        self.changes.record(cover(k));
         self.commands.remove(k);
         Arc::make_mut(&mut self.data).remove(k)
     }
@@ -843,6 +893,17 @@ impl CommitNotify for MemoryStore {
     /// counts them.
     fn next_commit(&self) -> CommitWait {
         self.signal.wait()
+    }
+}
+
+impl Changes for MemoryStore {
+    /// The streams written or purged, kept for the last 65,536 touches.
+    async fn changes_cursor(&self) -> Result<ChangeCursor, StoreError> {
+        Ok(ChangeCursor::new(self.lock().changes.head()))
+    }
+
+    async fn changed_since(&self, since: ChangeCursor) -> Result<Changed, StoreError> {
+        Ok(self.lock().changes.since(since.position()))
     }
 }
 

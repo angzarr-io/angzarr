@@ -49,6 +49,9 @@ enum Flaw {
     // ---- the hub's settlements
     /// A held delivery is settled with no delay.
     NoDelay,
+    // ---- what a failure is reported as
+    /// A failure is reported as what it did not become.
+    Mislabels,
     // ---- where positions are kept
     /// An ephemeral subscription's positions are kept in the store.
     Persists,
@@ -208,7 +211,27 @@ impl<B: angzarr_bus::Bus> angzarr_bus::Bus for Wrapped<B> {
         &mut self,
         more: M,
     ) -> impl Future<Output = Result<(), B::Error>> + MaybeSend {
-        self.inner.serve(more)
+        let mislabels = self.flaw == Some(Flaw::Mislabels);
+        let mut more = more;
+        self.inner
+            .serve(move |served: &angzarr_bus::Served| match mislabels {
+                false => more(served),
+                true => {
+                    let mut relabeled = angzarr_bus::Served::new();
+                    relabeled.add_handled(served.handled());
+                    for failed in served.failures() {
+                        let outcome = match failed.outcome {
+                            angzarr_bus::Outcome::Held => angzarr_bus::Outcome::Passed,
+                            _ => angzarr_bus::Outcome::Held,
+                        };
+                        relabeled.push(angzarr_bus::Failed {
+                            outcome,
+                            ..failed.clone()
+                        });
+                    }
+                    more(&relabeled)
+                }
+            })
     }
 }
 
@@ -913,6 +936,24 @@ mod bus_checks {
     async fn the_shared_bus_check_fails_a_bus_that_forgets_the_durable_ones() {
         let check = kit::a_durable_and_an_ephemeral_projector_share_a_bus;
         catches(Flaw::Forgetful, "the durable one's row", check).await;
+    }
+
+    #[tokio::test]
+    async fn the_outcome_check_fails_a_bus_that_mislabels_failures() {
+        let check = kit::a_failure_is_reported_with_what_became_of_it;
+        catches(Flaw::Mislabels, "held to be handed again", check).await;
+    }
+
+    #[tokio::test]
+    async fn the_missing_outcome_check_fails_a_bus_that_mislabels_failures() {
+        let check = kit::a_missing_predecessor_is_reported_held_then_dead_lettered;
+        catches(Flaw::Mislabels, "held to the cap", check).await;
+    }
+
+    #[tokio::test]
+    async fn the_policy_outcome_check_fails_a_bus_that_mislabels_failures() {
+        let check = kit::a_policys_failure_is_reported_by_what_became_of_its_position;
+        catches(Flaw::Mislabels, "outcome", check).await;
     }
 
     #[tokio::test]

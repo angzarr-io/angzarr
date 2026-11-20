@@ -277,6 +277,8 @@ struct Run {
     store: Store,
     letters: AtomicUsize,
     commands: AtomicU64,
+    /// The store transport is told which streams a commit touched.
+    incremental: bool,
 }
 
 const EVERY: Duration = Duration::from_secs(1);
@@ -297,6 +299,14 @@ fn retry() -> RetryPolicy {
 }
 
 impl Run {
+    /// A run whose store transport reads only the streams a commit touched.
+    fn incremental() -> Run {
+        Run {
+            incremental: true,
+            ..Run::default()
+        }
+    }
+
     fn memory(&self) -> &MemoryStore {
         self.store.inner()
     }
@@ -318,7 +328,11 @@ impl Run {
     }
 
     fn transport(&self, timer: &'static dyn Timer) -> StoreTransport<'_, Store> {
-        StoreTransport::new(&self.store, timer, EVERY).pushed_by(self.memory())
+        let transport = StoreTransport::new(&self.store, timer, EVERY).pushed_by(self.memory());
+        match self.incremental {
+            true => transport.changes_from(self.memory()),
+            false => transport,
+        }
     }
 
     async fn pages(&self, stream: &Cover) -> Vec<EventPage> {
@@ -477,6 +491,18 @@ mod bus {
 mod transport {
     use super::Run;
     angzarr_bus::transport_contract!(#[tokio::test], Run::default());
+}
+
+/// The same suites with the store transport told which streams a commit
+/// touched, not listing and reading every stream.
+mod bus_incremental {
+    use super::Run;
+    angzarr_bus::bus_contract!(#[tokio::test], Run::incremental());
+}
+
+mod transport_incremental {
+    use super::Run;
+    angzarr_bus::transport_contract!(#[tokio::test], Run::incremental());
 }
 
 #[path = "contract/flawed.rs"]

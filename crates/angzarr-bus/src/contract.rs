@@ -66,7 +66,7 @@ use angzarr_proto::v1::{event_meta::Causation, Cover, EventPage, EventRef, Uuid}
 use super::transport::{
     Body, Delivery as Carried, Feed, Next, Opening, OrderingKey, PullTransport, Settle,
 };
-use super::{Bus, Credit, Failed, MemoryPositions, Scope, Served, Subscription};
+use super::{Bus, Credit, Failed, MemoryPositions, Outcome, Scope, Served, Subscription};
 
 /// How a bus the suite builds wakes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -948,6 +948,79 @@ pub async fn a_durable_and_an_ephemeral_projector_share_a_bus<H: Harness>(harnes
     assert_eq!(ephemeral.handed(), events(&a, 0..3), "everything again");
 }
 
+/// A failure is reported with what became of it: a retryable one held (it
+/// is handed again), a bug dead-lettered and passed.
+pub async fn a_failure_is_reported_with_what_became_of_it<H: Harness>(harness: H) {
+    let domains = harness.domains();
+    let a = stream(&domains.first, 1);
+    append(&harness, &a, 3).await;
+    let probe = Probe::new();
+    probe.lock().failing.push((event(&a, 0), false));
+    probe.lock().failing.push((event(&a, 1), true));
+    let mut bus = harness.bus(Wake::Poll);
+    let scope = Scope::domain(&domains.first);
+    project(&harness, &mut bus, PROBE, scope, credit(1), &probe);
+    let tally = serve(&harness, &mut bus, "failures", |t| t.handled >= 2).await;
+    let reported: Vec<(Option<u64>, Outcome)> = (tally.failures.iter())
+        .map(|f| (f.sequence, f.outcome))
+        .collect();
+    assert_eq!(
+        reported,
+        [(Some(0), Outcome::Held), (Some(1), Outcome::Passed)],
+        "held to be handed again; passed, its letter kept"
+    );
+}
+
+/// A delivery waiting on a predecessor no source has is reported held at
+/// each attempt, then dead-lettered at the retry cap, its stream held.
+pub async fn a_missing_predecessor_is_reported_held_then_dead_lettered<H: Harness>(harness: H) {
+    let domains = harness.domains();
+    let (a, b) = (stream(&domains.first, 1), stream(&domains.first, 2));
+    append(&harness, &a, 2).await;
+    let pages = harness.landed(&a).await;
+    let orphan = Body::Event(Box::new(pages[1].clone()));
+    let script = Scripted::new([(b.clone(), 1, orphan)]);
+    let probe = Probe::new();
+    let mut bus = harness.bus_over(script.clone());
+    let scope = Scope::domain(&domains.first);
+    project(&harness, &mut bus, PROBE, scope, credit(1), &probe);
+    let all = script.clone();
+    let dead = move |_: &Tally| {
+        let settles = all.settled().into_iter().map(|(_, _, _, settle)| settle);
+        settles
+            .into_iter()
+            .any(|settle| settle == Settle::DeadLettered)
+    };
+    let tally = serve(&harness, &mut bus, "a missing predecessor", dead).await;
+    let reported: Vec<(Option<u64>, Outcome)> = (tally.failures.iter())
+        .map(|f| (f.sequence, f.outcome))
+        .collect();
+    let mut expected = vec![(Some(0), Outcome::Held); harness.retry_cap() as usize];
+    expected.push((Some(0), Outcome::DeadLettered));
+    assert_eq!(reported, expected, "held to the cap, then dead-lettered");
+}
+
+/// A policy's failure is reported held if its position stayed (it is run
+/// again), and passed if its position moved past it with a letter kept.
+pub async fn a_policys_failure_is_reported_by_what_became_of_its_position<H: Harness>(harness: H) {
+    let domains = harness.domains();
+    let a = stream(&domains.first, 1);
+    append(&harness, &a, 1).await;
+    let relay = Relay::to(&[]);
+    relay.lock().failing = true;
+    let mut bus = harness.bus(Wake::Poll);
+    react(&harness, &mut bus, RELAY, &domains.first, &relay);
+    let enough = |t: &Tally| !t.failures.is_empty() && t.idles >= 3;
+    let tally = serve(&harness, &mut bus, "a policy's bug", enough).await;
+    let expected = match harness.position(RELAY, &a).await {
+        0 => Outcome::Held,
+        _ => Outcome::Passed,
+    };
+    for failed in &tally.failures {
+        assert_eq!(failed.outcome, expected, "{failed:?}");
+    }
+}
+
 // ---------------------------------------------------------------- the macro
 
 /// One test per check, under the caller's test attribute (its runtime),
@@ -983,6 +1056,9 @@ macro_rules! bus_contract {
             an_ephemeral_projector_recovers_out_of_order_deliveries,
             an_ephemeral_projector_holds_and_dead_letters_as_a_durable_one,
             a_durable_and_an_ephemeral_projector_share_a_bus,
+            a_failure_is_reported_with_what_became_of_it,
+            a_missing_predecessor_is_reported_held_then_dead_lettered,
+            a_policys_failure_is_reported_by_what_became_of_its_position,
         );
     };
     (@each [$($a:tt)*], $f:expr; $check:ident, $($rest:ident,)*) => {
@@ -1021,6 +1097,9 @@ pub const CHECKS: &[&str] = &[
     "an_ephemeral_projector_recovers_out_of_order_deliveries",
     "an_ephemeral_projector_holds_and_dead_letters_as_a_durable_one",
     "a_durable_and_an_ephemeral_projector_share_a_bus",
+    "a_failure_is_reported_with_what_became_of_it",
+    "a_missing_predecessor_is_reported_held_then_dead_lettered",
+    "a_policys_failure_is_reported_by_what_became_of_its_position",
 ];
 
 // ---------------------------------------------------------------- scripted

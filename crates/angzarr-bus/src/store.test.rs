@@ -5,6 +5,8 @@
 use std::future::Future;
 use std::num::NonZeroUsize;
 use std::pin::pin;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use angzarr_ports::memory::MemoryStore;
@@ -92,11 +94,15 @@ fn credit(instances: usize) -> Credit {
     Credit::new(NonZeroUsize::new(instances).unwrap())
 }
 
-async fn open<'t, W: Timer + ?Sized>(
-    transport: &'t StoreTransport<'t, MemoryStore, W>,
+async fn open<'t, S, W>(
+    transport: &'t StoreTransport<'t, S, W>,
     scope: &Scope,
     instances: usize,
-) -> StoreFeed<'t, MemoryStore, W> {
+) -> StoreFeed<'t, S, W>
+where
+    S: angzarr_ports::ReadStore + angzarr_ports::Processed + angzarr_ports::Watch,
+    W: Timer + ?Sized,
+{
     let opening = Opening {
         name: NAME,
         scope,
@@ -382,4 +388,153 @@ async fn a_feed_that_does_not_resume_starts_at_the_beginning_whatever_is_stored(
     let fresh = transport.open(opening).await.unwrap();
     let (_, from_start) = delivery(&fresh).await;
     assert_eq!(from_start.sequence, 0, "at the beginning");
+}
+
+// ---------------------------------------------------------------- the cost of a commit
+
+/// The store operations a feed makes, counted.
+#[derive(Clone, Default)]
+struct Ops {
+    covers: Arc<AtomicUsize>,
+    heads: Arc<AtomicUsize>,
+    tokens: Arc<AtomicUsize>,
+}
+
+impl Ops {
+    fn take(&self) -> (usize, usize, usize) {
+        let swap = |counter: &AtomicUsize| counter.swap(0, Ordering::SeqCst);
+        (swap(&self.covers), swap(&self.heads), swap(&self.tokens))
+    }
+}
+
+/// A store whose listings, head reads and change tokens are counted.
+struct Counting {
+    inner: MemoryStore,
+    ops: Ops,
+}
+
+struct CountedUnit<U> {
+    inner: U,
+    ops: Ops,
+}
+
+impl angzarr_ports::ReadStore for Counting {
+    type Reads<'s> = CountedUnit<<MemoryStore as angzarr_ports::ReadStore>::Reads<'s>>;
+
+    async fn begin_read(&self) -> Result<Self::Reads<'_>, angzarr_ports::StoreError> {
+        Ok(CountedUnit {
+            inner: self.inner.begin_read().await?,
+            ops: self.ops.clone(),
+        })
+    }
+}
+
+impl<U: angzarr_ports::ReadUnit> angzarr_ports::ReadUnit for CountedUnit<U> {
+    async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, angzarr_ports::StoreError> {
+        self.ops.covers.fetch_add(1, Ordering::SeqCst);
+        self.inner.covers(domain).await
+    }
+
+    async fn read(
+        &mut self,
+        stream: StreamRef<'_>,
+        from: u64,
+        to: Option<u64>,
+    ) -> Result<angzarr_ports::Slice, angzarr_ports::StoreError> {
+        self.inner.read(stream, from, to).await
+    }
+
+    async fn head(
+        &mut self,
+        stream: StreamRef<'_>,
+    ) -> Result<angzarr_ports::Head, angzarr_ports::StoreError> {
+        self.ops.heads.fetch_add(1, Ordering::SeqCst);
+        self.inner.head(stream).await
+    }
+
+    async fn read_snapshot(
+        &mut self,
+        stream: StreamRef<'_>,
+    ) -> Result<Option<angzarr_proto::v1::Snapshot>, angzarr_ports::StoreError> {
+        self.inner.read_snapshot(stream).await
+    }
+}
+
+impl angzarr_ports::Processed for Counting {
+    async fn processed(
+        &self,
+        handler: &str,
+    ) -> Result<Vec<(Cover, u64)>, angzarr_ports::StoreError> {
+        self.inner.processed(handler).await
+    }
+}
+
+impl angzarr_ports::Watch for Counting {
+    async fn change_token(&self) -> Result<angzarr_ports::ChangeToken, angzarr_ports::StoreError> {
+        self.ops.tokens.fetch_add(1, Ordering::SeqCst);
+        self.inner.change_token().await
+    }
+}
+
+/// `n` streams of one event each, all delivered and settled; then one more
+/// event on one of them. What the commit cost the feed in store operations
+/// (listings, head reads, change tokens).
+async fn commit_cost(n: usize, incremental: bool) -> (usize, usize, usize, usize) {
+    let counting = Counting {
+        inner: MemoryStore::default(),
+        ops: Ops::default(),
+    };
+    for stream in 0..n {
+        let cover = Cover {
+            domain: DOMAIN.to_string(),
+            root: Some(Uuid::from_bytes((stream as u128 + 1).to_be_bytes())),
+            edition: None,
+        };
+        append(&counting.inner, &cover, 1).await;
+    }
+    let mut transport = StoreTransport::new(&counting, &Frozen, Duration::from_secs(3600))
+        .pushed_by(&counting.inner);
+    if incremental {
+        transport = transport.changes_from(&counting.inner);
+    }
+    let feed = open(&transport, &scope(), 4).await;
+    for _ in 0..n {
+        let (token, _) = delivery(&feed).await;
+        feed.settle(token, Settle::Handled).await.unwrap();
+    }
+    let touched = Cover {
+        domain: DOMAIN.to_string(),
+        root: Some(Uuid::from_bytes((n as u128 / 2 + 1).to_be_bytes())),
+        edition: None,
+    };
+    counting.ops.take();
+    let visits = feed.lock().visits;
+    let commit = async {
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        append(&counting.inner, &touched, 1).await;
+    };
+    let (_, (_, next)) = tokio::join!(commit, delivery(&feed));
+    assert_eq!((next.stream, next.sequence), (touched, 1));
+    let (covers, heads, tokens) = counting.ops.take();
+    let used = feed.lock().visits - visits;
+    (covers, heads, tokens, used)
+}
+
+#[tokio::test]
+async fn a_commit_costs_the_feed_nothing_for_the_streams_it_did_not_touch() {
+    for n in [100, 2000] {
+        let (covers, heads, tokens, visits) = commit_cost(n, true).await;
+        assert!(
+            covers == 0 && heads <= 2 && tokens <= 2 && visits <= 6,
+            "{n} streams, one touched: {covers} listings, {heads} head reads, {tokens} tokens, {visits} lane visits"
+        );
+    }
+}
+
+#[tokio::test]
+async fn without_a_change_feed_a_commit_lists_and_reads_every_stream() {
+    let (covers, heads, _, _) = commit_cost(100, false).await;
+    assert_eq!((covers, heads), (1, 100), "the fallback is the full scan");
 }
