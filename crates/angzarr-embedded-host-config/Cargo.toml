@@ -1,0 +1,24 @@
+[package]
+name = "angzarr-embedded-host-config"
+version = "0.1.0"
+description = "The schema of an angzarr-embedded application's host config, angzarr.yaml: its types, its versioned loader and the fixtures that hold old files to it, with no runtime. Shared by angzarr-embedded-host, which runs the config, and angzarr-cli, which writes and lints it. Part of angzarr-embedded, angzarr's in-app runtime; for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
+edition = "2021"
+license.workspace = true
+publish.workspace = true
+rust-version = "1.77"
+
+# Dependency-light by design (see CLAUDE.md): a tool that only writes or
+# lints the config (angzarr-cli's generator, and so every application's
+# build script) takes no tokio, tonic or SQLite through it.
+# angzarr-yaml reads the file (versioned, then a strict serde decode, every
+# failure a key path and a code); serde derives the schema.
+[dependencies]
+angzarr-yaml = { path = "../angzarr-yaml" }
+serde = { version = "1", features = ["derive"] }
+
+# The tests read the load errors' codes.
+[dev-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+
+[lints]
+workspace = true

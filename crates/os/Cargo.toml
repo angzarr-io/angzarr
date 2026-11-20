@@ -1,0 +1,53 @@
+[package]
+name = "os"
+version = "0.1.0"
+description = "Everything that differs between operating systems, in one place: path, environment and search-path logic for every flavor (testable on any host), and the host's syscalls behind one trait made once at startup"
+edition = "2021"
+rust-version = "1.96"
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+# Advisory locks: flock on unix, LockFileEx on Windows.
+fs4.workspace = true
+# The stop signal and the signals heard by name: SIGHUP, SIGINT and SIGTERM
+# on unix; Ctrl-C, Ctrl-Break and the console's close, logoff and shutdown
+# on Windows; made on the caller's runtime.
+tokio = { workspace = true, features = ["signal"] }
+typed-path.workspace = true
+# The process tree kill: a process group on unix, a job object on Windows.
+process-wrap.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# getpwuid_r (the account's home) and setsid (a detached spawn).
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+process-wrap = { workspace = true, features = ["job-object"] }
+junction.workspace = true
+same-file.workspace = true
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    # CreateProcessW's security attributes (a detached spawn).
+    "Win32_Security",
+    # MoveFileExW (a rename that replaces nothing).
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Console",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+] }
+
+[dev-dependencies]
+mutants.workspace = true
+tempfile.workspace = true
+
+[features]
+# The test-only API other crates' tests use (`fixture`, `PRIVATE_DIR`,
+# `Flavor::program_file` and `startup_vars`, `own_group` and
+# `ctrl_break`): their dev-dependency turns it on, and no build of a
+# binary does.
+test-support = []
+
+[lints]
+workspace = true

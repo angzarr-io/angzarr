@@ -1,0 +1,40 @@
+[package]
+name = "angzarr-store-sqlite"
+version = "0.1.0"
+description = "angzarr-ports on SQLite: the shared store adapter that angzarr-embedded (angzarr's in-app runtime) and angzarr core (the distributed system, https://github.com/angzarr-io/angzarr) both use, its schema and migrations, held to the ports' conformance suite."
+edition = "2021"
+license.workspace = true
+publish.workspace = true
+# uuid 1.28 (through angzarr-proto) needs 1.89; sqlx 0.8's graph (icu_*,
+# home) needs 1.88.
+rust-version = "1.89"
+
+# A LEAF: angzarr-ports (and the wire types through it) and SQL, nothing of
+# angzarr-embedded (`a_store_depends_on_nothing_of_angzarr_embedded`), so angzarr's runtimes use
+# it as angzarr-embedded does. Third-party by design (see CLAUDE.md): a SQL store needs
+# a query builder and a driver, and hand-rolling either is a second,
+# unchecked implementation of the dialect.
+[dependencies]
+angzarr-ports = { path = "../angzarr-ports" }
+prost = "0.14"
+prost-types = "0.14"
+sea-query = "0.32"
+sea-query-binder = { version = "0.7", features = ["sqlx-sqlite"] }
+sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runtime-tokio", "migrate", "macros"] }
+# The async lock a handle's one connection is held behind, so the ports take
+# `&self`: tokio's, already in the graph through sqlx's tokio runtime, its
+# `sync` module alone (no runtime of its own).
+tokio = { version = "1", default-features = false, features = ["sync"] }
+
+# The conformance suite, run on this store under tokio.
+[dev-dependencies]
+angzarr-ports = { path = "../angzarr-ports", features = ["contract"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+
+[lints]
+workspace = true

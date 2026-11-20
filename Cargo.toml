@@ -1,70 +1,125 @@
-# angzarr core: a virtual workspace of the shared crates, each built, linted
-# and tested by its own justfile (`just check-shared-crates`).
+# angzarr, one workspace: core, router, embedded, build and platform.
+#
+# Flat layout: every crate is crates/<crate-name> (tools/archlint besides), so
+# a crate's `../angzarr-project/...` and `../<sibling>` paths are the ones it
+# had in its own repository. Crates between families are path dependencies;
+# there is no pin, no [patch], no lockstep check.
 [workspace]
 members = [
+    "crates/angzarr-build",
     "crates/angzarr-bus",
+    "crates/angzarr-codegen",
     "crates/angzarr-coordinator",
     "crates/angzarr-coordinator-base",
     "crates/angzarr-coordinator-grpc",
     "crates/angzarr-diagnostic",
+    "crates/angzarr-embedded",
+    "crates/angzarr-embedded-catalog-check",
+    "crates/angzarr-embedded-conformance",
+    "crates/angzarr-embedded-host",
+    "crates/angzarr-embedded-host-config",
+    "crates/angzarr-embedded-macros",
+    "crates/angzarr-embedded-runner",
     "crates/angzarr-ports",
     "crates/angzarr-presentation",
-    "crates/angzarr-reads",
     "crates/angzarr-proto",
     "crates/angzarr-proto-component",
     "crates/angzarr-proto-handler",
-    "crates/angzarr-proto-transport-distributed",
     "crates/angzarr-proto-jsonl",
+    "crates/angzarr-proto-transport-distributed",
     "crates/angzarr-proto-transport-embedded",
+    "crates/angzarr-reads",
+    "crates/angzarr-router",
+    "crates/angzarr-router-conformance",
+    "crates/angzarr-store-sqlite",
     "crates/angzarr-store-transfer",
     "crates/angzarr-test-dir",
     "crates/angzarr-yaml",
+    "crates/file-lock",
+    "crates/file-system",
+    "crates/os",
+    "crates/store-jsonl",
+    "tools/archlint",
 ]
-# sererr is a submodule with its own cargo workspace; none of its packages
-# is a member of this one.
-exclude = ["sererr"]
+# sererr is a submodule with its own cargo workspace (its protos feed the
+# docs' `just buf-docs`); angzarr-project's crates are standalone workspaces.
+# families/ holds each source repository's non-crate files, not code.
+exclude = ["sererr", "angzarr-project", "families"]
+# Resolver 2, as core, embedded, platform and router had it: resolver 3
+# (angzarr-build's) is MSRV-aware, and with embedded's rust-version 1.77 in
+# the same workspace it would resolve every dependency down to 1.77.
 resolver = "2"
 
-# The shared crates' lints (crates/*: each opts in with `[lints] workspace =
-# true`). Complexity is taskloom's gate: cognitive_complexity and
-# too_many_lines at clippy's defaults (25, 100), excessive_nesting at
-# crates/clippy.toml's threshold. All warn, and
-# every shared crate's `lint` (`just check-shared-crates`, the pre-commit
-# hook) denies warnings.
+[workspace.package]
+license = "Apache-2.0 OR BSD-3-Clause"
+# Not published to crates.io; shared by git only.
+publish = false
+# edition, rust-version, version and authors differ by family and are set in
+# each crate's own manifest (the family's former [workspace.package] value).
+
+[workspace.dependencies]
+# Family crates other crates name through the workspace.
+angzarr-build = { path = "crates/angzarr-build" }
+angzarr-codegen = { path = "crates/angzarr-codegen" }
+angzarr-diagnostic = { path = "crates/angzarr-diagnostic" }
+angzarr-proto = { path = "crates/angzarr-proto" }
+angzarr-proto-handler = { path = "crates/angzarr-proto-handler" }
+angzarr-proto-jsonl = { path = "crates/angzarr-proto-jsonl" }
+angzarr-ports = { path = "crates/angzarr-ports" }
+angzarr-presentation = { path = "crates/angzarr-presentation" }
+angzarr-test-dir = { path = "crates/angzarr-test-dir" }
+angzarr-embedded-host-config = { path = "crates/angzarr-embedded-host-config" }
+os = { path = "crates/os" }
+file-system = { path = "crates/file-system" }
+file-lock = { path = "crates/file-lock" }
+store-jsonl = { path = "crates/store-jsonl" }
+
+# Third-party (from platform, build and router; one entry each, no conflicts).
+serde = { version = "1", features = ["derive"] }
+fluent-syntax = "0.11"
+fs4 = "1.1"
+mutants = "0.0.4"
+tempfile = "3"
+junction = "=2.1.0"
+same-file = "=1.0.6"
+windows-sys = "=0.61.2"
+libc = "0.2"
+typed-path = "=0.12.3"
+tokio = { version = "1", features = ["rt", "time"] }
+prost = "0.14"
+prost-types = "0.14"
+prost-reflect = "0.16.5"
+prost-build = "0.14"
+tracing = "0.1"
+process-wrap = { version = "=10.0.1", default-features = false, features = ["std", "process-group"] }
+
+# Every crate opts in with `[lints] workspace = true` (router's crates now
+# inherit the three deny lints it did not have).
 [workspace.lints.clippy]
-# Zero-width and other invisible characters in source: never intended.
 invisible_characters = "deny"
-# A literal in another normalization form than NFC reads the same as its NFC
-# twin and compares unequal.
 unicode_not_nfc = "deny"
-# Non-ASCII in a literal is written as an escape, so what the code holds is
-# visible. Allowed, with a comment, only where a test's corpus is the point.
 non_ascii_literal = "deny"
 cognitive_complexity = "warn"
 too_many_lines = "warn"
 excessive_nesting = "warn"
 
-# === Build Profiles ===
-
-# Dev profile - optimized for size to keep disk usage sane
+# === Build Profiles (core's, now the whole workspace's: profiles are read
+# from the workspace root only) ===
 [profile.dev]
 opt-level = "z"
 debug = 0
 strip = true
 incremental = true
 
-# Test profile - optimized for size
-# Usage: cargo test (automatically used)
 [profile.test]
 opt-level = "z"
 debug = 0
 strip = true
 incremental = true
 
-# Release profile - slow compilation, fast runtime (for production)
 [profile.release]
-opt-level = "z"     # Optimize for size
-lto = "fat"         # Maximum link-time optimization
-codegen-units = 1   # Single codegen unit for best optimization
-strip = true        # Strip symbols for smaller binaries
-panic = "abort"     # Abort on panic (smaller binaries, no unwinding)
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = true
+panic = "abort"

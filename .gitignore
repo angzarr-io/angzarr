@@ -110,3 +110,5 @@ dist/
 
 # SCM memory (local session data, not shared)
 .scm/memory/
+target/
+mutants.out*/

@@ -1,0 +1,17 @@
+[package]
+name = "archlint"
+version = "0.1.0"
+edition = "2021"
+license.workspace = true
+publish = false
+description = "Module-level architecture rules for a Cargo workspace, declared in archlint.toml"
+
+[dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+syn = { version = "2", features = ["full", "visit", "parsing"] }
+toml = "0.8"
+
+[lints]
+workspace = true

@@ -1,0 +1,34 @@
+[package]
+name = "angzarr-embedded-catalog-check"
+version = "0.1.0"
+description = "Test-only: every error code in angzarr-embedded has a message, using exactly its args, in every shipped Fluent catalog. Part of angzarr-embedded, angzarr's in-app runtime (embedded in your application, not a microcontroller); for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
+edition = "2021"
+license.workspace = true
+publish.workspace = true
+# It reads angzarr-embedded's samples, so it needs what angzarr-embedded needs.
+rust-version = "1.89"
+
+# No library to speak of and no dependencies: the check is src/lib.test.rs.
+[dependencies]
+
+# angzarr-diagnostic's `catalog` checks the catalogs against the samples.
+# Test-only: nothing in angzarr-embedded renders Fluent; the client does.
+[dev-dependencies]
+angzarr-embedded = { path = "../angzarr-embedded" }
+# Its `build` feature for build::SOURCE, the catalog source's file name.
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+angzarr-embedded-host = { path = "../angzarr-embedded-host" }
+# The local-process transport's keys and their English (decision 14.64):
+# the host codes a child's failures under them.
+angzarr-proto-transport-embedded = { path = "../angzarr-proto-transport-embedded" }
+angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
+# angzarr-ports' own en-US catalog, which renders the store errors
+# angzarr-embedded forwards.
+angzarr-ports = { path = "../angzarr-ports" }
+# fluent-bundle (Apache-2.0 OR MIT) renders each sample's message with its
+# args, so a message naming an arg its error may not give fails here, not in
+# the client.
+fluent-bundle = "0.16"
+
+[lints]
+workspace = true

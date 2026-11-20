@@ -1,0 +1,74 @@
+[package]
+name = "angzarr-embedded"
+version = "0.1.0"
+description = "angzarr's in-app runtime: a small, deterministic event-sourcing engine (decide, emit, apply, replay) run inside your application's process, embedded in your application, not a microcontroller. For the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
+edition = "2021"
+license.workspace = true
+publish.workspace = true
+# uuid 1.28 (through angzarr-proto) needs 1.89; prost 0.14 needs 1.85.
+rust-version = "1.89"
+
+# The kernel operates on angzarr's wire types directly (`angzarr_embedded`), so
+# it depends on angzarr-proto: angzarr's own prost crate for io.angzarr.v1,
+# a git dependency pinned by rev, whose build needs `protoc`. prost and
+# prost-types are the versions angzarr-proto generates for, so its messages
+# and the kernel's are the same types. Dependency-freeness was given up for
+# this deliberately: see docs/design/audit.md, *Layering*.
+[dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+angzarr-proto = { path = "../angzarr-proto" }
+prost = "0.14"
+prost-types = "0.14"
+# angzarr's shared storage contract (one async trait set, its errors and
+# codes): angzarr-embedded's store ports are these, pinned with angzarr-proto at the
+# same rev of angzarr core (both crates moved there from angzarr-project), so
+# both share one set of wire types.
+angzarr-ports = { path = "../angzarr-ports" }
+# angzarr's bus interface (angzarr core's angzarr-bus): the trait a bus
+# hosted on a kernel implements, with projector and policy subscriptions.
+angzarr-bus = { path = "../angzarr-bus" }
+# angzarr's shared client router: business dispatch (handlers, typed
+# refusals and the refusal path), implemented once for every runtime. The
+# kernel calls it and keeps the check, identification, admission,
+# upcasting, snapshots, a policy's output checks, the store writes,
+# positions and resume.
+angzarr-router = { path = "../angzarr-router" }
+# angzarr's shared SQLite store, re-exported (`angzarr_embedded::angzarr_store_sqlite`)
+# so an application pins it through angzarr-embedded, at the rev the kernel
+# is built with. Behind the `sqlite` feature, off by default: it brings
+# sqlx and SQLite, which an application on another store, and the wasm
+# build, have no use for.
+angzarr-store-sqlite = { path = "../angzarr-store-sqlite", optional = true }
+
+[features]
+# Re-export angzarr-store-sqlite.
+sqlite = ["dep:angzarr-store-sqlite"]
+# The kernel's test support (`angzarr_embedded::testing`), for an
+# application's tests: angzarr-ports' MemoryStore and FaultyStore (its
+# `memory` and `faulty` features), and the pipeline on one stream in memory,
+# with no store (`Stream::execute`), for tests of the pipeline's steps.
+# Tests only; an application runs `Kernel::handle`.
+test-support = ["angzarr-ports/memory", "angzarr-ports/faulty"]
+
+# The kernel's tests run on angzarr-ports' MemoryStore and, on a tokio
+# runtime, on the shared SQLite adapter (sqlite.test.rs); and a decorated
+# aggregate (`src/decorated.test.rs`) through angzarr-embedded-macros, whose expansion
+# names `::angzarr-embedded`; with `sqlite` on, so the re-export is tested,
+# and `test-support`, its fixtures. The bus's tests run its instances
+# concurrently on tokio, each bounded by tokio's timer (`time`).
+[dev-dependencies]
+angzarr-embedded = { path = ".", features = ["sqlite", "test-support"] }
+angzarr-ports = { path = "../angzarr-ports", features = ["memory", "faulty"] }
+# The bus interface's conformance suite, run against the hosted bus.
+angzarr-bus = { path = "../angzarr-bus", features = ["contract"] }
+angzarr-embedded-macros = { path = "../angzarr-embedded-macros" }
+angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+
+[lints]
+workspace = true

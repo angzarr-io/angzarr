@@ -1,0 +1,56 @@
+# Workspace clippy settings: the nesting threshold for `excessive_nesting`,
+# which Cargo.toml's [workspace.lints.clippy] turns on (taskloom's complexity
+# gate), and the file I/O only the file-system seam may do.
+excessive-nesting-threshold = 6
+
+# All file I/O goes through the file-system seam (crates/file-system): an
+# `Fs`, the real `Os` in production and a temp-rooted `Rooted` in tests, so
+# a test's files and its lock files land under a root of its own. The seam
+# crate, and the os crate under it, alone may call these (each one's
+# `#![allow]` says so). The Windows paths do not resolve on other targets,
+# hence `allow-invalid`.
+disallowed-methods = [
+  { path = "std::fs::read", reason = "file I/O goes through the file-system seam: Fs::read" },
+  { path = "std::fs::read_to_string", reason = "file I/O goes through the file-system seam: Fs::read_to_string" },
+  { path = "std::fs::write", reason = "file I/O goes through the file-system seam: Fs::write_atomic" },
+  { path = "std::fs::read_dir", reason = "file I/O goes through the file-system seam: Fs::read_dir" },
+  { path = "std::fs::create_dir", reason = "file I/O goes through the file-system seam: Fs::create_dir_all" },
+  { path = "std::fs::create_dir_all", reason = "file I/O goes through the file-system seam: Fs::create_dir_all" },
+  { path = "std::fs::remove_file", reason = "file I/O goes through the file-system seam: Fs::remove_file" },
+  { path = "std::fs::remove_dir", reason = "file I/O goes through the file-system seam: Fs::remove_dir_all" },
+  { path = "std::fs::remove_dir_all", reason = "file I/O goes through the file-system seam: Fs::remove_dir_all" },
+  { path = "std::fs::rename", reason = "file I/O goes through the file-system seam: Fs::rename" },
+  { path = "std::fs::copy", reason = "file I/O goes through the file-system seam: Fs::read and Fs::write_atomic" },
+  { path = "std::fs::hard_link", reason = "file I/O goes through the file-system seam" },
+  { path = "std::fs::metadata", reason = "file I/O goes through the file-system seam: Fs::metadata" },
+  { path = "std::fs::symlink_metadata", reason = "file I/O goes through the file-system seam: Fs::symlink_metadata" },
+  { path = "std::fs::canonicalize", reason = "file I/O goes through the file-system seam: Fs::canonicalize" },
+  { path = "std::fs::read_link", reason = "file I/O goes through the file-system seam: Fs::read_link" },
+  { path = "std::fs::set_permissions", reason = "file I/O goes through the file-system seam: Fs::set_permissions" },
+  { path = "std::fs::exists", reason = "file I/O goes through the file-system seam: Fs::exists" },
+  { path = "std::fs::File::open", reason = "file I/O goes through the file-system seam: Fs::open" },
+  { path = "std::fs::File::create", reason = "file I/O goes through the file-system seam: Fs::open" },
+  { path = "std::fs::File::create_new", reason = "file I/O goes through the file-system seam: Fs::open" },
+  { path = "std::fs::OpenOptions::open", reason = "file I/O goes through the file-system seam: Fs::open" },
+  { path = "std::os::unix::fs::symlink", reason = "file I/O goes through the file-system seam: Fs::symlink_dir" },
+  { path = "std::os::windows::fs::symlink_dir", reason = "file I/O goes through the file-system seam: Fs::symlink_dir", allow-invalid = true },
+  { path = "std::os::windows::fs::symlink_file", reason = "file I/O goes through the file-system seam", allow-invalid = true },
+  { path = "std::path::Path::exists", reason = "file I/O goes through the file-system seam: Fs::exists" },
+  { path = "std::path::Path::try_exists", reason = "file I/O goes through the file-system seam: Fs::exists" },
+  { path = "std::path::Path::is_file", reason = "file I/O goes through the file-system seam: Fs::metadata" },
+  { path = "std::path::Path::is_dir", reason = "file I/O goes through the file-system seam: Fs::metadata" },
+  { path = "std::path::Path::is_symlink", reason = "file I/O goes through the file-system seam: Fs::symlink_metadata" },
+  { path = "std::path::Path::metadata", reason = "file I/O goes through the file-system seam: Fs::metadata" },
+  { path = "std::path::Path::symlink_metadata", reason = "file I/O goes through the file-system seam: Fs::symlink_metadata" },
+  { path = "std::path::Path::canonicalize", reason = "file I/O goes through the file-system seam: Fs::canonicalize" },
+  { path = "std::path::Path::read_dir", reason = "file I/O goes through the file-system seam: Fs::read_dir" },
+  { path = "std::path::Path::read_link", reason = "file I/O goes through the file-system seam: Fs::read_link" },
+  { path = "tempfile::tempdir", reason = "file I/O goes through the file-system seam: Rooted::temp (a test's own filesystem)" },
+  { path = "tempfile::tempdir_in", reason = "file I/O goes through the file-system seam: Rooted::temp" },
+  { path = "tempfile::TempDir::new", reason = "file I/O goes through the file-system seam: Rooted::temp" },
+  { path = "tempfile::tempfile", reason = "file I/O goes through the file-system seam" },
+  { path = "tempfile::NamedTempFile::new", reason = "file I/O goes through the file-system seam: Fs::write_atomic" },
+  { path = "tempfile::NamedTempFile::new_in", reason = "file I/O goes through the file-system seam: Fs::write_atomic" },
+  { path = "tempfile::Builder::tempdir", reason = "file I/O goes through the file-system seam: Rooted::temp" },
+  { path = "tempfile::Builder::tempfile", reason = "file I/O goes through the file-system seam" },
+]
