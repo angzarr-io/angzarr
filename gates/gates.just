@@ -337,7 +337,8 @@ _tests +packages:
         done
         # `cargo test --doc` refuses a package without a library (a proc-macro
         # crate is one: its doc examples, compile_fail ones too, run).
-        while IFS= read -r name; do doc+=(--package "$name"); done < <(cargo metadata --format-version 1 --no-deps \
+        # (jq on Windows ends its lines with CRLF: \r is a delimiter here.)
+        while IFS=$'\r\n' read -r name; do doc+=(--package "$name"); done < <(cargo metadata --format-version 1 --no-deps \
             --offline --manifest-path "$root/Cargo.toml" | jq -r --args '.packages[] | select(.name as $n | $ARGS.positional
             | index($n)) | select(any(.targets[]; .kind | index("lib") or index("proc-macro"))) | .name' "$@")
     fi
@@ -349,7 +350,7 @@ _tests +packages:
     # nextest (it has no `--list`): nextest skips it by binary id and `cargo test`
     # runs it after the rest (gates/harnessless.py names them).
     skip=() harnessless=()
-    while IFS=$'\t' read -r pkg target; do
+    while IFS=$'\t\r\n' read -r pkg target; do
         if [ "$1" != --workspace ]; then
             case " $* " in *" $pkg "*) ;; *) continue ;; esac
         fi
