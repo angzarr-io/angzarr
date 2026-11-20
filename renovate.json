@@ -1,0 +1,28 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "labels": ["dependencies"],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "fileMatch": ["^\\.github/workflows/.*\\.ya?ml$"],
+      "matchStrings": [
+        "VERSIONATOR_VERSION:\\s*(?<currentValue>v[\\d.]+)"
+      ],
+      "depNameTemplate": "benjaminabbitt/versionator",
+      "datasourceTemplate": "github-releases"
+    }
+  ],
+  "packageRules": [
+    {
+      "matchManagers": ["github-actions"],
+      "groupName": "github-actions"
+    },
+    {
+      "matchPackageNames": ["benjaminabbitt/versionator"],
+      "groupName": "versionator"
+    }
+  ]
+}

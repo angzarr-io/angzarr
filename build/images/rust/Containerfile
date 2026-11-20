@@ -1,0 +1,90 @@
+# syntax=docker/dockerfile:1.4
+# Rust build image for angzarr
+#
+# Build: podman build -t ghcr.io/angzarr-io/angzarr-rust .
+#
+# Provides: rustup, cargo, clippy, rustfmt, mold linker, clang
+# Based on: ghcr.io/angzarr-io/angzarr-base
+
+# BASE_IMAGE must be provided via build arg (no default to avoid registry lookups)
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+
+ARG RUST_VERSION=1.93.0
+ARG MOLD_VERSION=2.40.1
+
+# Clang for faster linking with mold, protoc for prost-build, musl for static builds
+# libsasl2-dev for rdkafka SASL authentication support
+# cmake for building native dependencies (rdkafka-sys)
+# libcurl4-openssl-dev for rdkafka HTTP features
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang \
+    lld \
+    protobuf-compiler \
+    musl-tools \
+    musl-dev \
+    libsasl2-dev \
+    cmake \
+    libcurl4-openssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install mold (fast linker)
+# Create ld.mold symlink for clang's -fuse-ld=mold flag
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) MOLD_ARCH="x86_64" ;; \
+        arm64) MOLD_ARCH="aarch64" ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -Lo /tmp/mold.tar.gz \
+        "https://github.com/rui314/mold/releases/download/v${MOLD_VERSION}/mold-${MOLD_VERSION}-${MOLD_ARCH}-linux.tar.gz" && \
+    tar -xzf /tmp/mold.tar.gz -C /tmp && \
+    cp /tmp/mold-${MOLD_VERSION}-${MOLD_ARCH}-linux/bin/mold /usr/local/bin/ && \
+    ln -sf /usr/local/bin/mold /usr/local/bin/ld.mold && \
+    rm -rf /tmp/mold*
+
+# Install Rust via rustup
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
+    -y \
+    --default-toolchain ${RUST_VERSION} \
+    --profile minimal \
+    --component rustfmt,clippy
+
+# Add musl targets for static builds
+RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl
+
+# Install protobuf code generators for Rust
+RUN cargo install --locked \
+    protoc-gen-prost \
+    protoc-gen-tonic \
+    protoc-gen-prost-crate
+
+# Install cargo-llvm-cov for test coverage
+# Requires llvm-tools-preview rustup component
+RUN rustup component add llvm-tools-preview && \
+    cargo install cargo-llvm-cov --locked
+
+# Install cargo-mutants. Always invoked via `just mutants*` inside the
+# ephemeral container helper (see core justfile / CLAUDE.md "Mutation
+# Testing"). Bundling it in the image avoids a `cargo install` on every
+# CI mutation job.
+RUN cargo install cargo-mutants --locked
+
+# Configure cargo to use mold linker by default
+RUN mkdir -p /usr/local/cargo && \
+    echo '[target.x86_64-unknown-linux-gnu]' >> /usr/local/cargo/config.toml && \
+    echo 'linker = "clang"' >> /usr/local/cargo/config.toml && \
+    echo 'rustflags = ["-C", "link-arg=-fuse-ld=mold"]' >> /usr/local/cargo/config.toml && \
+    echo '' >> /usr/local/cargo/config.toml && \
+    echo '[target.aarch64-unknown-linux-gnu]' >> /usr/local/cargo/config.toml && \
+    echo 'linker = "clang"' >> /usr/local/cargo/config.toml && \
+    echo 'rustflags = ["-C", "link-arg=-fuse-ld=mold"]' >> /usr/local/cargo/config.toml
+
+# Verify installations
+RUN rustc --version && cargo --version && mold --version
+
+WORKDIR /workspace

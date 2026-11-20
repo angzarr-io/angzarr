@@ -1,0 +1,20 @@
+[package]
+name = "angzarr-test-dir"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "A test's scratch directory under the temporary directory, removed when its guard drops, on a pass and on a panic alike, kept for a panicking test with ANGZARR_KEEP_TEST_DIRS"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace declares no [workspace.package], so nothing is inherited.
+
+# std alone, and taken only as a dev-dependency: a test's scratch, never a
+# program's.
+[dependencies]
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

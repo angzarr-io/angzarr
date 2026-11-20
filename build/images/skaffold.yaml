@@ -1,0 +1,47 @@
+apiVersion: skaffold/v4beta11
+kind: Config
+metadata:
+  name: angzarr-images
+
+# Base and Rust images with content-addressable tags
+# Other language images are built in their respective client repos
+# Usage: skaffold build -f build/images/skaffold.yaml [--profile dev]
+
+build:
+  # Git-based tags - unique per commit, no registry checks during tag computation
+  # (inputDigest requires resolving base images which triggers registry lookups)
+  tagPolicy:
+    gitCommit: {}
+  local:
+    push: false       # Don't push by default (CI uses --push flag)
+    useBuildkit: true
+    tryImportMissing: true  # Pull from registry if exists
+
+  artifacts:
+    # Base image - foundation for all others
+    - image: ghcr.io/angzarr-io/angzarr-base
+      context: base
+      docker:
+        dockerfile: Containerfile
+
+    # Rust image - built here, other languages in client repos
+    - image: ghcr.io/angzarr-io/angzarr-rust
+      context: rust
+      docker:
+        dockerfile: Containerfile
+      requires:
+        - image: ghcr.io/angzarr-io/angzarr-base
+          alias: BASE_IMAGE
+
+profiles:
+  # Dev profile - adds dev container with extra tooling
+  - name: dev
+    build:
+      artifacts:
+        - image: ghcr.io/angzarr-io/angzarr-dev-rust
+          context: ../../.devcontainer
+          docker:
+            dockerfile: Containerfile
+          requires:
+            - image: ghcr.io/angzarr-io/angzarr-rust
+              alias: RUST_IMAGE

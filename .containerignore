@@ -1,0 +1,38 @@
+# Build artifacts
+target/
+**/target/
+*.rs.bk
+
+# IDE/Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Development files
+.plan/
+*.md
+!README.md
+
+# Test data
+data/
+*.db
+
+# Example projects - exclude venvs and build artifacts, keep source
+examples/go/**/go-*
+examples/python/**/.venv/
+examples/python/**/__pycache__/
+examples/python/**/.pytest_cache/
+
+# CI/CD
+.github/
+
+# Docker
+Dockerfile*
+docker-compose*
+!Dockerfile
+!docker-compose.yml

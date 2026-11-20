@@ -1,0 +1,40 @@
+[package]
+name = "angzarr-bus"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "angzarr's bus interface: subscriptions of projectors and policies served from a stream store, one trait for the in-process and the distributed bus, and the conformance suite every implementation runs"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace declares no [workspace.package], so nothing is inherited.
+
+[features]
+# The conformance suite: `angzarr_bus::contract` and `bus_contract!`. An
+# implementation enables it for its own tests (under dev-dependencies).
+contract = []
+
+# The handler types are each implementation's (angzarr-router's traits
+# depend on this workspace, so nothing here names them): no router, no
+# runtime, no transport.
+[dependencies]
+# A failure's cause is an angzarr_diagnostic::Report; the trait's errors
+# are Diagnostics.
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+# `MaybeSend`/`MaybeSync`, the ports' one bound that differs by target.
+angzarr-ports = { path = "../angzarr-ports" }
+# The wire types a delivery names (Cover, EventPage, EventRef, UUID) and
+# `ids::policy_command_id`, which the suite checks routed outputs against.
+angzarr-proto = { path = "../angzarr-proto" }
+
+# The suite's reference run (tests/contract.rs): the in-memory store, made
+# to fail on demand, on tokio's runtime and timer; `Any` for its events.
+[dev-dependencies]
+angzarr-ports = { path = "../angzarr-ports", features = ["memory", "faulty"] }
+prost-types = "0.14"
+tokio = { version = "1", features = ["macros", "rt", "time"] }
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

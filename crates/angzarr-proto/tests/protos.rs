@@ -1,0 +1,56 @@
+//! The embedded protos are angzarr-project's, byte for byte, and written
+//! out they form an include directory protoc can import from.
+
+use std::path::PathBuf;
+
+use angzarr_proto::protos::{write_include_dir, FILES};
+
+// A test's scratch directory, removed when it drops, on a panic too.
+use angzarr_test_dir::TestDir;
+
+/// The proto root build.rs generated the library from (exported by it).
+fn repo_proto() -> PathBuf {
+    PathBuf::from(env!("ANGZARR_PROTO_ROOT"))
+}
+
+#[test]
+fn every_embedded_proto_is_the_repositorys() {
+    let paths: Vec<_> = FILES.iter().map(|f| f.path).collect();
+    assert!(paths.contains(&"io/angzarr/v1/options.proto"));
+    assert!(paths.contains(&"io/angzarr/v1/types.proto"));
+    for file in FILES {
+        let on_disk = std::fs::read_to_string(repo_proto().join(file.path)).unwrap();
+        assert_eq!(file.contents, on_disk, "{}", file.path);
+    }
+}
+
+#[test]
+fn written_out_they_are_an_include_directory() {
+    let dir = TestDir::new(env!("CARGO_PKG_NAME"));
+    let include = write_include_dir(&dir).unwrap();
+    assert_eq!(include, *dir);
+    for file in FILES {
+        assert_eq!(
+            std::fs::read_to_string(include.join(file.path)).unwrap(),
+            file.contents
+        );
+    }
+    // Every import between them resolves inside the directory
+    // (google/protobuf/* aside, which protoc supplies; google/rpc/code.proto
+    // is embedded, for reasons.proto).
+    for file in FILES {
+        for line in file.contents.lines() {
+            let Some(rest) = line.trim().strip_prefix("import \"") else {
+                continue;
+            };
+            let import = rest.trim_end_matches("\";");
+            if !import.starts_with("google/protobuf/") {
+                assert!(
+                    include.join(import).exists(),
+                    "{} imports {import}",
+                    file.path
+                );
+            }
+        }
+    }
+}

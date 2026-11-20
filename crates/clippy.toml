@@ -1,0 +1,5 @@
+# The shared crates' clippy settings (crates/*). Clippy reads the nearest
+# clippy.toml above a package's manifest, so this one is theirs and the root
+# package's is not. taskloom's complexity gate: nesting deeper than 6 is
+# `excessive_nesting` (enabled in the root Cargo.toml's [workspace.lints]).
+excessive-nesting-threshold = 6

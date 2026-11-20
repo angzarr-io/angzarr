@@ -1,0 +1,164 @@
+name: CI
+
+# angzarr core is a virtual workspace of the shared crates (crates/*). All
+# logic lives in justfile recipes; these jobs only install tools and invoke
+# them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  packages: read
+
+# Every action is pinned to a commit, its release in the comment; every tool
+# to a version. mold: .cargo/config.toml links the Linux builds with
+# `-fuse-ld=mold`, which a hosted runner does not have, so each job that
+# compiles installs it.
+env:
+  MOLD_VERSION: '2.42.1'
+  PROTOC_VERSION: '21.12'
+  JUST_VERSION: '1.40.0'
+  CARGO_DENY_VERSION: '0.20.2'
+
+jobs:
+  # Unbypassable guard against `--no-verify` / `LEFTHOOK=0` locally. Mirrors
+  # the parent-side check that lefthook runs on pre-commit. Pointer-only
+  # bumps pass; dirty submodule working trees fail.
+  submodules:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: true
+
+      - name: Install just
+        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2.0.0
+        with:
+          just-version: ${{ env.JUST_VERSION }}
+
+      - name: Verify submodules are clean
+        run: just check-submodules-clean
+
+  # Every check of every shared crate (`just check-shared-crates`: the
+  # submodule cannot clash with them, then each crate's fmt-check, build,
+  # lint, test and, where it has them, wasm and wasm-test), on the runner
+  # itself: the crates need protoc, the wasm32 target,
+  # wasm-bindgen-test-runner and node.
+  shared-crates:
+    name: Shared crates
+    runs-on: ubuntu-latest
+    needs: [submodules]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: true
+
+      - name: Install just
+        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2.0.0
+        with:
+          just-version: ${{ env.JUST_VERSION }}
+
+      - name: Install protoc
+        uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
+        with:
+          version: ${{ env.PROTOC_VERSION }}
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install mold (.cargo/config.toml links with -fuse-ld=mold)
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        with:
+          mold-version: ${{ env.MOLD_VERSION }}
+          make-default: false
+
+      - name: Install Rust (stable, wasm32, rustfmt, clippy)
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt,clippy --target wasm32-unknown-unknown
+          rustup default stable
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+
+      - name: Cache cargo
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin/wasm-bindgen*
+            target
+          key: ${{ runner.os }}-shared-crates-${{ hashFiles('Cargo.lock') }}
+
+      - name: wasm-bindgen-test-runner
+        run: just -f crates/angzarr-ports/justfile tools
+
+      - name: Every shared crate's checks
+        run: just check-shared-crates
+
+  # What may enter the shared crates' dependency graph (deny.toml).
+  lint-deps:
+    name: Dependencies (cargo-deny)
+    runs-on: ubuntu-latest
+    needs: [submodules]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: true
+
+      - name: Install just
+        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2.0.0
+        with:
+          just-version: ${{ env.JUST_VERSION }}
+
+      - name: Install mold (.cargo/config.toml links with -fuse-ld=mold)
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        with:
+          mold-version: ${{ env.MOLD_VERSION }}
+          make-default: false
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked --version ${{ env.CARGO_DENY_VERSION }}
+
+      - name: cargo-deny
+        run: just lint-deps
+
+  # The spec's protos, as the angzarr-project submodule pins them.
+  protos:
+    name: Protos (buf)
+    runs-on: ubuntu-latest
+    needs: [submodules]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          submodules: true
+
+      - name: Log in to Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Buf lint
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace/angzarr-project/proto \
+            ghcr.io/angzarr-io/angzarr-rust:latest \
+            buf lint
+
+      - name: Buf breaking changes
+        if: github.event_name == 'pull_request'
+        run: |
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "${{ github.workspace }}:/workspace" \
+            -w /workspace/angzarr-project/proto \
+            ghcr.io/angzarr-io/angzarr-rust:latest \
+            buf breaking --against 'https://github.com/${{ github.repository }}.git#branch=main'
+        continue-on-error: true

@@ -1,0 +1,35 @@
+# angzarr-proto-transport-embedded: the local-process transport
+# (io.angzarr.transport.embedded.v1): its constants and keys, prost only. Needs protoc on
+# PATH (or PROTOC set) and the angzarr-project submodule checked out
+# (build.rs reads its proto/). A member of angzarr-core's workspace: every
+# recipe names this package, and --locked means the workspace's Cargo.lock.
+# Runs on the host (`just -f crates/angzarr-proto-transport-embedded/justfile check`).
+
+# Format check, build, lint and test
+check: check-untested tests
+
+# Every check but running the tests, the tests' build included: a failure
+# here is never a red test (the root justfile's `check-shared-crates-commit`)
+check-untested: fmt-check build lint build-tests
+
+# Run the tests: a failure here is a red test
+tests: test
+
+fmt:
+    cargo fmt -p angzarr-proto-transport-embedded
+
+fmt-check:
+    cargo fmt -p angzarr-proto-transport-embedded --check
+
+build:
+    cargo build --locked -p angzarr-proto-transport-embedded
+
+lint:
+    cargo clippy --locked -p angzarr-proto-transport-embedded --all-targets -- -D warnings
+
+test:
+    cargo test --locked -p angzarr-proto-transport-embedded
+
+# Build the tests without running them
+build-tests:
+    cargo test --locked -p angzarr-proto-transport-embedded --no-run

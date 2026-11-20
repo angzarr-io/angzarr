@@ -1,0 +1,47 @@
+[package]
+name = "angzarr-store-transfer"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "A store carried across a proto generation: every row a store keeps (angzarr-ports' Export), written as JSONL in proto3's JSON mapping, its business payloads expanded through the app's descriptors, and refused where a row would be lost"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace declares no [workspace.package], so nothing is inherited.
+
+[dependencies]
+# Every error is an angzarr_diagnostic::Diagnostic.
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+# The Export port, the ledger (Migrations), and the wire types through its
+# angzarr-proto re-export (FILE_DESCRIPTOR_SET among them).
+angzarr-ports = { path = "../angzarr-ports" }
+# The re-encoding check: a stored row decoded by the build's own types and
+# encoded again must be its bytes.
+prost = "0.14"
+# `Any`, as a digest's state is packed.
+prost-types = "0.14"
+# proto3's JSON mapping over descriptors, `Any` expanded, unknown fields
+# kept to be refused (the store export/import plan, D4 (a)): here only, so
+# angzarr-proto stays prost-only.
+prost-reflect = { version = "0.16", features = ["serde"] }
+# The JSONL format's records: serde structs (serde_json's own traits, with
+# their derive).
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# The tests export MemoryStore.
+angzarr-ports = { path = "../angzarr-ports", features = ["memory"] }
+tokio = { version = "1", features = ["macros", "rt"] }
+# The tests build stored messages as the ports keep them.
+prost-types = "0.14"
+
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

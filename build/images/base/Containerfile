@@ -1,0 +1,52 @@
+# syntax=docker/dockerfile:1.4
+# Base image for all angzarr language-specific build images
+#
+# Build: podman build -t ghcr.io/angzarr-io/angzarr-base .
+#
+# Provides: just, buf, core build tools, system libraries
+# Based on: debian:trixie-slim (minimal)
+
+FROM docker.io/library/debian:trixie-slim AS base
+
+ARG JUST_VERSION=1.36.0
+ARG BUF_VERSION=1.47.2
+
+# System libraries needed for builds across languages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Core build essentials
+    build-essential \
+    ca-certificates \
+    curl \
+    git \
+    pkg-config \
+    unzip \
+    # System libraries for SSL/TLS and protobuf
+    libssl-dev \
+    libprotobuf-dev \
+    # Compression (needed by various build systems)
+    zlib1g-dev \
+    # Code formatting
+    clang-format \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install just (command runner)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://just.systems/install.sh \
+    | bash -s -- --tag ${JUST_VERSION} --to /usr/local/bin
+
+# Install buf (modern protobuf toolchain)
+# buf manages protoc internally and provides better dependency management
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) BUF_ARCH="x86_64" ;; \
+        arm64) BUF_ARCH="aarch64" ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    curl --retry 3 --retry-delay 5 -fLo /usr/local/bin/buf \
+        "https://github.com/bufbuild/buf/releases/download/v${BUF_VERSION}/buf-Linux-${BUF_ARCH}" && \
+    chmod +x /usr/local/bin/buf && \
+    buf --version || (echo "buf download failed - binary not executable" && exit 1)
+
+WORKDIR /workspace
+
+# Verify installations
+RUN just --version && buf --version

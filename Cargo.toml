@@ -1,0 +1,70 @@
+# angzarr core: a virtual workspace of the shared crates, each built, linted
+# and tested by its own justfile (`just check-shared-crates`).
+[workspace]
+members = [
+    "crates/angzarr-bus",
+    "crates/angzarr-coordinator",
+    "crates/angzarr-coordinator-base",
+    "crates/angzarr-coordinator-grpc",
+    "crates/angzarr-diagnostic",
+    "crates/angzarr-ports",
+    "crates/angzarr-presentation",
+    "crates/angzarr-reads",
+    "crates/angzarr-proto",
+    "crates/angzarr-proto-component",
+    "crates/angzarr-proto-handler",
+    "crates/angzarr-proto-transport-distributed",
+    "crates/angzarr-proto-jsonl",
+    "crates/angzarr-proto-transport-embedded",
+    "crates/angzarr-store-transfer",
+    "crates/angzarr-test-dir",
+    "crates/angzarr-yaml",
+]
+# sererr is a submodule with its own cargo workspace; none of its packages
+# is a member of this one.
+exclude = ["sererr"]
+resolver = "2"
+
+# The shared crates' lints (crates/*: each opts in with `[lints] workspace =
+# true`). Complexity is taskloom's gate: cognitive_complexity and
+# too_many_lines at clippy's defaults (25, 100), excessive_nesting at
+# crates/clippy.toml's threshold. All warn, and
+# every shared crate's `lint` (`just check-shared-crates`, the pre-commit
+# hook) denies warnings.
+[workspace.lints.clippy]
+# Zero-width and other invisible characters in source: never intended.
+invisible_characters = "deny"
+# A literal in another normalization form than NFC reads the same as its NFC
+# twin and compares unequal.
+unicode_not_nfc = "deny"
+# Non-ASCII in a literal is written as an escape, so what the code holds is
+# visible. Allowed, with a comment, only where a test's corpus is the point.
+non_ascii_literal = "deny"
+cognitive_complexity = "warn"
+too_many_lines = "warn"
+excessive_nesting = "warn"
+
+# === Build Profiles ===
+
+# Dev profile - optimized for size to keep disk usage sane
+[profile.dev]
+opt-level = "z"
+debug = 0
+strip = true
+incremental = true
+
+# Test profile - optimized for size
+# Usage: cargo test (automatically used)
+[profile.test]
+opt-level = "z"
+debug = 0
+strip = true
+incremental = true
+
+# Release profile - slow compilation, fast runtime (for production)
+[profile.release]
+opt-level = "z"     # Optimize for size
+lto = "fat"         # Maximum link-time optimization
+codegen-units = 1   # Single codegen unit for best optimization
+strip = true        # Strip symbols for smaller binaries
+panic = "abort"     # Abort on panic (smaller binaries, no unwinding)

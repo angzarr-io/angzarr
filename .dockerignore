@@ -1,0 +1,51 @@
+# Build artifacts - these are huge and should never be in build context
+target/
+**/target/
+
+# Language-specific build artifacts
+**/node_modules/
+**/.venv/
+**/venv/
+**/__pycache__/
+**/*.pyc
+**/vendor/
+**/.gradle/
+**/build/
+**/obj/
+# C#/Java build output directories (but NOT src/bin which is Rust sources)
+**/bin/Debug/
+**/bin/Release/
+examples/**/bin/
+**/m2/
+**/.m2/
+
+# IDE and editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Git
+.git/
+.gitignore
+
+# Documentation and planning
+*.md
+.plan/
+
+# Test artifacts
+coverage/
+.pytest_cache/
+.nyc_output/
+htmlcov/
+
+# Terraform
+.terraform/
+*.tfstate*
+
+# Local config
+*.local
+.env
+.env.*
+secrets/

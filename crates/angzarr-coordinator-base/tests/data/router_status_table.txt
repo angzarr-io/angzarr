@@ -1,0 +1,56 @@
+# The angzarr router's status table, kept as data: what this crate's `Code`
+# and `Coded::spec` must agree with. The router is not a dependency of this
+# crate (nothing above angzarr-ports is), so the table is a COPY, taken by
+# hand from angzarr-router, branch c2/spec-keys (83d09ac),
+# crates/router/src/error.rs and its callers (domain.rs, router.rs,
+# rebuild.rs). Re-copy it when the router's table changes; a row here that
+# the router no longer has is the stale one.
+#
+# code <NAME> <wire number>   the router's `GrpcCode`
+# addition <NAME> <wire number>   a Code the router's table does NOT have
+# key <KEY> <STATUS>          the status the router answers a core reason key under
+
+code UNKNOWN 2
+code INVALID_ARGUMENT 3
+code DEADLINE_EXCEEDED 4
+code NOT_FOUND 5
+code ALREADY_EXISTS 6
+code PERMISSION_DENIED 7
+code RESOURCE_EXHAUSTED 8
+code FAILED_PRECONDITION 9
+code ABORTED 10
+code OUT_OF_RANGE 11
+code UNIMPLEMENTED 12
+code INTERNAL 13
+code UNAVAILABLE 14
+code DATA_LOSS 15
+
+# NOT in the router's table: this crate's addition beyond it. The gate
+# (gate-contract.md) answers a bad or revoked credential UNAUTHENTICATED,
+# shown to the caller; the router has no such code. Upstream note: the
+# router's status table should gain it, after which this row moves up to
+# `code`.
+addition UNAUTHENTICATED 16
+
+# CodedError::unknown_type (domain.rs): INTERNAL, a bug
+key ANGZARR_REASON_UNKNOWN_COMMAND_TYPE INTERNAL
+key ANGZARR_REASON_NO_FACT_HANDLER INTERNAL
+# CodedError::internal(NoRefusalHandler) (domain.rs)
+key ANGZARR_REASON_NO_REFUSAL_HANDLER INTERNAL
+# CodedError::undecodable: INTERNAL
+key ANGZARR_REASON_ANY_DECODE_FAILED INTERNAL
+# CodedError::persisted_corrupt: DATA_LOSS
+key ANGZARR_REASON_PERSISTED_EVENT_CORRUPT DATA_LOSS
+# CodedError::fold_failed: INTERNAL
+key ANGZARR_REASON_FOLD_FAILED INTERNAL
+key ANGZARR_REASON_FOLD_FAILED_EMITTED INTERNAL
+# CodedError::unhandled and ::panicked: INTERNAL
+key ANGZARR_REASON_UNHANDLED_HANDLER_ERROR INTERNAL
+key ANGZARR_REASON_HANDLER_PANICKED INTERNAL
+# CodedError::refused: FAILED_PRECONDITION
+key ANGZARR_REASON_COMMAND_REFUSED FAILED_PRECONDITION
+# CodedError::unimplemented(NoComponentOfKind) (router.rs): UNIMPLEMENTED
+key ANGZARR_REASON_NO_COMPONENT_OF_KIND UNIMPLEMENTED
+# CodedError::internal (router.rs)
+key ANGZARR_REASON_NO_HANDLERS_REGISTERED INTERNAL
+key ANGZARR_REASON_DUPLICATE_COMPONENT INTERNAL

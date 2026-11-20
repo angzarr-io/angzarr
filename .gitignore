@@ -1,0 +1,112 @@
+/target
+**/target/
+.cargo-container/
+
+# Skaffold build output
+.devcontainer/build.json
+*.swp
+*.swo
+.DS_Store
+*.db
+*-shm
+*-wal
+/data/
+
+# Runtime artifacts
+.plan/
+.tasks/
+
+# Secrets - never commit
+.env
+secrets/
+*-secrets.yaml
+*-credentials.yaml
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+
+# Go build artifacts
+*.so
+*.h
+!build/**/*.h
+
+# C++ build artifacts (for any C++ code in this repo)
+**/cpp/build/
+
+# C# build artifacts
+**/obj/
+**/bin/
+
+# Java build artifacts
+**/build/
+!/build/
+!/build/images/
+!/build/images/**
+build/images/build.json
+.gradle/
+
+# Generated proto files (regenerated during build)
+/generated/
+
+# Go - protoc-gen-go output
+**/*.pb.go
+
+# Python - grpcio-tools output
+**/*_pb2.py
+**/*_pb2_grpc.py
+
+# C++ - protoc output (kept in build/ dirs which are already ignored)
+# **/*.pb.cc
+# **/*.pb.h
+
+# TypeScript/JavaScript - protoc-gen-ts output
+**/*_pb.js
+**/*_pb.d.ts
+**/*_grpc_pb.js
+**/*_grpc_pb.d.ts
+
+# Java/Kotlin - protoc output goes to build/ (already ignored via **/build/)
+# C# - protoc output goes to obj/ (already ignored via **/obj/)
+
+# Generated proto outputs (examples moved to separate repos)
+
+# IDE
+.vscode/
+.idea/
+*.ipr
+*.iws
+*.iml
+
+# Backup files
+*.bak
+*.orig
+*~
+
+
+.scm/sessions/
+
+# Mutation testing output
+mutants.out/
+mutants.out.*
+**/mutants/
+.mutants-cache/
+
+# Coverage files
+*.coverage
+.coverage
+coverage.out
+htmlcov/
+
+# Distribution artifacts
+dist/
+*.whl
+*.tar.gz
+*.egg-info/
+
+.claude/settings.local.json
+
+# SCM memory (local session data, not shared)
+.scm/memory/

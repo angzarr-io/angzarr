@@ -1,0 +1,29 @@
+[project]
+name = "angzarr"
+version = "0.1.0"
+description = "Event sourcing framework with aggregates, sagas, and process managers"
+requires-python = ">=3.11"
+dependencies = [
+    "structlog>=24.0",
+]
+
+[dependency-groups]
+dev = [
+    "black>=24.0.0",
+    "ruff>=0.4.0",
+]
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "C4", "SIM"]
+ignore = []
+
+[tool.ruff.lint.isort]
+known-first-party = ["angzarr", "angzarr_client"]

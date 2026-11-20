@@ -1,0 +1,5 @@
+# Opinionated C++ formatting - Google style base
+# https://clang.llvm.org/docs/ClangFormatStyleOptions.html
+BasedOnStyle: Google
+IndentWidth: 4
+ColumnLimit: 100

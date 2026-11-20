@@ -1,0 +1,90 @@
+[package]
+name = "angzarr-coordinator-grpc"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "The coordinators' gRPC server, shared by the embedded and distributed runtimes: the listener policy (UDS 0600 in a 0700 directory, TCP, an Arrival declared per listener, limits per listener), Code to tonic::Status with an ErrorInfo, the bearer read from metadata, health and shutdown"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace declares no [workspace.package], so nothing is inherited.
+
+# The one crate of core that links tonic and tokio: the transport-free
+# crates (base, reads, coordinator) never do (their tests/dependencies.rs
+# pin it). It serves the edge's `Coordinator` (commands, reads, gate) as the
+# command-handler coordinator and event-query services, behind the two
+# features. The coordinator crate's own features are enabled by these.
+[features]
+default = ["commands", "reads"]
+# The CommandHandlerCoordinatorService (`Handle`). A read-only container
+# builds without it.
+commands = ["angzarr-coordinator/commands"]
+# The EventQueryService (`GetEvents`).
+reads = ["angzarr-coordinator/reads", "dep:angzarr-reads"]
+# The EventStreamService (`Subscribe`, one stream: catch-up, then live on
+# the store's commit push with its change token polled as the fallback).
+# Off by default: a read half that follows needs a store with `Watch` and
+# `CommitNotify`. It links tokio's timer and `select!`.
+subscribe = ["reads", "tokio/time", "tokio/macros"]
+# TLS on a TCP listener (`Listener::tls`): the server does the handshake.
+# Off by default; with it off nothing of TLS is linked. It enables tonic's
+# `tls-ring` and never `tls-aws-lc`, so ring is the one crypto provider.
+tls = ["tonic/tls-ring"]
+
+[dependencies]
+# Code, Coded and Refusal: what a status is made from.
+angzarr-coordinator-base = { path = "../angzarr-coordinator-base" }
+# The edge: Coordinator, Session, Gate, Credential, Arrival, Reach, Commands.
+angzarr-coordinator = { path = "../angzarr-coordinator", default-features = false }
+# Every error is a Diagnostic; the catalog's parity test is this crate's.
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+# The ports' BoxFuture.
+angzarr-ports = { path = "../angzarr-ports" }
+# The wire messages the services speak.
+angzarr-proto = { path = "../angzarr-proto" }
+# The services as tonic stubs (server side).
+angzarr-proto-transport-distributed = { path = "../angzarr-proto-transport-distributed" }
+# The read engine, behind the `reads` feature.
+angzarr-reads = { path = "../angzarr-reads", optional = true }
+# google.rpc.Status and ErrorInfo, on the wire as googleapis defines them
+# (already in the lock, with `Any`).
+prost = "0.14"
+prost-types = "0.14"
+# A bounded stop's grace is a timer (time).
+tokio = { version = "1", features = ["net", "rt", "sync", "time"] }
+# The listeners as streams of connections, for tonic's server.
+tokio-stream = { version = "0.1", features = ["net"] }
+# The server, its router (the services are added to it) and its codegen
+# re-exports; no TLS, no client channel.
+tonic = { version = "0.14", default-features = false, features = ["codegen", "router", "server"] }
+# The grpc.health.v1 service.
+tonic-health = "0.14"
+# A response body leased for as long as it lives (tonic's own body trait,
+# already in the lock).
+http-body = "1"
+
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+
+[dev-dependencies]
+# The tests' counter domain's store.
+angzarr-ports = { path = "../angzarr-ports", features = ["memory"] }
+# Each test's scratch directory (a short path, for a socket).
+angzarr-test-dir = { path = "../angzarr-test-dir" }
+# A UDS client: tonic's channel over a connector, whose stream hyper reads
+# through its own IO traits (hyper-util's adapter).
+hyper-util = { version = "0.1", features = ["tokio"] }
+# The limits' tests bound every wait (time) and speak raw HTTP/2 (io-util).
+tokio = { version = "1", features = ["io-util", "macros", "rt-multi-thread", "time"] }
+tonic = { version = "0.14", default-features = false, features = ["channel", "codegen", "router", "server"] }
+# The probe service's codec.
+tonic-prost = "0.14"
+# Certificates the TLS tests mint (ring, never aws-lc: one provider).
+rcgen = { version = "0.13", default-features = false, features = ["crypto", "pem", "ring"] }
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true

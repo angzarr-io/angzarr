@@ -1,0 +1,41 @@
+{
+  "name": "Angzarr Development",
+  "build": {
+    "dockerfile": "Containerfile",
+    "context": ".."
+  },
+  "features": {
+    "ghcr.io/devcontainers/features/docker-in-docker:2": {},
+    "ghcr.io/devcontainers/features/kubectl-helm-minikube:1": {
+      "helm": "latest",
+      "kubectl": "latest",
+      "minikube": "none"
+    }
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "rust-lang.rust-analyzer",
+        "tamasfe.even-better-toml",
+        "serayuzgur.crates",
+        "vadimcn.vscode-lldb",
+        "zhangyue.rust-mod-generator"
+      ],
+      "settings": {
+        "rust-analyzer.cargo.features": "all",
+        "rust-analyzer.check.command": "clippy",
+        "editor.formatOnSave": true
+      }
+    }
+  },
+  "mounts": [
+    "source=${localWorkspaceFolder}/.devcontainer/cargo-cache,target=/usr/local/cargo/registry,type=bind,consistency=cached",
+    "source=${localWorkspaceFolder}/.devcontainer/sccache,target=/home/vscode/.cache/sccache,type=bind,consistency=cached"
+  ],
+  "postCreateCommand": ".devcontainer/post-create.sh",
+  "remoteUser": "vscode",
+  "containerEnv": {
+    "RUSTC_WRAPPER": "sccache",
+    "SCCACHE_DIR": "/home/vscode/.cache/sccache"
+  }
+}

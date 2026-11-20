@@ -1,0 +1,32 @@
+[package]
+name = "angzarr-yaml"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "A strict subset of YAML, read and written, with no type coercion: versioned documents migrated on read, edited in place keeping comments, and decoded strictly through serde"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr-core's workspace, with every package field set here:
+# the workspace declares no [workspace.package], so nothing is inherited.
+
+# No dependencies beyond angzarr-diagnostic and serde's traits (no derive),
+# and nothing from any program that uses it.
+[dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+# The strict decode (src/decode.rs) is a serde Deserializer over Value.
+serde = { version = "1.0.228", default-features = false, features = ["std"] }
+
+[dev-dependencies]
+# The decode's tests derive their types.
+serde = { version = "1.0.228", features = ["derive"] }
+
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+
+# The shared crates' lints: the workspace's (the root Cargo.toml).
+[lints]
+workspace = true
