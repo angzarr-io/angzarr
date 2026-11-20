@@ -848,7 +848,7 @@ async fn the_builds_migration_set_is_what_an_open_applies() {
     assert_eq!(build, store.migrations());
     assert_eq!(
         build.iter().map(|m| m.version).collect::<Vec<_>>(),
-        [1, 2, 3, 4, 5, 6]
+        [1, 2, 3, 4, 5, 6, 7]
     );
     let ledger = store.applied().await.unwrap();
     assert_eq!(
@@ -2218,17 +2218,18 @@ async fn a_fork_lands_at_or_below_mains_head_once() {
 }
 
 /// Every statement a handle sends is counted, `BEGIN` and `COMMIT`
-/// included: a write of one event to a stream is four (`BEGIN`, its head,
-/// the insert, `COMMIT`); a read of it from 0 is one. There is no
+/// included: a write of one event to a stream is six (`BEGIN`, its head,
+/// the insert, the change feed's row and its trim, `COMMIT`); a read of it
+/// from 0 is one. There is no
 /// store-wide position to raise (decision 14.35).
 #[tokio::test]
 async fn a_handle_counts_the_statements_it_sends() {
     let store = SqliteStore::open_in_memory().await.unwrap();
     assert_eq!(store.round_trips(), 0);
     append(&store, stream(1), 0, &[page(0, 1)]).await.unwrap();
-    assert_eq!(store.round_trips(), 4);
+    assert_eq!(store.round_trips(), 6);
     store.read(stream(1), 0, None).await.unwrap();
-    assert_eq!(store.round_trips(), 5);
+    assert_eq!(store.round_trips(), 7);
 }
 
 // ---------------------------------------------- the outbox, per stream
@@ -2962,4 +2963,65 @@ async fn a_ledger_is_read_at_a_path_migrating_nothing() {
         Vec::<PathBuf>::new(),
         "and backed up by nothing"
     );
+}
+
+mod changes {
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+
+    use angzarr_ports::contract::changes::ChangesFixture;
+
+    use super::*;
+
+    /// A database file of its own, its handles connections to it, reopened
+    /// from the file.
+    struct File {
+        path: crate::test_database::Database,
+        _held: Mutex<Vec<SqliteStore>>,
+    }
+
+    impl File {
+        fn new() -> File {
+            File {
+                path: database(),
+                _held: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn at(&self) -> PathBuf {
+            self.path.to_path_buf()
+        }
+    }
+
+    impl ChangesFixture for File {
+        type Store = SqliteStore;
+
+        async fn handle(&self) -> SqliteStore {
+            SqliteStore::open(&self.at())
+                .await
+                .expect("the database opens")
+        }
+
+        async fn expire(&self) -> bool {
+            // Seventy thousand touches in one statement: past what the
+            // feed keeps.
+            let store = self.handle().await;
+            let aged = "INSERT INTO changes (domain, edition, root, purged) \
+                 SELECT 'aging', '', x'01010101010101010101010101010101', 0 FROM \
+                 (WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 70000) \
+                  SELECT i FROM n)";
+            let mut ex = store.conn.exec().await;
+            ex.execute(aged, []).await.expect("the feed is aged");
+            ex.execute(crate::statements::TRIM, [])
+                .await
+                .expect("and trimmed");
+            true
+        }
+
+        async fn reopen(&self) -> Option<SqliteStore> {
+            Some(self.handle().await)
+        }
+    }
+
+    angzarr_ports::changes_contract!(#[tokio::test], File::new());
 }

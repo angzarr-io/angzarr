@@ -195,6 +195,28 @@ pub(crate) const DELETE_DEAD_LETTERS: &str =
     "DELETE FROM dead_letters WHERE domain = ?1 AND edition = ?2 AND root = ?3";
 
 /// Row `(data_version, total_changes())`: what a change token is made of.
+/// Row `(identity, head)`: the feed's identity and the sequence of its last
+/// change (0 if none).
+pub(crate) const FEED: &str =
+    "SELECT identity, COALESCE((SELECT MAX(seq) FROM changes), 0) FROM feed";
+
+/// Rows `(seq, domain, edition, root, purged)` of the changes after `?1`, at
+/// most `?2`, in the order they landed.
+pub(crate) const CHANGES_AFTER: &str = "SELECT seq, domain, edition, root, purged FROM changes \
+     WHERE seq > ?1 ORDER BY seq LIMIT ?2";
+
+/// A change: stream `?1` (domain), `?2` (edition column), `?3` (root) was
+/// written to (`?4` 0) or purged (1).
+pub(crate) const TOUCH: &str =
+    "INSERT INTO changes (domain, edition, root, purged) VALUES (?1, ?2, ?3, ?4)";
+
+/// How many changes the feed keeps.
+pub(crate) const CHANGES_KEPT: i64 = 65_536;
+
+/// Forget the changes before the last [`CHANGES_KEPT`].
+pub(crate) const TRIM: &str =
+    "DELETE FROM changes WHERE seq <= (SELECT MAX(seq) FROM changes) - 65536";
+
 pub(crate) const CHANGE_TOKEN: &str =
     "SELECT data_version, total_changes() FROM pragma_data_version";
 

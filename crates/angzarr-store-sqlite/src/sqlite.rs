@@ -21,11 +21,11 @@ use std::time::Duration;
 
 use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage, Snapshot};
 use angzarr_ports::{
-    is_fork, Append, AppliedMigration, ChangeToken, CommitNotify, CommitSignal, CommitWait,
-    DeadLetter, DeadLetterKey, DeadLetterStore, EventStore, Export, ExportRow, Head, ListStreams,
-    Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge, ReadByCorrelation,
-    ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Uuid, Watch,
-    WeakCommitSignal, Write, Written,
+    is_fork, Append, AppliedMigration, ChangeCursor, ChangeToken, Changed, Changes, CommitNotify,
+    CommitSignal, CommitWait, DeadLetter, DeadLetterKey, DeadLetterStore, EventStore, Export,
+    ExportRow, Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed,
+    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
+    StreamChange, StreamRef, Uuid, Watch, WeakCommitSignal, Write, Written,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -803,6 +803,24 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         Ok(expected + pages.len() as u64)
     }
 
+    /// The change feed learns `stream` was written to, or purged, in this
+    /// transaction; it keeps the last [`statements::CHANGES_KEPT`].
+    async fn touch(&mut self, stream: StreamRef<'_>, purged: bool) -> Result<(), StoreError> {
+        let [domain, root, edition] = view_of(stream);
+        let values = [domain, edition, root, Value::Int(i64::from(purged))];
+        self.execute(statements::TOUCH, values).await?;
+        self.execute(statements::TRIM, []).await.map(drop)
+    }
+
+    /// The feed's identity and the sequence of its last change.
+    async fn feed(&mut self) -> Result<(u64, u64), StoreError> {
+        let rows = self.rows(statements::FEED, []).await?;
+        let row = rows.first().ok_or_else(no_data_version)?;
+        let identity: i64 = row.try_get(0).map_err(unavailable)?;
+        let head: i64 = row.try_get(1).map_err(unavailable)?;
+        Ok((identity as u64, head as u64))
+    }
+
     async fn put_position(&mut self, key: PositionKey<'_>, next: u64) -> Result<(), StoreError> {
         let [domain, root, edition] = view_of(key.stream);
         let values = [
@@ -943,6 +961,9 @@ impl EventStore for SqliteStore {
             Some(append) => Some(ex.append(append).await?),
             None => None,
         };
+        if let Some(append) = write.events.filter(|append| !append.pages.is_empty()) {
+            ex.touch(append.stream, false).await?;
+        }
         for (key, next) in write.positions {
             ex.put_position(*key, *next).await?;
         }
@@ -1084,6 +1105,7 @@ impl Purge for SqliteStore {
         // The positions on it stay: they are its drivers' record of what
         // their handlers processed, which a purge never touches (14.68).
         ex.delete_letters(stream).await?;
+        ex.touch(stream, true).await?;
         ex.count();
         ex.conn.commit().await.map_err(unavailable)?;
         self.signal.notify();
@@ -1302,6 +1324,73 @@ impl CommitNotify for SqliteStore {
     /// ([`Watch`]) sees those.
     fn next_commit(&self) -> CommitWait {
         self.signal.wait()
+    }
+}
+
+impl Changes for SqliteStore {
+    /// The feed kept in the database, in the transactions of the commits it
+    /// tells of: it survives a reopen and is the same to every process.
+    async fn changes_cursor(&self) -> Result<ChangeCursor, StoreError> {
+        let (identity, head) = self.conn.exec().await.feed().await?;
+        Ok(ChangeCursor::at(identity, head))
+    }
+
+    async fn changed_since(
+        &self,
+        since: &ChangeCursor,
+        limit: usize,
+    ) -> Result<Changed, StoreError> {
+        let mut ex = self.conn.exec().await;
+        let (identity, head) = ex.feed().await?;
+        let floor = head.saturating_sub(statements::CHANGES_KEPT as u64);
+        let at = match since.parts() {
+            Some((same, position)) if same == identity && (floor..=head).contains(&position) => {
+                position
+            }
+            _ => {
+                return Ok(Changed::Overflow {
+                    next: ChangeCursor::at(identity, head),
+                })
+            }
+        };
+        let taken = ex
+            .rows(
+                statements::CHANGES_AFTER,
+                [
+                    Value::Int(at as i64),
+                    Value::Int(i64::try_from(limit.max(1)).unwrap_or(i64::MAX)),
+                ],
+            )
+            .await?;
+        let mut next = at;
+        let mut changes: Vec<StreamChange> = Vec::new();
+        for row in taken {
+            let seq: i64 = row.try_get(0).map_err(unavailable)?;
+            let domain: String = row.try_get(1).map_err(unavailable)?;
+            let edition: String = row.try_get(2).map_err(unavailable)?;
+            let root: Vec<u8> = row.try_get(3).map_err(unavailable)?;
+            let purged: i64 = row.try_get(4).map_err(unavailable)?;
+            next = seq as u64;
+            let stream = rows::cover::<SqliteDialect>(&domain, edition, &root)?;
+            match changes.iter_mut().find(|change| change.stream == stream) {
+                Some(seen) => seen.purged |= purged != 0,
+                None => changes.push(StreamChange {
+                    stream,
+                    head: 0,
+                    purged: purged != 0,
+                }),
+            }
+        }
+        for change in &mut changes {
+            change.head = ex
+                .head(StreamRef::try_from(&change.stream)?)
+                .await?
+                .next_sequence;
+        }
+        Ok(Changed::Streams {
+            changes,
+            next: ChangeCursor::at(identity, next),
+        })
     }
 }
 

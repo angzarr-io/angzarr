@@ -145,6 +145,7 @@ pub struct Host<'h, S> {
     wait: &'h dyn Wait,
     every: Duration,
     push: Option<&'h dyn CommitNotify>,
+    following: angzarr_bus::Following<'h>,
     retry: Option<RetryPolicy>,
 }
 
@@ -163,6 +164,7 @@ impl<'h, S> Host<'h, S> {
         clock: &'h Clock,
         wait: &'h dyn Wait,
         every: Duration,
+        following: angzarr_bus::Following<'h>,
     ) -> Host<'h, S> {
         Host {
             store,
@@ -171,6 +173,7 @@ impl<'h, S> Host<'h, S> {
             wait,
             every,
             push: None,
+            following,
             retry: None,
         }
     }
@@ -221,7 +224,7 @@ impl<'h, S: Store + Outbox + ReadStore + Processed + Watch> Bus<'h, S> {
     /// A bus with no subscription, served on `host` over the store's own
     /// transport: woken by `host`'s push, polled on its timer.
     pub fn new(host: Host<'h, S>) -> Bus<'h, S> {
-        let mut transport = StoreTransport::new(host.store, host.wait, host.every);
+        let mut transport = StoreTransport::new(host.store, host.wait, host.every, host.following);
         if let Some(push) = host.push {
             transport = transport.pushed_by(push);
         }

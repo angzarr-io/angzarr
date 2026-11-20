@@ -154,6 +154,7 @@ struct Embedded {
     kernel: Kernel<'static>,
     letters: &'static MemoryDeadLetters,
     commands: AtomicU64,
+    incremental: bool,
 }
 
 impl Embedded {
@@ -168,6 +169,15 @@ impl Embedded {
             kernel,
             letters,
             commands: AtomicU64::new(1),
+            incremental: false,
+        }
+    }
+
+    /// The same, its bus told which streams a commit touched.
+    fn incremental() -> Embedded {
+        Embedded {
+            incremental: true,
+            ..Embedded::new()
         }
     }
 
@@ -195,12 +205,17 @@ impl Harness for Embedded {
             Wake::Poll => &Soon,
             Wake::CommitOnly => &Never,
         };
+        let following = match self.incremental {
+            true => angzarr_bus::Following::Changes(self.memory()),
+            false => angzarr_bus::Following::FullScan,
+        };
         let host = Host::new(
             &self.store,
             &self.kernel,
             &clock,
             wait,
             Duration::from_secs(1),
+            following,
         );
         Bus::new(host.pushed_by(self.memory()).retrying(retry()))
     }
@@ -212,6 +227,7 @@ impl Harness for Embedded {
             &clock,
             &Never,
             Duration::from_secs(1),
+            angzarr_bus::Following::FullScan,
         );
         Bus::over(Pumped::new(transport), host.retrying(retry()))
     }
@@ -307,4 +323,13 @@ impl Harness for Embedded {
     }
 }
 
-angzarr_bus::bus_contract!(#[tokio::test], Embedded::new());
+mod durable_scan {
+    use super::Embedded;
+    angzarr_bus::bus_contract!(#[tokio::test], Embedded::new());
+}
+
+/// The suite again with the bus told which streams a commit touched.
+mod incremental_scan {
+    use super::Embedded;
+    angzarr_bus::bus_contract!(#[tokio::test], Embedded::incremental());
+}

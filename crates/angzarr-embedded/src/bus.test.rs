@@ -16,6 +16,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use angzarr_bus::Bus as _;
+use angzarr_bus::Following;
+
+/// The bus tests' stores are wrapped to count or to fail: followed by a full scan.
+const FULL: Following<'static> = Following::FullScan;
 use angzarr_ports::memory::MemoryRead;
 use angzarr_router::error::{CodedError, RetryableStatus};
 use angzarr_router::router::{DynProjectorHandler, ProjectorHandler};
@@ -204,7 +208,7 @@ fn bus_on<'h>(
     kernel: &'h Kernel<'h>,
     wait: &'h dyn Wait,
 ) -> Bus<'h, MemoryStore> {
-    Bus::new(Host::new(store, kernel, &clock, wait, EVERY).pushed_by(store))
+    Bus::new(Host::new(store, kernel, &clock, wait, EVERY, FULL).pushed_by(store))
 }
 
 /// `worker` on `bus`, over the account domain, as `instances` at once,
@@ -303,7 +307,7 @@ async fn no_event_is_read_twice_per_handling() {
     opened(&store.inner, &registry, 2, 7);
     let worker = Worker::new("worker");
     let kernel = kernel(&registry);
-    let mut bus = Bus::new(Host::new(&store, &kernel, &clock, &Soon, EVERY));
+    let mut bus = Bus::new(Host::new(&store, &kernel, &clock, &Soon, EVERY, FULL));
     work(&mut bus, &worker, 2).unwrap();
     drain(&mut bus).await;
     assert_eq!(worker.done().len(), 4);
@@ -327,7 +331,7 @@ async fn a_store_that_does_not_push_is_polled() {
     let store = Counted::default();
     let worker = Worker::new("worker");
     let kernel = kernel(&registry);
-    let mut bus = Bus::new(Host::new(&store, &kernel, &clock, &Soon, EVERY));
+    let mut bus = Bus::new(Host::new(&store, &kernel, &clock, &Soon, EVERY, FULL));
     work(&mut bus, &worker, 1).unwrap();
     let more = |_: &angzarr_bus::Served| worker.done().len() < 2;
     let serve = bus.serve(more);
@@ -608,7 +612,7 @@ async fn a_policy_on_the_bus_steps_as_an_inline_one_and_resume_leaves_it_alone()
         .unwrap();
     opened(&store, &crate::toys::registry(), 1, 5);
     let kernel = Kernel::new(&registry);
-    let mut bus = Bus::new(Host::new(&store, &kernel, &clock, &Never, EVERY));
+    let mut bus = Bus::new(Host::new(&store, &kernel, &clock, &Never, EVERY, FULL));
     bus.subscribe(bookkeeping()).unwrap();
     let asked = drain(&mut bus).await;
     assert_eq!(handled(&asked), 2);
@@ -712,7 +716,7 @@ async fn a_pending_outbox_entry_is_relayed_when_the_policy_is_next_served() {
     // The first event's outbox write lands, its relay's step does not.
     store.fail([Fault::Sound, Fault::Unavailable]);
     let mut bus =
-        Bus::new(Host::new(&store, &kernel, &clock, &Never, EVERY).pushed_by(store.inner()));
+        Bus::new(Host::new(&store, &kernel, &clock, &Never, EVERY, FULL).pushed_by(store.inner()));
     bus.subscribe(bookkeeping()).unwrap();
     let asked = drain(&mut bus).await;
     assert_eq!(failures(&asked).len(), 1, "the relay's failure reported");
@@ -725,7 +729,7 @@ async fn a_pending_outbox_entry_is_relayed_when_the_policy_is_next_served() {
     assert_eq!(pending.len(), 1, "the first trigger's output pending");
 
     let mut again =
-        Bus::new(Host::new(&store, &kernel, &clock, &Never, EVERY).pushed_by(store.inner()));
+        Bus::new(Host::new(&store, &kernel, &clock, &Never, EVERY, FULL).pushed_by(store.inner()));
     again.subscribe(bookkeeping()).unwrap();
     let asked = drain(&mut again).await;
     assert_eq!(handled(&asked), 0, "the policy is not run again");
@@ -1001,7 +1005,7 @@ fn scripted<'h>(
         cap: Some(cap),
         ..angzarr_bus::RetryPolicy::default()
     };
-    let host = Host::new(store, kernel, &clock, &Never, EVERY).retrying(policy);
+    let host = Host::new(store, kernel, &clock, &Never, EVERY, FULL).retrying(policy);
     Bus::over(angzarr_bus::Pumped::new(script), host)
 }
 
@@ -1126,7 +1130,7 @@ mod refused {
             max: hour,
             ..angzarr_bus::RetryPolicy::default()
         };
-        let host = Host::new(store, kernel, &clock, &Never, EVERY).pushed_by(store.inner());
+        let host = Host::new(store, kernel, &clock, &Never, EVERY, FULL).pushed_by(store.inner());
         let mut bus = Bus::new(if held { host.retrying(policy) } else { host });
         let answering = BusPolicy::new(Answering);
         bus.subscribe(angzarr_bus::Subscription::policy(n(1), answering))
@@ -1214,7 +1218,7 @@ async fn a_pending_refused_command_is_translated_from_its_trigger() {
     let kernel = kernel(&registry);
     drain(&mut refused::served(&store, &kernel, true)).await;
     assert_eq!(refused::pending(store.inner()).len(), 1);
-    let host = Host::new(&store, &kernel, &clock, &Never, EVERY).pushed_by(store.inner());
+    let host = Host::new(&store, &kernel, &clock, &Never, EVERY, FULL).pushed_by(store.inner());
     let mut bus = Bus::new(host);
     let echoing = BusPolicy::new(Echoing);
     bus.subscribe(angzarr_bus::Subscription::policy(n(1), echoing))

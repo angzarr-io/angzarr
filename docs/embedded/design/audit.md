@@ -867,8 +867,10 @@ caught up or on the bus, a book with no page at 0 says the stream is gone.
 The bus is angzarr core's generic bus (`angzarr_bus::Hub`, the
 `angzarr_bus::Bus` interface; angzarr-project's
 `docs/design/bus-interface.md`) hosted on the kernel
-(`Bus::new(Host::new(store, kernel, clock, wait, every))`,
-`Host::pushed_by` for the store's push, `Host::retrying` for its retry
+(`Bus::new(Host::new(store, kernel, clock, wait, every, following))`,
+`following` is `Following::Changes(store)` for a store with a change feed
+(a commit costs the streams it touched) or, explicitly and slower,
+`Following::FullScan`; `Host::pushed_by` for the store's push, `Host::retrying` for its retry
 policy), over the store's own transport (`StoreFed`: angzarr core's
 `StoreTransport`, a pull feed woken by the commit, served through
 `Pumped`) or any other push transport (`Bus::over`): one API with the
