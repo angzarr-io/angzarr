@@ -645,6 +645,8 @@ _mutants-judge gate patch: (_mutants-no-features gate)
         done
         [ "${#packages[@]}" -gt 0 ] || continue
         family_rc=0
+        # cargo-mutants puts its mutants.out in --output, which must exist.
+        mkdir -p "$out/families/$name"
         # In the background, so an interrupt is handled at once rather than once
         # the run ends: the trap's exit reaps the session, cargo mutants too.
         setsid --wait bash -c 'echo $$ > "$1"; shift; exec "$@"' mutants-session "$session" \
