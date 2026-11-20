@@ -118,14 +118,21 @@ pub fn metadata(manifest: &Path) -> Result<Metadata, String> {
     serde_json::from_slice(&output.stdout).map_err(|e| format!("cargo metadata: {e}"))
 }
 
-/// Builds the model of every workspace package: each target's module tree
-/// and the edges its manifest dependencies declare.
-pub fn build_model(meta: &Metadata) -> Result<(Model, Vec<String>), String> {
+/// Builds the model of the workspace packages named in `scope` (all of them
+/// when it is empty): each target's module tree and the edges its manifest
+/// dependencies declare. A workspace package outside `scope` is external, like
+/// a crate from a registry: the rules constrain it by `deny` alone.
+pub fn build_model(meta: &Metadata, scope: &[String]) -> Result<(Model, Vec<String>), String> {
     let mut scanner = Scanner::new(meta.workspace_root.clone());
-    for package in &meta.packages {
+    let analysed: Vec<&Package> = meta
+        .packages
+        .iter()
+        .filter(|p| scope.is_empty() || scope.contains(&p.name))
+        .collect();
+    for package in &analysed {
         scanner.add_workspace_crate(&package.lib_name());
     }
-    for package in &meta.packages {
+    for package in analysed {
         let lib = package.lib_name();
         let mut known: BTreeSet<String> = package
             .dependencies

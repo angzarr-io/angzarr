@@ -343,9 +343,30 @@ _tests +packages:
         just --justfile "$root/justfile" {{features_prepare}}
     fi
     cargo test --manifest-path "$root/Cargo.toml" --no-run "${cargo_terse[@]}" "${selection[@]}" "${features[@]}"
+    # A test target with `harness = false` (a cucumber runner) cannot be listed by
+    # nextest (it has no `--list`): nextest skips it by binary id and `cargo test`
+    # runs it after the rest (gates/harnessless.py names them).
+    skip=() harnessless=()
+    while IFS=$'\t' read -r pkg target; do
+        if [ "$1" != --workspace ]; then
+            case " $* " in *" $pkg "*) ;; *) continue ;; esac
+        fi
+        skip+=("binary_id(=$pkg::$target)")
+        harnessless+=("$pkg"$'\t'"$target")
+    done < <(python3 -I "$root/gates/harnessless.py" "$root/Cargo.toml")
+    filter=()
+    if [ "${#skip[@]}" -gt 0 ]; then
+        joined=$(printf ' | %s' "${skip[@]}")
+        filter=(-E "not (${joined# | })")
+    fi
     rc=0
     cargo nextest run --manifest-path "$root/Cargo.toml" --no-fail-fast --no-tests=pass "${terse[@]}" \
-        "${selection[@]}" "${features[@]}" || rc=$?
+        "${selection[@]}" "${features[@]}" "${filter[@]}" || rc=$?
+    # They were built above, so a failure here is a red test, not a build failure: 100.
+    for pair in "${harnessless[@]}"; do
+        IFS=$'\t' read -r pkg target <<< "$pair"
+        cargo test --manifest-path "$root/Cargo.toml" "${cargo_terse[@]}" --package "$pkg" --test "$target" "${features[@]}" || rc=100
+    done
     # After a failed test, the doc tests would only bury it. Everything they
     # need was built above, so their failing is a red doc test (one that does
     # not compile included), not a build failure: 102, not cargo's 101.
@@ -594,14 +615,55 @@ _mutants-judge gate patch: (_mutants-no-features gate)
         cp "$2" "$work/staged.patch"
         diff=(--in-diff "$work/staged.patch")
     fi
+    # One cargo-mutants run per family (`mutation_families`: "<family>=<crate>,..."),
+    # each with its family's config (.cargo/mutants.<family>.toml; the crates of
+    # no family are the default's, .cargo/mutants.toml; MUTANTS_ONLY, space-separated
+    # crate names, restricts the run to them). Their outcomes are
+    # merged into <out>/mutants.out for the one verdict.
+    declare -A claimed=()
+    families=()
+    for entry in {{mutation_families}}; do
+        crates=${entry#*=}
+        for crate in ${crates//,/ }; do claimed[$crate]=1; done
+        families+=("${entry%%=*}|$root/.cargo/mutants.${entry%%=*}.toml|${crates//,/ }")
+    done
+    rest=
+    while IFS= read -r crate; do
+        [ -n "${claimed[$crate]:-}" ] || rest+="$crate "
+    done < <(cargo metadata --format-version 1 --no-deps --offline --manifest-path "$root/Cargo.toml" | jq -r '.packages[].name')
+    families+=("default|$root/.cargo/mutants.toml|${rest% }")
     rc=0
-    # In the background, so an interrupt is handled at once rather than once
-    # the run ends: the trap's exit reaps the session, cargo mutants too.
-    setsid --wait bash -c 'echo $$ > "$1"; shift; exec "$@"' mutants-session "$session" \
-        cargo mutants --dir "$root" --in-place --workspace "${diff[@]}" \
-        --output "$out" --colors never 9>&- &
-    wait "$!" || rc=$?
-    reap
+    for family in "${families[@]}"; do
+        IFS='|' read -r name config crates <<< "$family"
+        [ -n "$crates" ] || continue
+        packages=()
+        for crate in $crates; do
+            [ -z "${MUTANTS_ONLY:-}" ] || [[ " $MUTANTS_ONLY " == *" $crate "* ]] || continue
+            packages+=(--package "$crate")
+        done
+        [ "${#packages[@]}" -gt 0 ] || continue
+        family_rc=0
+        # In the background, so an interrupt is handled at once rather than once
+        # the run ends: the trap's exit reaps the session, cargo mutants too.
+        setsid --wait bash -c 'echo $$ > "$1"; shift; exec "$@"' mutants-session "$session" \
+            cargo mutants --dir "$root" --in-place --config "$config" "${packages[@]}" "${diff[@]}" \
+            --output "$out/families/$name" --colors never 9>&- &
+        wait "$!" || family_rc=$?
+        reap
+        case "$family_rc" in
+            0|2|3) ;;
+            4) rc=4; mkdir -p "$out/mutants.out/log"; cp "$out/families/$name/mutants.out/log/baseline.log" "$out/mutants.out/log/baseline.log" 2>/dev/null || true ;;
+            *) [ "$rc" = 4 ] || rc=1 ;;
+        esac
+    done
+    mkdir -p "$out/mutants.out"
+    outcomes=("$out"/families/*/mutants.out/outcomes.json)
+    if [ -e "${outcomes[0]}" ]; then
+        jq -s '{total_mutants: (map(.total_mutants // 0) | add), outcomes: (map(.outcomes // []) | add)}' "${outcomes[@]}" > "$out/mutants.out/outcomes.json"
+    fi
+    for list in missed.txt timeout.txt caught.txt unviable.txt; do
+        cat "$out"/families/*/mutants.out/"$list" > "$out/mutants.out/$list" 2>/dev/null || true
+    done
     just --justfile "$root/justfile" _mutants-verdict "$gate" "$out" "$rc"
 
 # The mutation verdict of `gate`, from cargo-mutants' own outcomes.json in

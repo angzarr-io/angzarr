@@ -142,7 +142,7 @@ fn build_model_scans_targets_and_manifest_edges() {
             },
         ],
     };
-    let (m, warnings) = build_model(&meta).unwrap();
+    let (m, warnings) = build_model(&meta, &[]).unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
     assert!(warnings.is_empty(), "{warnings:?}");
     let e: Vec<(String, String, Scope)> = m
@@ -201,4 +201,55 @@ fn metadata_reads_the_workspace() {
         .find(|p| p.name == "archlint")
         .expect("archlint package");
     assert!(me.targets.iter().any(|t| t.kind == ["bin"]));
+}
+
+#[test]
+fn a_package_outside_the_scope_is_external() {
+    let dir = std::env::temp_dir().join(format!("archlint-scope-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("mine/src")).unwrap();
+    std::fs::create_dir_all(dir.join("other/src")).unwrap();
+    std::fs::write(dir.join("mine/src/lib.rs"), "use other::Thing;").unwrap();
+    std::fs::write(dir.join("other/src/lib.rs"), "pub struct Thing;").unwrap();
+    let package = |name: &str, deps: Vec<Dependency>| Package {
+        name: name.into(),
+        manifest_path: dir.join(name).join("Cargo.toml"),
+        targets: vec![target(
+            name,
+            "lib",
+            dir.join(name).join("src/lib.rs").to_str().unwrap(),
+        )],
+        dependencies: deps,
+    };
+    let meta = Metadata {
+        workspace_root: dir.clone(),
+        packages: vec![
+            package(
+                "mine",
+                vec![dep(
+                    "other",
+                    None,
+                    None,
+                    Some(dir.join("other").to_str().unwrap()),
+                )],
+            ),
+            package("other", vec![]),
+        ],
+    };
+    let (m, _) = build_model(&meta, &["mine".to_string()]).unwrap();
+    std::fs::remove_dir_all(&dir).unwrap();
+    assert_eq!(
+        m.workspace_crates.iter().collect::<Vec<_>>(),
+        ["mine"],
+        "only the scoped package is a workspace crate"
+    );
+    assert!(
+        !m.edges.iter().any(|e| e.to.starts_with("path:")),
+        "a path dependency on a workspace package is not a vendored path: {:?}",
+        m.edges
+    );
+    assert!(
+        !m.modules.keys().any(|k| k.starts_with("other")),
+        "the out-of-scope package is not scanned"
+    );
 }

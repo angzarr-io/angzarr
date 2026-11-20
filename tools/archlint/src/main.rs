@@ -5,9 +5,11 @@
 //! it against the rules in `archlint.toml` (see [`rules`] for the format).
 //!
 //! ```text
-//! archlint [--rules archlint.toml] [--manifest-path Cargo.toml] [--edges]
+//! archlint [--rules archlint.toml] [--manifest-path Cargo.toml] [--package NAME]... [--edges]
 //! ```
 //!
+//! `--package` (repeatable) limits the model to the named workspace packages; the
+//! others are external, as in a workspace that holds more than one product.
 //! `--edges` prints the model (one `scope from -> to` line per edge) instead
 //! of checking it: the starting point when writing rules for a new repo.
 //! Exit status: 0 clean, 1 violations, 2 a configuration or scan error.
@@ -25,6 +27,7 @@ use model::{Model, Scope};
 struct Args {
     rules: PathBuf,
     manifest: PathBuf,
+    packages: Vec<String>,
     edges: bool,
 }
 
@@ -32,6 +35,7 @@ fn parse_args() -> Result<Args, String> {
     let mut args = Args {
         rules: PathBuf::from("archlint.toml"),
         manifest: PathBuf::from("Cargo.toml"),
+        packages: Vec::new(),
         edges: false,
     };
     let mut it = std::env::args().skip(1);
@@ -41,6 +45,9 @@ fn parse_args() -> Result<Args, String> {
             "--manifest-path" => {
                 args.manifest = it.next().ok_or("--manifest-path needs a path")?.into()
             }
+            "--package" => args
+                .packages
+                .push(it.next().ok_or("--package needs a name")?),
             "--edges" => args.edges = true,
             other => return Err(format!("unknown argument `{other}`")),
         }
@@ -62,7 +69,7 @@ fn main() -> ExitCode {
 fn run() -> Result<bool, String> {
     let args = parse_args()?;
     let meta = workspace::metadata(&args.manifest)?;
-    let (model, warnings) = workspace::build_model(&meta)?;
+    let (model, warnings) = workspace::build_model(&meta, &args.packages)?;
     for w in &warnings {
         eprintln!("archlint: warning: {w}");
     }

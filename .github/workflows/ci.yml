@@ -1,16 +1,13 @@
-# The gates, on every push and pull request: on Linux every gate the
-# justfile has (gates/gates.just's fmt-check, lint-deps and test, and the
-# justfile's own build, lint, lint-os and check-windows); on Windows and
-# macOS, natively, build and test (each host's implementors run, not only
-# compile).
+# The gates, on every push and pull request. Linux runs every gate the justfile
+# has over the whole workspace. Windows and macOS run only the crates that name
+# an operating system (the justfile's `portable_crates`: os, file-system,
+# file-lock, store-jsonl), built and tested natively; the rest of the workspace
+# (tonic, sqlx, the embedded host) is not asked to build there.
 #
-# A plain checkout: every dependency outside this repository is a git
-# dependency pinned by commit (Cargo.toml). The gates are in the repository
-# (gates/).
-#
-# angzarr core's angzarr-proto runs protoc in its build script: protoc
-# 3.21.12, by ctxloom/ci's setup-protoc (the release zip checked against
-# its pinned sha256), on every runner.
+# All logic is in just recipes; the jobs install tools and call them. The
+# angzarr-project submodule is checked out: angzarr-proto's build script reads
+# its protos with protoc (3.21.12, ctxloom/ci's setup-protoc, the release zip
+# checked against its pinned sha256), on every runner.
 #
 # Every action is pinned to a commit, its release in the comment; every tool
 # to a version.
@@ -19,15 +16,21 @@ name: ci
 
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: never
   TOOLS: just@1.40.0,cargo-nextest@0.9.146,cargo-deny@0.20.2
+  MOLD_VERSION: '2.42.1'
 
 jobs:
   linux:
@@ -38,34 +41,52 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
       - name: Toolchain (rust-toolchain.toml) and the Windows target
         run: |
           rustup show active-toolchain || rustup toolchain install
           rustup target add x86_64-pc-windows-gnu
+      - name: Install mold (.cargo/config.toml links the Linux builds with -fuse-ld=mold)
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        with:
+          mold-version: ${{ env.MOLD_VERSION }}
+          make-default: false
       - uses: ctxloom/ci/.github/actions/setup-protoc@fa01764571615bd3174313e84631bdd5c13a02e6 # main 2026-11-12, protoc 3.21.12 by checksum
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
           tool: ${{ env.TOOLS }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: just check-submodules-clean
       - run: just build
       - run: just fmt-check
       - run: just lint
-      - run: just lint-os
+      - run: just archlint
       - run: just lint-deps
       - run: just test
-      - run: just check-windows
+      - run: just selftest
       - name: The gates' logs
         if: failure()
         run: shopt -s nullglob; for log in target/logs/*.log; do echo "::group::$log"; cat "$log"; echo "::endgroup::"; done
 
-  windows:
-    name: build and test (windows)
-    runs-on: windows-latest
+  # The crates that name an operating system, natively: each host's
+  # implementors run, not only compile.
+  portable:
+    name: build and test (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: windows, os: windows-latest }
+          - { name: macos, os: macos-15 }
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
       - name: Toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - uses: ctxloom/ci/.github/actions/setup-protoc@fa01764571615bd3174313e84631bdd5c13a02e6 # main 2026-11-12, protoc 3.21.12 by checksum
@@ -73,29 +94,36 @@ jobs:
         with:
           tool: ${{ env.TOOLS }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: just build
-      - run: just test
+      - run: just build-portable
+      - run: just test-portable
       - name: The gates' logs
         if: failure()
         run: shopt -s nullglob; for log in target/logs/*.log; do echo "::group::$log"; cat "$log"; echo "::endgroup::"; done
 
-  macos:
-    name: build and test (macos)
-    runs-on: macos-15
+  # The kernel and the router build for the browser.
+  wasm:
+    name: wasm32
+    runs-on: ubuntu-24.04
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Toolchain (rust-toolchain.toml)
-        run: rustup show active-toolchain || rustup toolchain install
+        with:
+          submodules: true
+      - name: Toolchain (rust-toolchain.toml) and the wasm target
+        run: |
+          rustup show active-toolchain || rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+      - name: Install mold
+        uses: rui314/setup-mold@339e96b4ff1f3bd865856ba4cbbe8818a7acb038 # v1
+        with:
+          mold-version: ${{ env.MOLD_VERSION }}
+          make-default: false
       - uses: ctxloom/ci/.github/actions/setup-protoc@fa01764571615bd3174313e84631bdd5c13a02e6 # main 2026-11-12, protoc 3.21.12 by checksum
       - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
         with:
-          tool: ${{ env.TOOLS }}
+          tool: just@1.40.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: just build
-      - run: just test
-      - name: The gates' logs
-        if: failure()
-        run: shopt -s nullglob; for log in target/logs/*.log; do echo "::group::$log"; cat "$log"; echo "::endgroup::"; done
+      - run: just wasm
+      - run: just wasm-router
