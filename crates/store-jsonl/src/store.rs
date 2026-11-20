@@ -7,10 +7,10 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use angzarr_ports::angzarr_proto::v1::{Cover, EditionSummary, EventBook, EventPage, Snapshot};
 use angzarr_ports::memory::{MemoryRead, MemoryStore};
 use angzarr_ports::{
-    ChangeToken, CommitNotify, CommitSignal, CommitWait, DeadLetter, DeadLetterKey,
-    DeadLetterStore, Editions, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
-    PositionStore, Processed, Purge, ReadByCorrelation, ReadStore, ReadUntilTime, Slice,
-    SnapshotStore, StoreError, StreamRef, Uuid, Watch, Write, Written,
+    ChangeCursor, ChangeToken, Changed, Changes, CommitNotify, CommitSignal, CommitWait,
+    DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore, Head, ListStreams, Outbox,
+    OutboxEntry, PositionKey, PositionStore, Processed, Purge, ReadByCorrelation, ReadStore,
+    ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Uuid, Watch, Write, Written,
 };
 use file_system::Fs;
 use prost_types::Timestamp;
@@ -296,6 +296,24 @@ impl ReadStore for JsonlStore {
 
     async fn begin_read(&self) -> Result<MemoryRead, StoreError> {
         self.observe(async |inner| inner.begin_read().await)
+    }
+}
+
+impl Changes for JsonlStore {
+    /// The feed of the in-memory store the journal is replayed into, read
+    /// under the gate like every read, so it tells only what is in the
+    /// journal. It is a process's: a cursor from before a reopen is another
+    /// feed's, and an overflow, so a follower reads everything once.
+    async fn changes_cursor(&self) -> Result<ChangeCursor, StoreError> {
+        self.observe(async |inner| inner.changes_cursor().await)
+    }
+
+    async fn changed_since(
+        &self,
+        since: &ChangeCursor,
+        limit: usize,
+    ) -> Result<Changed, StoreError> {
+        self.observe(async |inner| inner.changed_since(since, limit).await)
     }
 }
 
