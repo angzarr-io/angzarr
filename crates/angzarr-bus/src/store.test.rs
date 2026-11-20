@@ -944,3 +944,42 @@ async fn a_call_dropped_while_the_change_feed_is_answering_loses_no_commit() {
         "the commit read by a dropped call"
     );
 }
+
+#[tokio::test]
+async fn a_feed_does_not_answer_idle_while_a_commit_landed_during_its_read_is_unread() {
+    use std::sync::atomic::AtomicBool;
+    let store = MemoryStore::default();
+    let pausing = Pausing {
+        store: &store,
+        paused: AtomicBool::new(false),
+        resume: AtomicBool::new(false),
+    };
+    let transport = StoreTransport::new(
+        &store,
+        &Frozen,
+        Duration::from_secs(3600),
+        Following::Changes(&pausing),
+    )
+    .pushed_by(&store);
+    let feed = open(&transport, &scope(), 1).await;
+    assert!(matches!(answer(&feed).await, Next::Idle));
+    let elsewhere = Cover {
+        domain: "elsewhere".to_string(),
+        ..stream(9)
+    };
+    let committing = async {
+        // A commit the feed's scope does not hold wakes it; while it reads
+        // that, a commit it does hold lands.
+        append(&store, &elsewhere, 1).await;
+        while !pausing.paused.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        append(&store, &stream(1), 1).await;
+        pausing.resume.store(true, Ordering::SeqCst);
+    };
+    let (_, next) = tokio::join!(committing, answer(&feed));
+    assert!(
+        matches!(next, Next::Delivery(..)),
+        "delivered, not idle with a commit unread"
+    );
+}
