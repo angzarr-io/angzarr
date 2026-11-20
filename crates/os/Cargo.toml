@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Everything that differs between operating systems, in one place: path, environment and search-path logic for every flavor (testable on any host), and the host's syscalls behind one trait made once at startup"
 edition = "2021"
 rust-version = "1.96"
-license.workspace = true
+license = "Apache-2.0 OR BSD-3-Clause"
 publish.workspace = true
 
 [dependencies]

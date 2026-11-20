@@ -2,7 +2,7 @@
 name = "angzarr-store-transfer"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0 OR BSD-3-Clause"
+license = "AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"
 description = "A store carried across a proto generation: every row a store keeps (angzarr-ports' Export), written as JSONL in proto3's JSON mapping, its business payloads expanded through the app's descriptors, and refused where a row would be lost"
 repository = "https://github.com/angzarr-io/angzarr"
 publish = false

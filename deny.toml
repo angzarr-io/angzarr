@@ -28,9 +28,11 @@ ignore = [
 
 [licenses]
 version = 2
-# angzarr-embedded is Apache-2.0 OR BSD-3-Clause and used as a library by applications under other
-# licences, so a dependency's licence must be permissive: it must not impose
-# its terms on angzarr-embedded or on what links it. Copyleft is not on this list.
+# Third-party dependencies must be permissive: angzarr's runtime exception and its
+# permissive crates are linked by applications under other licences, and a
+# copyleft dependency would impose its terms on them. Copyleft is not on this
+# list. angzarr's own AGPL crates are allowed one by one, by the exceptions at
+# the end of this file, which scripts/licences.sh writes from licences.tsv.
 allow = [
   "Apache-2.0",
   "Apache-2.0 WITH LLVM-exception",
@@ -43,11 +45,7 @@ allow = [
   "Zlib",
 ]
 confidence-threshold = 0.9
-# angzarr-proto (angzarr's wire types, which angzarr-embedded's kernel
-# operates on directly) and angzarr-ports (the shared store contract the
-# kernel and angzarr-store-sqlite implement and use) are angzarr core's, and
-# Apache-2.0 OR BSD-3-Clause like the rest: on the list above, with no
-# exception. Any copyleft crate fails here.
+# Any third-party copyleft crate fails here.
 
 [licenses.private]
 # Not ignored: angzarr-embedded's own crates are `publish = false`, and so are
@@ -68,3 +66,66 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
+
+# BEGIN licences.sh (generated from licences.tsv)
+[[licenses.exceptions]]
+crate = "angzarr-coordinator"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission"]
+
+[[licenses.exceptions]]
+crate = "angzarr-coordinator-base"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission"]
+
+[[licenses.exceptions]]
+crate = "angzarr-coordinator-grpc"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission"]
+
+[[licenses.exceptions]]
+crate = "angzarr-reads"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission"]
+
+[[licenses.exceptions]]
+crate = "angzarr-embedded"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
+
+[[licenses.exceptions]]
+crate = "angzarr-embedded-host"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
+
+[[licenses.exceptions]]
+crate = "angzarr-embedded-runner"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
+
+[[licenses.exceptions]]
+crate = "angzarr-embedded-catalog-check"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
+
+[[licenses.exceptions]]
+crate = "angzarr-embedded-conformance"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
+
+[[licenses.exceptions]]
+crate = "angzarr-ports"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
+
+[[licenses.exceptions]]
+crate = "angzarr-bus"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
+
+[[licenses.exceptions]]
+crate = "angzarr-diagnostic"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
+
+[[licenses.exceptions]]
+crate = "angzarr-presentation"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
+
+[[licenses.exceptions]]
+crate = "angzarr-yaml"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
+
+[[licenses.exceptions]]
+crate = "angzarr-store-transfer"
+allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
+
+# END licences.sh

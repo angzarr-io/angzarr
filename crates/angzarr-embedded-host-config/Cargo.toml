@@ -3,7 +3,7 @@ name = "angzarr-embedded-host-config"
 version = "0.1.0"
 description = "The schema of an angzarr-embedded application's host config, angzarr.yaml: its types, its versioned loader and the fixtures that hold old files to it, with no runtime. Shared by angzarr-embedded-host, which runs the config, and angzarr-cli, which writes and lints it. Part of angzarr-embedded, angzarr's in-app runtime; for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
 edition = "2021"
-license.workspace = true
+license = "Apache-2.0 OR BSD-3-Clause"
 publish.workspace = true
 rust-version = "1.77"
 

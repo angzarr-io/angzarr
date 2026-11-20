@@ -2,7 +2,7 @@
 name = "archlint"
 version = "0.1.0"
 edition = "2021"
-license.workspace = true
+license = "Apache-2.0 OR BSD-3-Clause"
 publish = false
 description = "Module-level architecture rules for a Cargo workspace, declared in archlint.toml"
 

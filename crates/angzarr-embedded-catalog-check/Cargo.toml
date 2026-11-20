@@ -3,7 +3,7 @@ name = "angzarr-embedded-catalog-check"
 version = "0.1.0"
 description = "Test-only: every error code in angzarr-embedded has a message, using exactly its args, in every shipped Fluent catalog. Part of angzarr-embedded, angzarr's in-app runtime (embedded in your application, not a microcontroller); for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
 edition = "2021"
-license.workspace = true
+license = "AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"
 publish.workspace = true
 # It reads angzarr-embedded's samples, so it needs what angzarr-embedded needs.
 rust-version = "1.89"

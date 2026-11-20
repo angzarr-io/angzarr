@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "ctxloom's advisory file locks, as Go ctxloom takes them: flock on a lock file, re-checked against the file at its path, waited for a bounded time"
 edition = "2021"
 rust-version = "1.96"
-license.workspace = true
+license = "Apache-2.0 OR BSD-3-Clause"
 publish.workspace = true
 
 [dependencies]

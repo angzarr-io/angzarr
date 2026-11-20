@@ -2,7 +2,7 @@
 name = "angzarr-bus"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0 OR BSD-3-Clause"
+license = "AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"
 description = "angzarr's bus interface: subscriptions of projectors and policies served from a stream store, one trait for the in-process and the distributed bus, and the conformance suite every implementation runs"
 repository = "https://github.com/angzarr-io/angzarr"
 publish = false

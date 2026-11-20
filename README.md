@@ -10,28 +10,100 @@ Angzarr handles the infrastructure complexity of event-sourced systems—event p
 
 ## This Repository
 
-angzarr core holds the shared Rust crates the rest of angzarr builds on, a
-virtual Cargo workspace under `crates/`:
+One Cargo workspace holds angzarr's Rust. Five repositories became one, so a
+change that crosses them (a core port, the router that dispatches through it,
+the embedded kernel that hosts it) is one commit and no crate pins another.
 
-| Crate | What it is |
-|-------|------------|
-| `angzarr-proto` | prost types for core's wire contract (`io.angzarr.v1`) |
-| `angzarr-proto-handler` | the handler layer (`io.angzarr.handler.v1`): what each kind of business logic takes and returns |
-| `angzarr-proto-component` | the component contract: the handler-side services' tonic stubs |
-| `angzarr-proto-transport-embedded` | the local-process transport: the child launch protocol and its reason keys |
-| `angzarr-proto-transport-distributed` | the distributed transport's services, envelopes and reason keys |
-| `angzarr-ports` | the shared storage contract and the conformance suite every backend runs |
-| `angzarr-bus` | the bus interface: subscriptions of projectors and policies over a stream store, push `Transport`/`Sink`/`Settle`, pull `Pumped`, durable or in-memory `Positions`, and the conformance kit (normative: angzarr-project's `docs/design/bus-interface.md`) |
-| `angzarr-coordinator-base` | the coordinators' shared vocabulary, transport-free: `Code`/`Coded`/`Refusal`, the upcast port and its drivers, `Wait`, `Answered` |
-| `angzarr-reads` | the coordinators' read engine, transport-free, linking no command-side code: GetEvents, GetEventBook, correlated reads, ListStreams over the store's read ports |
-| `angzarr-coordinator` | the coordinators' edge, transport-free: `Arrival`/`Reach`/`Hidden`/`Unserved` routing, the `Commands` trait (feature `commands`), and the gate (`Gate`, `Allowlist`, `Credential`, `Coordinator`/`Session`: identify, operation allowed, reach, owns, stamp, handle; refusals answered as a missing domain) |
-| `angzarr-coordinator-grpc` | the coordinators' tonic server, the one crate of core that links tonic and tokio: the listener policy (Unix socket 0600 in a 0700 directory, TCP, an `Arrival` declared per listener), the bearer read from metadata, `Code` as a status with an `ErrorInfo`, health and shutdown |
-| `angzarr-diagnostic` | localizable errors: a stable code and named data, rendered from a Fluent catalog |
-| `angzarr-yaml` | a strict subset of YAML, versioned documents migrated on read, decoded strictly |
-| `angzarr-proto-jsonl` | protobuf messages as JSON Lines: canonical proto3 JSON, one message per line, against descriptors the caller supplies |
-| `angzarr-presentation` | JSON or text at a driving edge, diagnostics rendered from Fluent catalogs |
-| `angzarr-test-dir` | a test's scratch directory, removed when its guard drops, on a panic too (a dev-dependency only) |
-| `angzarr-store-transfer` | a store carried across a proto generation: every row exported as JSONL in proto3's JSON mapping (the export half) |
+Every crate is `crates/<crate-name>`; the name prefix says the family:
+
+| Family | Crates | What it is |
+|--------|--------|------------|
+| core | `angzarr-proto*`, `-ports`, `-bus`, `-coordinator*`, `-reads`, `-diagnostic`, `-yaml`, `-presentation`, `-test-dir`, `-store-transfer` | the wire contract, the storage and bus ports, the coordinators' building blocks, shared libraries |
+| router | `angzarr-router`, `angzarr-router-conformance` | the client router every runtime dispatches through |
+| embedded | `angzarr-embedded*`, `angzarr-store-sqlite` | the in-process runtime: a small deterministic event-sourcing kernel inside an application's process |
+| build | `angzarr-build`, `angzarr-codegen` | build-script helpers and the generator core |
+| platform | `os`, `file-system`, `file-lock`, `store-jsonl` | everything that differs between operating systems, behind one seam, and a single-process store |
+
+`tools/archlint` checks module-level layering of the router crates. The spec,
+protos and design documents are the `angzarr-project` submodule, and `sererr`
+is a docs-only submodule. `docs/` holds the families' design notes. The
+families' own former repositories are archived; their history is not carried
+here.
+
+### Crates and licences
+
+Each crate carries its own licence files beside its `Cargo.toml`. Groups: **A**
+is the service side (plain AGPL), **B** is shared runtime code (AGPL with a
+runtime exception, so an application that links it keeps its own licence), **C**
+is client-linked code (permissive). `licences.tsv` is the source of this table,
+and `just licence-check` (part of `just lint`) holds the Cargo `license` fields,
+the `LICENSE-*` files, `deny.toml` and this table to it.
+
+<!-- BEGIN licences.sh (generated from licences.tsv) -->
+| Crate | Group | Licence (SPDX) | What it is |
+|-------|-------|----------------|------------|
+| `angzarr-coordinator` | A | `AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission` | the coordinators' edge and gate, transport-free |
+| `angzarr-coordinator-base` | A | `AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission` | the coordinators' shared vocabulary |
+| `angzarr-coordinator-grpc` | A | `AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission` | the coordinators' tonic server |
+| `angzarr-reads` | A | `AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission` | the coordinators' read engine |
+| `angzarr-store-sqlite` | C | `Apache-2.0 OR BSD-3-Clause` | SQLite adapter of the storage ports |
+| `store-jsonl` | C | `Apache-2.0 OR BSD-3-Clause` | single-process JSON Lines store |
+| `angzarr-embedded` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | the in-process runtime (kernel) |
+| `angzarr-embedded-host` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | hosts remote components as child processes |
+| `angzarr-embedded-host-config` | C | `Apache-2.0 OR BSD-3-Clause` | the schema and loader of angzarr.yaml |
+| `angzarr-embedded-runner` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | an application's use cases' way to run a command |
+| `angzarr-embedded-catalog-check` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | test-only: error codes against Fluent catalogs |
+| `angzarr-embedded-conformance` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | test-only: the coordinator-contract tier on the kernel |
+| `angzarr-ports` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | the shared storage contract and its conformance suite |
+| `angzarr-bus` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | the bus interface and its conformance kit |
+| `angzarr-diagnostic` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | localizable errors |
+| `angzarr-presentation` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | JSON or text at a driving edge |
+| `angzarr-yaml` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | a strict YAML subset |
+| `angzarr-test-dir` | C | `Apache-2.0 OR BSD-3-Clause` | a test's scratch directory (dev-dependency) |
+| `angzarr-store-transfer` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | a store carried across a proto generation |
+| `os` | C | `Apache-2.0 OR BSD-3-Clause` | everything that differs between operating systems |
+| `file-system` | C | `Apache-2.0 OR BSD-3-Clause` | the filesystem seam |
+| `file-lock` | C | `Apache-2.0 OR BSD-3-Clause` | advisory file locks |
+| `angzarr-proto` | C | `Apache-2.0 OR BSD-3-Clause` | prost types of the wire contract |
+| `angzarr-proto-handler` | C | `Apache-2.0 OR BSD-3-Clause` | the handler layer's prost types |
+| `angzarr-proto-component` | C | `Apache-2.0 OR BSD-3-Clause` | the component contract's tonic stubs |
+| `angzarr-proto-transport-embedded` | C | `Apache-2.0 OR BSD-3-Clause` | the local-process transport's constants and keys |
+| `angzarr-proto-transport-distributed` | C | `Apache-2.0 OR BSD-3-Clause` | the distributed transport's stubs and envelopes |
+| `angzarr-proto-jsonl` | C | `Apache-2.0 OR BSD-3-Clause` | protobuf messages as JSON Lines |
+| `angzarr-router` | C | `Apache-2.0 OR BSD-3-Clause` | the shared client router |
+| `angzarr-router-conformance` | C | `Apache-2.0 OR BSD-3-Clause` | test-only: the router's conformance features |
+| `angzarr-build` | C | `Apache-2.0 OR BSD-3-Clause` | build.rs helpers |
+| `angzarr-codegen` | C | `Apache-2.0 OR BSD-3-Clause` | the generator core |
+| `angzarr-embedded-macros` | C | `Apache-2.0 OR BSD-3-Clause` | proc-macros over aggregates, policies and projectors |
+| `archlint` | C | `Apache-2.0 OR BSD-3-Clause` | module-level architecture rules for a workspace |
+<!-- END licences.sh -->
+
+
+## Building
+
+```bash
+git clone --recurse-submodules https://github.com/angzarr-io/angzarr
+cd angzarr
+just hooks-install   # lefthook; once per clone
+just build           # protoc on PATH; every crate, tests included
+just lint            # clippy -D warnings (complexity lints too), the licence table
+just test            # cargo-nextest over the workspace; `just test-pkg <crate>` for a few
+just lint-deps       # cargo-deny: permissive third-party licences, sources, advisories
+just --list          # the rest (mutation, wasm, spec-vendor); core's recipes: `just core::`
+```
+
+The Linux builds link with mold and clang (`.cargo/config.toml`). The wasm
+checks need the `wasm32-unknown-unknown` target; core's per-crate checks
+(`just core::check-shared-crates`) also need wasm-bindgen-test-runner and node.
+
+## Versions and tags
+
+The workspace has one version, `VERSION`, and one tag for the whole tree,
+`vMAJOR.MINOR.PATCH`. Crates are not published to crates.io (`publish = false`),
+and an application depends on this repository by full commit hash (or a tag),
+naming several crates from the one source. Besides it, `proto/vX.Y.Z` publishes
+the protos to the Buf registry and `client/go/vX.Y.Z` is the Go client's module
+tag. A crate that is later published gets `<crate>-vX.Y.Z` for it alone.
 
 ## Retired: the distributed runtime
 
@@ -41,7 +113,7 @@ acceptance features) was retired on 2026-11-02 and is to be brought back.
 The router is the distributed runtime meanwhile. The last commit holding all
 of it is tagged **`distributed-runtime-final`**
 (`9745c402cefdaa317bca417934b0dc46f623973f`,
-[tree](https://github.com/angzarr-io/angzarr/tree/distributed-runtime-final)).
+[tree](https://github.com/angzarr-io/angzarr-legacy/tree/distributed-runtime-final), in the archived repository, which keeps the history this one dropped).
 It holds `src/`, `build.rs`, `tests/` and `migrations/` (the crate),
 `crates/trivial-delegation` and `xtask/`, `deploy/` (helm chart, OpenTofu,
 kind), `gateway/` (the Go grpc-gateway), `features/`, the coordinator image
@@ -53,7 +125,8 @@ from `angzarr-project/proto/angzarr_client/proto/angzarr/v1/`, which no
 longer exists. To restore it:
 
 ```bash
-git checkout distributed-runtime-final -- \
+git fetch https://github.com/angzarr-io/angzarr-legacy distributed-runtime-final
+git checkout FETCH_HEAD -- \
     src build.rs tests migrations crates/trivial-delegation xtask \
     deploy gateway features kind-config.yaml artifacthub-repo.yml \
     Containerfile skaffold.yaml build.json justfile.container \
@@ -87,20 +160,6 @@ Client libraries are provided for the top TIOBE languages:
 
 **Client libraries are optional.** Any language with gRPC support can integrate directly using the [proto definitions](proto/)—the libraries just reduce boilerplate.
 
-## Quick Start
-
-```bash
-git clone --recurse-submodules https://github.com/angzarr-io/angzarr
-cd angzarr
-just check-shared-crates
-```
-
-Each crate's checks need protoc, the `wasm32-unknown-unknown` target,
-wasm-bindgen-test-runner (`just -f crates/angzarr-ports/justfile tools`) and
-node.
-
-See [Getting Started](https://angzarr.io/getting-started) for full setup including Kubernetes and standalone mode.
-
 ## Documentation
 
 - **[Introduction](https://angzarr.io/)** — Problem statement, when Angzarr fits
@@ -110,21 +169,43 @@ See [Getting Started](https://angzarr.io/getting-started) for full setup includi
 - **[Client SDKs](https://angzarr.io/sdks)** — Language-specific client libraries
 - **[Technical Pitch](https://angzarr.io/pitch)** — Detailed rationale and architecture
 
-## License
 
-AGPL-3.0 (GNU Affero General Public License v3)
+## Licence
 
-The shared crates `angzarr-proto`, `angzarr-proto-handler`,
-`angzarr-proto-component`,
-`angzarr-proto-transport-embedded`, `angzarr-proto-transport-distributed`,
-`angzarr-ports`, `angzarr-coordinator-base`, `angzarr-reads`, `angzarr-coordinator`,
-`angzarr-coordinator-grpc`,
-`angzarr-diagnostic`, `angzarr-yaml`,
-`angzarr-presentation`, `angzarr-proto-jsonl`, `angzarr-test-dir` and
-`angzarr-store-transfer`: Licensed under either
-of Apache License 2.0 or BSD 3-Clause, at your option (each crate's
-`LICENSE-APACHE` and `LICENSE-BSD`).
+This repository is multi-licensed, **per crate**. The table above says which crate
+is under which licence, and each crate directory holds the files of its group:
 
-Commercial licensing: the AGPL-3.0 parts of this project (not the
-dual-licensed shared crates above) are also available under a commercial
-licence. The author is open to it; contact Benjamin Abbitt.
+| Group | Files beside `Cargo.toml` | `license` field |
+|-------|---------------------------|-----------------|
+| A | `LICENSE-AGPL`, `LICENSE-GRPC-PERMISSION` | `AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission` |
+| B | `LICENSE-AGPL`, `LICENSE-EXCEPTION` | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` |
+| C | `LICENSE-APACHE`, `LICENSE-BSD` | `Apache-2.0 OR BSD-3-Clause` (at your option) |
+
+The root holds the licence texts: `LICENSE-AGPL`, `LICENSE-EXCEPTION`,
+`LICENSE-GRPC-PERMISSION` (which also covers group B), `LICENSE-APACHE` and `LICENSE-BSD`.
+
+- **AGPL-3.0 (A and B).** The aim of the AGPL here is to close the managed-service
+  loophole: anyone who modifies angzarr and serves people with it shares the
+  changes. Unmodified commercial use is fine.
+- **Runtime exception (B).** Shared runtime code can end up in an application's
+  own process, and a Classpath-style exception (`LICENSE-EXCEPTION`) lets an
+  application link it without becoming AGPL itself, provided the application's
+  other modules are independent of it. Modifications to the exempted crates
+  themselves stay under the AGPL.
+- **gRPC API permission (A, and B by the same repo-wide grant).** `LICENSE-GRPC-PERMISSION` is an additional
+  permission under AGPL section 7: a program that only uses the published gRPC API
+  (the `angzarr-project` protos), however rich its data structures, is not a work
+  based on an AGPL angzarr program and may be licensed as its author likes. It does
+  not cover a program that links or copies an AGPL crate.
+- **Permissive (C).** Client-linked code (the protos' Rust types, the router, the
+  generator and its proc-macros) is Apache-2.0 or BSD-3-Clause, at your option.
+- **Everything else.** Files outside `crates/` and `tools/` (documentation, scripts,
+  CI, the justfile) are Apache-2.0 OR BSD-3-Clause, at your option, unless a file says otherwise. The vendored
+  protos under `proto/` keep their own licences (their headers), and the submodules
+  (`angzarr-project`, `sererr`) have licences of their own.
+
+A commercial licence is potentially available for the distributed runtime, for
+those who want to keep their modifications to it private. Contact Benjamin Abbitt.
+
+These texts have not been reviewed by counsel. Truncating this repository's
+history does not revoke the licence under which earlier copies were obtained.

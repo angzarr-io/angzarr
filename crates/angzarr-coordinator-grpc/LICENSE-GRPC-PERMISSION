@@ -1,0 +1,36 @@
+angzarr gRPC API permission
+SPDX additional-permission identifier: AdditionRef-angzarr-grpc-api-permission
+
+This is an additional permission under section 7 of the GNU Affero General
+Public License, version 3 (AGPL-3.0). It applies to every crate of this
+repository that is licensed under the AGPL-3.0, with or without the angzarr
+runtime exception (LICENSE-EXCEPTION), and to modified versions of them that
+keep it.
+
+The published gRPC API is the set of services and messages defined by the
+`.proto` files of angzarr-project (https://github.com/angzarr-io/angzarr-project),
+as published at the version a running angzarr program implements.
+
+Permission. A program that communicates with an angzarr program covered by
+this permission solely by calling or implementing the services of the
+published gRPC API, and by exchanging the messages those files define
+(however rich their data structures, including nested, repeated and
+`google.protobuf.Any`-packed messages), is an independent work. It is not,
+for that reason alone, a work based on the covered program, a combined work
+with it, or a modified version of it, whether it runs on the same machine or
+another and whether it is a client, a business-logic component serving the
+component services, or a tool. You may license such a program under terms of
+your choice. The exchange of data structures through the published API is not
+by itself the kind of intimate communication that makes two programs a single
+combined work.
+
+Limits. This permission does not cover a program that links, imports, embeds,
+or contains code copied from a covered crate, nor a program that is a modified
+version of a covered crate. It does not release the covered program itself:
+if you modify it, section 13 of the AGPL still applies to your modified
+version when users interact with it remotely through a network.
+
+If you modify a covered crate, you may extend this permission to your version
+or delete it, as the AGPL's section 7 allows.
+
+This permission has not been reviewed by counsel.

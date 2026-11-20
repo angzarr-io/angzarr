@@ -3,7 +3,7 @@ name = "angzarr-embedded"
 version = "0.1.0"
 description = "angzarr's in-app runtime: a small, deterministic event-sourcing engine (decide, emit, apply, replay) run inside your application's process, embedded in your application, not a microcontroller. For the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
 edition = "2021"
-license.workspace = true
+license = "AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"
 publish.workspace = true
 # uuid 1.28 (through angzarr-proto) needs 1.89; prost 0.14 needs 1.85.
 rust-version = "1.89"

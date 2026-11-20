@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "A single-process angzarr store kept in one append-only JSON Lines journal of protobuf messages: memory to read from, the journal to survive"
 edition = "2021"
 rust-version = "1.96"
-license.workspace = true
+license = "Apache-2.0 OR BSD-3-Clause"
 publish.workspace = true
 
 [dependencies]

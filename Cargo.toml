@@ -51,7 +51,6 @@ exclude = ["sererr", "angzarr-project", "families"]
 resolver = "2"
 
 [workspace.package]
-license = "Apache-2.0 OR BSD-3-Clause"
 # Not published to crates.io; shared by git only.
 publish = false
 # edition, rust-version, version and authors differ by family and are set in

@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "The one seam every filesystem operation goes through: the real filesystem, paths as given; or the same std::fs re-rooted under a directory (a temporary one, in tests)"
 edition = "2021"
 rust-version = "1.96"
-license.workspace = true
+license = "Apache-2.0 OR BSD-3-Clause"
 publish.workspace = true
 
 [dependencies]

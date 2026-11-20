@@ -3,7 +3,7 @@ name = "angzarr-embedded-runner"
 version = "0.1.0"
 description = "Running an application's commands through angzarr-embedded's kernel, as its use cases do: the kernel's retry under a capped, fully jittered backoff, its waits on the application's Delay and Jitter ports, a command stamped by its Clock port, the dead letters each call answers gathered, a refusal typed. Part of angzarr-embedded, angzarr's in-app runtime; for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
 edition = "2021"
-license.workspace = true
+license = "AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"
 publish.workspace = true
 # angzarr-embedded's.
 rust-version = "1.89"

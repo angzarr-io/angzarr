@@ -3,7 +3,7 @@ name = "angzarr-store-sqlite"
 version = "0.1.0"
 description = "angzarr-ports on SQLite: the shared store adapter that angzarr-embedded (angzarr's in-app runtime) and angzarr core (the distributed system, https://github.com/angzarr-io/angzarr) both use, its schema and migrations, held to the ports' conformance suite."
 edition = "2021"
-license.workspace = true
+license = "Apache-2.0 OR BSD-3-Clause"
 publish.workspace = true
 # uuid 1.28 (through angzarr-proto) needs 1.89; sqlx 0.8's graph (icu_*,
 # home) needs 1.88.

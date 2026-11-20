@@ -3,7 +3,7 @@ name = "angzarr-embedded-macros"
 version = "0.1.0"
 description = "Markup over hand-written aggregates, process managers, policies and projectors that generates their angzarr-embedded glue. Part of angzarr-embedded, angzarr's in-app runtime (embedded in your application, not a microcontroller); for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
 edition = "2021"
-license.workspace = true
+license = "Apache-2.0 OR BSD-3-Clause"
 publish.workspace = true
 # Its doc tests build angzarr-embedded, which needs 1.89.
 rust-version = "1.89"

@@ -2,7 +2,7 @@
 name = "angzarr-coordinator"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0 OR BSD-3-Clause"
+license = "AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission"
 description = "The coordinators' edge, transport-free: routing and reach (Arrival, Reach, Hidden, Unserved), the Commands trait a frontend implements, and the gate (Gate, Allowlist, Credential, Coordinator, Session) that decides who may reach which streams"
 repository = "https://github.com/angzarr-io/angzarr"
 publish = false

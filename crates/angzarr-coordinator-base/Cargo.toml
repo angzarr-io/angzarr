@@ -2,7 +2,7 @@
 name = "angzarr-coordinator-base"
 version = "0.1.0"
 edition = "2021"
-license = "Apache-2.0 OR BSD-3-Clause"
+license = "AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission"
 description = "The coordinators' shared vocabulary, transport-free: Code, Coded and Refusal, the Upcast port and its drivers, Wait, and Answered"
 repository = "https://github.com/angzarr-io/angzarr"
 publish = false

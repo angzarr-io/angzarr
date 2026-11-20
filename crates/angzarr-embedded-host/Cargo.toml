@@ -3,7 +3,7 @@ name = "angzarr-embedded-host"
 version = "0.1.0"
 description = "Hosts an angzarr-embedded application's remote components (domains, policies, projectors): launches each as a child process, waits for its gRPC health to report SERVING on a Unix socket, describes and supervises it, and hands each back to the kernel by its kind. Part of angzarr-embedded, angzarr's in-app runtime; for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
 edition = "2021"
-license.workspace = true
+license = "AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"
 publish.workspace = true
 # uuid 1.28 (through angzarr-proto) needs 1.89; tonic 0.14.8 and its
 # companions (tonic-prost, tonic-types, tonic-health) need 1.88.

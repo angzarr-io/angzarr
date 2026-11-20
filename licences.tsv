@@ -1,0 +1,36 @@
+# crate	group	what	review (empty when the group follows from the rule; else why)
+# A = AGPL-3.0-only (the service side) | B = AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception (shared runtime code) | C = Apache-2.0 OR BSD-3-Clause (client-linked)
+angzarr-coordinator	A	the coordinators' edge and gate, transport-free	
+angzarr-coordinator-base	A	the coordinators' shared vocabulary	
+angzarr-coordinator-grpc	A	the coordinators' tonic server	Owner's set. Its Cargo.toml says it is shared by the embedded and distributed runtimes, but no B crate depends on it today.
+angzarr-reads	A	the coordinators' read engine	
+angzarr-store-sqlite	C	SQLite adapter of the storage ports	Owner 2026-11-20: not at risk of being served in a real capacity.
+store-jsonl	C	single-process JSON Lines store	Owner 2026-11-20: permissive, as store-sqlite.
+angzarr-embedded	B	the in-process runtime (kernel)	
+angzarr-embedded-host	B	hosts remote components as child processes	
+angzarr-embedded-host-config	C	the schema and loader of angzarr.yaml	Owner 2026-11-20: borderline crate, permissive.
+angzarr-embedded-runner	B	an application's use cases' way to run a command	
+angzarr-embedded-catalog-check	B	test-only: error codes against Fluent catalogs	Test-only, never linked into an application. Follows its family.
+angzarr-embedded-conformance	B	test-only: the coordinator-contract tier on the kernel	Test-only, never linked into an application. Follows its family.
+angzarr-ports	B	the shared storage contract and its conformance suite	Shared by the distributed runtime and embedded: the owner's example of why the exception exists. Also a dependency of angzarr-router (C).
+angzarr-bus	B	the bus interface and its conformance kit	
+angzarr-diagnostic	B	localizable errors	
+angzarr-presentation	B	JSON or text at a driving edge	
+angzarr-yaml	B	a strict YAML subset	
+angzarr-test-dir	C	a test's scratch directory (dev-dependency)	Owner 2026-11-20: borderline crate, permissive.
+angzarr-store-transfer	B	a store carried across a proto generation	
+os	C	everything that differs between operating systems	Owner 2026-11-20: borderline crate, permissive.
+file-system	C	the filesystem seam	Owner 2026-11-20: borderline crate, permissive.
+file-lock	C	advisory file locks	Owner 2026-11-20: borderline crate, permissive.
+angzarr-proto	C	prost types of the wire contract	
+angzarr-proto-handler	C	the handler layer's prost types	
+angzarr-proto-component	C	the component contract's tonic stubs	
+angzarr-proto-transport-embedded	C	the local-process transport's constants and keys	
+angzarr-proto-transport-distributed	C	the distributed transport's stubs and envelopes	
+angzarr-proto-jsonl	C	protobuf messages as JSON Lines	Named proto-* so C by the rule, but it is a codec with no proto definitions of its own; used by store-jsonl and store-transfer. Could be B.
+angzarr-router	C	the shared client router	Client-linked by the rule, but it depends on angzarr-ports (B): an application linking the router links B code, which the exception covers. If the exception is not signed off for ports, the router is not permissive in practice.
+angzarr-router-conformance	C	test-only: the router's conformance features	Follows the router.
+angzarr-build	C	build.rs helpers	
+angzarr-codegen	C	the generator core	Depends on angzarr-diagnostic, -embedded-host-config and -proto (B and C): covered by the exception.
+angzarr-embedded-macros	C	proc-macros over aggregates, policies and projectors	A proc-macro by the rule; it generates glue code that links angzarr-embedded (B), covered by the exception.
+archlint	C	module-level architecture rules for a workspace	A development tool, not linked into anything; C by the rule for build tooling. Not named in it.
