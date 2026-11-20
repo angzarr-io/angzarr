@@ -1,0 +1,63 @@
+# Every key the host config has, at version 1.
+schema_version: 1
+
+component:
+  - name: table
+    kind: domain              # required: domain, policy, projector or upcaster
+    language: rust            # in-process: registered by main.rs, not launched
+    expose: loopback          # reachable through the host's listener from
+                              # this machine; ip from the network; none (the
+                              # default) from nowhere
+  - name: policy-table-player
+    kind: policy              # in-process too: main.rs registers it
+    language: rust
+  - name: player
+    kind: domain
+    language: python          # launched as `uv run --locked -m player.serve`
+    entry: [-m, player.serve]
+    dir: domains/player
+    env:
+      PLAYER_SEATS: "6"
+  - name: table-player
+    kind: policy              # a PolicyService child
+    language: python
+    entry: [-m, table_player.serve]
+  - name: table-upcaster
+    kind: upcaster            # the table's inputs are upcast through it
+    upcasts: table
+    language: python
+    entry: [-m, table_upcaster.serve]
+  - name: dealer
+    kind: domain
+    language: go              # loaded by the application, with no default:
+    launch: [./bin/dealer]    # the launch command is given
+
+supervision:
+  handshake_timeout_ms: 10000
+  initial_backoff_ms: 100
+  max_backoff_ms: 5000
+  shutdown_grace_ms: 5000
+  terminate_grace_ms: 2000
+  call_timeout_ms: 30000
+  socket_dir: /run/user/1000
+
+store:
+  path: angzarr.db            # SQLite; `in_memory: true` for none on disk
+  in_memory: false
+
+policy:
+  on_bug: move_past           # a policy step's bug, dead-lettered, moves its
+                              # position past the trigger; stay keeps it
+
+retry:
+  max_retries: 3              # a retryable failure is retried this often
+                              # (0: never), then dead-lettered; waiting
+  max_race_runs: 10           # a command that keeps losing its write to
+                              # another write to its stream runs this often,
+                              # then is dead-lettered (0: never again, the
+                              # conflict back to the caller, retryable, not
+                              # dead-lettered); waiting
+  initial_backoff_ms: 100     # this long first,
+  multiplier: 2.0             # this many times longer each retry,
+  max_backoff_ms: 5000        # at most this long,
+  jitter: 0.2                 # less up to this fraction of it at random

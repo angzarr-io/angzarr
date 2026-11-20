@@ -1,0 +1,57 @@
+# cargo-mutants (https://mutants.rs): `just mutants` runs it, and so do the
+# gates: `just mutants-push` and `just mutants-staged` (by hand; no git hook
+# runs mutation) and `just mutants-all` (the full pass, weekly in CI).
+#
+# Test code is not mutated: a test is what judges a mutant, so a mutant in
+# one measures the measure. The glob names every test file, whatever cfg
+# includes it.
+exclude_globs = ["*.test.rs"]
+
+# Otherwise excluded: only the mutants in `exclude_re` below, each equivalent
+# (no test can tell it from the code), each matched alone by its description, grouped by crate.
+#
+# Not excluded, though they might have been:
+# - angzarr-embedded-catalog-check's src/lib.rs holds no code; its check is a test.
+# - Display impls are not noise: angzarr-embedded-catalog-check fails an empty English
+#   Display, so with test_workspace those mutants are caught.
+
+# Run every crate's tests against each mutant: angzarr-embedded-catalog-check tests the
+# other crates' Diagnostic codes, args and Display, from outside them.
+test_workspace = true
+
+
+
+exclude_re = [
+    # angzarr-embedded
+    # A body that cannot run: no value of `Infallible` exists to call it on
+    # (`match *self {}`), so whatever the mutant returns is never returned.
+    '''replace <impl Payload for std::convert::Infallible>::to_any -> Any with Default::default\(\)$''',
+    '''replace <impl Diagnostic for std::convert::Infallible>::code -> &'static str with ""$''',
+    '''replace <impl Diagnostic for std::convert::Infallible>::code -> &'static str with "xyzzy"$''',
+    '''replace <impl Diagnostic for std::convert::Infallible>::args -> Vec<\(&'static str, Arg\)> with vec!\[\]$''',
+    # The mutant is the code: each already returns an empty Vec, so `vec![]`
+    # changes nothing.
+    '''replace <impl Payload for std::convert::Infallible>::type_urls -> Vec<String> with vec!\[\]$''',
+    '''replace <impl Project for \(\)>::project -> Vec<ProjectorFailure> with vec!\[\]$''',
+    # angzarr-store-sqlite
+    # instant_column's saturation picks its end by the sign of a nanosecond
+    # count no i64 holds: it is never 0 there (0 converts), so `< 0` and
+    # `<= 0` choose alike.
+    'crates/angzarr-store-sqlite/src/statements\.rs:\d+:\d+: replace < with <= in instant_column$',
+    # into_wal's busy guard. Taking a non-busy error for busy makes into_wal
+    # run `BEGIN EXCLUSIVE` and try the move again: the same error comes back
+    # on each try, or from `BEGIN EXCLUSIVE` itself, so the open still fails
+    # with that error, only later. No test can tell the two apart.
+    'crates/angzarr-store-sqlite/src/sqlite\.rs:\d+:\d+: replace match guard busy\(&error\) with true in into_wal$',
+    'crates/angzarr-store-sqlite/src/sqlite\.rs:\d+:\d+: replace busy -> bool with true$',
+    # angzarr-embedded-host
+    # The mutant is the code: a remote domain's command_types already
+    # returns an empty Vec, so `vec![]` changes nothing.
+    '''replace <impl CommandHandler for RemoteCommandHandler>::command_types -> Vec<String> with vec!\[\]$''',
+    # without_unix.rs is compiled only where there are no Unix sockets
+    # (cfg(not(unix))): on the Unix machines mutation runs on, a mutant
+    # there changes no code that is built, so no test can tell it apart.
+    'crates/angzarr-embedded-host/src/without_unix\.rs:\d+:\d+: replace spawn -> std::io::Result<Child> with Ok\(Default::default\(\)\)$',
+    'crates/angzarr-embedded-host/src/without_unix\.rs:\d+:\d+: replace terminate with \(\)$',
+    'crates/angzarr-embedded-host/src/without_unix\.rs:\d+:\d+: replace connect_unix -> Result<Channel, tonic::transport::Error> with Ok\(Default::default\(\)\)$',
+]

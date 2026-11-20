@@ -1,0 +1,2 @@
+# The least a version-1 config holds: its stamp. Every table has defaults.
+schema_version: 1

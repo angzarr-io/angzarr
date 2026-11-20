@@ -1,0 +1,7 @@
+# Scoped to this repo so the global default is untouched. Pinned to a version,
+# not a host triple, so it builds on Linux and Windows alike; on Windows the
+# msvc host needs the Visual Studio Build Tools (C++ workload), which
+# `just setup` in tdautobattle installs.
+[toolchain]
+channel = "1.96.1"
+components = ["clippy", "rustfmt"]

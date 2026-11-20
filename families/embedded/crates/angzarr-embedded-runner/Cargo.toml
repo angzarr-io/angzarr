@@ -1,0 +1,26 @@
+[package]
+name = "angzarr-embedded-runner"
+version = "0.1.0"
+description = "Running an application's commands through angzarr-embedded's kernel, as its use cases do: the kernel's retry under a capped, fully jittered backoff, its waits on the application's Delay and Jitter ports, a command stamped by its Clock port, the dead letters each call answers gathered, a refusal typed. Part of angzarr-embedded, angzarr's in-app runtime; for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+# angzarr-embedded's.
+rust-version = "1.89"
+
+# The kernel it runs commands through, and the reports its outcomes carry,
+# at the rev angzarr-embedded pins.
+[dependencies]
+angzarr-embedded = { path = "../angzarr-embedded" }
+angzarr-diagnostic = { git = "https://github.com/angzarr-io/angzarr", rev = "3535a54a25e95b57dabbcbaea5f3603b1ac13f5c" }
+
+# The tests run commands to a toy marked-up aggregate (src/note.test.rs),
+# its wire messages prost's, on the kernel's test support (block_on_ready,
+# angzarr-ports' MemoryStore and FaultyStore).
+[dev-dependencies]
+angzarr-embedded = { path = "../angzarr-embedded", features = ["test-support"] }
+angzarr-embedded-macros = { path = "../angzarr-embedded-macros" }
+prost = "0.14"
+
+[lints]
+workspace = true

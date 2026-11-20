@@ -1,0 +1,4 @@
+# Workspace clippy settings: the nesting threshold for `excessive_nesting`,
+# which Cargo.toml's [workspace.lints.clippy] turns on (taskloom's complexity
+# gate).
+excessive-nesting-threshold = 6

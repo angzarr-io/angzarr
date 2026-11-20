@@ -1,0 +1,7 @@
+schema_version: 4
+component:
+  - name: table
+    kind: domain
+    language: rust
+store:
+  in_memory: true

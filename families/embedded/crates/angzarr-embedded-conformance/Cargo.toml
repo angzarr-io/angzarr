@@ -1,0 +1,25 @@
+[package]
+name = "angzarr-embedded-conformance"
+version = "0.1.0"
+description = "Test-only: angzarr's coordinator-contract tier (the spec's .feature files, vendored in features/ at the revision SPEC_REV names) run against angzarr-embedded's kernel, and the handler-contract tier's compensation.feature against its markup's compensation tooling. Part of angzarr-embedded, angzarr's in-app runtime (embedded in your application, not a microcontroller); for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+# It runs angzarr-embedded's kernel, so it needs what angzarr-embedded needs.
+rust-version = "1.89"
+
+# No library to speak of and no dependencies: the runner is src/lib.test.rs.
+[dependencies]
+
+# cucumber runs the vendored features; it is the router's runner
+# (angzarr-router's conformance crate), at the same version. The kernel runs
+# over angzarr-ports' MemoryStore (angzarr-embedded's `test-support`).
+[dev-dependencies]
+angzarr-embedded = { path = "../angzarr-embedded", features = ["test-support"] }
+cucumber = "0.21"
+# The compensation fixture's messages (handler-contract/compensation.feature):
+# prost as angzarr-embedded has it, already in the graph.
+prost = "0.14"
+
+[lints]
+workspace = true

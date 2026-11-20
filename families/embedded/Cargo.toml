@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+edition = "2021"
+rust-version = "1.77"
+license = "Apache-2.0 OR BSD-3-Clause"
+# Not published to crates.io; shared by git only.
+publish = false
+
+# Every crate opts in with `[lints] workspace = true`.
+[workspace.lints.clippy]
+# Zero-width and other invisible characters in source: never intended.
+invisible_characters = "deny"
+# A literal in another normalization form than NFC reads the same as its NFC
+# twin and compares unequal.
+unicode_not_nfc = "deny"
+# Non-ASCII in a literal is written as an escape, so what the code holds is
+# visible. Allowed, with a comment, only where a test's corpus is the point.
+non_ascii_literal = "deny"
+# Complexity is taskloom's gate: cognitive_complexity and too_many_lines at
+# clippy's defaults (25, 100), excessive_nesting at clippy.toml's threshold.
+# All warn, and `just lint` (the pre-commit clippy gate) denies warnings over
+# every target.
+cognitive_complexity = "warn"
+too_many_lines = "warn"
+excessive_nesting = "warn"

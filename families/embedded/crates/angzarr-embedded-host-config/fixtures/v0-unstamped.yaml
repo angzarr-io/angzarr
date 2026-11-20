@@ -1,0 +1,8 @@
+# A config written before the stamp: the oldest generation, version 0,
+# which has the version-1 shape, so it loads through every step.
+component:
+  - name: table
+    kind: domain
+    language: rust
+store:
+  in_memory: true
