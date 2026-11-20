@@ -1,301 +1,164 @@
-## This Repository
-
-angzarr core is a virtual Cargo workspace of the shared crates under
-`crates/` (angzarr-proto, angzarr-proto-handler, angzarr-proto-component, the two
-angzarr-proto-transport crates, angzarr-ports, angzarr-diagnostic,
-angzarr-yaml, angzarr-presentation, angzarr-proto-jsonl, angzarr-test-dir, angzarr-store-transfer,
-and the coordinators' crates: angzarr-coordinator-base (the shared vocabulary,
-transport-free), angzarr-reads (the read engine), angzarr-coordinator (the
-edge and the gate: `Gate`, closed `Allowlist`, `Credential`,
-`Coordinator`/`Session`; no tonic, no tokio) and angzarr-coordinator-grpc (the
-one crate that links tonic and tokio: the listener policy, the bearer, the
-status mapping and the services)), which the router, angzarr-embedded,
-the CLI and the client and example repos depend on by git rev. Each crate
-has its own justfile; the root justfile runs them all:
-
-```bash
-just check-shared-crates   # the whole gate: submodule check, then each crate's check
-just build                 # or fmt-check, lint, test: one step across every crate
-just lint-deps             # cargo-deny (deny.toml)
-```
-
-### Diagnostics in a locale
-
-A crate with diagnostics ships its Fluent catalogs as
-`locales/<locale>/messages.ftl`; its build script
-(`angzarr_diagnostic::build::catalogs()`) writes each to `OUT_DIR` under the
-crate's name, and beside them `locales.rs`, the table of every locale. The
-crate exports `EN_US` (its en-US catalog) and `LOCALES` (the table, via
-`include!`), so adding `locales/de-DE/messages.ftl` offers de-DE with no
-other edit. A binary picks the locale with
-`angzarr_presentation::locale::detect(|name| std::env::var(name).ok())`
-(`LC_ALL`, `LC_MESSAGES`, `LANG`; `C`, `POSIX`, unset or unparseable are
-en-US) and builds `Catalog::for_locale(&locale, &[a::LOCALES, ...])`, which
-negotiates the locale against what the catalogs offer and falls back to
-en-US message by message. `Catalog::en_us(&[a::EN_US, ...])` is the same
-as asking for en-US. Only en-US catalogs ship; every code has a message in
-en-US.
-
-The distributed coordinator runtime (the root package `angzarr`, its
-coordinator binaries and images, `deploy/`, `gateway/`, `features/` and the
-k8s recipes) was retired on 2026-11-02 and is to be brought back. Its last
-commit is tagged `distributed-runtime-final`
-(`9745c402cefdaa317bca417934b0dc46f623973f`); it did not build there (its
-`build.rs` read `angzarr-project/proto/angzarr_client/...`, since removed).
-README.md's "Retired: the distributed runtime" has the restore recipe.
-
-## General Rules
-
-Correctness over speed. Second priority: reducing reviewer cognitive load.
-
-### Fix What You Find
-Prototype codebase. If you encounter broken things, note the issue, check with me about priority, propose a fix. Leave codebase better than found.
-
-### In-process vs Distributed
-Keep the in-process and distributed code paths as similar as possible—differ only where necessary (process count, bus transports, storage).
-
-### Priorities
-1. Understanding — minimize cognitive load, avoid foot-guns
-2. Architectural correctness — reduce churn, enable change
-3. Performance — optimize when bottlenecks measured
-
-Plan everything and run it by me. Ask about meaningful decisions.
-
-## Examples
-CQRS-ES poker system. Player domain: functional aggregates. Others: object-oriented.
-
-### Definition of Done
-**Nothing is "done" until tests prove it works.**
-- Implementation requires corresponding test code
-- Tests must execute (not just exist)
-- Gherkin: step definitions implemented, runner passes
-- Mark todos complete only after tests green
-
-### Mutation Testing
-**Run after every new test.** Tests must kill mutants to be meaningful.
-
-```bash
-just -f crates/<crate>/justfile mutation-test         # the whole crate
-just -f crates/<crate>/justfile mutation-diff <patch> # only the lines a diff changes
-```
-
-**Host cargo-mutants outside `just` is FORBIDDEN.** Each crate's recipes go
-through the root justfile's `shared-mutation`, which has cargo-mutants mutate
-a scratch copy of the workspace under TMPDIR (never `--in-place`), so no
-mutated source reaches the working tree. No git hook runs mutation; the full
-pass runs weekly in CI (`.github/workflows/mutation-shared-crates.yml`).
-
-**Target kill rate: 90%** (each crate's `MUTATION_THRESHOLD`).
-
-**Uncaught mutations:** Pure logic → add test. Needs mocking → check integration coverage. Side-effect only (logging) → accept. Framework glue → verify integration path.
-
-### Enums
-Use enum names, not integer representations.
-
-## Tooling
-
-| Tool | Usage |
-|------|-------|
-| just | Every gate: the root justfile and each crate's |
-| buf | The spec's protos (`just buf-lint`) |
-| Python | Helper scripts (`scripts/`) |
-
-Other languages in separate repos: `angzarr-examples-{lang}`.
-
-## Testing
-
-Four levels. **Never** write blank "pass" tests.
-
-### Unit Tests
-No external deps. Mock prior state (e.g., `EventBook`). Direct domain logic invocation.
-
-- Core: each crate's tests (`crates/<crate>/tests/`, or `.test.rs` alongside source)
-- Examples: `test_*_logic.py`, `*_test.go`, `*.test.rs`
-- Run: `just test` (every crate) or `just -f crates/<crate>/justfile test`
-
-**File organization:**
-```
-src/
-├── correlation.rs           # Production
-├── correlation.test.rs      # Tests
-└── mod.rs                   # #[cfg(test)] #[path="..."] include
-```
-
-**Always document WHY** — business context, failure mode, edge case rationale.
-
-**Unit test:** validation, transforms, state calculations, error formatting.
-**Skip (use integration):** gRPC wrappers, DB ops, file I/O, multi-dependency orchestration.
-
-### Contract Tests
-**Must break the build.** angzarr-ports carries the conformance suite every
-store backend runs (`angzarr_ports::contract` and `store_contract!`, its
-`contract` feature).
-
-### Acceptance Tests
-Business behavior via Gherkin. Full stack through sagas, PMs, projectors.
-
-- Features: the spec's (`angzarr-project/features/`)
-
-### Gherkin Authoring
-Business-readable spec, not test code. Describe **what/why**, never **how**.
-
-**Litmus test:** "Will wording change if implementation changes?" If yes, abstract.
-
-| Keyword | Purpose |
-|---------|---------|
-| Given | Past state/context |
-| When | Single triggering action |
-| Then | Business outcomes |
-
-**Anti-patterns:** UI steps, technical assertions, conditionals, vague outcomes, hardcoded data.
-
-## Proto
-Use extension traits on generated code. No free functions or wrappers.
-
-## Coordinators
-
-### Aggregates
-Commands in, events out. Single domain. Source of truth.
-
-**Handler pattern: guard/validate/compute**
-```
-guard(state) → Result<()>           # Preconditions
-validate(cmd, state) → Result<T>    # Input validation
-compute(cmd, state, validated) → Event  # Pure business logic
-```
-
-All pure functions—100% unit testable without mocks. Same pattern across languages.
-
-**Event sourcing boundary:** Framework stores events as `Any` blobs. Business logic packs/unpacks typed events. Tests wrap events in `Any` to mimic production.
-
-### Sagas
-Domain translators. Events from domain A → commands to domain B. **Stateless.** Minimal logic—just field mapping.
-
-**Destination sequences:** Framework provides `destination_sequences` map. Use `StampCommand(cmd, domain)` helper.
-
-Name: `saga-{source}-{target}`
-
-### Projectors
-Events in → external output (DB, API, files). Name: `projector-{source}-{feature}`
-
-### Process Managers
-Multi-domain event correlation via correlation ID. Own aggregate (correlation ID = root). Stateful.
-
-**Destination sequences:** Framework provides `destination_sequences` map (same as sagas).
-
-### Saga/PM Design Philosophy: Facts Over State Rebuilding
-
-**Sagas and PMs are translators/coordinators, NOT decision makers.**
-
-#### Output Options
-
-Sagas and PMs can emit two types of output to destination aggregates:
-
-| Output | When to Use | Aggregate Response |
-|--------|-------------|-------------------|
-| **Facts** | Inter-domain messages, sagas, external events (webhooks) | Always accepted (no validation) |
-| **Commands** | When the destination aggregate must validate and can reject | Accept → events, Reject → notification |
-
-**Facts (typical for sagas and inter-domain messages)**
-```rust
-// Saga translates domain A event into domain B fact
-let fact = PlayerSeated { player_root, seat, table_id };
-// Fact is injected directly — destination aggregate records it
-```
-
-**Commands (when validation/rejection is needed)**
-```rust
-// PM sends command when aggregate must decide
-let cmd = SeatPlayer { player_root, seat, amount };
-destinations.stamp_command(&mut cmd, "table")?;
-// With SyncMode::Simple, PM receives immediate accept/reject
-// Handle rejection via on_rejected()
-```
-
-#### Design Principles
-
-1. **Let aggregates decide** — Business logic belongs in aggregates, not coordinators
-2. **Facts are the norm for inter-domain flow** — Sagas typically emit facts, not commands
-3. **Use commands when rejection matters** — Commands let the destination validate and reject
-4. **Use sequences for stamping** — Destinations provide `next_sequence` for command headers
-
-#### Anti-pattern: Decision Making in Sagas
-
-```python
-# BAD: Saga rebuilds state and makes decisions
-@handles(OrderCreated)
-def handle_order(self, event, destinations):
-    inventory = rebuild_state(destinations["inventory"])
-    if inventory.stock < event.quantity:  # Decision in saga!
-        return RejectCommand(...)
-    return CreateReservation(...)
-
-# GOOD: Saga translates, aggregate records the fact
-@handles(OrderCreated)
-def handle_order(self, event, ctx):
-    fact = OrderRequested(order_id=event.order_id, quantity=event.quantity)
-    ctx.inject_fact(fact, "inventory")
-    return fact
-    # Inventory aggregate records the fact
-    # If validation is needed, use a command instead
-```
-
-**Key insight:** Sagas/PMs receive only sequence numbers, not EventBooks. They cannot (and should not) rebuild destination aggregate state.
-
-### Event Design
-- Sagas/projectors: no querying, enrich at source aggregate
-- Aggregates: may read external systems, never write (projectors handle side effects)
-- Keep events lean—use IDs for immutable references
-
-## Subscriptions
-
-Config-based (env var or file):
-```bash
-ANGZARR_SUBSCRIPTIONS="order:OrderCreated,OrderCompleted;inventory"
-```
-
-Empty types = all events. Domains separated by `;`, types by `,`.
-
-## Topology
-
-Runtime observation builds graph. Nodes: first event processed. Edges: event flow. REST API for Grafana.
-
-## Glossary
-
-| Type | Description |
-|------|-------------|
-| Aggregate | Commands→events. Single domain. Source of truth. |
-| Saga | Stateless domain bridge. Events→commands cross-domain. |
-| Projector | Events→external output. Read models. |
-| Process Manager | Multi-domain orchestrator. Stateful via correlation ID. |
-| Domain | Bounded context. Events/commands namespaced. |
-| Coordinator | Sidecar abstracting framework from business logic. |
-| Events | Immutable facts. Past tense. Via commands or facts. |
-| Commands | Action requests. Sequenced, validated, rejectable. |
-| Facts | Direct event injection, no validation. Cannot reject. |
-| Notifications | Unsequenced coordination messages. Not persisted. |
-| Correlation ID | Cross-domain process identifier. PM aggregate root. |
-
-**Correlation propagation:** Client provides on initial command. Framework propagates through sagas/PMs. PMs require it (guarded at router).
-
-## Project Layout
-
-```
-examples/{lang}/
-├── {domain}/
-│   ├── agg/              # Aggregate
-│   └── saga-{target}/    # Outbound saga
-├── pmg-{name}/           # Process managers (domain peers)
-├── prj-{name}/           # Projectors (domain peers)
-└── tests/
-```
-
-**Naming:** `agg-{domain}`, `saga-{source}-{target}`, `projector-{source}-{feature}`
-
-**Crate org:** One crate per component. Never combine handlers with env var switching.
-
-## Common Pitfalls
-
-**Naming collisions:** Component names globally unique. Prefix with type: `saga-order-fulfillment`, `projector-inventory`.
-
-**Proto duplication:** Unify shared structures. Single `Target` type, not separate `Subscription`/`CommandTarget`.
+# angzarr
+
+One Cargo workspace for angzarr's Rust: the shared core (`angzarr-proto*`,
+`-ports`, `-bus`, `-coordinator*`, `-reads`, `-diagnostic`, `-yaml`,
+`-presentation`, `-store-transfer`), the client router (`angzarr-router`), the
+in-process runtime (`angzarr-embedded*`, `angzarr-store-sqlite`), the code
+generator (`angzarr-build`, `angzarr-codegen`) and the platform seams (`os`,
+`file-system`, `file-lock`, `store-jsonl`). They were five repositories; their
+histories are not here. README.md has the crate and licence table.
+
+The spec, protos and design docs are the `angzarr-project` submodule
+(`git submodule update --init`); build scripts read its protos, so the
+submodule must be checked out and `protoc` on `PATH`. The distributed
+runtime is retired and to be brought back (README, "Retired").
+
+## Layout and dependencies
+
+- **Flat `crates/<crate-name>`.** The family (core, router, embedded, build,
+  platform) is the name prefix, not a directory. Crates reach each other by
+  `path` dependency. There is no pin, no `[patch]`, no lockstep check; a change
+  to a core crate must keep every dependent green in the same commit.
+- Never add a git dependency on this repository's own crates. Third-party crates
+  come from crates.io only (`deny.toml` has `allow-git = []`).
+- **A new dependency** is named, with why, in the docs of the crate that takes
+  it, and passes `just lint-deps`. Third-party licences must be permissive;
+  copyleft fails the gate. Changing `deny.toml` needs a stated reason.
+- **Crates know no application.** Anything specific to one application belongs in
+  that application's repository.
+- Only `os` and `file-system` call `std::fs` or name an operating system
+  (clippy `disallowed-methods` in the four crates' `clippy.toml`, kept equal to
+  each other). A test's files live under a `Rooted::temp` filesystem or a
+  `angzarr_test_dir::TestDir`, never a bare `temp_dir().join(..)`.
+- `angzarr-embedded` and `angzarr-router` must keep building for
+  `wasm32-unknown-unknown` (`just wasm`, `just wasm-router`).
+- Only the root `Cargo.toml` profiles apply (size-optimised, `panic = "abort"` in
+  release). The submodule pointer moves only when the spec itself is bumped,
+  never in passing.
+- The codegen constants `ANGZARR_EMBEDDED_REV` and `ANGZARR_BUILD_REV` name a
+  commit already on main: a generated app is an external consumer. Move them in
+  a later commit, and only when generated output changes
+  (`ANGZARR_BLESS=1 cargo test -p angzarr-codegen --test app` rewrites the goldens).
+- Each package-level field (`edition`, `rust-version`, `version`, `authors`) is set
+  in the crate's own manifest; families differ (editions 2021 and 2024). Keep
+  resolver 2.
+
+## Licences: the table is `licences.tsv`
+
+Three groups, per crate, by the linking boundary (the owner's rule, 2026-11-20):
+
+- **A**, `AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission`: the service
+  side (the coordinators and the read engine).
+- **B**, `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception`: shared
+  runtime code that can end up in a user's process. `LICENSE-EXCEPTION` frees
+  an application that links it.
+- **C**, `Apache-2.0 OR BSD-3-Clause`: client-linked code (protos, router,
+  codegen, proc-macros), the platform seams, the SQLite and JSON Lines stores, test-dir. Files
+  outside crates/ are C too.
+
+Rules a change must not break:
+
+- A new crate gets a row in `licences.tsv` **before** it gets code, and states
+  its own `license` (nothing is inherited from the workspace). Then
+  `scripts/licences.sh apply`, which writes the Cargo field, the `LICENSE-*`
+  files, deny.toml's exception and the README table; `just licence-check` (part
+  of `just lint`) fails on any disagreement. Never edit those four by hand.
+- A crate of group B or C never depends (outside dev-dependencies) on a group A
+  crate: the exception cannot reach what it links.
+- README, `LICENSE-*` files and Cargo `license` fields never disagree.
+- Licence text is the owner's: do not paraphrase `LICENSE-EXCEPTION` or
+  `LICENSE-GRPC-PERMISSION`, and do not call truncating history a revocation.
+
+## Gates
+
+Use `just`, never plain cargo for the gates; `just --list`. Each gate prints one
+`ok` line, or `FAIL`, the extract and a log in `target/logs/<gate>.log`
+(`VERBOSE=1` shows all). `just test` runs cargo-nextest (targets with
+`harness = false` run by `cargo test`); `just test-pkg <crate>...` is the quick
+loop; `just selftest` tests the gates; core's own recipes (buf, images,
+per-crate justfiles) are the `core` module: `just core::buf-lint`.
+
+- Hooks are lefthook's (`just hooks-install`, once per clone). Pre-commit: fmt of
+  the staged files, secrets (gitleaks; a fake secret in a test ends its line with
+  `gitleaks:allow`), clippy, deps, and tests of the staged files' crates and
+  their dependents. Pre-push runs the pushed commit's tests.
+- **A failing gate is a finding: fix the cause. Never `--no-verify`, never weaken
+  a gate, never raise a threshold.**
+- Red tests may be committed only on a branch other than `main`, with a warning;
+  `main` refuses them.
+- Complexity: `cognitive_complexity`, `too_many_lines`, `excessive_nesting`
+  (threshold 6) warn, and `just lint` denies warnings. Refactor into named
+  helpers; never `#[allow]`, `#[expect]` or a raised threshold.
+- `invisible_characters`, `unicode_not_nfc` and `non_ascii_literal` are denied:
+  write a non-ASCII character as an escape (`"\u{e9}"`).
+- Windows and macOS CI build and test only `portable_crates` (`os`, `file-system`,
+  `file-lock`, `store-jsonl`). A change that makes another crate's build need a
+  host feature is a CI change.
+
+## Tests
+
+Nothing is done until tests that execute prove it. Never write a blank `pass` test.
+
+- **Tests live beside the code**: `foo.rs` includes `foo.test.rs` at its end with
+  `#[cfg(test)] #[path = "foo.test.rs"] mod tests;`. No inline `mod tests {}`.
+  Shared fixtures are `*.test.rs` too. Always say WHY a test exists (the failure
+  mode or business rule).
+- Contract tests must break the build: `angzarr-ports` carries the conformance
+  suite every store runs; `angzarr-bus` the bus's; the spec's features run under
+  cucumber (`angzarr-router-conformance`, `angzarr-embedded-conformance`).
+- **Every embedded scenario is bound or tagged** (`tags.test.rs`): a divergence from
+  the distributed design is a tag with its reason, never prose. Moving the spec is
+  `just spec-vendor <rev>`, then bind or tag what is new.
+- Gherkin describes what and why, never how: if the wording changes when the
+  implementation changes, abstract it. Given is past state, When one action,
+  Then a business outcome; no UI steps, conditionals or hard-coded data.
+- **Mutation**: after every new test. `just mutants-staged`, `mutants-push`,
+  `mutants-all`; `MUTANTS_ONLY="crate ..." just mutants-all` for a few crates.
+  Host `cargo mutants` outside `just` is **forbidden** (it must run in a scratch
+  copy, never `--in-place` on your tree). Kill rate 90% (`angzarr-codegen` 100%).
+  A survivor gets a test; an equivalent mutant gets an `exclude_re` in its
+  family's `.cargo/mutants*.toml` matching that one mutant, with the reason, or
+  `#[cfg_attr(test, mutants::skip)]` where the crate already depends on `mutants`.
+  Never a lower threshold. Each family has its own config
+  (`mutation_families` in the justfile).
+
+## Errors, docs, wire
+
+- **Errors are a key and args.** Every public error implements
+  `angzarr_diagnostic::Diagnostic`: a stable kebab-case code written
+  `code!("suffix")` (prefixed by the crate name), named args, and a `Display` that
+  is the code and args, never English. A new variant needs a code and an en-US
+  message in `locales/en-US/messages.ftl` using exactly its args. Codes are never
+  reused. A third party's error text goes verbatim in the arg `ext_err_txt`. The
+  catalog check holds the catalogs to the errors.
+- **Docs and code state the current design only.** No "previously", "was X now Y",
+  strikethroughs, dated decision notes, kept-for-reference sections, or comments
+  about what code used to do. Version control holds history; a rejected
+  alternative may stay only as rationale ("not X, because ...").
+- Embedded diverges from the distributed system only where it must; prefer a change
+  that removes a divergence, and record each remaining one as a tag.
+- Messages are `.proto` files in `angzarr-project`, built with angzarr-build; no
+  hand-written prost message. Extension traits on generated code, not free
+  functions. Use enum names, never integers.
+- Prototype codebase: fix what you find or report it; propose before large changes.
+  Priorities: understanding, then architectural correctness, then speed.
+
+## Domain model (when touching coordinators, router or examples)
+
+- Aggregates: commands in, events out, one domain, pure `guard`, `validate`,
+  `compute`. Events are lean and past tense; stored as `Any`.
+- Sagas are stateless translators (events from A to facts or commands for B); they
+  receive sequence numbers, never event books, and make no decisions. Use a
+  **fact** (always accepted) between domains and a **command** only when the
+  destination must be able to reject. Process managers key on the correlation id.
+- Projectors turn events into outside output and never query. Aggregates may read
+  outside systems and never write them.
+- Names: `agg-{domain}`, `saga-{source}-{target}`, `projector-{source}-{feature}`,
+  globally unique; one crate per component.
+
+## Commits and releases
+
+Conventional Commits. One workspace version (`VERSION`), one tag `vMAJOR.MINOR.PATCH`
+for the whole tree; `proto/vX.Y.Z` publishes the protos to buf; `client/go/vX.Y.Z`
+is the Go client's. No per-crate tags (nothing is published to crates.io; consumers
+pin this repository by full commit hash).
