@@ -248,7 +248,8 @@ struct State {
     token: Option<ChangeToken>,
     /// Where the store's change feed was at the last refresh, if it has one.
     cursor: Option<ChangeCursor>,
-    /// How many lanes the feed has looked at (a test reads it).
+    /// How many times a lane's place in the owed and held sets was brought
+    /// up to date (a test reads it).
     visits: usize,
 }
 
@@ -281,7 +282,6 @@ impl State {
             .filter(|(_, lane)| lane.held.is_some())
             .map(|(key, _)| key.clone())
             .collect();
-        self.visits += self.lanes.len();
     }
 
     /// Lane `key` seen at `head` (its next sequence, 0 if the store holds
@@ -290,20 +290,22 @@ impl State {
     /// delivery.
     fn seen(&mut self, cover: Cover, head: u64) {
         let key = key(&cover);
-        if head > 0 {
+        if head == 0 {
+            if let Some(lane) = self.lanes.get_mut(&key) {
+                lane.listed = false;
+                match lane.kept() || lane.gone {
+                    true => lane.gone = true,
+                    false => {
+                        self.lanes.remove(&key);
+                    }
+                }
+            }
+        } else {
             let lane = (self.lanes.entry(key.clone())).or_insert_with(|| Lane::new(cover, 0));
             lane.listed = true;
             lane.head = head;
             if head < lane.cursor && lane.out.is_none() {
                 lane.gone = true;
-            }
-        } else if let Some(lane) = self.lanes.get_mut(&key) {
-            lane.listed = false;
-            match lane.kept() || lane.gone {
-                true => lane.gone = true,
-                false => {
-                    self.lanes.remove(&key);
-                }
             }
         }
         self.sync(&key);
@@ -419,7 +421,6 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> StoreFeed<'_, S, W> {
     fn pick(&self) -> Option<(StoreToken, Box<Delivery>)> {
         let mut guard = self.lock();
         let state = &mut *guard;
-        state.visits += 1;
         // A lane that owes has nothing out, so only a full gate keeps it.
         if state.gate.full() {
             return None;
