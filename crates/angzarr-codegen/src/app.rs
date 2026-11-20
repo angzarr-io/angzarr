@@ -46,18 +46,18 @@ use crate::warnings::Warning;
 /// The angzarr-embedded commit a generated application's `Cargo.toml` pins
 /// (its kernel, which re-exports the diagnostics, its markup and its host): the one this generator's output is
 /// written against.
-pub const ANGZARR_EMBEDDED_REV: &str = "bce1ff2ed813c72b869bbbfcdb7ba9b426e47812";
+pub const ANGZARR_EMBEDDED_REV: &str = "b9848330de43539a0a2d9ffbe960d59c2da0c67c";
 /// Where [`ANGZARR_EMBEDDED_REV`] is fetched from.
-pub const ANGZARR_EMBEDDED_GIT: &str = "https://github.com/angzarr-io/angzarr-embedded";
+pub const ANGZARR_EMBEDDED_GIT: &str = "https://github.com/angzarr-io/angzarr";
 /// Where angzarr-build is fetched from when a seed names no other source.
-pub const ANGZARR_BUILD_GIT: &str = "https://github.com/angzarr-io/angzarr-build";
+pub const ANGZARR_BUILD_GIT: &str = "https://github.com/angzarr-io/angzarr";
 /// The angzarr-build commit a generated application's `Cargo.toml` pins for
 /// its build script: a full hash of a commit already on this repository's
 /// main (a test holds it to that), since a commit cannot name itself. A
 /// change to what the generated build script calls moves it, in a later
 /// commit, to a pushed commit that has the change; a release moves it to
 /// the release's commit.
-pub const ANGZARR_BUILD_REV: &str = "2e07257111c5103da0d33db0a8cefe484babf464";
+pub const ANGZARR_BUILD_REV: &str = "b9848330de43539a0a2d9ffbe960d59c2da0c67c";
 
 /// From how far a command may reach a domain through the host's listener
 /// (the host config's `expose`); not exposed is the default and is not

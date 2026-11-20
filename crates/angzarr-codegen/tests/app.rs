@@ -1205,10 +1205,7 @@ fn a_host_configs_scaffold_settings_are_the_scaffolds_configuration() {
 /// the pinned commit: not the CLI's repository, which no longer holds it.
 #[test]
 fn the_default_manifest_pins_angzarr_build_in_its_own_repository() {
-    assert_eq!(
-        ANGZARR_BUILD_GIT,
-        "https://github.com/angzarr-io/angzarr-build"
-    );
+    assert_eq!(ANGZARR_BUILD_GIT, "https://github.com/angzarr-io/angzarr");
     let files = app(&descriptors(SHOP), SHOP, &seed("shop"), None, None).unwrap();
     let manifest = &file(&files, "Cargo.toml").source;
     let expected = format!(
