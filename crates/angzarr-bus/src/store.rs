@@ -31,7 +31,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use std::task::Poll;
+use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
 use angzarr_ports::{
@@ -152,6 +152,8 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> PullTransport
             .filter(|(cover, _)| opening.scope.holds(cover))
             .map(|(cover, mark)| (key(&cover), Lane::new(cover, mark)))
             .collect();
+        // Armed before the cursor and the first scan, like the cursor.
+        let commit = self.push.map(CommitNotify::next_commit);
         // Taken before the first scan: what is committed between them is
         // told again, which is harmless.
         let cursor = match self.following {
@@ -170,6 +172,9 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> PullTransport
                 told_idle: false,
                 token: None,
                 cursor,
+                commit,
+                rings: 0,
+                caught_up: 0,
                 visits: 0,
             }),
             delayed: Mutex::default(),
@@ -274,6 +279,16 @@ struct State {
     token: Option<ChangeToken>,
     /// Where the store's change feed was at the last refresh, if it has one.
     cursor: Option<ChangeCursor>,
+    /// The wait for the next commit, kept between calls and armed again at
+    /// the instant it rings, before what the commit changed is read: no
+    /// commit falls between one read and the next wait, nor between two
+    /// calls (a call may end, or be dropped, at any await).
+    commit: Option<CommitWait>,
+    /// How many times the wait rang, and how many of those the change feed
+    /// has been read for: a ring is owed a read until one that began after
+    /// it completes, however a call ends meanwhile.
+    rings: u64,
+    caught_up: u64,
     /// How many times a lane's place in the owed and held sets was brought
     /// up to date (a test reads it).
     visits: usize,
@@ -350,6 +365,15 @@ pub struct StoreFeed<'t, S, W: ?Sized = dyn Timer> {
     delayed: Mutex<Delayed<'t, Key>>,
     /// Rung at each settlement.
     settled: CommitSignal,
+}
+
+/// What a feed looks at, once it has armed its waits again, after being woken.
+enum Check {
+    Nothing,
+    /// What the change feed (or, without one, a scan) says changed.
+    Refresh,
+    /// The store's change token against the one at the last read.
+    Token,
 }
 
 /// What woke a waiting feed.
@@ -444,6 +468,45 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> StoreFeed<'_, S, W> {
         }
     }
 
+    /// Whether a commit rang the kept wait since it was armed, polled with
+    /// `cx`: if so, the wait is armed again, before anything is read.
+    fn poll_commit(&self, cx: &mut Context<'_>) -> Poll<()> {
+        let mut state = self.lock();
+        let Some(wait) = state.commit.as_mut() else {
+            return Poll::Pending;
+        };
+        let rung = Pin::new(wait).poll(cx);
+        if rung.is_ready() {
+            state.rings += 1;
+            state.commit = self.transport.push.map(CommitNotify::next_commit);
+        }
+        rung
+    }
+
+    /// Read what the commits that rang so far changed, unless that was done.
+    async fn catch_up(&self) -> Result<(), StoreError> {
+        let rings = self.lock().rings;
+        if self.lock().caught_up != rings {
+            self.refresh().await?;
+            self.lock().caught_up = rings;
+        }
+        Ok(())
+    }
+
+    /// Whether a commit rang since the last look, without waiting.
+    fn rung(&self) -> bool {
+        self.poll_commit(&mut Context::from_waker(Waker::noop()))
+            .is_ready()
+    }
+
+    /// Whether the store's change token moved since the last read: stale if so.
+    async fn compare_token(&self) -> Result<(), StoreError> {
+        let token = self.transport.store.change_token().await?;
+        let mut state = self.lock();
+        state.stale |= state.token != Some(token);
+        Ok(())
+    }
+
     /// The first delivery owed within the credit, taken out.
     fn pick(&self) -> Option<(StoreToken, Box<Delivery>)> {
         let mut guard = self.lock();
@@ -514,17 +577,10 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> StoreFeed<'_, S, W> {
     }
 
     /// Wait for a commit, a settlement, a delay that passed, or `timer`.
-    async fn woken(
-        &self,
-        timer: &mut BoxFuture<'_, ()>,
-        settled: &mut CommitWait,
-        commit: &mut Option<CommitWait>,
-    ) -> Woken {
+    async fn woken(&self, timer: &mut BoxFuture<'_, ()>, settled: &mut CommitWait) -> Woken {
         poll_fn(|cx| {
-            if let Some(commit) = commit.as_mut() {
-                if Pin::new(commit).poll(cx).is_ready() {
-                    return Poll::Ready(Woken::Commit);
-                }
+            if self.poll_commit(cx).is_ready() {
+                return Poll::Ready(Woken::Commit);
             }
             if Pin::new(&mut *settled).poll(cx).is_ready() {
                 return Poll::Ready(Woken::Settled);
@@ -547,11 +603,21 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> Feed for StoreFeed<'_,
     async fn next(&self) -> Result<Next<StoreToken>, StoreError> {
         let transport = self.transport;
         let mut timer = transport.timer.after(transport.every);
+        let mut check = Check::Nothing;
         loop {
-            // Armed before reading: a commit or settlement after this
-            // resolves it.
-            let mut commit = transport.push.map(CommitNotify::next_commit);
+            // Armed before reading: a settlement after this resolves it. A
+            // commit rings the feed's own wait ([`StoreFeed::poll_commit`]).
             let mut settled = self.settled.wait();
+            self.rung();
+            self.catch_up().await?;
+            // Read after the commit wait is armed again, never before: a
+            // store's feed takes time, and a commit that lands while it
+            // answers must ring the wait now kept.
+            match std::mem::replace(&mut check, Check::Nothing) {
+                Check::Nothing => {}
+                Check::Refresh => self.refresh().await?,
+                Check::Token => self.compare_token().await?,
+            }
             if self.lock().stale {
                 self.scan().await?;
             }
@@ -559,26 +625,26 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> Feed for StoreFeed<'_,
                 self.lock().told_idle = false;
                 return Ok(Next::Delivery(token, delivery));
             }
+            if self.rung() {
+                // Rung while this call read: read what it changed first.
+                self.lock().told_idle = false;
+                continue;
+            }
             let idle = !self.owes() && !std::mem::replace(&mut self.lock().told_idle, true);
             if idle {
                 return Ok(Next::Idle);
             }
-            match self.woken(&mut timer, &mut settled, &mut commit).await {
+            match self.woken(&mut timer, &mut settled).await {
                 Woken::Commit => {
-                    self.refresh().await?;
                     self.lock().told_idle = false;
                 }
                 Woken::Tick => {
                     timer = transport.timer.after(transport.every);
                     self.release(None);
-                    match transport.following {
-                        Following::Changes(_) => self.refresh().await?,
-                        Following::FullScan => {
-                            let token = transport.store.change_token().await?;
-                            let mut state = self.lock();
-                            state.stale |= state.token != Some(token);
-                        }
-                    }
+                    check = match transport.following {
+                        Following::Changes(_) => Check::Refresh,
+                        Following::FullScan => Check::Token,
+                    };
                     self.lock().told_idle = false;
                 }
                 Woken::Due(due) => {

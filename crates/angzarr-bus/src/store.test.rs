@@ -736,3 +736,211 @@ async fn told_what_a_commit_touched_a_stream_never_delivered_that_is_purged_is_n
     };
     tokio::join!(churn, nothing);
 }
+
+// ---------------------------------------------------------------- a change feed that takes time
+
+/// A change feed that pauses, mid-answer, once it has answered "caught up":
+/// the time a real store's feed spends on I/O, in which a commit can land.
+struct Pausing<'s> {
+    store: &'s MemoryStore,
+    /// The feed answered "caught up" and is paused.
+    paused: std::sync::atomic::AtomicBool,
+    /// The test lets it go on.
+    resume: std::sync::atomic::AtomicBool,
+}
+
+impl angzarr_ports::Changes for Pausing<'_> {
+    async fn changes_cursor(&self) -> Result<angzarr_ports::ChangeCursor, StoreError> {
+        self.store.changes_cursor().await
+    }
+
+    async fn changed_since(
+        &self,
+        since: &angzarr_ports::ChangeCursor,
+        limit: usize,
+    ) -> Result<angzarr_ports::Changed, StoreError> {
+        let answer = self.store.changed_since(since, limit).await?;
+        let caught_up = matches!(
+            &answer,
+            angzarr_ports::Changed::Streams { changes, .. } if changes.is_empty()
+        );
+        if caught_up && !self.resume.load(Ordering::SeqCst) {
+            self.paused.store(true, Ordering::SeqCst);
+            while !self.resume.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        }
+        Ok(answer)
+    }
+}
+
+#[tokio::test]
+async fn a_commit_landing_while_the_change_feed_is_answering_is_not_lost() {
+    use std::sync::atomic::AtomicBool;
+    let store = MemoryStore::default();
+    let pausing = Pausing {
+        store: &store,
+        paused: AtomicBool::new(false),
+        resume: AtomicBool::new(false),
+    };
+    let transport = StoreTransport::new(
+        &store,
+        &Frozen,
+        Duration::from_secs(3600),
+        Following::Changes(&pausing),
+    )
+    .pushed_by(&store);
+    let feed = open(&transport, &scope(), 1).await;
+    let committing = async {
+        for _ in 0..5 {
+            tokio::task::yield_now().await;
+        }
+        append(&store, &stream(1), 1).await;
+        while !pausing.paused.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        // The feed has answered "caught up" and not returned yet.
+        append(&store, &stream(2), 1).await;
+        pausing.resume.store(true, Ordering::SeqCst);
+    };
+    let following = async {
+        let mut streams = Vec::new();
+        for _ in 0..2 {
+            let (token, delivered) = delivery(&feed).await;
+            streams.push(delivered.stream);
+            feed.settle(token, Settle::Handled).await.unwrap();
+        }
+        streams
+    };
+    let (_, mut delivered) = tokio::join!(committing, following);
+    delivered.sort_by_key(|cover| cover.root.as_ref().map(|root| root.value.to_vec()));
+    let expected = vec![stream(1), stream(2)];
+    assert_eq!(delivered, expected, "both commits were delivered");
+}
+
+/// A change feed that yields a pseudo-random number of times around each
+/// answer, as a store's I/O does.
+struct Yielding<'s> {
+    store: &'s MemoryStore,
+    seed: AtomicUsize,
+}
+
+impl Yielding<'_> {
+    async fn pause(&self) {
+        let next = (self.seed.load(Ordering::SeqCst))
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        self.seed.store(next, Ordering::SeqCst);
+        for _ in 0..(next >> 33) % 4 {
+            tokio::task::yield_now().await;
+        }
+    }
+}
+
+impl angzarr_ports::Changes for Yielding<'_> {
+    async fn changes_cursor(&self) -> Result<angzarr_ports::ChangeCursor, StoreError> {
+        self.pause().await;
+        let cursor = self.store.changes_cursor().await;
+        self.pause().await;
+        cursor
+    }
+
+    async fn changed_since(
+        &self,
+        since: &angzarr_ports::ChangeCursor,
+        limit: usize,
+    ) -> Result<angzarr_ports::Changed, StoreError> {
+        self.pause().await;
+        let answer = self.store.changed_since(since, limit).await;
+        self.pause().await;
+        answer
+    }
+}
+
+#[tokio::test]
+async fn every_event_committed_while_the_change_feed_yields_is_delivered_once() {
+    const STREAMS: u8 = 64;
+    const EVENTS: u64 = 2;
+    for seed in 0..20 {
+        let store = MemoryStore::default();
+        let yielding = Yielding {
+            store: &store,
+            seed: AtomicUsize::new(seed),
+        };
+        let transport = StoreTransport::new(
+            &store,
+            &Frozen,
+            Duration::from_secs(3600),
+            Following::Changes(&yielding),
+        )
+        .pushed_by(&store);
+        let feed = open(&transport, &scope(), 8).await;
+        let committing = async {
+            for n in (0..EVENTS).flat_map(|round| (0..STREAMS).map(move |n| (round, n))) {
+                append(&store, &stream(n.1), 1).await;
+                if (n.1 as u64 + n.0).is_multiple_of(3) {
+                    tokio::task::yield_now().await;
+                }
+            }
+        };
+        let following = async {
+            let mut seen = BTreeSet::new();
+            while seen.len() < STREAMS as usize * EVENTS as usize {
+                let (token, delivered) = delivery(&feed).await;
+                let root = delivered.stream.root.as_ref().unwrap().value.to_vec();
+                assert!(
+                    seen.insert((root, delivered.sequence)),
+                    "delivered twice, seed {seed}"
+                );
+                tokio::task::yield_now().await;
+                feed.settle(token, Settle::Handled).await.unwrap();
+            }
+        };
+        tokio::join!(committing, following);
+    }
+}
+
+#[tokio::test]
+async fn a_call_dropped_while_the_change_feed_is_answering_loses_no_commit() {
+    use std::sync::atomic::AtomicBool;
+    let store = MemoryStore::default();
+    let pausing = Pausing {
+        store: &store,
+        paused: AtomicBool::new(false),
+        resume: AtomicBool::new(false),
+    };
+    let transport = StoreTransport::new(
+        &store,
+        &Frozen,
+        Duration::from_secs(3600),
+        Following::Changes(&pausing),
+    )
+    .pushed_by(&store);
+    let feed = open(&transport, &scope(), 1).await;
+    // Idle first, so the next call waits for a commit.
+    assert!(matches!(answer(&feed).await, Next::Idle));
+    append(&store, &stream(1), 1).await;
+    {
+        // Polled until the change feed pauses mid-answer, then dropped.
+        let mut next = pin!(feed.next());
+        let mut cx = Context::from_waker(Waker::noop());
+        for _ in 0..1000 {
+            if pausing.paused.load(Ordering::SeqCst) {
+                break;
+            }
+            assert!(next.as_mut().poll(&mut cx).is_pending());
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            pausing.paused.load(Ordering::SeqCst),
+            "the call read the feed"
+        );
+    }
+    pausing.resume.store(true, Ordering::SeqCst);
+    let (_, delivered) = delivery(&feed).await;
+    assert_eq!(
+        delivered.stream,
+        stream(1),
+        "the commit read by a dropped call"
+    );
+}
