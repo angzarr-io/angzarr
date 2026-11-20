@@ -1,0 +1,10 @@
+# cargo-mutants (https://mutants.rs): `just mutants-push` runs it over what a
+# push would add and `just mutants-staged` over the staged diff, both by hand
+# (no git hook runs mutation), and `just mutants-all` over the whole
+# workspace (the full pass, weekly in CI). The kill-rate thresholds are not
+# here but in the justfile's `mutation_thresholds`, which judges the run.
+
+# Each mutant runs only its own crate's tests (cargo-mutants' default). The
+# thresholds judge whether a crate tests itself; a dependent's tests killing
+# a mutant would credit the crate with coverage it does not have.
+test_workspace = false

@@ -1,0 +1,56 @@
+# The mutation full pass, weekly and by hand: `just mutants-all` mutates the
+# whole workspace and judges each crate by the justfile's mutation_thresholds
+# (gates/gates.just). No git hook runs mutation; `mutants-push` and
+# `mutants-staged` judge a change's diff by hand, and this pass catches what
+# has drifted under them. It needs just and cargo-mutants. It fires on
+# schedule only once it is on the default branch.
+#
+# angzarr core's angzarr-proto runs protoc in its build script: protoc
+# 3.21.12, by ctxloom/ci's setup-protoc (the release zip checked against
+# its pinned sha256), on every runner.
+#
+# Every action is pinned to a commit, its release in the comment; every tool
+# to a version.
+
+name: mutation
+
+on:
+  schedule:
+    # Weekly, Monday 06:00 UTC.
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: never
+  TOOLS: just@1.40.0,cargo-mutants@26.2.0
+
+jobs:
+  mutants-all:
+    name: mutation full pass
+    runs-on: ubuntu-24.04
+    # GitHub's cap for a hosted job; let the full pass finish rather than
+    # cancel it mid-run.
+    timeout-minutes: 360
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Toolchain (rust-toolchain.toml)
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: ctxloom/ci/.github/actions/setup-protoc@fa01764571615bd3174313e84631bdd5c13a02e6 # main 2026-11-12, protoc 3.21.12 by checksum
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: ${{ env.TOOLS }}
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - run: just mutants-all
+      - name: The gate's log and surviving mutants
+        if: always()
+        run: |
+          shopt -s nullglob
+          for f in target/logs/mutants-all.log target/logs/mutants-all/mutants.out/missed.txt; do
+            echo "::group::$f"; cat "$f"; echo "::endgroup::"
+          done

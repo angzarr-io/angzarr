@@ -1,0 +1,79 @@
+# The git-hook gates. The repository's lefthook.yml extends this file.
+#
+# A failing hook is a finding: fix the cause and commit again; never bypass
+# with --no-verify. Red tests are not a failing hook off the default branch:
+# test-first work commits them there, warned that the branch cannot merge
+# until they pass, and the hooks below keep them out of the default branch.
+# Every `run:` is one simple command, so it means the same
+# under whatever /bin/sh the committing machine has; anything longer is a
+# just recipe (gates.just, imported by the repository's justfile).
+
+# Show a command's output only when it fails, then the per-command summary.
+# Each gate prints one line on a pass and the extract that matters on a
+# failure, with its full log in target/logs/ (gates.just's `_run`).
+output:
+  - execution_out
+  - failure
+  - summary
+
+pre-commit:
+  # One at a time in priority order, stopping at the first failure.
+  piped: true
+  commands:
+    fmt:
+      # Formats the staged Rust instead of refusing it, in the index itself
+      # (`just fmt-staged` says how), so a partially staged file's unstaged
+      # hunks are never moved. No `stage_fixed`: the recipe stages.
+      priority: 1
+      glob: "*.rs"
+      run: just fmt-staged {staged_files}
+    secrets:
+      priority: 2
+      run: just secrets-scan-staged
+    clippy:
+      # The repository's own `lint`.
+      priority: 3
+      run: just lint
+    deps:
+      priority: 4
+      run: just lint-deps
+    tests:
+      # The tests of the crates the commit changes and of their workspace
+      # dependents, over the STAGED tree (`just test-staged` says how). Red
+      # tests are committed on a branch other than the default one, with a
+      # warning, and refused on the default branch (`just test-commit`).
+      priority: 5
+      run: just test-commit
+    # No mutation testing in any hook: it runs while tests are written and
+    # judged (`just mutants-staged`, `just mutants-push`), at the end of an
+    # unattended run, and in the scheduled CI full pass (`just mutants-all`).
+
+# Red tests never reach the default branch. A merge commit into it is tested
+# as a commit is (pre-merge-commit); a push to it is refused unless the whole
+# workspace's tests pass on the pushed commit (pre-push); a fast-forward of it,
+# which runs no hook that can refuse it, is tested just after (post-merge),
+# and named with the way back when its tests fail.
+pre-merge-commit:
+  commands:
+    tests:
+      run: just test-commit
+
+pre-push:
+  commands:
+    tests:
+      # git's pushed refs are on stdin, and {1} is the remote's name.
+      # lefthook skips a pre-push command when it finds no files changed
+      # between HEAD and the remote, which says nothing of the refs pushed
+      # (`git push origin feature:main` from main changes none); a `{files}`
+      # in `run` is what turns that off, so `files` names one that is always
+      # there, and push-check ignores it.
+      priority: 1
+      use_stdin: true
+      files: echo justfile
+      run: just push-check {1} {files}
+
+post-merge:
+  commands:
+    tests:
+      # {1} is git's squash flag.
+      run: just merge-check {1}

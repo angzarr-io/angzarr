@@ -1,0 +1,6 @@
+# The allowed exceptions to `just lint-os` (scripts/os-cfg-check.sh): code
+# outside crates/os that names an OS. One per line:
+#   <file> | <text on the line> | <why>
+# Keep it short: an exception is code the os crate cannot hold. None today:
+# the tests that need a unix tool (sh, kill, mkfifo, git) ask the host's
+# flavor at run time instead of compiling out.

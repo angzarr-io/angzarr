@@ -1,0 +1,14 @@
+# gitleaks configuration for the pre-commit secret scan
+# (`just secrets-scan-staged`).
+#
+# The default rule set, with no allowlist: angzarr-platform is a library with no
+# credentials, services or deployment of its own, and its history scans
+# clean, so any finding is either a real secret or a test fixture. A one-off
+# fake secret in a test is allowed where it lives, with a trailing
+# `gitleaks:allow` comment on its line, not here: the annotation moves and
+# dies with the code it covers, while a path here outlives a rename and
+# silently stops meaning anything. A whole class of false positive goes here,
+# with the reason it is not a secret.
+
+[extend]
+useDefault = true

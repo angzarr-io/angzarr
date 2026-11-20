@@ -1,0 +1,4 @@
+# Git hooks, managed by lefthook (`just hooks-install`). The gates are
+# gates/lefthook.yml; angzarr-platform's parameters for them are in its justfile.
+extends:
+  - gates/lefthook.yml

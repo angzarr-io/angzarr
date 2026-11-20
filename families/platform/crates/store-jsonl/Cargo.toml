@@ -1,0 +1,48 @@
+[package]
+name = "store-jsonl"
+version = "0.1.0"
+description = "A single-process angzarr store kept in one append-only JSON Lines journal of protobuf messages: memory to read from, the journal to survive"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+angzarr-diagnostic.workspace = true
+# The ports the store implements, and the in-memory store it delegates to.
+angzarr-ports = { workspace = true, features = ["memory"] }
+# One journal entry as one line of canonical proto3 JSON.
+angzarr-proto-jsonl.workspace = true
+# The exclusive lock that makes the journal single-process.
+file-lock.workspace = true
+# Every journal operation goes through the filesystem seam.
+file-system.workspace = true
+# `Mode`, for the journal's permissions.
+os.workspace = true
+prost.workspace = true
+prost-reflect.workspace = true
+prost-types.workspace = true
+
+[dev-dependencies]
+# The conformance suite every store runs.
+angzarr-ports = { workspace = true, features = ["memory", "contract"] }
+# Rendering catalogs' English (`english_for!`), and reading the catalog's
+# messages and variables.
+angzarr-presentation = { workspace = true, features = ["test-support"] }
+fluent-syntax.workspace = true
+mutants.workspace = true
+# The suite's checks are async: one runtime attribute per check.
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { workspace = true, features = ["build"] }
+
+[features]
+# `diagnostic_samples`, for other crates' catalog tests: their
+# dev-dependency turns it on, and no build of a binary does.
+test-support = []
+
+[lints]
+workspace = true

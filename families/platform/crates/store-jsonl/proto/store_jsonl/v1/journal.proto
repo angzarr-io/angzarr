@@ -1,0 +1,124 @@
+// The journal of store-jsonl: one `Entry` per line of one append-only JSON
+// Lines file, in the canonical proto3 JSON mapping.
+//
+// A line is the atomic unit. An entry holds everything its operation changes
+// together, so a write's events, positions, outbox entries and dead letters
+// are ONE line. The first line is always the header.
+//
+// A store never reads a business payload: an event page, a snapshot, an
+// outbox message and a dead letter's letter are kept as the bytes the wire
+// encodes them as (base64 in JSON), so the journal needs no descriptor of
+// any type a caller defines.
+
+syntax = "proto3";
+
+package store_jsonl.v1;
+
+message Entry {
+  oneof op {
+    Header header = 1;
+    Write write = 2;
+    SnapshotWritten snapshot_written = 3;
+    Purged purged = 4;
+    EditionStreamRemoved edition_stream_removed = 5;
+    OutboxCleared outbox_cleared = 6;
+    DeadLettersDrained dead_letters_drained = 7;
+    DeadLettersRemoved dead_letters_removed = 8;
+  }
+}
+
+// The journal's first line: the format its other lines are in.
+message Header {
+  uint32 format = 1;
+}
+
+// One stream: (domain, edition, root). The main timeline has no edition.
+message Stream {
+  string domain = 1;
+  optional string edition = 2;
+  // The root's canonical text (hyphenated lowercase).
+  string root = 3;
+}
+
+// One handling step's write, whole.
+message Write {
+  optional Append events = 1;
+  repeated Position positions = 2;
+  repeated OutboxEntry outbox = 3;
+  repeated DeadLetter dead_letters = 4;
+  // Outbox entries the write clears, each an id's canonical text: cleared
+  // before the write's own entries are added.
+  repeated string cleared = 5;
+}
+
+message Append {
+  Stream stream = 1;
+  uint64 expected = 2;
+  // Each an encoded EventPage.
+  repeated bytes pages = 3;
+}
+
+message Position {
+  string handler = 1;
+  Stream stream = 2;
+  uint64 next = 3;
+}
+
+message OutboxEntry {
+  // The id's canonical text.
+  string id = 1;
+  string origin = 2;
+  // The encoded Any.
+  bytes message = 3;
+  optional string edition = 4;
+}
+
+message DeadLetter {
+  Stream stream = 1;
+  Place at = 2;
+  // The encoded AngzarrDeadLetter.
+  bytes letter = 3;
+}
+
+// Where on its stream a dead letter is.
+message Place {
+  oneof at {
+    uint64 sequence = 1;
+    // The command's id, canonical text.
+    string command = 2;
+  }
+}
+
+message DeadLetterKey {
+  Stream stream = 1;
+  Place at = 2;
+  string component = 3;
+}
+
+message SnapshotWritten {
+  Stream stream = 1;
+  // The encoded Snapshot.
+  bytes snapshot = 2;
+}
+
+message Purged {
+  Stream stream = 1;
+  uint64 expected = 2;
+}
+
+message EditionStreamRemoved {
+  Stream stream = 1;
+}
+
+message OutboxCleared {
+  // Each an id's canonical text.
+  repeated string ids = 1;
+}
+
+message DeadLettersDrained {
+  Stream stream = 1;
+}
+
+message DeadLettersRemoved {
+  repeated DeadLetterKey keys = 1;
+}
