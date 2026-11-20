@@ -90,7 +90,7 @@ jobs:
           mold-version: ${{ env.MOLD_VERSION }}
           make-default: false
 
-      - name: Install Rust (rust-toolchain.toml: pinned channel, rustfmt, clippy, wasm32)
+      - name: Install Rust (rust-toolchain.toml, with rustfmt, clippy and wasm32)
         run: rustup show active-toolchain || rustup toolchain install
 
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
