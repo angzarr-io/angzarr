@@ -19,13 +19,15 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage, Snapshot};
+use angzarr_ports::angzarr_proto::v1::{
+    Cover, EditionSummary, EventBook, EventPage, EventRef, Snapshot,
+};
 use angzarr_ports::{
     is_fork, Append, AppliedMigration, ChangeCursor, ChangeToken, Changed, Changes, CommitNotify,
-    CommitSignal, CommitWait, DeadLetter, DeadLetterKey, DeadLetterStore, EventStore, Export,
-    ExportRow, Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed,
-    Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
-    StreamChange, StreamRef, Uuid, Watch, WeakCommitSignal, Write, Written,
+    CommitSignal, CommitWait, DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore,
+    Export, ExportRow, Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore,
+    Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore,
+    StoreError, StreamChange, StreamRef, Uuid, Watch, WeakCommitSignal, Write, Written,
 };
 use prost::Message;
 use prost_types::Timestamp;
@@ -536,13 +538,13 @@ const SQLITE_NOTADB: i32 = 26;
 
 // ------------------------------------------------------------ the ports
 //
-// Every port and capability. Editions are per-stream forks only as far as
-// the base ports need them: an edition stream's first own event is its
-// fork (an `EditionCreated` meta-event, `is_fork`), it reads main below its fork, then its
-// own; a write of anything else to an unforked one is refused. The
-// administration of editions (the `Editions` port:
-// listing, deletion and removal) is not implemented yet (the owner's
-// ruling, 2026-10-28): a follow-up.
+// Every port and capability. Editions are per-stream forks: an edition
+// stream's first own event is its fork (an `EditionCreated` meta-event,
+// `is_fork`), it reads main below its fork, then its own; a write of
+// anything else to an unforked one is refused. An edition exists while a
+// fork of it remains (no table names one): `Editions` lists them from the
+// fork rows and removes an edition stream's rows, and the opt-in
+// `EditionKnown` is derived from the listing.
 
 /// A value bound to a statement's parameter.
 enum Value {
@@ -574,6 +576,15 @@ fn letter_key(key: DeadLetterKey<'_>) -> [Value; 6] {
         Value::Blob(at),
         Value::Text(key.component.to_string()),
     ]
+}
+
+/// What a write's stream part landed.
+struct Landed<'w> {
+    /// The appended stream's new length.
+    next_sequence: Option<u64>,
+    /// The edition streams the write touched: the one it appended to and
+    /// those its positions are on.
+    edition_streams: Vec<StreamRef<'w>>,
 }
 
 /// Statements run on one connection, each counted.
@@ -733,9 +744,36 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         rows::snapshot(&cover, &bytes).map(Some)
     }
 
-    /// The events of a write: checked against the stream as read in its
-    /// edition, then inserted.
-    async fn append(&mut self, append: Append<'_>) -> Result<u64, StoreError> {
+    /// The first sequence of `stream`'s own rows in its edition: none while
+    /// it has no row of its own there.
+    async fn own_first(&mut self, stream: StreamRef<'_>) -> Result<Option<i64>, StoreError> {
+        let own = [
+            Value::Text(stream.domain.to_string()),
+            Value::Text(stream.edition.unwrap_or_default().to_string()),
+            Value::Blob(stream.root.as_bytes().to_vec()),
+        ];
+        let rows = self.rows(statements::OWN_FIRST, own).await?;
+        Ok(rows
+            .first()
+            .map(|row| row.try_get(0))
+            .transpose()
+            .map_err(unavailable)?
+            .flatten())
+    }
+
+    /// Whether a fork of edition `name` remains: some stream holds a row
+    /// of it.
+    async fn edition_exists(&mut self, name: &str) -> Result<bool, StoreError> {
+        let found = self
+            .rows(statements::EDITION_EXISTS, [Value::Text(name.to_string())])
+            .await?;
+        Ok(!found.is_empty())
+    }
+
+    /// The events of a write, checked against the stream as read in its
+    /// edition, nothing yet inserted: whether the stream holds rows of its
+    /// own once they land.
+    async fn admit(&mut self, append: Append<'_>) -> Result<bool, StoreError> {
         let Append {
             stream,
             expected,
@@ -743,24 +781,15 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         } = append;
         let actual = self.head(stream).await?.next_sequence;
         let creates = pages.first().is_some_and(is_fork);
-        match stream.edition {
-            None if creates => return Err(StoreError::EditionNameRequired),
-            None => {}
-            Some(edition) => {
-                let own = [
-                    Value::Text(stream.domain.to_string()),
-                    Value::Text(edition.to_string()),
-                    Value::Blob(stream.root.as_bytes().to_vec()),
-                ];
-                let first: Option<i64> = self
-                    .rows(statements::OWN_FIRST, own)
-                    .await?
-                    .first()
-                    .map(|row| row.try_get(0))
-                    .transpose()
-                    .map_err(unavailable)?
-                    .flatten();
-                match (first.is_some(), creates) {
+        let holds = match stream.edition {
+            None if pages.iter().any(is_fork) => return Err(StoreError::EditionNameRequired),
+            None => true,
+            Some(_) if pages.iter().skip(1).any(is_fork) => {
+                return Err(StoreError::edition_already_forked(stream))
+            }
+            Some(_) => {
+                let forked = self.own_first(stream).await?.is_some();
+                match (forked, creates) {
                     (true, true) => return Err(StoreError::edition_already_forked(stream)),
                     (false, false) if !pages.is_empty() => {
                         return Err(StoreError::edition_not_forked(stream))
@@ -769,31 +798,54 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
                     // sequence: main's head or any sequence below it
                     // (14.36, decision 14.107).
                     (false, true) if expected <= actual => {
-                        return self.insert(stream, expected, pages).await;
+                        check_run(stream, expected, pages)?;
+                        return Ok(true);
                     }
-                    _ => {}
+                    _ => forked,
                 }
             }
-        }
+        };
         if expected != actual {
             return Err(StoreError::conflict(stream, expected, actual));
         }
-        self.insert(stream, expected, pages).await
+        check_run(stream, expected, pages)?;
+        Ok(holds)
+    }
+
+    /// A step's positions on edition streams, checked: one on a stream with
+    /// no row of its own (and none landing in this write) of an edition
+    /// that no longer exists would leave a row of it behind, so it is
+    /// refused `EditionNotFound`; while the edition exists, a position
+    /// lands on any stream of it, forked or not.
+    async fn check_positions(
+        &mut self,
+        positions: &[(PositionKey<'_>, u64)],
+        landing: Option<StreamRef<'_>>,
+    ) -> Result<(), StoreError> {
+        for (key, _) in positions {
+            let Some(name) = key.stream.edition else {
+                continue;
+            };
+            if landing == Some(key.stream) || self.own_first(key.stream).await?.is_some() {
+                continue;
+            }
+            if !self.edition_exists(name).await? {
+                return Err(StoreError::EditionNotFound {
+                    name: name.to_string(),
+                });
+            }
+        }
+        Ok(())
     }
 
     /// `pages`, continuing the stream from `expected`, inserted: the
-    /// stream's new length.
+    /// stream's new length. The caller has admitted them.
     async fn insert(
         &mut self,
         stream: StreamRef<'_>,
         expected: u64,
         pages: &[EventPage],
     ) -> Result<u64, StoreError> {
-        for (due, page) in (expected..).zip(pages) {
-            if page.sequence != due {
-                return Err(StoreError::discontinuous(stream, due, page.sequence));
-            }
-        }
         if pages.is_empty() {
             return Ok(expected);
         }
@@ -801,6 +853,41 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         self.built_execute(statements::insert_pages::<SqliteDialect>(&cover, pages)?)
             .await?;
         Ok(expected + pages.len() as u64)
+    }
+
+    /// The stream part of a write: admitted, the step's positions checked
+    /// against the edition they name, the pages inserted, the stream
+    /// touched. With the edition streams the write touched (the one it
+    /// appends to and those its positions are on), for its outbox entries.
+    async fn land<'w>(&mut self, write: &Write<'w>) -> Result<Landed<'w>, StoreError> {
+        let admitted = match write.events {
+            Some(append) => Some((append, self.admit(append).await?)),
+            None => None,
+        };
+        let landing = admitted
+            .filter(|(_, holds)| *holds)
+            .map(|(append, _)| append.stream);
+        self.check_positions(write.positions, landing).await?;
+        let next_sequence = match admitted {
+            Some((append, _)) => {
+                let next = self
+                    .insert(append.stream, append.expected, append.pages)
+                    .await?;
+                if !append.pages.is_empty() {
+                    self.touch(append.stream, false).await?;
+                }
+                Some(next)
+            }
+            None => None,
+        };
+        let edition_streams = (landing.into_iter())
+            .chain(write.positions.iter().map(|(key, _)| key.stream))
+            .filter(|stream| stream.edition.is_some())
+            .collect();
+        Ok(Landed {
+            next_sequence,
+            edition_streams,
+        })
     }
 
     /// The change feed learns `stream` was written to, or purged, in this
@@ -856,6 +943,7 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         entry: &OutboxEntry,
         at: Option<(StreamRef<'_>, u64)>,
         place: usize,
+        touched: &[StreamRef<'_>],
     ) -> Result<(), StoreError> {
         let ([domain, root, edition], sequence) = match at {
             Some((stream, sequence)) => (view_of(stream), sequence),
@@ -879,7 +967,29 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
             Value::Int(i64::try_from(sequence).unwrap_or(i64::MAX)),
             Value::Int(i64::try_from(place).unwrap_or(i64::MAX)),
         ];
-        self.execute(statements::PUT_OUTBOX, values).await.map(drop)
+        let kept = self.execute(statements::PUT_OUTBOX, values).await?;
+        match &entry.edition {
+            Some(edition) if kept > 0 => self.put_edition_streams(entry.id, edition, touched).await,
+            _ => Ok(()),
+        }
+    }
+
+    /// Keep which of `touched` are streams of `edition`, the edition of the
+    /// outbox entry `id` put with the write that touched them: removing one
+    /// takes the entry.
+    async fn put_edition_streams(
+        &mut self,
+        id: Uuid,
+        edition: &str,
+        touched: &[StreamRef<'_>],
+    ) -> Result<(), StoreError> {
+        for stream in touched.iter().filter(|s| s.edition == Some(edition)) {
+            let [domain, root, edition] = view_of(*stream);
+            let values = [Value::Blob(id.as_bytes().to_vec()), domain, edition, root];
+            self.execute(statements::PUT_OUTBOX_EDITION_STREAM, values)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Keep `letter`, replacing the one kept under its key.
@@ -930,6 +1040,35 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         self.execute(statements::DELETE_DEAD_LETTERS, [domain, edition, root])
             .await
     }
+
+    /// Delete every row of edition stream `stream`: how many events.
+    async fn remove_rows(&mut self, stream: StreamRef<'_>) -> Result<u64, StoreError> {
+        let cover = stream.to_cover();
+        let removed = self
+            .built_execute(statements::delete_events::<SqliteDialect>(&cover))
+            .await?;
+        self.built_execute(statements::delete_snapshot::<SqliteDialect>(&cover))
+            .await?;
+        let [domain, root, edition] = view_of(stream);
+        let key = [domain, edition, root];
+        self.execute(statements::DELETE_POSITIONS, key).await?;
+        self.delete_letters(stream).await?;
+        let [domain, root, edition] = view_of(stream);
+        self.execute(statements::DELETE_EDITION_OUTBOX, [domain, root, edition])
+            .await?;
+        self.touch(stream, true).await?;
+        Ok(removed)
+    }
+}
+
+/// Refuse pages whose sequences do not run on from `expected`.
+fn check_run(stream: StreamRef<'_>, expected: u64, pages: &[EventPage]) -> Result<(), StoreError> {
+    for (due, page) in (expected..).zip(pages) {
+        if page.sequence != due {
+            return Err(StoreError::discontinuous(stream, due, page.sequence));
+        }
+    }
+    Ok(())
 }
 
 /// The head after `last`, a stream's last page: 0 and no instant for none.
@@ -957,13 +1096,7 @@ impl EventStore for SqliteStore {
             .await
             .map_err(unavailable)?;
         let mut ex = Exec { conn: tx, sent };
-        let next_sequence = match write.events {
-            Some(append) => Some(ex.append(append).await?),
-            None => None,
-        };
-        if let Some(append) = write.events.filter(|append| !append.pages.is_empty()) {
-            ex.touch(append.stream, false).await?;
-        }
+        let landed = ex.land(&write).await?;
         for (key, next) in write.positions {
             ex.put_position(*key, *next).await?;
         }
@@ -983,7 +1116,8 @@ impl EventStore for SqliteStore {
                 .await?;
         }
         for (place, entry) in write.outbox.iter().enumerate() {
-            ex.put_outbox(entry, at, place).await?;
+            ex.put_outbox(entry, at, place, &landed.edition_streams)
+                .await?;
         }
         for letter in write.dead_letters {
             ex.put_dead_letter(letter).await?;
@@ -991,7 +1125,9 @@ impl EventStore for SqliteStore {
         ex.count();
         ex.conn.commit().await.map_err(unavailable)?;
         self.signal.notify();
-        Ok(Written { next_sequence })
+        Ok(Written {
+            next_sequence: landed.next_sequence,
+        })
     }
 
     /// One statement when the read runs to the end from 0, its last page
@@ -1176,6 +1312,60 @@ impl DeadLetterStore for SqliteStore {
     }
 }
 
+impl Editions for SqliteStore {
+    /// One read: every edition stream's first row, its fork, grouped by
+    /// edition (`events_of_editions` holds just those rows).
+    async fn list_editions(&self) -> Result<Vec<EditionSummary>, StoreError> {
+        let rows = self
+            .conn
+            .exec()
+            .await
+            .rows(statements::LIST_EDITIONS, [])
+            .await?;
+        let mut editions: Vec<EditionSummary> = Vec::new();
+        for row in rows {
+            let name: String = row.try_get(0).map_err(unavailable)?;
+            let domain: String = row.try_get(1).map_err(unavailable)?;
+            let root: Vec<u8> = row.try_get(2).map_err(unavailable)?;
+            let fork: i64 = row.try_get(3).map_err(unavailable)?;
+            let fork = EventRef {
+                stream: Some(rows::cover::<SqliteDialect>(&domain, name.clone(), &root)?),
+                sequence: fork.unsigned_abs(),
+            };
+            match editions.last_mut() {
+                Some(last) if last.name == name => last.forks.push(fork),
+                _ => editions.push(EditionSummary {
+                    name,
+                    forks: vec![fork],
+                }),
+            }
+        }
+        Ok(editions)
+    }
+
+    /// One `BEGIN IMMEDIATE` transaction, as a purge's: the stream's events
+    /// (the fork included), snapshot, positions, dead letters and the outbox
+    /// entries of its edition written with it go together, and the stream
+    /// reads as main's again. Nothing is appended and main is not touched.
+    async fn remove_edition_stream(&self, stream: StreamRef<'_>) -> Result<u64, StoreError> {
+        if stream.edition.is_none() {
+            return Err(StoreError::EditionNameRequired);
+        }
+        let Exec { mut conn, sent } = self.conn.exec().await;
+        sent.fetch_add(1, Ordering::Relaxed);
+        let tx = conn
+            .begin_with("BEGIN IMMEDIATE")
+            .await
+            .map_err(unavailable)?;
+        let mut ex = Exec { conn: tx, sent };
+        let removed = ex.remove_rows(stream).await?;
+        ex.count();
+        ex.conn.commit().await.map_err(unavailable)?;
+        self.signal.notify();
+        Ok(removed)
+    }
+}
+
 /// `(id, origin, message, edition)` rows as outbox entries.
 fn outbox_entries(rows: Vec<SqliteRow>) -> Result<Vec<OutboxEntry>, StoreError> {
     let mut entries = Vec::new();
@@ -1294,6 +1484,19 @@ impl Drop for SqliteRead<'_> {
     }
 }
 
+impl SqliteRead<'_> {
+    /// `stream`, refused if its edition does not exist (no fork of it
+    /// anywhere, as of the unit's moment): `UnknownEdition`.
+    async fn known(&mut self, stream: StreamRef<'_>) -> Result<(), StoreError> {
+        match stream.edition {
+            Some(name) if !self.ex.edition_exists(name).await? => {
+                Err(StoreError::unknown_edition(stream))
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 impl ReadUnit for SqliteRead<'_> {
     async fn covers(&mut self, domain: &str) -> Result<Vec<Cover>, StoreError> {
         self.ex.covers(domain).await
@@ -1305,6 +1508,7 @@ impl ReadUnit for SqliteRead<'_> {
         from: u64,
         to: Option<u64>,
     ) -> Result<Slice, StoreError> {
+        self.known(stream).await?;
         self.ex.read(stream, from, to).await
     }
 
@@ -1312,6 +1516,7 @@ impl ReadUnit for SqliteRead<'_> {
         &mut self,
         stream: StreamRef<'_>,
     ) -> Result<Option<Snapshot>, StoreError> {
+        self.known(stream).await?;
         self.ex.read_snapshot(stream).await
     }
 }
@@ -1656,3 +1861,11 @@ impl Export for SqliteStore {
 #[cfg(test)]
 #[path = "sqlite.test.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "editions.test.rs"]
+mod editions_tests;
+
+#[cfg(test)]
+#[path = "reads_engine.test.rs"]
+mod reads_engine_tests;
