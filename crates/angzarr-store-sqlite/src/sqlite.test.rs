@@ -927,6 +927,9 @@ async fn reading_finds_what_was_written() {
     assert_eq!(tasks_in(&path).await, Ok(covers(&[s])));
 }
 
+// Unix only: a directory's mode is what keeps SQLite from writing beside the
+// file, and Windows has no read-only directory in that sense.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_read_only_file_in_a_read_only_directory_opens_for_reading() {
     use std::os::unix::fs::PermissionsExt;
@@ -2916,15 +2919,19 @@ async fn the_ledger_is_sqlxs_record_read_whole() {
 #[tokio::test]
 async fn a_backup_runs_on_a_read_only_store() {
     use angzarr_ports::Backup;
-    use std::os::unix::fs::PermissionsExt;
     let path = database();
     with_content(&path, &MIGRATOR).await;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o444)).unwrap();
+    let read_only = |path: &Path, on: bool| {
+        let mut permissions = std::fs::metadata(path).unwrap().permissions();
+        permissions.set_readonly(on);
+        std::fs::set_permissions(path, permissions).unwrap()
+    };
+    read_only(&path, true);
     let store = SqliteStore::open_existing(&path).await.unwrap().unwrap();
     let dest = path.with_file_name("copy.db");
     let backed = store.backup(&dest).await;
     drop(store);
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    read_only(&path, false);
     assert_eq!(backed, Ok(()));
     assert_eq!(versions(&raw_ledger(&dest).await), build_versions());
 }
