@@ -26,9 +26,13 @@ sqlx = { version = "0.8", default-features = false, features = ["sqlite", "runti
 # `sync` module alone (no runtime of its own).
 tokio = { version = "1", default-features = false, features = ["sync"] }
 
-# The conformance suite, run on this store under tokio.
+# The conformance suite, run on this store under tokio; and the coordinators'
+# read engine (angzarr-reads), run over it (`reads_engine.test.rs`): a store
+# without `EditionKnown` cannot serve it. A dev-dependency only, so nothing
+# of the engine's licence group is linked by the store.
 [dev-dependencies]
 angzarr-ports = { path = "../angzarr-ports", features = ["contract"] }
+angzarr-reads = { path = "../angzarr-reads" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 
 # The build writes the catalog's source under the crate's name

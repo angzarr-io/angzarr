@@ -1,5 +1,5 @@
-//! The SQLite store held to angzarr-ports' conformance suite, every section
-//! but editions, the same checks `MemoryStore` passes, so angzarr-embedded and angzarr
+//! The SQLite store held to angzarr-ports' conformance suite, every section,
+//! the same checks `MemoryStore` passes, so angzarr-embedded and angzarr
 //! behave alike over either; then what is particular to a store on a file:
 //! opening, WAL, migrations (an existing database's included), dead
 //! letters on a file, integrity,
@@ -8,12 +8,12 @@
 //! stream, and a migrated database keeps no trace of the released
 //! adapter's commit position.
 //!
-//! **Editions are per-stream forks only** in this adapter: an edition
-//! stream is forked by its fork event as its first own event, at or below
-//! main's head, and reads main below the fork; any other first write to it
-//! is refused `EditionNotForked`. The edition administration (the
-//! `Editions` port) is not implemented: the suite's checks for it are
-//! present and ignored, and `MemoryStore` covers them meanwhile.
+//! **Editions are per-stream forks**: an edition stream is forked by its
+//! fork event as its first own event, at or below main's head, and reads
+//! main below the fork; any other first write to it is refused
+//! `EditionNotForked`. The `Editions` port (listing, deletion by
+//! enumeration) and `EditionKnown` are the store's too, and the suite's
+//! edition sections run on it.
 
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
@@ -92,55 +92,13 @@ async fn pair(path: &Path) -> (SqliteStore, SqliteStore) {
     (a, b)
 }
 
-/// One `#[tokio::test]` per named check of the suite, each on a fresh
-/// store from `$fresh`, a check carrying its own attributes (an edition
-/// check's `#[ignore]`). The base and read sections are stamped here, not
-/// by `store_contract!`, because each holds edition checks this adapter
-/// does not pass yet; their lists are angzarr-ports' at 3311a3ae, kept in
-/// step by hand when the suite grows.
-macro_rules! checks {
-    ($fresh:expr; $($(#[$a:meta])* $check:ident,)*) => {
-        $(
-            $(#[$a])*
-            #[tokio::test]
-            async fn $check() {
-                angzarr_ports::contract::$check($fresh).await;
-            }
-        )*
-    };
-}
-
-/// The base section, every check but three of editions (NOT IMPLEMENTED
-/// YET in this adapter, owner ruling 2026-10-28).
+/// The base section, edition rules included.
 mod base {
     use super::*;
-    checks!(SqliteStore::open_in_memory().await.unwrap();
-        append_checks_the_expected_length_and_continuity,
-        append_refuses_a_stale_first_sequence,
-        an_empty_append_checks_and_creates_nothing,
-        read_is_bounded_by_from_and_to,
-        a_read_of_no_such_stream_is_empty_at_zero,
-        a_read_past_the_end_is_empty_but_knows_the_end,
-        head_is_the_next_sequence_and_the_last_recorded_at,
-        a_stream_is_domain_edition_and_root,
-        covers_orders_main_first_then_by_edition_and_root,
-        #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
-        an_unforked_edition_stream_reads_as_main,
-        #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
-        an_edition_stream_takes_only_a_fork_as_its_first_own_event,
-        #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
-        a_forked_stream_reads_main_below_its_fork_then_its_own,
-        a_fork_below_mains_head_lands_at_its_stated_sequence,
-        a_fork_above_mains_head_is_a_conflict,
-        find_command_finds_a_commands_events_on_its_stream,
-        find_command_finds_a_retried_facts_events_by_its_id,
-        find_command_finds_a_refusal_fact_on_the_trigger_stream_by_the_refused_id,
-        a_store_keeps_the_newest_snapshot_per_stream,
-        a_position_is_zero_until_put_then_the_last_put,
-        positions_are_per_handler_and_per_stream,
-        a_write_lands_its_events_and_positions_together,
-        a_refused_write_lands_nothing,
-        a_position_only_write_is_a_step_with_no_stream,
+    angzarr_ports::store_contract!(
+        base,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
     );
 }
 
@@ -158,56 +116,45 @@ mod purge {
     );
 }
 
-/// NOT IMPLEMENTED YET: editions are a follow-up in this adapter (owner
-/// ruling 2026-10-28). The `editions` section needs the `Editions` port,
-/// which this store does not implement, so its checks cannot be stamped
-/// here; this placeholder names them, ignored, until they are:
-/// `list_editions_derives_each_edition_from_its_fork_events`,
-/// `an_edition_deletion_is_recorded_like_any_event`,
-/// `a_deleted_stream_is_removed_with_every_row_of_it`,
-/// `a_deletion_reaching_an_uncreated_stream_writes_nothing`,
-/// `a_deletion_is_recorded_and_removed_stream_by_stream`,
-/// `after_deletion_a_later_arrival_in_the_edition_is_refused`,
-/// `a_what_if_edition_runs_beside_main_and_leaves_main_untouched`.
 mod editions {
-    #[test]
-    #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
-    fn the_editions_section_is_not_implemented_yet() {
-        unimplemented!("the SQLite adapter's Editions: a follow-up")
-    }
+    use super::*;
+    angzarr_ports::store_contract!(
+        editions,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
 }
 
-/// NOT IMPLEMENTED YET (owner ruling 2026-10-28). The `editions_outbox`
-/// section needs `Editions` too:
-/// `a_deleted_stream_is_removed_only_after_its_deletion_has_propagated`.
+mod editions_on_a_file {
+    use super::*;
+    angzarr_ports::store_contract!(
+        editions,
+        #[tokio::test],
+        SqliteStore::open(&database()).await.unwrap()
+    );
+}
+
 mod editions_outbox {
-    #[test]
-    #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
-    fn the_editions_outbox_section_is_not_implemented_yet() {
-        unimplemented!("the SQLite adapter's Editions: a follow-up")
-    }
+    use super::*;
+    angzarr_ports::store_contract!(
+        editions_outbox,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
 }
 
-/// The read section, every check but its edition one (NOT IMPLEMENTED
-/// YET, owner ruling 2026-10-28).
 mod read {
     use super::*;
-    checks!(pair(&database()).await;
-        a_read_unit_sees_the_store_as_it_began,
-        a_read_unit_heads_and_snapshots_as_it_began,
-        #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
-        a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main,
-    );
+    angzarr_ports::store_contract!(read, #[tokio::test], pair(&database()).await);
 }
 
 /// A read unit and a write through the one handle that began it.
 mod read_one_handle {
     use super::*;
-    checks!(SqliteStore::open(&database()).await.unwrap();
-        a_read_unit_sees_the_store_as_it_began_through_one_handle,
-        a_read_unit_heads_and_snapshots_as_it_began_through_one_handle,
-        #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
-        a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main_through_one_handle,
+    angzarr_ports::store_contract!(
+        read_one_handle,
+        #[tokio::test],
+        SqliteStore::open(&database()).await.unwrap()
     );
 }
 
@@ -225,15 +172,13 @@ mod read_purge {
     angzarr_ports::store_contract!(read_purge, #[tokio::test], pair(&database()).await);
 }
 
-/// NOT IMPLEMENTED YET (owner ruling 2026-10-28). The `read_forks`
-/// section's one check, `a_read_unit_reads_a_forked_stream_through_to_main`,
-/// needs a forked stream, which this store cannot make.
 mod read_forks {
-    #[test]
-    #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
-    fn the_read_forks_section_is_not_implemented_yet() {
-        unimplemented!("the SQLite adapter's Editions: a follow-up")
-    }
+    use super::*;
+    angzarr_ports::store_contract!(
+        read_forks,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
 }
 
 mod watch {
@@ -326,6 +271,15 @@ mod dead_letters_purge {
     use super::*;
     angzarr_ports::store_contract!(
         dead_letters_purge,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
+}
+
+mod dead_letters_editions {
+    use super::*;
+    angzarr_ports::store_contract!(
+        dead_letters_editions,
         #[tokio::test],
         SqliteStore::open_in_memory().await.unwrap()
     );
@@ -848,7 +802,7 @@ async fn the_builds_migration_set_is_what_an_open_applies() {
     assert_eq!(build, store.migrations());
     assert_eq!(
         build.iter().map(|m| m.version).collect::<Vec<_>>(),
-        [1, 2, 3, 4, 5, 6, 7]
+        [1, 2, 3, 4, 5, 6, 7, 8]
     );
     let ledger = store.applied().await.unwrap();
     assert_eq!(
@@ -1934,7 +1888,6 @@ mod read_on_file {
     }
 
     #[tokio::test]
-    #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
     async fn a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main() {
         on_file(
             writable,
@@ -1944,7 +1897,6 @@ mod read_on_file {
     }
 
     #[tokio::test]
-    #[ignore = "editions are not implemented yet in the SQLite adapter (owner ruling 2026-10-28); a follow-up; MemoryStore covers them"]
     async fn a_read_only_stores_read_unit_refuses_an_unknown_edition() {
         on_file(
             read_only_store,

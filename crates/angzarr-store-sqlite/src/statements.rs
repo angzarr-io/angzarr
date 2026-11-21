@@ -92,6 +92,36 @@ pub(crate) const UNTIL: &str = concat!(
 pub(crate) const OWN_FIRST: &str =
     "SELECT MIN(sequence) FROM events WHERE domain = ?1 AND edition = ?2 AND root = ?3";
 
+/// Rows `(edition, domain, root, fork)` of every edition stream holding a
+/// row of its own, `fork` its first, the sequence of its fork: by edition
+/// name, then stream, as `ListEditions` gives them. The partial index
+/// `events_of_editions` holds exactly these rows, so `edition <> ''` stays
+/// in the condition for the planner to use it.
+pub(crate) const LIST_EDITIONS: &str = "SELECT edition, domain, root, MIN(sequence) FROM events \
+     WHERE edition <> '' GROUP BY edition, domain, root ORDER BY edition, domain, root";
+
+/// Row `(1)` while some stream holds a row of edition `?1`, a fork of it
+/// remaining: the edition exists.
+pub(crate) const EDITION_EXISTS: &str =
+    "SELECT 1 FROM events WHERE edition = ?1 AND edition <> '' LIMIT 1";
+
+/// Delete every position on a stream (`?1` domain, `?2` edition column,
+/// `?3` root).
+pub(crate) const DELETE_POSITIONS: &str =
+    "DELETE FROM positions WHERE domain = ?1 AND edition = ?2 AND root = ?3";
+
+/// Keep that the write of an outbox entry (`?1`) touched edition stream
+/// `?2` (domain), `?3` (edition), `?4` (root).
+pub(crate) const PUT_OUTBOX_EDITION_STREAM: &str =
+    "INSERT INTO outbox_edition_streams (id, domain, edition, root) VALUES (?1, ?2, ?3, ?4) \
+     ON CONFLICT DO NOTHING";
+
+/// Delete the pending entries of edition `?3` written with its stream
+/// `?1` (domain), `?2` (root): the stream's removal takes them,
+/// undelivered. Their stream rows go with them (the migration's trigger).
+pub(crate) const DELETE_EDITION_OUTBOX: &str = "DELETE FROM outbox WHERE edition = ?3 AND id IN \
+     (SELECT id FROM outbox_edition_streams WHERE domain = ?1 AND edition = ?3 AND root = ?2)";
+
 /// Rows `(edition, root)` of `?1`'s streams holding a row of their own,
 /// main first (`''` sorts first), then by edition, each by root.
 pub(crate) const COVERS: &str =

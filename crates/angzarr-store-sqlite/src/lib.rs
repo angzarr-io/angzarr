@@ -2,8 +2,8 @@
 //! use (plan ruling 10). A leaf: it depends on angzarr-ports and SQL, and
 //! on nothing of angzarr-embedded.
 //!
-//! [`SqliteStore`] implements every base port and every opt-in capability
-//! but the edition administration: [`EventStore`](angzarr_ports::EventStore),
+//! [`SqliteStore`] implements every base port and every opt-in capability:
+//! [`EventStore`](angzarr_ports::EventStore),
 //! [`SnapshotStore`](angzarr_ports::SnapshotStore),
 //! [`PositionStore`](angzarr_ports::PositionStore) (a step's one
 //! [`write`](angzarr_ports::EventStore::write) is a `BEGIN IMMEDIATE`
@@ -23,6 +23,9 @@
 //! durable, written in the step's write: migration 0006),
 //! [`Export`](angzarr_ports::Export) (every row as stored, in one read
 //! transaction: for carrying a store across a proto generation),
+//! [`Editions`](angzarr_ports::Editions) (listing from the fork rows and
+//! removal of an edition stream's rows, migration 0008; with it
+//! [`EditionKnown`](angzarr_ports::EditionKnown), derived from the listing),
 //! [`Migrations`](angzarr_ports::Migrations) (through sqlx's migrator; every
 //! open, to read or to write, runs what is pending) and
 //! [`Backup`](angzarr_ports::Backup) (`VACUUM INTO`, and before every
@@ -32,16 +35,19 @@
 //! connection to close, so the last one's WAL checkpoint is done when it
 //! returns.
 //!
-//! Editions are per-stream forks as far as the base ports need them: an
-//! edition stream's first own event is its fork (an `EditionCreated` meta-event,
-//! at main's head or below it), and it reads main's events below that, then
-//! its own; an edition stream with none of its own reads as main's, and
-//! anything else written to it first is refused
-//! (`StoreError::EditionNotForked`). The edition administration, the
-//! [`Editions`](angzarr_ports::Editions) port (listing,
-//! deletion and removal), is NOT IMPLEMENTED YET (the owner's ruling,
-//! 2026-10-28: a follow-up; `MemoryStore` covers it meanwhile), and the
-//! suite's checks of it are ignored here.
+//! Editions are per-stream forks: an edition stream's first own event is its
+//! fork (an `EditionCreated` meta-event, at main's head or below it), and it
+//! reads main's events below that, then its own; an edition stream with none
+//! of its own reads as main's, and anything else written to it first is
+//! refused (`StoreError::EditionNotForked`). An edition exists while a fork
+//! of it remains: no table names one, [`Editions`](angzarr_ports::Editions)
+//! lists them from the streams' first rows (a partial index holds just the
+//! edition streams' rows) and removes an edition stream's events, snapshot,
+//! positions, dead letters and the outbox entries of its edition written
+//! with it. A read unit refuses a stream of an edition that does not exist
+//! (`StoreError::UnknownEdition`), and a step's position on a stream with no
+//! row of an edition that no longer exists is refused
+//! (`StoreError::EditionNotFound`).
 //!
 //! The rows are written with sea-query from the schema's identifiers
 //! (`schema`, `statements`) and read with SQL over one condition, a stream
