@@ -1704,10 +1704,10 @@ where
         "every entry pending before"
     );
     assert_eq!(store.remove_edition_stream(e).await, Ok(2));
-    assert_eq!(
-        store.pending(10).await,
-        Ok(vec![others[0].clone(), mains[0].clone()]),
-        "its entries gone, undelivered; another stream's and main's kept"
+    let left = store.pending(10).await.unwrap();
+    assert!(
+        same_entries(&left, &[&others[0], &mains[0]]),
+        "its entries gone, undelivered; another stream's and main's kept, in no order across streams: {left:?}"
     );
     assert_eq!(
         store.position(key("player-table", e)).await,
