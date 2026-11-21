@@ -9,7 +9,8 @@ use std::borrow::Cow;
 
 use angzarr_ports::angzarr_proto::v1::{EditionSummary, EventPage};
 use angzarr_ports::contract::{
-    append, created_page, edition_stream, entry_in, event_ref, fork, main_stream, page, put,
+    append, command, created_page, edition_stream, entry, entry_in, event_ref, fork, main_stream,
+    page, put,
 };
 use angzarr_ports::{
     Changed, Changes, CommitNotify, EditionKnown, Editions, EventStore, Outbox, PositionKey,
@@ -208,65 +209,54 @@ async fn an_entry_written_with_two_streams_goes_with_the_removal_of_either() {
     }
 }
 
-/// Why: only the entries of the stream's own edition are its rows: an entry
-/// of another edition put by a write that touched the stream, and a main
-/// entry, stay pending, and an entry put again while pending keeps the
-/// streams of its first write.
+/// Why: only the entries of the stream's own edition, put by a write that
+/// touched it, are its rows: an entry of another edition put by a write
+/// that touched the stream, and a main entry, stay pending; and an entry
+/// put again while pending keeps the streams of its first write, not the
+/// second's.
 #[tokio::test]
 async fn a_removal_takes_only_the_entries_of_its_own_edition_written_with_it() {
     let store = SqliteStore::open_in_memory().await.unwrap();
-    let (x, y) = (
+    let (x, x2, y) = (
         edition_stream("tasks", 1, "x"),
+        edition_stream("tasks", 2, "x"),
         edition_stream("tasks", 1, "y"),
     );
-    fork(&store, x).await;
-    fork(&store, y).await;
+    for s in [x, x2, y] {
+        fork(&store, s).await;
+    }
     let entries = [
         entry_in(1, "a", 1, "y"),
         entry_in(2, "a", 2, "x"),
-        angzarr_ports::contract::entry(3, "a", 3),
+        entry(3, "a", 3),
     ];
-    let positions = [(key("h", x), 1)];
+    let on_x = [(key("h", x), 1)];
     store
         .write(Write {
-            positions: &positions,
+            positions: &on_x,
             outbox: &entries,
             ..Write::default()
         })
         .await
         .unwrap();
     let again = [entry_in(2, "a", 9, "x")];
-    let on_y = [(key("h", y), 1)];
+    let on_x2 = [(key("h", x2), 1)];
     store
         .write(Write {
-            positions: &on_y,
+            positions: &on_x2,
             outbox: &again,
             ..Write::default()
         })
         .await
         .unwrap();
-    store.remove_edition_stream(y).await.unwrap();
-    let left = store.pending(10).await.unwrap();
-    assert_eq!(
-        left.len(),
-        3,
-        "y's removal took nothing written with x: {left:?}"
-    );
+    for removed in [y, x2] {
+        store.remove_edition_stream(removed).await.unwrap();
+        let left = store.pending(10).await.unwrap();
+        assert_eq!(left.len(), 3, "after {removed:?}: {left:?}");
+    }
     store.remove_edition_stream(x).await.unwrap();
     let left = store.pending(10).await.unwrap();
-    let ids: Vec<_> = left.iter().map(|e| e.id).collect();
-    assert_eq!(
-        ids,
-        [entries[0].id, entries[2].id]
-            .map(|_| ids[0])
-            .to_vec()
-            .len()
-            .eq(&2)
-            .then(|| ids.clone())
-            .unwrap(),
-        "x's removal took its own entry alone: {left:?}"
-    );
-    assert_eq!(left.len(), 2);
+    assert_eq!(left.len(), 2, "{left:?}");
     assert!(left.iter().all(|e| e.id != entries[1].id), "{left:?}");
 }
 
@@ -505,28 +495,16 @@ async fn a_database_before_the_edition_tables_opens_migrated_and_keeps_its_editi
     .execute(&mut conn)
     .await
     .unwrap();
-    let entry = |n: u8, edition: Option<&str>, stream_edition: &str| {
-        let e = entry_in(n, "a", n, "x");
-        (
-            e.id.as_bytes().to_vec(),
-            e.message.encode_to_vec(),
-            edition.map(str::to_string),
-            stream_edition.to_string(),
-        )
-    };
-    for (id, message, edition, stream_edition) in [
-        entry(1, Some("x"), "x"),
-        entry(2, Some("x"), ""),
-        entry(3, None, "x"),
-    ] {
+    let message = entry_in(1, "a", 1, "x").message.encode_to_vec();
+    for (n, edition, stream_edition) in [(1, Some("x"), "x"), (2, Some("x"), ""), (3, None, "x")] {
         sqlx::query(
             "INSERT INTO outbox (id, domain, stream_edition, root, sequence, place, origin, message, edition) \
              VALUES (?, 'tasks', ?, ?, 0, 0, 'a', ?, ?)",
         )
-        .bind(id)
+        .bind(command(n).as_bytes().to_vec())
         .bind(stream_edition)
         .bind(&root)
-        .bind(message)
+        .bind(&message)
         .bind(edition)
         .execute(&mut conn)
         .await
@@ -550,5 +528,5 @@ async fn a_database_before_the_edition_tables_opens_migrated_and_keeps_its_editi
         2,
         "the entry tied to the stream is gone: {left:?}"
     );
-    assert!(left.iter().all(|l| l.id != entry_in(1, "a", 1, "x").id));
+    assert!(left.iter().all(|l| l.id != command(1)), "{left:?}");
 }
