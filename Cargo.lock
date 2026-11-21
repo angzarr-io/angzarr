@@ -278,18 +278,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "angzarr-proto-jsonl"
-version = "0.1.0"
-dependencies = [
- "angzarr-diagnostic",
- "prost",
- "prost-reflect",
- "prost-types",
- "serde",
- "serde_json",
-]
-
-[[package]]
 name = "angzarr-proto-transport-distributed"
 version = "0.1.0"
 dependencies = [

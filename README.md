@@ -68,7 +68,6 @@ the `LICENSE-*` files, `deny.toml` and this table to it.
 | `angzarr-proto-component` | C | `Apache-2.0 OR BSD-3-Clause` | the component contract's tonic stubs |
 | `angzarr-proto-transport-embedded` | C | `Apache-2.0 OR BSD-3-Clause` | the local-process transport's constants and keys |
 | `angzarr-proto-transport-distributed` | C | `Apache-2.0 OR BSD-3-Clause` | the distributed transport's stubs and envelopes |
-| `angzarr-proto-jsonl` | C | `Apache-2.0 OR BSD-3-Clause` | protobuf messages as JSON Lines |
 | `angzarr-router` | C | `Apache-2.0 OR BSD-3-Clause` | the shared client router |
 | `angzarr-router-conformance` | C | `Apache-2.0 OR BSD-3-Clause` | test-only: the router's conformance features |
 | `angzarr-build` | C | `Apache-2.0 OR BSD-3-Clause` | build.rs helpers |
@@ -76,6 +75,7 @@ the `LICENSE-*` files, `deny.toml` and this table to it.
 | `angzarr-embedded-macros` | C | `Apache-2.0 OR BSD-3-Clause` | proc-macros over aggregates, policies and projectors |
 | `archlint` | C | `Apache-2.0 OR BSD-3-Clause` | module-level architecture rules for a workspace |
 <!-- END licences.sh -->
+
 
 
 

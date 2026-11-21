@@ -25,7 +25,6 @@ members = [
     "crates/angzarr-proto",
     "crates/angzarr-proto-component",
     "crates/angzarr-proto-handler",
-    "crates/angzarr-proto-jsonl",
     "crates/angzarr-proto-transport-distributed",
     "crates/angzarr-proto-transport-embedded",
     "crates/angzarr-reads",
@@ -62,7 +61,6 @@ angzarr-codegen = { path = "crates/angzarr-codegen" }
 angzarr-diagnostic = { path = "crates/angzarr-diagnostic" }
 angzarr-proto = { path = "crates/angzarr-proto" }
 angzarr-proto-handler = { path = "crates/angzarr-proto-handler" }
-angzarr-proto-jsonl = { path = "crates/angzarr-proto-jsonl" }
 angzarr-ports = { path = "crates/angzarr-ports" }
 angzarr-presentation = { path = "crates/angzarr-presentation" }
 angzarr-test-dir = { path = "crates/angzarr-test-dir" }
