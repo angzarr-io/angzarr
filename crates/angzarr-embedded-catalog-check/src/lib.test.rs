@@ -57,6 +57,7 @@ fn checked() -> Vec<(Exported, Vec<Box<dyn Diagnostic>>)> {
             angzarr_embedded_host::diagnostic_samples(),
         ),
         (angzarr_store_sqlite::EN_US, sqlite_samples()),
+        (angzarr_store_duckdb::EN_US, duckdb_samples()),
     ]
 }
 
@@ -76,6 +77,17 @@ fn sqlite_samples() -> Vec<Box<dyn Diagnostic>> {
         .map(|error| -> Box<dyn Diagnostic> { Box::new(error) })
         .collect();
     samples.push(Box::new(angzarr_store_sqlite::damage_sample()));
+    samples
+}
+
+/// angzarr-store-duckdb's errors: each one it puts in a store error as its
+/// cause, and a damage report.
+fn duckdb_samples() -> Vec<Box<dyn Diagnostic>> {
+    let mut samples: Vec<Box<dyn Diagnostic>> = angzarr_store_duckdb::errors()
+        .into_iter()
+        .map(|error| -> Box<dyn Diagnostic> { Box::new(error) })
+        .collect();
+    samples.push(Box::new(angzarr_store_duckdb::damage_sample()));
     samples
 }
 
@@ -122,7 +134,10 @@ fn members() -> BTreeMap<String, PathBuf> {
         };
         let name = package_name(&manifest)
             .unwrap_or_else(|| panic!("{}: no [package] name", dir.display()));
-        if name.starts_with("angzarr-embedded") || name == "angzarr-store-sqlite" {
+        if name.starts_with("angzarr-embedded")
+            || name == "angzarr-store-sqlite"
+            || name == "angzarr-store-duckdb"
+        {
             out.insert(name, dir);
         }
     }

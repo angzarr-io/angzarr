@@ -1,0 +1,41 @@
+[package]
+name = "angzarr-store-duckdb"
+version = "0.1.0"
+description = "angzarr-ports on an embedded DuckDB file: a durable store (events, snapshots, positions, outbox, dead letters, the change feed) one process owns and SQL can query, held to the ports' conformance suite"
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+publish.workspace = true
+# duckdb 1.20001 needs 1.88; uuid 1.28 (through angzarr-proto) needs 1.89.
+rust-version = "1.89"
+
+# A LEAF, as angzarr-store-sqlite is: angzarr-ports (and the wire types
+# through it) and the database, nothing of angzarr-embedded.
+[dependencies]
+angzarr-ports = { path = "../angzarr-ports" }
+# DuckDB, compiled in (`bundled`): the crate links no system library. It is
+# the one third-party dependency of this crate: a SQL engine is not
+# hand-rolled (see the crate's documentation for why DuckDB). Pinned exactly,
+# because the crate's version is the engine's (1.2000x is DuckDB 2.0) and the
+# file format follows the engine.
+duckdb = { version = "=1.20001.0", default-features = false, features = ["bundled"] }
+prost = "0.14"
+prost-types = "0.14"
+
+# The conformance suite, run on this store under tokio.
+[dev-dependencies]
+angzarr-ports = { path = "../angzarr-ports", features = ["contract", "memory"] }
+angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
+angzarr-test-dir = { path = "../angzarr-test-dir" }
+# The load example times the three durable stores side by side.
+file-system = { path = "../file-system" }
+os = { path = "../os" }
+store-jsonl = { path = "../store-jsonl" }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+[build-dependencies]
+angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+
+[lints]
+workspace = true

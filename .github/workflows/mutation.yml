@@ -51,6 +51,7 @@ jobs:
               {"name": "presentation", "crates": "angzarr-presentation"},
               {"name": "test-dir", "crates": "angzarr-test-dir"},
               {"name": "proto-jsonl", "crates": "angzarr-proto-jsonl"},
+              {"name": "store-duckdb", "crates": "angzarr-store-duckdb"},
               {"name": "store-transfer", "crates": "angzarr-store-transfer"},
               {"name": "coordinator-base", "crates": "angzarr-coordinator-base"},
               {"name": "reads", "crates": "angzarr-reads"},

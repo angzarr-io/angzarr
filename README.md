@@ -48,6 +48,7 @@ the `LICENSE-*` files, `deny.toml` and this table to it.
 | `angzarr-reads` | A | `AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission` | the coordinators' read engine |
 | `angzarr-store-sqlite` | C | `Apache-2.0 OR BSD-3-Clause` | SQLite adapter of the storage ports |
 | `store-jsonl` | C | `Apache-2.0 OR BSD-3-Clause` | single-process JSON Lines store |
+| `angzarr-store-duckdb` | C | `Apache-2.0 OR BSD-3-Clause` | DuckDB adapter of the storage ports |
 | `angzarr-embedded` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | the in-process runtime (kernel) |
 | `angzarr-embedded-host` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | hosts remote components as child processes |
 | `angzarr-embedded-host-config` | C | `Apache-2.0 OR BSD-3-Clause` | the schema and loader of angzarr.yaml |
@@ -77,6 +78,7 @@ the `LICENSE-*` files, `deny.toml` and this table to it.
 | `angzarr-embedded-macros` | C | `Apache-2.0 OR BSD-3-Clause` | proc-macros over aggregates, policies and projectors |
 | `archlint` | C | `Apache-2.0 OR BSD-3-Clause` | module-level architecture rules for a workspace |
 <!-- END licences.sh -->
+
 
 
 ## Building

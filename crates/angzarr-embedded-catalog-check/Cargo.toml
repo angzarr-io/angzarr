@@ -22,6 +22,7 @@ angzarr-embedded-host = { path = "../angzarr-embedded-host" }
 # the host codes a child's failures under them.
 angzarr-proto-transport-embedded = { path = "../angzarr-proto-transport-embedded" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
+angzarr-store-duckdb = { path = "../angzarr-store-duckdb" }
 # angzarr-ports' own en-US catalog, which renders the store errors
 # angzarr-embedded forwards.
 angzarr-ports = { path = "../angzarr-ports" }

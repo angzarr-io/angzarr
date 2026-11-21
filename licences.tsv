@@ -6,6 +6,7 @@ angzarr-coordinator-grpc	A	the coordinators' tonic server	Owner's set. Its Cargo
 angzarr-reads	A	the coordinators' read engine	
 angzarr-store-sqlite	C	SQLite adapter of the storage ports	Owner 2026-11-20: not at risk of being served in a real capacity.
 store-jsonl	C	single-process JSON Lines store	Owner 2026-11-20: permissive, as store-sqlite.
+angzarr-store-duckdb	C	DuckDB adapter of the storage ports	Owner 2026-11-20: permissive, as store-sqlite and store-jsonl. DuckDB itself is MIT.
 angzarr-embedded	B	the in-process runtime (kernel)	
 angzarr-embedded-host	B	hosts remote components as child processes	
 angzarr-embedded-host-config	C	the schema and loader of angzarr.yaml	Owner 2026-11-20: borderline crate, permissive.

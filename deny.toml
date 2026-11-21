@@ -21,7 +21,12 @@ version = 2
 # cucumber, the conformance crate's dev-dependency (the features' runner),
 # and every cucumber release (0.21 to 0.23) depends on it. Delete this
 # ignore when cucumber drops humantime.
+# RUSTSEC-2026-0543: chrono is unmaintained (all versions); not a
+# vulnerability. It reaches the graph only through the duckdb crate, which
+# depends on arrow and chrono unconditionally (angzarr-store-duckdb).
+# Delete this ignore when duckdb drops chrono or chrono is maintained again.
 ignore = [
+  { id = "RUSTSEC-2026-0543", reason = "unmaintained, not vulnerable; only through the duckdb crate (arrow, chrono), which cannot be built without them" },
   { id = "RUSTSEC-2026-0459", reason = "bundled SQLite via the store; databases are the user's own; upstream bump pending" },
   { id = "RUSTSEC-2026-0542", reason = "unmaintained, not vulnerable; only through cucumber, a test-only dev-dependency; no cucumber release avoids it" },
 ]
@@ -66,6 +71,13 @@ unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = []
+
+# tiny-keccak is CC0-1.0, a public-domain dedication with no conditions: it is
+# permissive in effect. It reaches the graph only through the duckdb crate
+# (arrow, ahash, const-random). Allowed for that crate alone.
+[[licenses.exceptions]]
+crate = "tiny-keccak"
+allow = ["CC0-1.0"]
 
 # BEGIN licences.sh (generated from licences.tsv)
 [[licenses.exceptions]]
