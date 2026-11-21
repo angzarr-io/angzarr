@@ -38,7 +38,6 @@ members = [
     "crates/file-lock",
     "crates/file-system",
     "crates/os",
-    "crates/store-jsonl",
     "tools/archlint",
 ]
 # sererr is a submodule with its own cargo workspace (its protos feed the
@@ -71,7 +70,6 @@ angzarr-embedded-host-config = { path = "crates/angzarr-embedded-host-config" }
 os = { path = "crates/os" }
 file-system = { path = "crates/file-system" }
 file-lock = { path = "crates/file-lock" }
-store-jsonl = { path = "crates/store-jsonl" }
 
 # Third-party (from platform, build and router; one entry each, no conflicts).
 serde = { version = "1", features = ["derive"] }

@@ -59,7 +59,7 @@ jobs:
               {"name": "router", "crates": "angzarr-router"},
               {"name": "build", "crates": "angzarr-build angzarr-codegen"},
               {"name": "embedded", "crates": "angzarr-embedded angzarr-embedded-catalog-check angzarr-embedded-conformance angzarr-embedded-host angzarr-embedded-host-config angzarr-embedded-macros angzarr-embedded-runner angzarr-store-sqlite"},
-              {"name": "platform", "crates": "os file-system file-lock store-jsonl"}
+              {"name": "platform", "crates": "os file-system file-lock"}
             ]
         run: |
           matrix=$(jq -c --arg group "$GROUP" '{include: map(select($group == "" or .name == $group))}' <<< "$GROUP_TABLE")

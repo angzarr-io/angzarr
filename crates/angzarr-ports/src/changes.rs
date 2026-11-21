@@ -18,8 +18,8 @@
 //! gives. A follower never guesses, and a store never answers a cursor it
 //! does not understand with a partial list.
 //!
-//! **Durability is the store's.** A store with persistence (SQLite, the
-//! journal) keeps its feed as it keeps its events, or an overflow says it did
+//! **Durability is the store's.** A store with persistence (SQLite)
+//! keeps its feed as it keeps its events, or an overflow says it did
 //! not: a follower never misses a commit silently across a reopen. A store
 //! with none (the in-memory store) has no reopen and no restart; its feed is
 //! as non-durable as its events, on purpose. A follower that outlives such a
