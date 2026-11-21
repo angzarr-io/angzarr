@@ -21,7 +21,7 @@ impl EventStore for DuckStore {
     /// upserted, the outbox entries it clears cleared and then its own and
     /// its dead letters kept. A failure lands nothing.
     async fn write(&self, write: Write<'_>) -> Result<Written, StoreError> {
-        let done = self.with(|conn| in_transaction(conn, |tx| tx.apply(&write)));
+        let done = self.with(|conn| in_transaction(conn, |tx| tx.apply(&self.shared.feed, &write)));
         self.shared.pushed(done)
     }
 
@@ -82,7 +82,11 @@ impl Purge for DuckStore {
     /// after any write, or not at all. The stream's head is checked against
     /// `expected` inside it; a refusal rolls back, deleting nothing.
     async fn purge(&self, stream: StreamRef<'_>, expected: u64) -> Result<u64, StoreError> {
-        let purged = self.with(|conn| in_transaction(conn, |tx| tx.purge_stream(stream, expected)));
+        let purged = self.with(|conn| {
+            in_transaction(conn, |tx| {
+                tx.purge_stream(&self.shared.feed, stream, expected)
+            })
+        });
         self.shared.pushed(purged)
     }
 }

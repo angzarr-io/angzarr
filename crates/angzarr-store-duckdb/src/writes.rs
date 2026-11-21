@@ -14,6 +14,7 @@ use prost::Message;
 
 use crate::error::unavailable;
 use crate::queries::{Key, Queries};
+use crate::store::Feed;
 use crate::{rows, statements};
 
 /// The stream a write's outbox entries order on, and the sequence there.
@@ -39,13 +40,13 @@ fn ordered_on<'a>(write: &Write<'a>) -> OrderedOn<'a> {
 pub(crate) trait Writes: Queries {
     /// A whole write: events, positions, cleared and new outbox entries,
     /// dead letters.
-    fn apply(&self, write: &Write<'_>) -> Result<Written, StoreError> {
+    fn apply(&self, feed: &Feed, write: &Write<'_>) -> Result<Written, StoreError> {
         let next_sequence = match write.events {
             Some(append) => Some(self.append(append)?),
             None => None,
         };
         if let Some(append) = write.events.filter(|append| !append.pages.is_empty()) {
-            self.touch(append.stream, false)?;
+            self.touch(feed, append.stream, false)?;
         }
         for (key, next) in write.positions {
             self.put_position(*key, *next)?;
@@ -149,19 +150,21 @@ pub(crate) trait Writes: Queries {
         let next = statements::sequence_column(next);
         let seconds = at.map(|at| at.seconds);
         let nanos = at.map(|at| at.nanos);
-        let params = key.with(&[&first, &next, &seconds, &nanos]);
-        self.run(statements::UPSERT_EXTENT, &params).map(drop)
+        let moved = key.with(&[&next, &seconds, &nanos]);
+        if self.run(statements::UPDATE_EXTENT, &moved)? == 0 {
+            let made = key.with(&[&first, &next, &seconds, &nanos]);
+            self.run(statements::INSERT_EXTENT, &made)?;
+        }
+        Ok(())
     }
 
     /// The change feed learns `stream` was written to, or purged, in this
     /// transaction; it keeps the last [`statements::CHANGES_KEPT`].
-    fn touch(&self, stream: StreamRef<'_>, purged: bool) -> Result<(), StoreError> {
+    fn touch(&self, feed: &Feed, stream: StreamRef<'_>, purged: bool) -> Result<(), StoreError> {
         let key = Key::from(stream);
-        let params = key.with(&[&purged]);
-        let touched = format!("{} RETURNING seq", statements::TOUCH);
-        let seq = self
-            .first(&touched, &params, |row| row.get::<_, i64>(0))?
-            .unwrap_or_default();
+        let seq = feed.next();
+        let params: [&dyn ToSql; 5] = [&seq, &key.domain, &key.edition, &key.root, &purged];
+        self.run(statements::TOUCH, &params)?;
         if seq % statements::TRIM_EVERY == 0 {
             self.run(statements::TRIM, &[])?;
         }
@@ -171,8 +174,11 @@ pub(crate) trait Writes: Queries {
     fn put_position(&self, key: PositionKey<'_>, next: u64) -> Result<(), StoreError> {
         let stream = Key::from(key.stream);
         let next = statements::sequence_column(next);
-        let params = stream.with(&[&key.handler, &next]);
-        self.run(statements::PUT_POSITION, &params).map(drop)
+        let moved = stream.with(&[&key.handler, &next]);
+        if self.run(statements::UPDATE_POSITION, &moved)? == 0 {
+            self.run(statements::INSERT_POSITION, &moved)?;
+        }
+        Ok(())
     }
 
     /// Keep `entry`, the `place`th of its write, under `at`: the stream it
@@ -237,7 +243,12 @@ pub(crate) trait Writes: Queries {
 
     /// A purge, its head checked against `expected`: the stream's own pages,
     /// extent, snapshot and letters deleted, positions kept. How many pages.
-    fn purge_stream(&self, stream: StreamRef<'_>, expected: u64) -> Result<u64, StoreError> {
+    fn purge_stream(
+        &self,
+        feed: &Feed,
+        stream: StreamRef<'_>,
+        expected: u64,
+    ) -> Result<u64, StoreError> {
         let actual = self.head(stream)?.next_sequence;
         if actual != expected {
             return Err(StoreError::conflict(stream, expected, actual));
@@ -247,7 +258,7 @@ pub(crate) trait Writes: Queries {
         self.run(statements::DELETE_EXTENT, &key.params())?;
         self.run(statements::DELETE_SNAPSHOT, &key.params())?;
         self.delete_letters(stream)?;
-        self.touch(stream, true)?;
+        self.touch(feed, stream, true)?;
         Ok(deleted as u64)
     }
 

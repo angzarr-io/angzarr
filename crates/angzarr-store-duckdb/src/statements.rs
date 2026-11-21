@@ -99,13 +99,19 @@ pub(crate) const INSERT_PAGE: &str =
     "INSERT INTO events (domain, edition, root, sequence, command_id, correlation_id, \
      recorded_at, page) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)";
 
-/// Set a stream's extent after an append: stream (`$1` to `$3`), the first
-/// own sequence (kept if the stream has one), the next, the last instant.
-pub(crate) const UPSERT_EXTENT: &str =
+/// Move a stream's extent after an append: stream (`$1` to `$3`), the next
+/// sequence, the last instant. How many rows: 0 while the stream has no
+/// extent. (An update then an insert, not `ON CONFLICT`: DuckDB's upsert
+/// costs about twice as much, and a handling step does one per write.)
+pub(crate) const UPDATE_EXTENT: &str =
+    "UPDATE streams SET next_sequence = $4, last_seconds = $5, last_nanos = $6 \
+     WHERE domain = $1 AND edition = $2 AND root = $3";
+
+/// A stream's first extent: stream (`$1` to `$3`), the first own sequence,
+/// the next, the last instant.
+pub(crate) const INSERT_EXTENT: &str =
     "INSERT INTO streams (domain, edition, root, first_sequence, next_sequence, last_seconds, \
-     last_nanos) VALUES ($1, $2, $3, $4, $5, $6, $7) \
-     ON CONFLICT (domain, edition, root) DO UPDATE SET next_sequence = excluded.next_sequence, \
-     last_seconds = excluded.last_seconds, last_nanos = excluded.last_nanos";
+     last_nanos) VALUES ($1, $2, $3, $4, $5, $6, $7)";
 
 /// Delete a stream's own pages, extent, snapshot.
 pub(crate) const DELETE_EVENTS: &str =
@@ -133,10 +139,14 @@ pub(crate) const POSITION: &str = "SELECT next FROM positions \
 pub(crate) const HANDLER_POSITIONS: &str = "SELECT domain, edition, root, next FROM positions \
      WHERE handler = $1 AND next > 0 ORDER BY domain, edition, root";
 
-/// Put a handler's position on a stream: a plain upsert.
-pub(crate) const PUT_POSITION: &str =
-    "INSERT INTO positions (domain, edition, root, handler, next) VALUES ($1, $2, $3, $4, $5) \
-     ON CONFLICT (domain, edition, root, handler) DO UPDATE SET next = excluded.next";
+/// Move a handler's position (`$4`) on a stream to `$5`: how many rows,
+/// 0 while it has none.
+pub(crate) const UPDATE_POSITION: &str = "UPDATE positions SET next = $5 \
+     WHERE domain = $1 AND edition = $2 AND root = $3 AND handler = $4";
+
+/// A handler's first position on a stream.
+pub(crate) const INSERT_POSITION: &str =
+    "INSERT INTO positions (domain, edition, root, handler, next) VALUES ($1, $2, $3, $4, $5)";
 
 /// Keep an outbox entry, unless its id is pending already: id, the stream
 /// its write appended to (domain, edition, root; an empty domain for
@@ -219,10 +229,9 @@ pub(crate) const PUT_META: &str = "INSERT INTO meta (key, value) VALUES ($1, $2)
 pub(crate) const CHANGES_AFTER: &str = "SELECT seq, domain, edition, root, purged FROM changes \
      WHERE seq > $1 ORDER BY seq LIMIT $2";
 
-/// A change: stream (`$1` to `$3`) was written to (`$4` false) or purged.
-/// Its place in the feed is the last change's plus one.
-pub(crate) const TOUCH: &str =
-    "INSERT INTO changes SELECT COALESCE(MAX(seq), 0) + 1, $1, $2, $3, $4 FROM changes";
+/// A change at place `$1`: stream (`$2` to `$4`) was written to (`$5`
+/// false) or purged.
+pub(crate) const TOUCH: &str = "INSERT INTO changes VALUES ($1, $2, $3, $4, $5)";
 
 /// How many changes the feed keeps.
 pub(crate) const CHANGES_KEPT: i64 = 65_536;

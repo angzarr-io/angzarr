@@ -5,7 +5,7 @@ use std::collections::hash_map::RandomState;
 use std::collections::BTreeMap;
 use std::hash::{BuildHasher, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 
 use angzarr_ports::{CommitSignal, StoreError};
@@ -51,6 +51,27 @@ pub(crate) struct Shared {
     commits: AtomicU64,
     /// The feed's identity: a cursor of another's is an overflow.
     pub(crate) identity: u64,
+    /// The place of the feed's last change: the next is one more. The store
+    /// is the file's one writer, so it numbers the changes itself and a
+    /// commit does not scan the feed for its place.
+    pub(crate) feed: Feed,
+}
+
+/// The place of the feed's last change (see [`Shared::feed`]).
+pub(crate) struct Feed(AtomicI64);
+
+impl Feed {
+    /// The place of the next change.
+    pub(crate) fn next(&self) -> i64 {
+        self.0.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    /// Take the feed's last place from the file.
+    pub(crate) fn align(&self, conn: &Connection) -> Result<(), StoreError> {
+        let head = conn.first(statements::FEED_HEAD, &[], |row| row.get::<_, i64>(0))?;
+        self.0.store(head.unwrap_or_default(), Ordering::SeqCst);
+        Ok(())
+    }
 }
 
 impl Shared {
@@ -110,6 +131,8 @@ impl DuckStore {
     fn on(conn: Connection, path: Option<PathBuf>) -> Result<DuckStore, StoreError> {
         conn.set_prepared_statement_cache_capacity(STATEMENTS_KEPT);
         let identity = schema::ensure(&conn)?;
+        let feed = Feed(AtomicI64::new(0));
+        feed.align(&conn)?;
         Ok(DuckStore {
             shared: Arc::new(Shared {
                 conn: Mutex::new(conn),
@@ -117,6 +140,7 @@ impl DuckStore {
                 signal: CommitSignal::new(),
                 commits: AtomicU64::new(0),
                 identity,
+                feed,
             }),
         })
     }

@@ -265,7 +265,11 @@ async fn main() {
         |at: usize, default: u32| args.get(at).and_then(|a| a.parse().ok()).unwrap_or(default);
     let scale = (number(0, 1), number(1, 2000));
     let which = args.get(2).map_or("all", String::as_str);
-    let dir = angzarr_test_dir::TestDir::new("angzarr-store-duckdb-load");
+    // The temporary directory is often memory (no `fsync` to pay for): set
+    // ANGZARR_LOAD_DIR to a directory on the disk to time commits there.
+    let scratch = angzarr_test_dir::TestDir::new("angzarr-store-duckdb-load");
+    let dir =
+        std::env::var_os("ANGZARR_LOAD_DIR").map_or_else(|| scratch.to_path_buf(), Into::into);
     println!("{} run(s) of {} mutants", scale.0, scale.1);
     if matches!(which, "all" | "duckdb") {
         duckdb(&dir, scale).await.print();

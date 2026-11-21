@@ -111,6 +111,15 @@ debug = 0
 strip = true
 incremental = true
 
+# DuckDB's C++ (angzarr-store-duckdb) is several times slower at the
+# size-optimised level every other crate is built at: its statements and
+# commits cost milliseconds there. Only that crate's C++ is built for speed.
+[profile.dev.package.libduckdb-sys]
+opt-level = 3
+
+[profile.test.package.libduckdb-sys]
+opt-level = 3
+
 [profile.test]
 opt-level = "z"
 debug = 0

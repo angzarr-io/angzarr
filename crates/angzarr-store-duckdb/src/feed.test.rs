@@ -48,7 +48,8 @@ impl ChangesFixture for File {
                 )
                 .map_err(crate::error::unavailable)?;
                 conn.execute_batch(crate::statements::TRIM)
-                    .map_err(crate::error::unavailable)
+                    .map_err(crate::error::unavailable)?;
+                store.shared.feed.align(conn)
             })
             .expect("the feed is aged and trimmed");
         true

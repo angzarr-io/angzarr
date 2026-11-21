@@ -86,7 +86,8 @@ async fn the_feed_is_trimmed_at_a_multiple_and_keeps_what_it_promises() {
                 "INSERT INTO changes SELECT i, 'x', '', '\\x01'::BLOB, false FROM range(1, {}) t(i)",
                 aged + 1
             ))
-            .map_err(crate::error::unavailable)
+            .map_err(crate::error::unavailable)?;
+            store.shared.feed.align(c)
         })
         .unwrap();
     assert_eq!(count(&store), aged);
