@@ -42,6 +42,27 @@ async fn a_new_file_is_made_and_a_store_in_memory_has_none() {
     assert_eq!(DuckStore::open_in_memory().unwrap().path(), None);
 }
 
+/// A feed's identity is made at random, once per file: two new files do not
+/// share one (a cursor of one would be understood by the other), and a file
+/// keeps its own when it is opened again.
+#[tokio::test]
+async fn each_new_file_has_an_identity_of_its_own_that_it_keeps() {
+    let (a, b) = (scratch(), scratch());
+    let first = DuckStore::open(&a).unwrap();
+    let other = DuckStore::open(&b).unwrap();
+    assert_ne!(first.shared.identity, other.shared.identity);
+    assert!(first.shared.identity > 1 && other.shared.identity > 1);
+    // Every identity fits the column that keeps it (a 63-bit number): a
+    // number that did not would be kept as 0, and read back as another.
+    for _ in 0..24 {
+        let made = DuckStore::open_in_memory().unwrap().shared.identity;
+        assert!(made > 1 && i64::try_from(made).is_ok(), "{made}");
+    }
+    let identity = first.shared.identity;
+    first.close().unwrap();
+    assert_eq!(DuckStore::open(&a).unwrap().shared.identity, identity);
+}
+
 /// Why the store is durable at all: everything it was given is still there
 /// when the file is opened again by another store: events (a fork's
 /// included), the snapshot, the positions, the dead letters, the outbox,

@@ -91,3 +91,17 @@ fn a_damage_names_its_first_problem_and_the_rest() {
         )
     );
 }
+
+/// How many more problems there are than the first is counted, not
+/// assumed: three problems are two more.
+#[test]
+fn a_damage_counts_the_problems_beyond_its_first() {
+    let damage = crate::Damage {
+        problems: vec!["a".into(), "b".into(), "c".into()],
+    };
+    assert!(damage.to_string().ends_with("first=a more=2"), "{damage}");
+    let one = crate::Damage {
+        problems: vec!["a".into()],
+    };
+    assert!(one.to_string().ends_with("first=a more=0"), "{one}");
+}

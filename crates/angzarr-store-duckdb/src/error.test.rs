@@ -46,6 +46,7 @@ fn every_error_has_its_own_code_and_a_cause() {
     codes.sort_unstable();
     codes.dedup();
     assert_eq!(codes.len(), all.len());
+    assert_eq!(all.len(), 7, "one sample of each DuckError");
     assert_eq!(causes().len(), all.len());
     for (error, cause) in all.iter().zip(causes()) {
         assert_eq!(cause.code, error.code());
