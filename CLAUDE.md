@@ -5,7 +5,7 @@ One Cargo workspace for angzarr's Rust: the shared core (`angzarr-proto*`,
 `-presentation`, `-store-transfer`), the client router (`angzarr-router`), the
 in-process runtime (`angzarr-embedded*`, `angzarr-store-sqlite`), the code
 generator (`angzarr-build`, `angzarr-codegen`) and the platform seams (`os`,
-`file-system`, `file-lock`, `store-jsonl`). They were five repositories; their
+`file-system`, `file-lock`). They were five repositories; their
 histories are not here. README.md has the crate and licence table.
 
 The spec, protos and design docs are the `angzarr-project` submodule
@@ -53,7 +53,7 @@ Three groups, per crate, by the linking boundary (the owner's rule, 2026-11-20):
   runtime code that can end up in a user's process. `LICENSE-EXCEPTION` frees
   an application that links it.
 - **C**, `Apache-2.0 OR BSD-3-Clause`: client-linked code (protos, router,
-  codegen, proc-macros), the platform seams, the SQLite and JSON Lines stores, test-dir. Files
+  codegen, proc-macros), the platform seams, the SQLite store, test-dir. Files
   outside crates/ are C too.
 
 Rules a change must not break:
@@ -92,7 +92,7 @@ per-crate justfiles) are the `core` module: `just core::buf-lint`.
 - `invisible_characters`, `unicode_not_nfc` and `non_ascii_literal` are denied:
   write a non-ASCII character as an escape (`"\u{e9}"`).
 - Windows and macOS CI build and test only `portable_crates` (`os`, `file-system`,
-  `file-lock`, `store-jsonl`). A change that makes another crate's build need a
+  `file-lock`). A change that makes another crate's build need a
   host feature is a CI change.
 
 ## Tests

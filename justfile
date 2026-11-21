@@ -26,11 +26,11 @@ mutation_thresholds := "crates=90 crates/angzarr-codegen=100"
 # (.cargo/mutants.<family>.toml; the crates of no family use .cargo/mutants.toml):
 # "<family>=<crate>,<crate> ...". embedded tests the whole workspace against each
 # mutant and carries equivalent-mutant excludes; platform tests each crate by itself.
-mutation_families := "embedded=angzarr-embedded,angzarr-embedded-catalog-check,angzarr-embedded-conformance,angzarr-embedded-host,angzarr-embedded-host-config,angzarr-embedded-macros,angzarr-embedded-runner,angzarr-store-sqlite platform=os,file-system,file-lock,store-jsonl"
+mutation_families := "embedded=angzarr-embedded,angzarr-embedded-catalog-check,angzarr-embedded-conformance,angzarr-embedded-host,angzarr-embedded-host-config,angzarr-embedded-macros,angzarr-embedded-runner,angzarr-store-sqlite platform=os,file-system,file-lock"
 
 # The crates the Windows and macOS CI jobs build and test: the ones that name an
 # operating system or sit on its filesystem (platform's, which built there before the merge).
-portable_crates := "os file-system file-lock store-jsonl"
+portable_crates := "os file-system file-lock angzarr-store-sqlite"
 
 # Staged paths outside any crate that test the whole workspace.
 workspace_wide := "Cargo.toml Cargo.lock rust-toolchain.toml .cargo/config.toml .cargo/config clippy.toml deny.toml"

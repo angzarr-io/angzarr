@@ -1,7 +1,7 @@
 //! The change feed's conformance checks, run against every implementation in
 //! this crate: the in-memory store, and the fault-injecting wrapper
-//! forwarding to it. (SQLite and the journal store run the same checks in
-//! their own crates.)
+//! forwarding to it. (SQLite runs the same checks in
+//! its own crate.)
 
 #![cfg(not(target_arch = "wasm32"))]
 

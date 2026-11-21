@@ -22,7 +22,7 @@ Every crate is `crates/<crate-name>`; the name prefix says the family:
 | router | `angzarr-router`, `angzarr-router-conformance` | the client router every runtime dispatches through |
 | embedded | `angzarr-embedded*`, `angzarr-store-sqlite` | the in-process runtime: a small deterministic event-sourcing kernel inside an application's process |
 | build | `angzarr-build`, `angzarr-codegen` | build-script helpers and the generator core |
-| platform | `os`, `file-system`, `file-lock`, `store-jsonl` | everything that differs between operating systems, behind one seam, and a single-process store |
+| platform | `os`, `file-system`, `file-lock` | everything that differs between operating systems, behind one seam, |
 
 `tools/archlint` checks module-level layering of the router crates. The spec,
 protos and design documents are the `angzarr-project` submodule, and `sererr`
@@ -47,7 +47,6 @@ the `LICENSE-*` files, `deny.toml` and this table to it.
 | `angzarr-coordinator-grpc` | A | `AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission` | the coordinators' tonic server |
 | `angzarr-reads` | A | `AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission` | the coordinators' read engine |
 | `angzarr-store-sqlite` | C | `Apache-2.0 OR BSD-3-Clause` | SQLite adapter of the storage ports |
-| `store-jsonl` | C | `Apache-2.0 OR BSD-3-Clause` | single-process JSON Lines store |
 | `angzarr-embedded` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | the in-process runtime (kernel) |
 | `angzarr-embedded-host` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | hosts remote components as child processes |
 | `angzarr-embedded-host-config` | C | `Apache-2.0 OR BSD-3-Clause` | the schema and loader of angzarr.yaml |
@@ -69,7 +68,6 @@ the `LICENSE-*` files, `deny.toml` and this table to it.
 | `angzarr-proto-component` | C | `Apache-2.0 OR BSD-3-Clause` | the component contract's tonic stubs |
 | `angzarr-proto-transport-embedded` | C | `Apache-2.0 OR BSD-3-Clause` | the local-process transport's constants and keys |
 | `angzarr-proto-transport-distributed` | C | `Apache-2.0 OR BSD-3-Clause` | the distributed transport's stubs and envelopes |
-| `angzarr-proto-jsonl` | C | `Apache-2.0 OR BSD-3-Clause` | protobuf messages as JSON Lines |
 | `angzarr-router` | C | `Apache-2.0 OR BSD-3-Clause` | the shared client router |
 | `angzarr-router-conformance` | C | `Apache-2.0 OR BSD-3-Clause` | test-only: the router's conformance features |
 | `angzarr-build` | C | `Apache-2.0 OR BSD-3-Clause` | build.rs helpers |
@@ -77,6 +75,8 @@ the `LICENSE-*` files, `deny.toml` and this table to it.
 | `angzarr-embedded-macros` | C | `Apache-2.0 OR BSD-3-Clause` | proc-macros over aggregates, policies and projectors |
 | `archlint` | C | `Apache-2.0 OR BSD-3-Clause` | module-level architecture rules for a workspace |
 <!-- END licences.sh -->
+
+
 
 
 ## Building

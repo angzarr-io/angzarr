@@ -5,7 +5,6 @@ angzarr-coordinator-base	A	the coordinators' shared vocabulary
 angzarr-coordinator-grpc	A	the coordinators' tonic server	Owner's set. Its Cargo.toml says it is shared by the embedded and distributed runtimes, but no B crate depends on it today.
 angzarr-reads	A	the coordinators' read engine	
 angzarr-store-sqlite	C	SQLite adapter of the storage ports	Owner 2026-11-20: not at risk of being served in a real capacity.
-store-jsonl	C	single-process JSON Lines store	Owner 2026-11-20: permissive, as store-sqlite.
 angzarr-embedded	B	the in-process runtime (kernel)	
 angzarr-embedded-host	B	hosts remote components as child processes	
 angzarr-embedded-host-config	C	the schema and loader of angzarr.yaml	Owner 2026-11-20: borderline crate, permissive.
@@ -27,7 +26,6 @@ angzarr-proto-handler	C	the handler layer's prost types
 angzarr-proto-component	C	the component contract's tonic stubs	
 angzarr-proto-transport-embedded	C	the local-process transport's constants and keys	
 angzarr-proto-transport-distributed	C	the distributed transport's stubs and envelopes	
-angzarr-proto-jsonl	C	protobuf messages as JSON Lines	Named proto-* so C by the rule, but it is a codec with no proto definitions of its own; used by store-jsonl and store-transfer. Could be B.
 angzarr-router	C	the shared client router	Client-linked by the rule, but it depends on angzarr-ports (B): an application linking the router links B code, which the exception covers. If the exception is not signed off for ports, the router is not permissive in practice.
 angzarr-router-conformance	C	test-only: the router's conformance features	Follows the router.
 angzarr-build	C	build.rs helpers	
