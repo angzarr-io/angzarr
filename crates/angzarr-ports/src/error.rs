@@ -204,12 +204,34 @@ impl StoreError {
     }
 }
 
-/// What a caller does about a [`StoreError`]: angzarr's one recovery,
-/// angzarr-diagnostic's. A store error is never
-/// [`Business`](Recovery::Business): a conflict or the store unavailable is
-/// `Retry`, a malformed request or one naming what does not exist
-/// `Invalid`, a discontinuous append or an unreadable event `Bug`.
-pub use angzarr_diagnostic::Recovery;
+/// What to do about a failure: decision 14.37's classes, as whoever holds
+/// the failure acts on it. The one recovery of angzarr's crates: a store's
+/// error ([`StoreError::recovery`]) and a runtime's alike, each mapping its
+/// own errors onto it. Beside the code, never in it: a code names the
+/// condition, its recovery says who must act.
+///
+/// A store error is never [`Business`](Recovery::Business): a conflict or
+/// the store unavailable is `Retry`, a malformed request or one naming what
+/// does not exist `Invalid`, a discontinuous append or an unreadable event
+/// `Bug`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Recovery {
+    /// Run it again, with the same identity, in a fresh unit of work: a
+    /// write that lost a race, a stale read to re-read and re-decide, a
+    /// dependency down for now (a store, a handler, a sidecar). Safe where
+    /// a retry starts at deduplication, so work that landed after all is
+    /// answered as a duplicate.
+    Retry,
+    /// The business said no, deliberately: the same request is refused the
+    /// same way. Tell the person who made it.
+    Business,
+    /// The request was malformed, or names what does not exist: the
+    /// caller's to fix.
+    Invalid,
+    /// A bug, damage or a misconfiguration: retrying will not help; an
+    /// operator must act.
+    Bug,
+}
 
 /// An adapter's own failure, captured as data so [`StoreError`] stays
 /// `Clone` and `Eq`: the adapter's stable code (its own crate's prefix,

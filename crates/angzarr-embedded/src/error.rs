@@ -342,7 +342,7 @@ pub enum ChainProblem {
     DeadEnd { source: String, ends_at: String },
 }
 
-/// What to do about a failure: angzarr's one recovery (angzarr-diagnostic's),
+/// What to do about a failure: angzarr's one recovery (angzarr-ports'),
 /// which a store's error shares. The kernel retries a step's
 /// [`Recovery::Retry`] itself, with backoff, up to a cap, then dead-letters
 /// it ([`OnRetryable`](super::OnRetryable)); the others it never retries.
@@ -356,7 +356,7 @@ pub enum ChainProblem {
 /// DATA_LOSS), the router's own error on malformed input, a discontinuous
 /// append, a key of the wrong domain, a chain too deep, unknown rules, a log
 /// that does not replay, an event the store cannot read back.
-pub use angzarr_diagnostic::Recovery;
+pub use angzarr_ports::Recovery;
 
 impl Failure<super::route::Rejected> {
     /// The domain's own refusal, typed as `R`, when this is a refusal its

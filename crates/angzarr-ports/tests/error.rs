@@ -225,12 +225,9 @@ fn every_error_says_how_to_recover() {
     }
 }
 
-/// The recovery is angzarr's one, angzarr-diagnostic's, and no store
-/// error is the business's to refuse.
+/// No store error is the business's to refuse.
 #[test]
-fn the_recovery_is_angzarr_diagnostics() {
-    let one: angzarr_ports::angzarr_diagnostic::Recovery = Recovery::Retry;
-    assert_eq!(one, Recovery::Retry);
+fn no_store_error_is_business() {
     for (error, _, _) in every() {
         assert_ne!(error.recovery(), Recovery::Business, "{error:?}");
     }
