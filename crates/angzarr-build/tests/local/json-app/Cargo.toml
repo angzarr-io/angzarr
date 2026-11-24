@@ -15,7 +15,7 @@ publish = false
 # angzarr core at the family's pin: its angzarr-proto is the wire types'
 # UUID.
 [dependencies]
-angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "b9848330de43539a0a2d9ffbe960d59c2da0c67c" }
+angzarr-proto = { git = "https://github.com/angzarr-io/angzarr", rev = "434ccc0a8ae614e42c7b88af81ab32b5a4de8686" }
 prost = "0.14"
 prost-types = "0.14"
 # The generated JSON's Serialize and Deserialize.

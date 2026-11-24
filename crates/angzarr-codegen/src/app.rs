@@ -46,7 +46,7 @@ use crate::warnings::Warning;
 /// The angzarr-embedded commit a generated application's `Cargo.toml` pins
 /// (its kernel, which re-exports the diagnostics, its markup and its host): the one this generator's output is
 /// written against.
-pub const ANGZARR_EMBEDDED_REV: &str = "b9848330de43539a0a2d9ffbe960d59c2da0c67c";
+pub const ANGZARR_EMBEDDED_REV: &str = "434ccc0a8ae614e42c7b88af81ab32b5a4de8686";
 /// Where [`ANGZARR_EMBEDDED_REV`] is fetched from.
 pub const ANGZARR_EMBEDDED_GIT: &str = "https://github.com/angzarr-io/angzarr";
 /// Where angzarr-build is fetched from when a seed names no other source.
@@ -57,7 +57,7 @@ pub const ANGZARR_BUILD_GIT: &str = "https://github.com/angzarr-io/angzarr";
 /// change to what the generated build script calls moves it, in a later
 /// commit, to a pushed commit that has the change; a release moves it to
 /// the release's commit.
-pub const ANGZARR_BUILD_REV: &str = "b9848330de43539a0a2d9ffbe960d59c2da0c67c";
+pub const ANGZARR_BUILD_REV: &str = "434ccc0a8ae614e42c7b88af81ab32b5a4de8686";
 
 /// From how far a command may reach a domain through the host's listener
 /// (the host config's `expose`); not exposed is the default and is not
