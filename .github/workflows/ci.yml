@@ -1,7 +1,7 @@
 # The gates, on every push and pull request. Linux runs every gate the justfile
 # has over the whole workspace. Windows and macOS run only the crates that name
-# an operating system (the justfile's `portable_crates`: os, file-system,
-# file-lock, angzarr-store-sqlite), built and tested natively; the rest of the workspace
+# an operating system (the justfile's `portable_crates`: angzarr-store-sqlite),
+# built and tested natively; the rest of the workspace
 # (tonic, sqlx, the embedded host) is not asked to build there.
 #
 # All logic is in just recipes; the jobs install tools and call them. The

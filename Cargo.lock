@@ -22,21 +22,21 @@ name = "angzarr-build"
 version = "0.1.0"
 dependencies = [
  "angzarr-codegen",
- "angzarr-diagnostic",
- "angzarr-presentation",
  "angzarr-proto",
- "angzarr-test-dir",
+ "diagnostic",
+ "presentation",
  "prost-build",
  "syn 3.0.10",
+ "test-dir",
 ]
 
 [[package]]
 name = "angzarr-bus"
 version = "0.1.0"
 dependencies = [
- "angzarr-diagnostic",
  "angzarr-ports",
  "angzarr-proto",
+ "diagnostic",
  "prost-types",
  "tokio",
 ]
@@ -45,12 +45,11 @@ dependencies = [
 name = "angzarr-codegen"
 version = "0.1.0"
 dependencies = [
- "angzarr-diagnostic",
  "angzarr-embedded-host-config",
- "angzarr-presentation",
  "angzarr-proto",
- "angzarr-test-dir",
  "cucumber",
+ "diagnostic",
+ "presentation",
  "prettyplease 0.3.0",
  "proc-macro2",
  "prost",
@@ -60,6 +59,7 @@ dependencies = [
  "serde",
  "serde_json",
  "syn 3.0.10",
+ "test-dir",
  "toml 0.9.12+spec-1.1.0",
 ]
 
@@ -68,19 +68,19 @@ name = "angzarr-coordinator"
 version = "0.1.0"
 dependencies = [
  "angzarr-coordinator-base",
- "angzarr-diagnostic",
  "angzarr-ports",
  "angzarr-proto",
  "angzarr-reads",
+ "diagnostic",
 ]
 
 [[package]]
 name = "angzarr-coordinator-base"
 version = "0.1.0"
 dependencies = [
- "angzarr-diagnostic",
  "angzarr-ports",
  "angzarr-proto",
+ "diagnostic",
  "prost-types",
 ]
 
@@ -90,17 +90,17 @@ version = "0.1.0"
 dependencies = [
  "angzarr-coordinator",
  "angzarr-coordinator-base",
- "angzarr-diagnostic",
  "angzarr-ports",
  "angzarr-proto",
  "angzarr-proto-transport-distributed",
  "angzarr-reads",
- "angzarr-test-dir",
+ "diagnostic",
  "http-body",
  "hyper-util",
  "prost",
  "prost-types",
  "rcgen",
+ "test-dir",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -109,25 +109,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "angzarr-diagnostic"
-version = "0.1.0"
-dependencies = [
- "angzarr-test-dir",
- "fluent-syntax 0.11.1",
-]
-
-[[package]]
 name = "angzarr-embedded"
 version = "0.1.0"
 dependencies = [
  "angzarr-bus",
- "angzarr-diagnostic",
  "angzarr-embedded",
  "angzarr-embedded-macros",
  "angzarr-ports",
  "angzarr-proto",
  "angzarr-router",
  "angzarr-store-sqlite",
+ "diagnostic",
  "prost",
  "prost-types",
  "tokio",
@@ -137,12 +129,12 @@ dependencies = [
 name = "angzarr-embedded-catalog-check"
 version = "0.1.0"
 dependencies = [
- "angzarr-diagnostic",
  "angzarr-embedded",
  "angzarr-embedded-host",
  "angzarr-ports",
  "angzarr-proto-transport-embedded",
  "angzarr-store-sqlite",
+ "diagnostic",
  "fluent-bundle 0.16.0",
 ]
 
@@ -159,7 +151,6 @@ dependencies = [
 name = "angzarr-embedded-host"
 version = "0.1.0"
 dependencies = [
- "angzarr-diagnostic",
  "angzarr-embedded",
  "angzarr-embedded-host-config",
  "angzarr-ports",
@@ -168,11 +159,12 @@ dependencies = [
  "angzarr-proto-transport-embedded",
  "angzarr-router",
  "angzarr-store-sqlite",
- "angzarr-test-dir",
+ "diagnostic",
  "hyper-util",
  "libc",
  "prost",
  "prost-types",
+ "test-dir",
  "tokio",
  "tokio-stream",
  "tonic",
@@ -186,8 +178,8 @@ dependencies = [
 name = "angzarr-embedded-host-config"
 version = "0.1.0"
 dependencies = [
- "angzarr-diagnostic",
  "angzarr-yaml",
+ "diagnostic",
  "serde",
 ]
 
@@ -195,8 +187,8 @@ dependencies = [
 name = "angzarr-embedded-macros"
 version = "0.1.0"
 dependencies = [
- "angzarr-diagnostic",
  "angzarr-embedded",
+ "diagnostic",
  "proc-macro2",
  "prost",
  "quote",
@@ -207,9 +199,9 @@ dependencies = [
 name = "angzarr-embedded-runner"
 version = "0.1.0"
 dependencies = [
- "angzarr-diagnostic",
  "angzarr-embedded",
  "angzarr-embedded-macros",
+ "diagnostic",
  "prost",
 ]
 
@@ -217,8 +209,8 @@ dependencies = [
 name = "angzarr-ports"
 version = "0.1.0"
 dependencies = [
- "angzarr-diagnostic",
  "angzarr-proto",
+ "diagnostic",
  "prost",
  "prost-types",
  "tokio",
@@ -226,28 +218,14 @@ dependencies = [
 ]
 
 [[package]]
-name = "angzarr-presentation"
-version = "0.1.0"
-dependencies = [
- "angzarr-diagnostic",
- "fluent-bundle 0.15.3",
- "fluent-langneg",
- "fluent-syntax 0.11.1",
- "serde",
- "serde_json",
- "unic-langid",
- "unicode-width",
-]
-
-[[package]]
 name = "angzarr-proto"
 version = "0.1.0"
 dependencies = [
- "angzarr-test-dir",
  "bytes",
  "prost",
  "prost-build",
  "prost-types",
+ "test-dir",
  "uuid",
 ]
 
@@ -308,9 +286,9 @@ name = "angzarr-reads"
 version = "0.1.0"
 dependencies = [
  "angzarr-coordinator-base",
- "angzarr-diagnostic",
  "angzarr-ports",
  "angzarr-proto",
+ "diagnostic",
  "prost",
  "prost-types",
 ]
@@ -348,9 +326,9 @@ dependencies = [
 name = "angzarr-store-sqlite"
 version = "0.1.0"
 dependencies = [
- "angzarr-diagnostic",
  "angzarr-ports",
  "angzarr-reads",
+ "diagnostic",
  "prost",
  "prost-types",
  "sea-query",
@@ -363,8 +341,8 @@ dependencies = [
 name = "angzarr-store-transfer"
 version = "0.1.0"
 dependencies = [
- "angzarr-diagnostic",
  "angzarr-ports",
+ "diagnostic",
  "prost",
  "prost-reflect",
  "prost-types",
@@ -374,14 +352,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "angzarr-test-dir"
-version = "0.1.0"
-
-[[package]]
 name = "angzarr-yaml"
 version = "0.1.0"
 dependencies = [
- "angzarr-diagnostic",
+ "diagnostic",
  "serde",
 ]
 
@@ -875,6 +849,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "diagnostic"
+version = "0.1.0"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=a3a9507ebb27187855b57862dcef9f2577a309bf#a3a9507ebb27187855b57862dcef9f2577a309bf"
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -968,25 +947,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 
 [[package]]
-name = "file-lock"
-version = "0.1.0"
-dependencies = [
- "angzarr-diagnostic",
- "angzarr-presentation",
- "file-system",
- "fluent-syntax 0.11.1",
- "mutants",
- "os",
-]
-
-[[package]]
 name = "file-system"
 version = "0.1.0"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=a3a9507ebb27187855b57862dcef9f2577a309bf#a3a9507ebb27187855b57862dcef9f2577a309bf"
 dependencies = [
- "angzarr-diagnostic",
- "angzarr-presentation",
- "fluent-syntax 0.11.1",
- "mutants",
+ "diagnostic",
  "os",
  "tempfile",
 ]
@@ -1946,12 +1911,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d87ecb2933e8aeadb3e3a02b828fed80a7528047e68b4f424523a0981a3a084"
 
 [[package]]
-name = "mutants"
-version = "0.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "add0ac067452ff1aca8c5002111bd6b1c895baee6e45fcbc44e0193aea17be56"
-
-[[package]]
 name = "nix"
 version = "0.31.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2074,14 +2033,13 @@ dependencies = [
 [[package]]
 name = "os"
 version = "0.1.0"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=a3a9507ebb27187855b57862dcef9f2577a309bf#a3a9507ebb27187855b57862dcef9f2577a309bf"
 dependencies = [
  "fs4",
  "junction",
  "libc",
- "mutants",
  "process-wrap",
  "same-file",
- "tempfile",
  "tokio",
  "typed-path",
  "windows-sys 0.61.2",
@@ -2262,6 +2220,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "presentation"
+version = "0.1.0"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=a3a9507ebb27187855b57862dcef9f2577a309bf#a3a9507ebb27187855b57862dcef9f2577a309bf"
+dependencies = [
+ "diagnostic",
+ "fluent-bundle 0.15.3",
+ "fluent-langneg",
+ "serde",
+ "serde_json",
+ "unic-langid",
+ "unicode-width",
 ]
 
 [[package]]
@@ -2861,6 +2833,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "sqlite-store-opener"
+version = "0.1.0"
+dependencies = [
+ "angzarr-ports",
+ "angzarr-store-sqlite",
+ "diagnostic",
+ "file-system",
+ "os",
+ "tokio",
+]
+
+[[package]]
 name = "sqlx"
 version = "0.8.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3168,6 +3152,11 @@ dependencies = [
  "rustix",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "test-dir"
+version = "0.1.0"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=a3a9507ebb27187855b57862dcef9f2577a309bf#a3a9507ebb27187855b57862dcef9f2577a309bf"
 
 [[package]]
 name = "textwrap"

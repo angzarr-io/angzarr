@@ -2,7 +2,7 @@ use std::fs;
 use std::io::{Error, ErrorKind};
 use std::os::unix::net::UnixListener;
 
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 use super::*;
 

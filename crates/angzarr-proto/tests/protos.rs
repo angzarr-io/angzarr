@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use angzarr_proto::protos::{write_include_dir, FILES};
 
 // A test's scratch directory, removed when it drops, on a panic too.
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 /// The proto root build.rs generated the library from (exported by it).
 fn repo_proto() -> PathBuf {

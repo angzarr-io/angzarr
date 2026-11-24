@@ -1,6 +1,6 @@
 # cargo-deny for the whole angzarr workspace (the union of the five former files:
-# embedded's advisory ignores, core's ISC; no git source is allowed any more,
-# the family crates are path dependencies). `just lint-deps` runs it.
+# embedded's advisory ignores, core's ISC; the family crates are path
+# dependencies, and the one git source is rust-support). `just lint-deps` runs it.
 
 [graph]
 # Every feature, judged, not only the default build.
@@ -65,7 +65,9 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# rust-support's crates (diagnostic, presentation, test-dir, os, file-system),
+# pinned by full commit in the root Cargo.toml; Apache-2.0 OR BSD-3-Clause.
+allow-git = ["https://github.com/benjaminabbitt/rust-support"]
 
 # BEGIN licences.sh (generated from licences.tsv)
 [[licenses.exceptions]]
@@ -110,14 +112,6 @@ allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
 
 [[licenses.exceptions]]
 crate = "angzarr-bus"
-allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
-
-[[licenses.exceptions]]
-crate = "angzarr-diagnostic"
-allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
-
-[[licenses.exceptions]]
-crate = "angzarr-presentation"
 allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
 
 [[licenses.exceptions]]

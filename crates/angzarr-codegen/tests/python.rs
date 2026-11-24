@@ -11,7 +11,7 @@ use angzarr_codegen::{
 };
 use common::*;
 
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 const GOLDEN: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/golden/python/player");
 

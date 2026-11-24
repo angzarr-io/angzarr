@@ -38,7 +38,7 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] 
 # The build writes the catalog's source under the crate's name
 # (angzarr_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+angzarr-diagnostic = { workspace = true, features = ["build"] }
 
 [lints]
 workspace = true

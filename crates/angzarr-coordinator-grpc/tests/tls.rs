@@ -13,8 +13,8 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use angzarr_coordinator_grpc::{BoundEndpoint, ListenError, Listener, Running, Server};
-use angzarr_test_dir::TestDir;
 use rcgen::{date_time_ymd, CertificateParams, KeyPair, SanType};
+use test_dir::TestDir;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity, ServerTlsConfig};
 
 const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);

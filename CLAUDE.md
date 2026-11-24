@@ -1,12 +1,13 @@
 # angzarr
 
 One Cargo workspace for angzarr's Rust: the shared core (`angzarr-proto*`,
-`-ports`, `-bus`, `-coordinator*`, `-reads`, `-diagnostic`, `-yaml`,
-`-presentation`, `-store-transfer`), the client router (`angzarr-router`), the
-in-process runtime (`angzarr-embedded*`, `angzarr-store-sqlite`), the code
-generator (`angzarr-build`, `angzarr-codegen`) and the platform seams (`os`,
-`file-system`, `file-lock`). They were five repositories; their
-histories are not here. README.md has the crate and licence table.
+`-ports`, `-bus`, `-coordinator*`, `-reads`, `-yaml`, `-store-transfer`), the
+client router (`angzarr-router`), the in-process runtime (`angzarr-embedded*`,
+`angzarr-store-sqlite`, `sqlite-store-opener`) and the code generator
+(`angzarr-build`, `angzarr-codegen`). They were five repositories; their
+histories are not here. README.md has the crate and licence table. The generic
+substrate (`diagnostic`, `presentation`, `os`, `file-system`, `file-lock`,
+`test-dir`) is rust-support's, not this workspace's.
 
 The spec, protos and design docs are the `angzarr-project` submodule
 (`git submodule update --init`); build scripts read its protos, so the
@@ -20,16 +21,22 @@ runtime is retired and to be brought back (README, "Retired").
   `path` dependency. There is no pin, no `[patch]`, no lockstep check; a change
   to a core crate must keep every dependent green in the same commit.
 - Never add a git dependency on this repository's own crates. Third-party crates
-  come from crates.io only (`deny.toml` has `allow-git = []`).
+  come from crates.io only, but for rust-support (github.com/benjaminabbitt/rust-support,
+  the generic substrate: `diagnostic`, `presentation`, `test-dir`, `os`,
+  `file-system`), the one git source `deny.toml` allows, pinned by full commit in
+  the root `Cargo.toml` (all of its crates at the one rev; bump it on purpose, in
+  a commit of its own). Its `diagnostic` is the dependency `angzarr-diagnostic`
+  (`package = "diagnostic"`), imported as `angzarr_diagnostic`: a crate named
+  `diagnostic` shadows rustc's `#[diagnostic::on_unimplemented]`.
 - **A new dependency** is named, with why, in the docs of the crate that takes
   it, and passes `just lint-deps`. Third-party licences must be permissive;
   copyleft fails the gate. Changing `deny.toml` needs a stated reason.
 - **Crates know no application.** Anything specific to one application belongs in
   that application's repository.
-- Only `os` and `file-system` call `std::fs` or name an operating system
-  (clippy `disallowed-methods` in the four crates' `clippy.toml`, kept equal to
-  each other). A test's files live under a `Rooted::temp` filesystem or a
-  `angzarr_test_dir::TestDir`, never a bare `temp_dir().join(..)`.
+- A crate that touches files does it through rust-support's `file_system::Fs`
+  (as `sqlite-store-opener` does), and a test's files live under a
+  `file_system::Rooted::temp` filesystem or a `test_dir::TestDir`, never a bare
+  `temp_dir().join(..)`.
 - `angzarr-embedded` and `angzarr-router` must keep building for
   `wasm32-unknown-unknown` (`just wasm`, `just wasm-router`).
 - Only the root `Cargo.toml` profiles apply (size-optimised, `panic = "abort"` in
@@ -53,7 +60,7 @@ Three groups, per crate, by the linking boundary (the owner's rule, 2026-11-20):
   runtime code that can end up in a user's process. `LICENSE-EXCEPTION` frees
   an application that links it.
 - **C**, `Apache-2.0 OR BSD-3-Clause`: client-linked code (protos, router,
-  codegen, proc-macros), the platform seams, the SQLite store, test-dir. Files
+  codegen, proc-macros), the SQLite store and its opener. Files
   outside crates/ are C too.
 
 Rules a change must not break:
@@ -91,8 +98,8 @@ per-crate justfiles) are the `core` module: `just core::buf-lint`.
   helpers; never `#[allow]`, `#[expect]` or a raised threshold.
 - `invisible_characters`, `unicode_not_nfc` and `non_ascii_literal` are denied:
   write a non-ASCII character as an escape (`"\u{e9}"`).
-- Windows and macOS CI build and test only `portable_crates` (`os`, `file-system`,
-  `file-lock`). A change that makes another crate's build need a
+- Windows and macOS CI build and test only `portable_crates`
+  (`angzarr-store-sqlite`). A change that makes another crate's build need a
   host feature is a CI change.
 
 ## Tests
@@ -125,7 +132,7 @@ Nothing is done until tests that execute prove it. Never write a blank `pass` te
 ## Errors, docs, wire
 
 - **Errors are a key and args.** Every public error implements
-  `angzarr_diagnostic::Diagnostic`: a stable kebab-case code written
+  `angzarr_diagnostic::Diagnostic` (rust-support's `diagnostic`): a stable kebab-case code written
   `code!("suffix")` (prefixed by the crate name), named args, and a `Display` that
   is the code and args, never English. A new variant needs a code and an en-US
   message in `locales/en-US/messages.ftl` using exactly its args. Codes are never

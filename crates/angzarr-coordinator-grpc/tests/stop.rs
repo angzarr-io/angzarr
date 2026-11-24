@@ -19,7 +19,7 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use angzarr_coordinator_grpc::{BoundEndpoint, Listener, Running, Server};
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 use tokio::sync::{watch, Notify};
 use tonic::codegen::{http, Body, Service, StdError};
 use tonic::server::NamedService;

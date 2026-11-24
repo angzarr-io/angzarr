@@ -14,7 +14,7 @@ publish = false
 # No dependencies beyond angzarr-diagnostic and serde's traits (no derive),
 # and nothing from any program that uses it.
 [dependencies]
-angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+angzarr-diagnostic = { workspace = true }
 # The strict decode (src/decode.rs) is a serde Deserializer over Value.
 serde = { version = "1.0.228", default-features = false, features = ["std"] }
 
@@ -25,7 +25,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 # The build writes the catalog's source under the crate's name
 # (angzarr_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+angzarr-diagnostic = { workspace = true, features = ["build"] }
 
 # The shared crates' lints: the workspace's (the root Cargo.toml).
 [lints]

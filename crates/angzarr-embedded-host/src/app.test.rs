@@ -7,7 +7,7 @@ use angzarr_embedded::{Any, Handled, Misconfigured, Registry, Sampled, Timestamp
 use super::*;
 use crate::config::HostConfig;
 use crate::fake_child::{config, domain, mode, noted};
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 /// `body` stamped at the current version, written as `angzarr.yaml` into
 /// `dir`.

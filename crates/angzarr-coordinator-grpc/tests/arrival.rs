@@ -6,7 +6,7 @@ mod support;
 use std::net::SocketAddr;
 
 use angzarr_coordinator_grpc::{Arrival, BoundEndpoint, ListenError, Listener, Reach, Server};
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 fn local() -> SocketAddr {
     "127.0.0.1:0".parse().unwrap()

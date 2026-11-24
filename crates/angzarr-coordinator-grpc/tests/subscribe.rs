@@ -29,8 +29,8 @@ use angzarr_proto_transport_distributed::v1::{
     subscribe_request, CorrelationFrom, StreamFrom, SubscribeRequest,
 };
 use angzarr_reads::{Query, ReadError, Reads};
-use angzarr_test_dir::TestDir;
 use counter::{bearing, commands, counted, cover, Counter, Tokens, DOMAIN, READER, SEVEN, WRITER};
+use test_dir::TestDir;
 use tonic::transport::Channel;
 use tonic::{Code, Status, Streaming};
 

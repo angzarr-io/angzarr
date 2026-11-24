@@ -1029,14 +1029,13 @@ mod tests {
     use super::{BuildError, EN_US, English, error_samples};
 
     /// Every crate's catalog a build script shows, in Fluent.
-    fn fluent() -> angzarr_presentation::Catalog {
-        angzarr_presentation::Catalog::en_us(&[angzarr_codegen::EN_US, EN_US])
-            .expect("the catalogs load")
+    fn fluent() -> presentation::Catalog {
+        presentation::Catalog::en_us(&[angzarr_codegen::EN_US, EN_US]).expect("the catalogs load")
     }
 
     /// `d` as Fluent renders it, strictly: a code with no message, or a
     /// message that does not format, fails the test.
-    fn rendered(catalog: &angzarr_presentation::Catalog, d: &dyn Diagnostic) -> String {
+    fn rendered(catalog: &presentation::Catalog, d: &dyn Diagnostic) -> String {
         catalog.render(d).expect("the catalog renders it")
     }
 

@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 #[test]
 fn test_descriptors_writes_into_out_dir_with_the_crates_version() {

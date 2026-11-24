@@ -38,7 +38,7 @@ angzarr-coordinator-base = { path = "../angzarr-coordinator-base" }
 # The edge: Coordinator, Session, Gate, Credential, Arrival, Reach, Commands.
 angzarr-coordinator = { path = "../angzarr-coordinator", default-features = false }
 # Every error is a Diagnostic; the catalog's parity test is this crate's.
-angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+angzarr-diagnostic = { workspace = true }
 # The ports' BoxFuture.
 angzarr-ports = { path = "../angzarr-ports" }
 # The wire messages the services speak.
@@ -67,13 +67,13 @@ http-body = "1"
 # The build writes the catalog's source under the crate's name
 # (angzarr_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+angzarr-diagnostic = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
 # The tests' counter domain's store.
 angzarr-ports = { path = "../angzarr-ports", features = ["memory"] }
 # Each test's scratch directory (a short path, for a socket).
-angzarr-test-dir = { path = "../angzarr-test-dir" }
+test-dir.workspace = true
 # A UDS client: tonic's channel over a connector, whose stream hyper reads
 # through its own IO traits (hyper-util's adapter).
 hyper-util = { version = "0.1", features = ["tokio"] }

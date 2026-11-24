@@ -15,7 +15,7 @@ rust-version = "1.89"
 # and the kernel's are the same types. Dependency-freeness was given up for
 # this deliberately: see docs/design/audit.md, *Layering*.
 [dependencies]
-angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+angzarr-diagnostic = { workspace = true }
 angzarr-proto = { path = "../angzarr-proto" }
 prost = "0.14"
 prost-types = "0.14"
@@ -68,7 +68,7 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] 
 # The build writes the catalog's source under the crate's name
 # (angzarr_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+angzarr-diagnostic = { workspace = true, features = ["build"] }
 
 [lints]
 workspace = true

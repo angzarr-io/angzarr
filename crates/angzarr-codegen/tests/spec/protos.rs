@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::process::Command;
 
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 /// A component's `ComponentOptions`: its one name and the arm of its kind.
 #[derive(Clone, Debug, Default)]

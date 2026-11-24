@@ -18,11 +18,14 @@ Every crate is `crates/<crate-name>`; the name prefix says the family:
 
 | Family | Crates | What it is |
 |--------|--------|------------|
-| core | `angzarr-proto*`, `-ports`, `-bus`, `-coordinator*`, `-reads`, `-diagnostic`, `-yaml`, `-presentation`, `-test-dir`, `-store-transfer` | the wire contract, the storage and bus ports, the coordinators' building blocks, shared libraries |
+| core | `angzarr-proto*`, `-ports`, `-bus`, `-coordinator*`, `-reads`, `-yaml`, `-store-transfer` | the wire contract, the storage and bus ports, the coordinators' building blocks, shared libraries |
 | router | `angzarr-router`, `angzarr-router-conformance` | the client router every runtime dispatches through |
-| embedded | `angzarr-embedded*`, `angzarr-store-sqlite` | the in-process runtime: a small deterministic event-sourcing kernel inside an application's process |
+| embedded | `angzarr-embedded*`, `angzarr-store-sqlite`, `sqlite-store-opener` | the in-process runtime: a small deterministic event-sourcing kernel inside an application's process |
 | build | `angzarr-build`, `angzarr-codegen` | build-script helpers and the generator core |
-| platform | `os`, `file-system`, `file-lock` | everything that differs between operating systems, behind one seam, |
+
+The generic substrate (localizable errors and their rendering, the operating-system
+and filesystem seams, a test's scratch directory) is [rust-support](https://github.com/benjaminabbitt/rust-support),
+a git dependency pinned by full commit in the root `Cargo.toml`.
 
 `tools/archlint` checks module-level layering of the router crates. The spec,
 protos and design documents are the `angzarr-project` submodule, and `sererr`
@@ -47,6 +50,7 @@ the `LICENSE-*` files, `deny.toml` and this table to it.
 | `angzarr-coordinator-grpc` | A | `AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission` | the coordinators' tonic server |
 | `angzarr-reads` | A | `AGPL-3.0-only WITH AdditionRef-angzarr-grpc-api-permission` | the coordinators' read engine |
 | `angzarr-store-sqlite` | C | `Apache-2.0 OR BSD-3-Clause` | SQLite adapter of the storage ports |
+| `sqlite-store-opener` | C | `Apache-2.0 OR BSD-3-Clause` | places and opens a project's SQLite event store under a caller-chosen file name |
 | `angzarr-embedded` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | the in-process runtime (kernel) |
 | `angzarr-embedded-host` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | hosts remote components as child processes |
 | `angzarr-embedded-host-config` | C | `Apache-2.0 OR BSD-3-Clause` | the schema and loader of angzarr.yaml |
@@ -55,14 +59,8 @@ the `LICENSE-*` files, `deny.toml` and this table to it.
 | `angzarr-embedded-conformance` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | test-only: the coordinator-contract tier on the kernel |
 | `angzarr-ports` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | the shared storage contract and its conformance suite |
 | `angzarr-bus` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | the bus interface and its conformance kit |
-| `angzarr-diagnostic` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | localizable errors |
-| `angzarr-presentation` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | JSON or text at a driving edge |
 | `angzarr-yaml` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | a strict YAML subset |
-| `angzarr-test-dir` | C | `Apache-2.0 OR BSD-3-Clause` | a test's scratch directory (dev-dependency) |
 | `angzarr-store-transfer` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | a store carried across a proto generation |
-| `os` | C | `Apache-2.0 OR BSD-3-Clause` | everything that differs between operating systems |
-| `file-system` | C | `Apache-2.0 OR BSD-3-Clause` | the filesystem seam |
-| `file-lock` | C | `Apache-2.0 OR BSD-3-Clause` | advisory file locks |
 | `angzarr-proto` | C | `Apache-2.0 OR BSD-3-Clause` | prost types of the wire contract |
 | `angzarr-proto-handler` | C | `Apache-2.0 OR BSD-3-Clause` | the handler layer's prost types |
 | `angzarr-proto-component` | C | `Apache-2.0 OR BSD-3-Clause` | the component contract's tonic stubs |
@@ -75,6 +73,7 @@ the `LICENSE-*` files, `deny.toml` and this table to it.
 | `angzarr-embedded-macros` | C | `Apache-2.0 OR BSD-3-Clause` | proc-macros over aggregates, policies and projectors |
 | `archlint` | C | `Apache-2.0 OR BSD-3-Clause` | module-level architecture rules for a workspace |
 <!-- END licences.sh -->
+
 
 
 

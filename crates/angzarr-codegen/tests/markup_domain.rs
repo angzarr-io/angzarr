@@ -616,7 +616,7 @@ fn test_every_error_has_a_catalog_message_with_its_args() {
     // Fluent's own parser and formatter agree: every message formats with
     // exactly its error's args.
     let fluent =
-        angzarr_presentation::Catalog::en_us(&[angzarr_codegen::EN_US]).expect("the catalog loads");
+        presentation::Catalog::en_us(&[angzarr_codegen::EN_US]).expect("the catalog loads");
     for sample in &samples {
         fluent
             .render(&**sample)

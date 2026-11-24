@@ -33,7 +33,7 @@ angzarr-embedded = { path = "../angzarr-embedded" }
 # The config's schema and its versioned loader: angzarr.yaml, which the CLI
 # writes, read strictly.
 angzarr-embedded-host-config = { path = "../angzarr-embedded-host-config" }
-angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+angzarr-diagnostic = { workspace = true }
 # The store `run` opens: SQLite, at the config's [store] path or in memory.
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
 angzarr-proto = { path = "../angzarr-proto" }
@@ -65,12 +65,12 @@ tokio-stream = { version = "0.1", features = ["net"] }
 # The tests' scratch directories and files: angzarr core's one guard. std
 # alone and no shared type, so it is pinned at the first core rev that has
 # it, ahead of the rev the router and the rest of core are pinned at.
-angzarr-test-dir = { path = "../angzarr-test-dir" }
+test-dir.workspace = true
 
 # The build writes the catalog's source under the crate's name
 # (angzarr_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+angzarr-diagnostic = { workspace = true, features = ["build"] }
 
 [lints]
 workspace = true

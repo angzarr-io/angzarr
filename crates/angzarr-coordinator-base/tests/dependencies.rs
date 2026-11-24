@@ -38,9 +38,9 @@ fn tree(depth: Option<u32>) -> BTreeSet<String> {
         .collect()
 }
 
-const ALLOWED: [&str; 3] = ["angzarr-diagnostic", "angzarr-proto", "angzarr-ports"];
+const ALLOWED: [&str; 2] = ["angzarr-proto", "angzarr-ports"];
 
-/// The angzarr crates under this one are the three allowed, and everything
+/// The angzarr crates under this one are the two allowed, and everything
 /// above ports (and every transport and runtime) is absent from the
 /// closure.
 #[test]
@@ -55,6 +55,7 @@ fn base_depends_on_nothing_above_ports() {
     // other angzarr crate.
     let allowed: BTreeSet<_> = ALLOWED.iter().map(ToString::to_string).collect();
     assert_eq!(angzarr, allowed, "the angzarr crates in the closure");
+    assert!(every.contains("diagnostic"), "diagnostic is in the closure");
 
     for banned in [
         "tonic",
@@ -77,7 +78,7 @@ fn base_depends_on_nothing_above_ports() {
     }
 }
 
-/// Directly, the three angzarr crates and `prost-types` (for `Any`), and
+/// Directly, the two angzarr crates, `diagnostic` and `prost-types` (for `Any`), and
 /// no other third-party crate.
 #[test]
 fn base_links_no_third_party_crate_of_its_own_but_prost_types() {
@@ -88,7 +89,7 @@ fn base_links_no_third_party_crate_of_its_own_but_prost_types() {
         .collect();
     let allowed: BTreeSet<_> = ALLOWED
         .iter()
-        .chain(&["prost-types"])
+        .chain(&["diagnostic", "prost-types"])
         .map(ToString::to_string)
         .collect();
     assert_eq!(own, allowed);

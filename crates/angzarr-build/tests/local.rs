@@ -42,7 +42,7 @@ use angzarr_build::{
     Existing, ScaffoldConfig, Scaffolded, host_scaffold, scaffold_into, scaffold_with_into,
 };
 
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 const BUYIN: &[&str] = &[
     "buyin/v1/wallet.proto",

@@ -16,8 +16,8 @@ use std::num::NonZeroU32;
 use std::time::Duration;
 
 use angzarr_coordinator_grpc::{BoundEndpoint, ListenError, Listener, Running, Server};
-use angzarr_test_dir::TestDir;
 use support::frames::{self, Frame};
+use test_dir::TestDir;
 
 /// How long a test waits for an outcome before it fails.
 const GUARD: Duration = Duration::from_secs(5);

@@ -36,7 +36,7 @@ use crate::fake_child::{
     config, domain, health, kind, mode, noted, CONTROL_ENV, HEALTH_ENV, HOLD, HOLD_TOO_MUCH,
     INPUT_ENV, KIND_ENV, LOG_ENV, SEAT_RELEASED, STARTING_ENV, TARGET_ENV,
 };
-use angzarr_test_dir::TestFile;
+use test_dir::TestFile;
 
 /// The kernel's key for a process manager with no instance for an input.
 const PM_NO_INSTANCE: &str = "ANGZARR_REASON_PM_NO_INSTANCE";

@@ -1,0 +1,35 @@
+[package]
+name = "sqlite-store-opener"
+version = "0.1.0"
+description = "Places and opens a project's SQLite event store under a caller-chosen file name."
+edition = "2021"
+license = "Apache-2.0 OR BSD-3-Clause"
+publish = false
+# The newest of its dependencies' (os and file-system claim 1.96).
+rust-version = "1.96"
+
+[dependencies]
+angzarr-diagnostic = { workspace = true }
+# The store and the ports it speaks, directly: the kernel is not linked.
+angzarr-ports = { path = "../angzarr-ports" }
+angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
+file-system.workspace = true
+os.workspace = true
+
+[dev-dependencies]
+file-system = { workspace = true, features = ["test-support"] }
+os = { workspace = true, features = ["test-support"] }
+tokio = { version = "1", features = ["rt"] }
+
+[build-dependencies]
+# The build writes the catalog's source under the crate's name
+# (angzarr_diagnostic::build): no catalog spells its crate's name.
+angzarr-diagnostic = { workspace = true, features = ["build"] }
+
+[features]
+# `diagnostic_samples`, for other crates' catalog tests: their dev-dependency
+# turns it on, and no build of a binary does.
+test-support = []
+
+[lints]
+workspace = true

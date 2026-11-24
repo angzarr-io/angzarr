@@ -6,7 +6,7 @@
 
 use angzarr_build::{BuildError, ProtoInput, PythonApp, proto_gen_python};
 
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 fn app() -> PythonApp {
     PythonApp {

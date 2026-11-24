@@ -40,18 +40,15 @@ fn tree(depth: Option<u32>) -> BTreeSet<String> {
         .collect()
 }
 
-const ALLOWED: [&str; 10] = [
+const ALLOWED: [&str; 8] = [
     "angzarr-coordinator",
     "angzarr-coordinator-base",
-    "angzarr-diagnostic",
     "angzarr-ports",
     "angzarr-proto",
     "angzarr-proto-component",
     "angzarr-proto-handler",
     "angzarr-proto-transport-distributed",
     "angzarr-reads",
-    // The tests' scratch directories (a dev-dependency).
-    "angzarr-test-dir",
 ];
 
 /// The angzarr crates in the closure are the allowed ones (the base, the
@@ -68,6 +65,8 @@ fn the_listener_links_only_the_edge_the_reads_and_the_wire() {
         .collect();
     let allowed: BTreeSet<_> = ALLOWED.iter().map(ToString::to_string).collect();
     assert_eq!(angzarr, allowed, "the angzarr crates in the closure");
+    assert!(every.contains("diagnostic"), "diagnostic is in the closure");
+    assert!(every.contains("test-dir"), "test-dir is in the closure");
 }
 
 /// The transport-free crates stay so: the closure of the base, which this
@@ -93,12 +92,12 @@ fn the_listener_links_no_third_party_crate_outside_the_tonic_stack() {
     let allowed: BTreeSet<_> = [
         "angzarr-coordinator",
         "angzarr-coordinator-base",
-        "angzarr-diagnostic",
+        "diagnostic",
         "angzarr-ports",
         "angzarr-proto",
         "angzarr-proto-transport-distributed",
         "angzarr-reads",
-        "angzarr-test-dir",
+        "test-dir",
         // tonic's own body trait (a response body leased for its life).
         "http-body",
         "hyper-util",

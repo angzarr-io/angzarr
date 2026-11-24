@@ -16,7 +16,7 @@ rust-version = "1.89"
 [dev-dependencies]
 angzarr-embedded = { path = "../angzarr-embedded" }
 # Its `build` feature for build::SOURCE, the catalog source's file name.
-angzarr-diagnostic = { path = "../angzarr-diagnostic", features = ["build"] }
+angzarr-diagnostic = { workspace = true, features = ["build"] }
 angzarr-embedded-host = { path = "../angzarr-embedded-host" }
 # The local-process transport's keys and their English (decision 14.64):
 # the host codes a child's failures under them.

@@ -29,8 +29,8 @@ syn = { version = "3.0.9", features = ["full"] }
 toml = "0.9"
 
 [dev-dependencies]
-angzarr-presentation.workspace = true
-angzarr-test-dir.workspace = true
+presentation.workspace = true
+test-dir.workspace = true
 # Runs the spec's codegen tier (tests/spec.rs): angzarr-router's runner,
 # at the version its conformance crate runs its features with.
 cucumber = "0.21"

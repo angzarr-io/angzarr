@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 #[test]
 fn test_stand_ins_writes_into_out_dir() {

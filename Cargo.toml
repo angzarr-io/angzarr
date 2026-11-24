@@ -12,7 +12,6 @@ members = [
     "crates/angzarr-coordinator",
     "crates/angzarr-coordinator-base",
     "crates/angzarr-coordinator-grpc",
-    "crates/angzarr-diagnostic",
     "crates/angzarr-embedded",
     "crates/angzarr-embedded-catalog-check",
     "crates/angzarr-embedded-conformance",
@@ -21,7 +20,6 @@ members = [
     "crates/angzarr-embedded-macros",
     "crates/angzarr-embedded-runner",
     "crates/angzarr-ports",
-    "crates/angzarr-presentation",
     "crates/angzarr-proto",
     "crates/angzarr-proto-component",
     "crates/angzarr-proto-handler",
@@ -32,11 +30,8 @@ members = [
     "crates/angzarr-router-conformance",
     "crates/angzarr-store-sqlite",
     "crates/angzarr-store-transfer",
-    "crates/angzarr-test-dir",
     "crates/angzarr-yaml",
-    "crates/file-lock",
-    "crates/file-system",
-    "crates/os",
+    "crates/sqlite-store-opener",
     "tools/archlint",
 ]
 # sererr is a submodule with its own cargo workspace (its protos feed the
@@ -58,16 +53,22 @@ publish = false
 # Family crates other crates name through the workspace.
 angzarr-build = { path = "crates/angzarr-build" }
 angzarr-codegen = { path = "crates/angzarr-codegen" }
-angzarr-diagnostic = { path = "crates/angzarr-diagnostic" }
 angzarr-proto = { path = "crates/angzarr-proto" }
 angzarr-proto-handler = { path = "crates/angzarr-proto-handler" }
 angzarr-ports = { path = "crates/angzarr-ports" }
-angzarr-presentation = { path = "crates/angzarr-presentation" }
-angzarr-test-dir = { path = "crates/angzarr-test-dir" }
 angzarr-embedded-host-config = { path = "crates/angzarr-embedded-host-config" }
-os = { path = "crates/os" }
-file-system = { path = "crates/file-system" }
-file-lock = { path = "crates/file-lock" }
+# rust-support (github.com/benjaminabbitt/rust-support), the generic substrate: localizable
+# errors, their rendering at the driving edge, a test's scratch directory, and the
+# platform seams (os, file-system) the SQLite store's opener opens files through. One
+# commit of one repository, pinned by full hash.
+# The dependency key is `angzarr-diagnostic`, not the package name: a crate named
+# `diagnostic` shadows rustc's `#[diagnostic::on_unimplemented]` attribute namespace
+# wherever it is linked under that name, and the kernel and its generated code use it.
+angzarr-diagnostic = { package = "diagnostic", git = "https://github.com/benjaminabbitt/rust-support", rev = "a3a9507ebb27187855b57862dcef9f2577a309bf" }
+presentation = { git = "https://github.com/benjaminabbitt/rust-support", rev = "a3a9507ebb27187855b57862dcef9f2577a309bf" }
+test-dir = { git = "https://github.com/benjaminabbitt/rust-support", rev = "a3a9507ebb27187855b57862dcef9f2577a309bf" }
+os = { git = "https://github.com/benjaminabbitt/rust-support", rev = "a3a9507ebb27187855b57862dcef9f2577a309bf" }
+file-system = { git = "https://github.com/benjaminabbitt/rust-support", rev = "a3a9507ebb27187855b57862dcef9f2577a309bf" }
 
 # Third-party (from platform, build and router; one entry each, no conflicts).
 serde = { version = "1", features = ["derive"] }

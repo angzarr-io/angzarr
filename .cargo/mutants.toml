@@ -1,7 +1,7 @@
 # cargo-mutants, the default family: the crates of no family in the justfile's
 # `mutation_families` (core's, router's and build's). `just mutants-all`,
 # `mutants-push` and `mutants-staged` pass each family its own config
-# (.cargo/mutants.embedded.toml, .cargo/mutants.platform.toml).
+# (.cargo/mutants.embedded.toml).
 #
 # Test code is not mutated: a test is what judges a mutant. The glob names
 # every test file, whatever cfg includes it.

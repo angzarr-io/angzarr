@@ -12,11 +12,11 @@ use angzarr_proto::v1::EventBook;
 use angzarr_proto_transport_distributed::v1::{
     query, temporal_query, Query, SequenceSet, TemporalQuery,
 };
-use angzarr_test_dir::TestDir;
 use counter::{
     bearing, commands, counted, cover, events, from_sequence, serve, serve_declared, Harness,
     DOMAIN, WRITER,
 };
+use test_dir::TestDir;
 use tonic::transport::Channel;
 use tonic::Code;
 

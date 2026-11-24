@@ -46,10 +46,7 @@ jobs:
             [
               {"name": "ports", "crates": "angzarr-ports"},
               {"name": "bus", "crates": "angzarr-bus"},
-              {"name": "diagnostic", "crates": "angzarr-diagnostic"},
               {"name": "yaml", "crates": "angzarr-yaml"},
-              {"name": "presentation", "crates": "angzarr-presentation"},
-              {"name": "test-dir", "crates": "angzarr-test-dir"},
               {"name": "store-transfer", "crates": "angzarr-store-transfer"},
               {"name": "coordinator-base", "crates": "angzarr-coordinator-base"},
               {"name": "reads", "crates": "angzarr-reads"},
@@ -58,7 +55,7 @@ jobs:
               {"name": "router", "crates": "angzarr-router"},
               {"name": "build", "crates": "angzarr-build angzarr-codegen"},
               {"name": "embedded", "crates": "angzarr-embedded angzarr-embedded-catalog-check angzarr-embedded-conformance angzarr-embedded-host angzarr-embedded-host-config angzarr-embedded-macros angzarr-embedded-runner angzarr-store-sqlite"},
-              {"name": "platform", "crates": "os file-system file-lock"}
+              {"name": "sqlite-store-opener", "crates": "sqlite-store-opener"}
             ]
         run: |
           matrix=$(jq -c --arg group "$GROUP" '{include: map(select($group == "" or .name == $group))}' <<< "$GROUP_TABLE")

@@ -19,8 +19,8 @@ angzarr-diagnostic.workspace = true
 prost-build = "0.14"
 
 [dev-dependencies]
-angzarr-presentation.workspace = true
-angzarr-test-dir.workspace = true
+presentation.workspace = true
+test-dir.workspace = true
 syn = { version = "3.0.9", features = ["full"] }
 
 # The build writes the catalog's source under the crate's name

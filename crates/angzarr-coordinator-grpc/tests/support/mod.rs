@@ -154,7 +154,7 @@ pub async fn try_hang(channel: Channel) -> Result<String, Status> {
 /// `name` in `dir`, which is first made private (a `TestDir` is made with
 /// the umask's mode, and the policy refuses a socket in a directory that is
 /// not 0700).
-pub fn socket_in(dir: &angzarr_test_dir::TestDir, name: &str) -> PathBuf {
+pub fn socket_in(dir: &test_dir::TestDir, name: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
         .expect("the test directory is ours");

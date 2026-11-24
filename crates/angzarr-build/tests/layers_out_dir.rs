@@ -4,7 +4,7 @@
 
 use std::path::Path;
 
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 const SHAPES: &[&str] = &[
     "shapes/common/v1/common.proto",

@@ -9,7 +9,7 @@ use std::os::unix::net::UnixListener as StdListener;
 use std::path::Path;
 
 use angzarr_coordinator_grpc::{Arrival, BoundEndpoint, ListenError, Listener, Server};
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 fn mode(path: &Path) -> u32 {
     fs::metadata(path).unwrap().mode() & 0o777

@@ -15,11 +15,11 @@ use std::time::Duration;
 
 use angzarr_coordinator_grpc::error_info;
 use angzarr_proto::v1::{CommandBook, DeliveryOutcome};
-use angzarr_test_dir::TestDir;
 use counter::{
     bearing, command, commands, counted, cover, events, fact_of, from_sequence, presenting, serve,
     DOMAIN, OTHER, READER, SEVEN, WRITER,
 };
+use test_dir::TestDir;
 use tonic::Code;
 
 /// A socket path in a fresh private directory.

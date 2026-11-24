@@ -16,10 +16,7 @@ on:
       - 'crates/angzarr-bus/**'
       - 'crates/angzarr-coordinator*/**'
       - 'crates/angzarr-reads/**'
-      - 'crates/angzarr-diagnostic/**'
       - 'crates/angzarr-yaml/**'
-      - 'crates/angzarr-presentation/**'
-      - 'crates/angzarr-test-dir/**'
       - 'crates/angzarr-store-transfer/**'
       - '.github/workflows/core-ci.yml'
   pull_request:

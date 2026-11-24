@@ -11,7 +11,7 @@ use super::*;
 use crate::config::ComponentConfig;
 use crate::fake_child::{self, config, domain, mode};
 use crate::remote::is_retryable;
-use angzarr_test_dir::{OnPanic, TestDir, TestFile};
+use test_dir::{OnPanic, TestDir, TestFile};
 
 /// A [`TestDir`] for a host's sockets: under the host's default socket
 /// directory (`$XDG_RUNTIME_DIR`, else `/tmp`), not the temporary one, so it

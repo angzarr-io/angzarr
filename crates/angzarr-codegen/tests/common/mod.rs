@@ -8,7 +8,7 @@ use std::process::Command;
 
 use quote::ToTokens;
 
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 /// The toy buy-in project: a wallet aggregate, a buy-in process manager,
 /// and a policy each way between them.

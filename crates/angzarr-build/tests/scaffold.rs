@@ -15,7 +15,7 @@ use angzarr_build::{
 };
 use angzarr_codegen::{CodegenError, UseError};
 
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 const BUYIN: &[&str] = &[
     "buyin/v1/wallet.proto",

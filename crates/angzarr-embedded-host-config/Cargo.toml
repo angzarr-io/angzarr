@@ -18,7 +18,7 @@ serde = { version = "1", features = ["derive"] }
 
 # The tests read the load errors' codes.
 [dev-dependencies]
-angzarr-diagnostic = { path = "../angzarr-diagnostic" }
+angzarr-diagnostic = { workspace = true }
 
 [lints]
 workspace = true

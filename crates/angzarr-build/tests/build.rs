@@ -9,7 +9,7 @@ use angzarr_build::{
     markup_domain_into, markup_domain_with_into, scaffold_with_into, wire_into,
 };
 
-use angzarr_test_dir::TestDir;
+use test_dir::TestDir;
 
 const SHOP: &str = "shop/v1/shop.proto";
 
@@ -165,8 +165,7 @@ fn test_every_error_has_a_catalog_message_with_its_args() {
     assert!(problems.is_empty(), "{problems:#?}");
     // Fluent's own parser and formatter agree: every message formats with
     // exactly its error's args.
-    let fluent =
-        angzarr_presentation::Catalog::en_us(&[angzarr_build::EN_US]).expect("the catalog loads");
+    let fluent = presentation::Catalog::en_us(&[angzarr_build::EN_US]).expect("the catalog loads");
     for sample in &samples {
         fluent
             .render(&**sample)
