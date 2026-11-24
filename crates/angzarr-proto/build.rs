@@ -75,7 +75,14 @@ fn main() {
         .file_descriptor_set_path(out.join("file_descriptor_set.bin"))
         // Every proto `bytes` field is a `bytes::Bytes`: cheap to clone, and
         // `Hash`/`Eq`, so `Uuid` can key a map. Pure Rust, wasm32-safe.
-        .bytes(["."]);
+        .bytes(["."])
+        // Every proto `map` is a `BTreeMap`: its entries encode in key order,
+        // so one message has one byte form (a `HashMap` iterates in a
+        // per-process random order, which makes `Diagnostic.args` encode
+        // differently from one encode to the next), and a downstream
+        // message may hold a `Diagnostic` under angzarr-build's rule that
+        // every map is a `BTreeMap`.
+        .btree_map(["."]);
     // `Eq` and `Hash` need no configuration: prost-build 0.14 derives them
     // on every message without float fields (directly or nested), which
     // covers the key types (`Uuid`, `Cover`, `EventRef`, `FactOrigin`,

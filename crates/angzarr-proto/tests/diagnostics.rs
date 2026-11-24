@@ -63,3 +63,37 @@ fn a_wrapped_cause_is_flattened_into_the_args() {
     };
     assert_eq!(round_trip(&d), d);
 }
+
+/// One fact must have one byte form: event bytes are compared and hashed.
+/// A `HashMap` iterates in a per-process random order, so a Diagnostic with
+/// several args would encode differently from one encode to the next;
+/// the args are a `BTreeMap`, encoded in key order whatever the insertion order.
+#[test]
+fn a_diagnostic_encodes_to_the_same_bytes_whatever_the_order_its_args_were_added_in() {
+    let args = [("zeta", "1"), ("alpha", "2"), ("mid", "3"), ("beta", "4")];
+    let build = |order: &[usize]| {
+        let mut d = Diagnostic {
+            code: "angzarr-test-order".into(),
+            ..Default::default()
+        };
+        for &i in order {
+            d.args.insert(args[i].0.to_string(), args[i].1.to_string());
+        }
+        d.encode_to_vec()
+    };
+    let forward = build(&[0, 1, 2, 3]);
+    assert_eq!(forward, build(&[3, 2, 1, 0]));
+    assert_eq!(forward, build(&[2, 0, 3, 1]));
+
+    // The entries follow the code in key order: alpha, beta, mid, zeta.
+    let mut expected = vec![(1 << 3) | 2, 18];
+    expected.extend_from_slice(b"angzarr-test-order");
+    for (key, value) in [("alpha", "2"), ("beta", "4"), ("mid", "3"), ("zeta", "1")] {
+        expected.extend_from_slice(&[(2 << 3) | 2, (2 + key.len() + 2 + value.len()) as u8]);
+        expected.extend_from_slice(&[(1 << 3) | 2, key.len() as u8]);
+        expected.extend_from_slice(key.as_bytes());
+        expected.extend_from_slice(&[(2 << 3) | 2, value.len() as u8]);
+        expected.extend_from_slice(value.as_bytes());
+    }
+    assert_eq!(forward, expected);
+}
