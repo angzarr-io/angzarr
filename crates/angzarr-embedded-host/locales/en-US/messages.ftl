@@ -1,6 +1,6 @@
 # Messages for angzarr-embedded-host's errors. Each id is an error's code
 # without the crate's name, which the build prefixes
-# (angzarr_diagnostic::build); the variables are its args. Messages are
+# (coded_diagnostic::build); the variables are its args. Messages are
 # lowercase fragments, like the English Display, so they read well inside
 # another message. A condition the spec keys is coded under its key, whose
 # English is the spec's catalog (angzarr_proto::REASONS_EN_US; decision

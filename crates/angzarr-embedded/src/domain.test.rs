@@ -166,7 +166,7 @@ mod tx {
             Some(self.clone())
         }
 
-        fn restore(&mut self, anchor: Self) -> Result<(), angzarr_diagnostic::Report> {
+        fn restore(&mut self, anchor: Self) -> Result<(), coded_diagnostic::Report> {
             *self = anchor;
             Ok(())
         }

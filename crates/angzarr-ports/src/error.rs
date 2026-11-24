@@ -1,12 +1,12 @@
 //! One error for every port, with stable codes.
 //!
-//! Every error is an [`angzarr_diagnostic::Diagnostic`]: a stable kebab-case
+//! Every error is an [`coded_diagnostic::Diagnostic`]: a stable kebab-case
 //! [`code`](StoreError::code) starting with this crate's name and named
 //! [`args`](StoreError::args) that carry data. An error is a KEY and an
 //! ARGUMENT MAP, never rendered English (decision 14.37): text is rendered
 //! only where it is displayed, from a Fluent catalog keyed by the code (this
 //! crate's en-US one is [`EN_US`](crate::EN_US)), and the `Display` (what a
-//! log shows) is [`angzarr_diagnostic::display`]'s: the code followed by its
+//! log shows) is [`coded_diagnostic::display`]'s: the code followed by its
 //! args, ` name=value` each, a nested [`Cause`] as ` name=<its code>` then
 //! ` name.<arg>=value` for each of its args. A runtime forwards a wrapped
 //! `StoreError` as a nested diagnostic, its code and args unchanged; core
@@ -15,13 +15,13 @@
 //!
 //! [`Arg`] and [`Cause`] are this crate's own, `Clone` and `Eq` so the error
 //! is: the inherent [`StoreError::args`] gives them, and the `Diagnostic`
-//! impls convert ([`Arg`] into `angzarr_diagnostic::Arg`, a [`Cause`] into a
+//! impls convert ([`Arg`] into `coded_diagnostic::Arg`, a [`Cause`] into a
 //! nested diagnostic).
 
 use std::fmt;
 
-use angzarr_diagnostic::code;
 use angzarr_proto::v1::Cover;
+use coded_diagnostic::code;
 
 /// Why a store refused or failed. A refusal it is sure of and a failure to
 /// answer are different variants: a [`Conflict`](StoreError::Conflict)
@@ -402,32 +402,32 @@ impl StoreError {
 /// catalog keyed by the code ([`EN_US`](crate::EN_US)).
 impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
-impl From<Arg> for angzarr_diagnostic::Arg {
-    fn from(arg: Arg) -> angzarr_diagnostic::Arg {
+impl From<Arg> for coded_diagnostic::Arg {
+    fn from(arg: Arg) -> coded_diagnostic::Arg {
         match arg {
-            Arg::Uint(n) => angzarr_diagnostic::Arg::Uint(n),
-            Arg::Str(s) => angzarr_diagnostic::Arg::Str(s),
-            Arg::Cause(cause) => angzarr_diagnostic::Arg::Nested(Box::new(cause)),
+            Arg::Uint(n) => coded_diagnostic::Arg::Uint(n),
+            Arg::Str(s) => coded_diagnostic::Arg::Str(s),
+            Arg::Cause(cause) => coded_diagnostic::Arg::Nested(Box::new(cause)),
         }
     }
 }
 
-fn diagnostic_args(args: Vec<(&'static str, Arg)>) -> Vec<(&'static str, angzarr_diagnostic::Arg)> {
+fn diagnostic_args(args: Vec<(&'static str, Arg)>) -> Vec<(&'static str, coded_diagnostic::Arg)> {
     args.into_iter()
         .map(|(name, arg)| (name, arg.into()))
         .collect()
 }
 
-impl angzarr_diagnostic::Diagnostic for StoreError {
+impl coded_diagnostic::Diagnostic for StoreError {
     fn code(&self) -> &str {
         StoreError::code(self)
     }
 
-    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, coded_diagnostic::Arg)> {
         diagnostic_args(StoreError::args(self))
     }
 }
@@ -435,18 +435,18 @@ impl angzarr_diagnostic::Diagnostic for StoreError {
 /// The adapter's code, then its args: never English.
 impl fmt::Display for Cause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
 /// An adapter's cause is a diagnostic of the adapter's own: its code, its
 /// args.
-impl angzarr_diagnostic::Diagnostic for Cause {
+impl coded_diagnostic::Diagnostic for Cause {
     fn code(&self) -> &str {
         self.code
     }
 
-    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, coded_diagnostic::Arg)> {
         diagnostic_args(self.args.clone())
     }
 }

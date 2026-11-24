@@ -1,5 +1,5 @@
 # Messages for angzarr-yaml's errors. Each id is an error's code without
-# the crate's name, which the build prefixes (angzarr_diagnostic::build);
+# the crate's name, which the build prefixes (coded_diagnostic::build);
 # the variables are its args. Messages are lowercase fragments, like the English
 # Display, so they read well inside another message. A literal brace is
 # written {"{"} or {"}"}.

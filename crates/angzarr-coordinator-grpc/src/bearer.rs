@@ -7,7 +7,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
+use coded_diagnostic::{code, Arg, Diagnostic};
 use tonic::metadata::MetadataMap;
 use tonic::Status;
 
@@ -47,7 +47,7 @@ pub enum AuthorizationError {
 
 impl fmt::Display for AuthorizationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

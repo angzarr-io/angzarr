@@ -8,13 +8,13 @@ use std::time::Duration;
 use crate::note::{
     Erase, FakeClock, FakeDelay, Note, NoteCommand, NoteRejection, Rewrite, Write, NOTE_DOMAIN,
 };
-use angzarr_diagnostic::{Diagnostic, Report};
 use angzarr_embedded::angzarr_ports::memory::MemoryStore;
 use angzarr_embedded::testing::{block_on_ready as ready, At, Fault, FaultyStore};
 use angzarr_embedded::v1::{CommandBook, Cover, Uuid};
 use angzarr_embedded::{
     CommandBookExt, CoverExt, Handled, Kernel, Recovery, Registry, Sampled, StreamRef, Wait,
 };
+use coded_diagnostic::{Diagnostic, Report};
 
 use super::{attempts, backoff, Ported, Refusal, Runner, Unrun, DRAW_SCALE, KERNEL_RETRY};
 

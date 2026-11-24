@@ -3,7 +3,6 @@
 //! written to the store; and a policy step from an in-process domain into
 //! the remote one.
 
-use angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_embedded::angzarr_router::error::CodedError;
 use angzarr_embedded::angzarr_router::hpb;
 use angzarr_embedded::angzarr_router::policy::PolicyDispatch;
@@ -17,6 +16,7 @@ use angzarr_embedded::{
     Recovery, Registry, Sampled, StreamRef, Timestamp, DEAD_LETTER_PREFIX,
 };
 use angzarr_ports::memory::MemoryStore;
+use coded_diagnostic::{Arg, Diagnostic};
 
 use super::Host;
 use crate::fake_child::{config, domain, mode, noted};

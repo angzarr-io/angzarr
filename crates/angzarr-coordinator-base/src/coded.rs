@@ -4,9 +4,9 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_proto::v1::AngzarrReason;
 use angzarr_proto::ReasonSurface;
+use coded_diagnostic::{Arg, Diagnostic};
 
 use crate::Code;
 
@@ -93,7 +93,7 @@ impl fmt::Display for Coded {
         f.write_str(&self.key)?;
         self.args
             .iter()
-            .try_for_each(|(name, value)| write!(f, " {name}={}", angzarr_diagnostic::quote(value)))
+            .try_for_each(|(name, value)| write!(f, " {name}={}", coded_diagnostic::quote(value)))
     }
 }
 

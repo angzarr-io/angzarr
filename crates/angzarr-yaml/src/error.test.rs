@@ -1,5 +1,5 @@
 use super::*;
-use angzarr_diagnostic::code;
+use coded_diagnostic::code;
 
 #[test]
 fn a_character_that_may_not_show_is_named_by_its_code_point() {

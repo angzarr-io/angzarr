@@ -24,6 +24,6 @@ angzarr-proto-transport-distributed	C	the distributed transport's stubs and enve
 angzarr-router	C	the shared client router	Client-linked by the rule, but it depends on angzarr-ports (B): an application linking the router links B code, which the exception covers. If the exception is not signed off for ports, the router is not permissive in practice.
 angzarr-router-conformance	C	test-only: the router's conformance features	Follows the router.
 angzarr-build	C	build.rs helpers	
-angzarr-codegen	C	the generator core	Depends on -embedded-host-config and -proto (B and C), and on rust-support's diagnostic (C): covered by the exception.
+angzarr-codegen	C	the generator core	Depends on -embedded-host-config and -proto (B and C), and on rust-support's coded-diagnostic (C): covered by the exception.
 angzarr-embedded-macros	C	proc-macros over aggregates, policies and projectors	A proc-macro by the rule; it generates glue code that links angzarr-embedded (B), covered by the exception.
 archlint	C	module-level architecture rules for a workspace	A development tool, not linked into anything; C by the rule for build tooling. Not named in it.

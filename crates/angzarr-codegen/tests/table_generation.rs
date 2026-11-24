@@ -160,7 +160,7 @@ fn test_a_typed_refusals_fields_are_its_diagnostic_args() {
     let source = one(markup_domain(&descriptors(BLACKJACK), &[TABLE], WIRE).unwrap());
     let diagnostic = impl_text(
         &source,
-        "::angzarr_embedded::angzarr_diagnostic::Diagnostic",
+        "::angzarr_embedded::coded_diagnostic::Diagnostic",
         "SeatNotConfirmable",
     );
     assert!(diagnostic.contains("(\"reason\","), "{diagnostic}");
@@ -182,7 +182,7 @@ fn test_a_refusals_reason_enum_is_its_rejection_code() {
     assert!(source.contains("pub enum BetRefusedReason"), "{source}");
     let diagnostic = impl_text(
         &source,
-        "::angzarr_embedded::angzarr_diagnostic::Diagnostic",
+        "::angzarr_embedded::coded_diagnostic::Diagnostic",
         "BetRefused",
     );
     for expected in [

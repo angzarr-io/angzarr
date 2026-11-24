@@ -1,6 +1,6 @@
 # Messages for angzarr-store-transfer's errors. Each id is an error's code
 # without the crate's name, which the build prefixes
-# (angzarr_diagnostic::build); the variables are its args. A row is named by
+# (coded_diagnostic::build); the variables are its args. A row is named by
 # $kind (page, snapshot, position, dead-letter), $stream
 # (domain:edition:root, the edition empty for main) and $place (a page's
 # sequence, a letter's place, a position's handler).

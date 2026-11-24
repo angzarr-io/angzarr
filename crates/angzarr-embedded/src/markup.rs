@@ -74,11 +74,11 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::code;
 use angzarr_proto::v1::event_meta::Causation;
 use angzarr_proto::v1::{Cover, EventBook, EventMeta, EventRef, FactOrigin, Uuid};
 use angzarr_router::error::HandlerError;
 use angzarr_router::hpb;
+use coded_diagnostic::code;
 use prost_types::{Any, Timestamp};
 
 use super::domain::Domain;
@@ -92,7 +92,7 @@ pub use angzarr_router::PageContext;
 
 /// The error a [`Snapshots::restore`] returns, re-exported so the
 /// expansion needs no dependency of its user's.
-pub use angzarr_diagnostic::Report;
+pub use coded_diagnostic::Report;
 
 /// angzarr-router's context of the input a handler decides: a
 /// [`Context`]'s `command`, and the input's arm with what it alone
@@ -222,16 +222,16 @@ pub struct NotItsStream {
 
 impl fmt::Display for NotItsStream {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
-impl angzarr_diagnostic::Diagnostic for NotItsStream {
+impl coded_diagnostic::Diagnostic for NotItsStream {
     fn code(&self) -> &str {
         code!("not-its-stream")
     }
 
-    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, coded_diagnostic::Arg)> {
         vec![
             ("domain", self.domain.as_str().into()),
             ("key", self.key.as_str().into()),
@@ -529,16 +529,16 @@ impl TypedRefusal {
 
 impl fmt::Display for TypedRefusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
-impl angzarr_diagnostic::Diagnostic for TypedRefusal {
+impl coded_diagnostic::Diagnostic for TypedRefusal {
     fn code(&self) -> &str {
         angzarr_proto::v1::AngzarrReason::CommandRefused.as_str_name()
     }
 
-    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, coded_diagnostic::Arg)> {
         vec![(
             angzarr_proto::v1::reason_args::REFUSAL_TYPE,
             self.refusal_type().into(),
@@ -565,12 +565,12 @@ impl fmt::Display for Unrefusable {
     }
 }
 
-impl angzarr_diagnostic::Diagnostic for Unrefusable {
+impl coded_diagnostic::Diagnostic for Unrefusable {
     fn code(&self) -> &str {
         match *self {}
     }
 
-    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, coded_diagnostic::Arg)> {
         match *self {}
     }
 }
@@ -646,7 +646,7 @@ impl<X> Failed<X> {
     }
 
     /// A bug, keyed by `bug`'s code, with its args.
-    pub fn bug(bug: &dyn angzarr_diagnostic::Diagnostic) -> Failed<X> {
+    pub fn bug(bug: &dyn coded_diagnostic::Diagnostic) -> Failed<X> {
         Failed::Bug(Report::of(bug))
     }
 
@@ -654,7 +654,7 @@ impl<X> Failed<X> {
     /// args.
     pub fn retryable_bug(
         status: RetryableStatus,
-        bug: &dyn angzarr_diagnostic::Diagnostic,
+        bug: &dyn coded_diagnostic::Diagnostic,
     ) -> Failed<X> {
         Failed::RetryableBug {
             status,
@@ -663,7 +663,7 @@ impl<X> Failed<X> {
     }
 
     /// An immediate return (ABORTED), keyed by `why`'s code, with its args.
-    pub fn immediate(why: &dyn angzarr_diagnostic::Diagnostic) -> Failed<X> {
+    pub fn immediate(why: &dyn coded_diagnostic::Diagnostic) -> Failed<X> {
         Failed::Immediate(Report::of(why))
     }
 
@@ -703,13 +703,13 @@ impl<X> From<X> for Failed<X> {
 
 /// The refusal's code and args, or the report's (decision 14.37): never
 /// English.
-impl<X: angzarr_diagnostic::Diagnostic> fmt::Display for Failed<X> {
+impl<X: coded_diagnostic::Diagnostic> fmt::Display for Failed<X> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Failed::Rejected { rejection, .. } => angzarr_diagnostic::display(rejection, f),
+            Failed::Rejected { rejection, .. } => coded_diagnostic::display(rejection, f),
             Failed::Immediate(report)
             | Failed::Bug(report)
-            | Failed::RetryableBug { report, .. } => angzarr_diagnostic::display(report, f),
+            | Failed::RetryableBug { report, .. } => coded_diagnostic::display(report, f),
         }
     }
 }
@@ -744,7 +744,7 @@ pub use super::policy::{no_refusal_handler, CommandTarget, EventSource, Policy, 
 pub use super::compensation::{Compensation, UndoTargetsCommand};
 
 /// What a policy's `#[on_event(E)]` handler returns as its `Ok` (its `Err`
-/// is any [`Diagnostic`](angzarr_diagnostic::Diagnostic): a bug,
+/// is any [`Diagnostic`](coded_diagnostic::Diagnostic): a bug,
 /// dead-lettered as
 /// [`StepError::PolicyFailed`](super::StepError::PolicyFailed)): what it
 /// sends its target `T` ([`CommandTarget`]: a domain here, or a remote
@@ -1015,7 +1015,7 @@ impl<P: AsyncProjector> angzarr_router::router::ProjectorHandler for Projected<P
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(instance);
         ran.map_err(|report| {
             angzarr_router::error::CodedError::bug(
-                angzarr_diagnostic::Diagnostic::code(&report),
+                coded_diagnostic::Diagnostic::code(&report),
                 super::route::flat_args(&report),
             )
         })?;
@@ -1367,13 +1367,13 @@ fn handler_error(failed: Failed<TypedRefusal>) -> HandlerError {
             super::route::rejection(rejection, status, object)
         }
         Failed::Immediate(report) => HandlerError::Coded(CodedError::immediate(
-            angzarr_diagnostic::Diagnostic::code(&report),
+            coded_diagnostic::Diagnostic::code(&report),
             super::route::flat_args(&report),
         )),
         Failed::Bug(report) => super::route::bug(&report),
         Failed::RetryableBug { status, report } => HandlerError::Coded(CodedError::retryable_bug(
             status,
-            angzarr_diagnostic::Diagnostic::code(&report),
+            coded_diagnostic::Diagnostic::code(&report),
             super::route::flat_args(&report),
         )),
     }
@@ -1512,7 +1512,7 @@ impl<S: Ingests<F>, F: DomainMessage> Translation<S> for F {
 /// A Translate callback's answer as [`Policy::on_refused`] returns it: its
 /// fact, one the policy's source `S` ingests, packed; or its error as a
 /// [`Report`], whose code and args are the dead letter's `cause`.
-pub fn translated_fact<S, T: Translation<S>, E: angzarr_diagnostic::Diagnostic>(
+pub fn translated_fact<S, T: Translation<S>, E: coded_diagnostic::Diagnostic>(
     answer: Result<T, E>,
 ) -> Result<Any, Report> {
     answer
@@ -1524,7 +1524,7 @@ pub fn translated_fact<S, T: Translation<S>, E: angzarr_diagnostic::Diagnostic>(
 /// [`Policy::on_event`] returns it: its commands
 /// for the target `T`, as handled (`Some`); or its error as a [`Report`],
 /// whose code and args are the dead letter's `cause`.
-pub fn policy_answer<T: CommandTarget, E: angzarr_diagnostic::Diagnostic>(
+pub fn policy_answer<T: CommandTarget, E: coded_diagnostic::Diagnostic>(
     answer: Result<Commands<T>, E>,
 ) -> Result<Option<Commands<T>>, Report> {
     answer.map(Some).map_err(|error| Report::of(&error))

@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use angzarr_coordinator_grpc::angzarr_diagnostic::catalog;
+use angzarr_coordinator_grpc::coded_diagnostic::catalog;
 
 #[test]
 fn its_locales_are_every_catalog_under_locales_en_us_alone() {

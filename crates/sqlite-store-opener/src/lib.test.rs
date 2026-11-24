@@ -8,9 +8,9 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
 use angzarr_ports::{ListStreams, StoreError};
 use angzarr_store_sqlite::{SqlError, SqliteStore};
+use coded_diagnostic::{code, Arg, Diagnostic};
 use file_system::{Fs, Os, Perms, Rooted};
 use os::Mode;
 

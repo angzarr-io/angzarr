@@ -1,6 +1,6 @@
 # Messages for this crate's diagnostics. Each id is a diagnostic's code
 # without the crate's name, which the build prefixes
-# (angzarr_diagnostic::build); the variables are its args.
+# (coded_diagnostic::build); the variables are its args.
 
 descriptors = the descriptor set does not decode: { $detail }
 file-not-in-set = { $file } is not in the descriptor set

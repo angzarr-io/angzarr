@@ -1,5 +1,5 @@
 # Messages for the crate's errors. Each id is an error's code without the
-# crate's name, which the build prefixes (angzarr_diagnostic::build); the
+# crate's name, which the build prefixes (coded_diagnostic::build); the
 # variables are its args. An error that carries another crate's (the project
 # id's, the store's) is rendered by that crate's catalog.
 

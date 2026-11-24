@@ -11,11 +11,11 @@ use std::time::Duration;
 
 use angzarr_bus::contract::{Delivery, Domains, Failing, Harness, React, Scripted, Sink, Wake};
 use angzarr_bus::{Pumped, RetryPolicy};
-use angzarr_diagnostic::Diagnostic as _;
 use angzarr_ports::faulty::{Fault, FaultyStore};
 use angzarr_router::error::{CodedError, RetryableStatus};
 use angzarr_router::hpb::{self, ProjectRequest, ProjectResponse};
 use angzarr_router::router::{DynProjectorHandler, PolicyComponent, ProjectorHandler};
+use coded_diagnostic::Diagnostic as _;
 
 use crate::toys::prelude::*;
 use crate::toys::{at, command, instant, ledger, no_retries, Account, AccountCmd, Edit, Shelf};

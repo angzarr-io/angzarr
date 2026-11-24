@@ -18,7 +18,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
+use coded_diagnostic::{code, Arg, Diagnostic, Report};
 
 use crate::versioned::{LoadError, Loader};
 
@@ -113,7 +113,7 @@ pub enum WriteBackError {
 
 impl fmt::Display for WriteBackError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

@@ -1,6 +1,6 @@
 //! Why SQLite could not answer, and how that reaches the ports.
 //!
-//! In angzarr-ports' style, through its re-export of angzarr-diagnostic (no
+//! In angzarr-ports' style, through its re-export of coded-diagnostic (no
 //! dependency of its own): every error is a `Diagnostic`, a stable
 //! kebab-case `code` starting with this crate's name and named `args` that
 //! carry data, and its `Display` is the code then the args (` name=value`
@@ -14,7 +14,7 @@
 
 use std::fmt;
 
-use angzarr_ports::angzarr_diagnostic::{self, code, Diagnostic};
+use angzarr_ports::coded_diagnostic::{self, code, Diagnostic};
 use angzarr_ports::{Arg, Cause, StoreError};
 
 /// The database's own failures, as causes.
@@ -93,8 +93,8 @@ impl SqlError {
     }
 }
 
-/// `args` as angzarr-diagnostic's: angzarr-ports' `From`, each by name.
-fn diagnostic_args(args: Vec<(&'static str, Arg)>) -> Vec<(&'static str, angzarr_diagnostic::Arg)> {
+/// `args` as coded-diagnostic's: angzarr-ports' `From`, each by name.
+fn diagnostic_args(args: Vec<(&'static str, Arg)>) -> Vec<(&'static str, coded_diagnostic::Arg)> {
     args.into_iter()
         .map(|(name, arg)| (name, arg.into()))
         .collect()
@@ -105,15 +105,15 @@ impl Diagnostic for SqlError {
         SqlError::code(self)
     }
 
-    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, coded_diagnostic::Arg)> {
         diagnostic_args(SqlError::args(self))
     }
 }
 
-/// The code then the args (decision 14.37): angzarr-diagnostic's display.
+/// The code then the args (decision 14.37): coded-diagnostic's display.
 impl fmt::Display for SqlError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -168,15 +168,15 @@ impl Diagnostic for Damage {
         Damage::code(self)
     }
 
-    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, coded_diagnostic::Arg)> {
         diagnostic_args(Damage::args(self))
     }
 }
 
-/// The code then the args (decision 14.37): angzarr-diagnostic's display.
+/// The code then the args (decision 14.37): coded-diagnostic's display.
 impl fmt::Display for Damage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

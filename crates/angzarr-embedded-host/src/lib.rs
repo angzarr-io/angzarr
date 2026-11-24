@@ -80,7 +80,7 @@ pub use stores::{OneStore, Stores};
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's diagnostics. The text of
 /// `locales/en-US/messages.ftl`, its ids under the crate's package name
-/// (`angzarr_diagnostic::build`).
+/// (`coded_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
     env!("CARGO_PKG_NAME"),
     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
@@ -88,7 +88,7 @@ pub const EN_US: (&str, &str) = (
 
 /// One value of every error this crate defines, each variant once, for the
 /// catalog parity test.
-pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
+pub fn diagnostic_samples() -> Vec<Box<dyn coded_diagnostic::Diagnostic>> {
     let mut samples = error::diagnostic_samples();
     samples.extend(exposure::diagnostic_samples());
     samples

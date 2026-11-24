@@ -315,7 +315,7 @@ fn test_markup_domain_gives_the_users_files_the_contexts_and_the_bug() {
     );
     let impls = impls(&file);
     assert!(impls.contains(&(
-        "::angzarr_embedded::angzarr_diagnostic::Diagnostic".to_string(),
+        "::angzarr_embedded::coded_diagnostic::Diagnostic".to_string(),
         "Bug".to_string()
     )));
     for failed in ["Failed<Unrefusable>", "Failed<InsufficientFunds>"] {
@@ -329,7 +329,7 @@ fn test_markup_domain_gives_the_users_files_the_contexts_and_the_bug() {
 #[test]
 fn test_markup_domain_gives_a_typed_refusal_its_diagnostic() {
     assert!(impls(&buyin()).contains(&(
-        "::angzarr_embedded::angzarr_diagnostic::Diagnostic".to_string(),
+        "::angzarr_embedded::coded_diagnostic::Diagnostic".to_string(),
         "InsufficientFunds".to_string()
     )));
 }
@@ -607,7 +607,7 @@ fn test_markup_domain_refuses_bytes_that_are_not_a_descriptor_set() {
 #[test]
 fn test_every_error_has_a_catalog_message_with_its_args() {
     let samples = angzarr_codegen::diagnostic_samples();
-    let problems = angzarr_diagnostic::catalog::check(
+    let problems = coded_diagnostic::catalog::check(
         angzarr_codegen::EN_US.0,
         angzarr_codegen::EN_US.1,
         &samples,
@@ -645,7 +645,7 @@ fn test_every_catalog_message_is_the_code_of_a_sample() {
 fn test_every_error_displays_as_its_code_and_args() {
     let (krate, ftl) = angzarr_codegen::EN_US;
     let problems =
-        angzarr_diagnostic::catalog::check(krate, ftl, &angzarr_codegen::diagnostic_samples());
+        coded_diagnostic::catalog::check(krate, ftl, &angzarr_codegen::diagnostic_samples());
     assert_eq!(problems, Vec::new());
 }
 

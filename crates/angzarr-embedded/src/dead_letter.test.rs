@@ -10,7 +10,7 @@ use crate::{
 };
 
 use crate::toys::{account, at, command, cover, fact, reason, registry, Account, Edit};
-use angzarr_diagnostic::code;
+use coded_diagnostic::code;
 
 /// The stream of account 1, as a reason names it.
 const ACCOUNT_1: &str = "account/0a000000-0000-0000-0000-000000000001";
@@ -427,7 +427,7 @@ fn a_kernel_error_with_no_spec_key_keeps_its_own_code() {
 /// angzarr-embedded's code.
 #[test]
 fn a_spec_keyed_errors_letter_carries_its_key_and_args() {
-    use angzarr_diagnostic::Report;
+    use coded_diagnostic::Report;
     let sqlite = angzarr_store_sqlite::SqlError::Unavailable {
         errno: Some(5),
         detail: String::new(),

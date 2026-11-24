@@ -21,7 +21,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use angzarr_coordinator_base::{Input, Key, Upcast, UpcastError, Upcasted};
-use angzarr_diagnostic::Report;
 use angzarr_ports::contract;
 use angzarr_ports::memory::MemoryStore;
 use angzarr_ports::{
@@ -29,6 +28,7 @@ use angzarr_ports::{
     ReadUntilTime, Slice, StoreError, StreamRef,
 };
 use angzarr_proto::v1::{Cover, EventBook, EventPage, Uuid};
+use coded_diagnostic::Report;
 use prost_types::{Any, Timestamp};
 
 use crate::Reads;

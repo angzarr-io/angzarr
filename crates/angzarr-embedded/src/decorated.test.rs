@@ -54,11 +54,11 @@ use ::angzarr_embedded::{
     MemoryDeadLetters, NotSnapshotted, Payload, PayloadError, Recovery, Registry, Rejected,
     Sampled, State, StepError, Stream, Timestamp, Upcaster, WireError,
 };
-use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 use angzarr_embedded_macros::{
     aggregate, applies, handles_cmd, handles_fact, on_event, on_refused, policy, process_manager,
     projector, projects,
 };
+use coded_diagnostic::{code, Arg, Diagnostic, Report};
 
 /// `value` packed as the `Any` a fact's `FactEmit` carries.
 fn event<T: DomainMessage>(value: &T) -> Any {
@@ -1246,7 +1246,7 @@ pub struct MisFolded;
 
 impl fmt::Display for MisFolded {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -3799,7 +3799,7 @@ pub struct Untranslated;
 
 impl fmt::Display for Untranslated {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

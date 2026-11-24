@@ -19,11 +19,11 @@
 
 use std::time::Duration;
 
-use angzarr_diagnostic::Report;
 use angzarr_embedded::KernelError;
 use angzarr_proto::v1 as pb;
 use angzarr_router::hpb;
 use angzarr_router::router::{CommandHandler, PolicyComponent, ProjectorHandler};
+use coded_diagnostic::Report;
 
 use crate::config::{ComponentConfig, ComponentKindConfig, Languages, Placement, Supervision};
 use crate::error::HostError;

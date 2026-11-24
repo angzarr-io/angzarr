@@ -3,8 +3,8 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
 use angzarr_ports::StoreError;
+use coded_diagnostic::{code, Arg, Diagnostic};
 
 /// Which stored row a refusal is about: its kind, its stream and where on
 /// the stream (a page's sequence, a position's handler, a letter's
@@ -58,7 +58,7 @@ pub enum ExportError {
 
 impl fmt::Display for ExportError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

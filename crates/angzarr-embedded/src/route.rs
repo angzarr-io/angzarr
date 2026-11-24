@@ -20,12 +20,12 @@ use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 
-use angzarr_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_router::domain::DomainDispatch;
 use angzarr_router::error::{BusinessStatus, CodedError, GrpcCode, HandlerError};
 use angzarr_router::hpb;
 use angzarr_router::rebuild::{FoldFailure, Rebuilder};
 use angzarr_router::PageContext;
+use coded_diagnostic::{Arg, Diagnostic, Report};
 use prost::Message;
 use prost_types::Any;
 

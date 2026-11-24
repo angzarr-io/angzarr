@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use angzarr_bus::angzarr_diagnostic::{Arg, Diagnostic, Report};
+use angzarr_bus::coded_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_bus::contract::transport::TransportHarness;
 use angzarr_bus::contract::{Delivery, Domains, Failing, Harness, React, Scripted, Sink, Wake};
 use angzarr_bus::{
@@ -47,7 +47,7 @@ impl Taken {
 
 impl fmt::Display for Taken {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_bus::angzarr_diagnostic::display(self, f)
+        angzarr_bus::coded_diagnostic::display(self, f)
     }
 }
 

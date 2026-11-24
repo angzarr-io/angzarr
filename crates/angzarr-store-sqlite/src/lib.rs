@@ -76,7 +76,7 @@ pub use sqlite::{SqliteRead, SqliteStore, BUSY_TIMEOUT};
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's errors. The text of
 /// `locales/en-US/messages.ftl`, its ids under the crate's package name
-/// (`angzarr_diagnostic::build`).
+/// (`coded_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
     env!("CARGO_PKG_NAME"),
     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),

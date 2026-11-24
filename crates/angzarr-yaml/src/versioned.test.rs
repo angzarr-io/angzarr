@@ -7,7 +7,7 @@ use crate::versioned::{
     DEFAULT_KEY,
 };
 use crate::{parse, write, Value};
-use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
+use coded_diagnostic::{code, Arg, Diagnostic, Report};
 
 fn ok(_: &mut Value) -> Result<(), MigrationError> {
     Ok(())

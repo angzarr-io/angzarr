@@ -665,7 +665,7 @@ fn policy_of(descriptor: &mut pb::ComponentDescriptor) -> &mut pb::PolicyDescrip
 /// naming the component, under ANGZARR_REASON_POLICY_NO_OUTPUT_DOMAIN.
 #[test]
 fn a_policy_descriptor_without_an_output_domain_is_refused() {
-    use angzarr_diagnostic::Diagnostic;
+    use coded_diagnostic::Diagnostic;
     let mut descriptor = described(pb::ComponentKind::Policy);
     assert_eq!(angzarr_embedded::validate_descriptor(&descriptor), Ok(()));
     policy_of(&mut descriptor).output_domain = String::new();
@@ -699,7 +699,7 @@ fn a_descriptor_that_fails_its_validation_is_refused_for_its_reason() {
         fault(&mut descriptor);
         angzarr_embedded::validate_descriptor(&descriptor)
             .err()
-            .map(|r| angzarr_diagnostic::Diagnostic::code(&r).to_string())
+            .map(|r| coded_diagnostic::Diagnostic::code(&r).to_string())
     };
     type Fault = fn(&mut pb::ComponentDescriptor);
     let cases: [(pb::ComponentKind, Fault, &str); 9] = [
@@ -897,7 +897,7 @@ fn a_child_described_again_is_refused_unless_the_registry_takes_it() {
     };
     let refused = order.registered_by(&unversioned, false);
     assert!(
-        matches!(&refused, Err(HostError::Register { cause }) if angzarr_diagnostic::Diagnostic::code(cause) == "ANGZARR_REASON_MISSING_RULES_VERSION"),
+        matches!(&refused, Err(HostError::Register { cause }) if coded_diagnostic::Diagnostic::code(cause) == "ANGZARR_REASON_MISSING_RULES_VERSION"),
         "{refused:?}"
     );
     assert_eq!(order.link.registered().descriptor, first, "the old kept");
@@ -1440,7 +1440,7 @@ const START_CHECKS: u64 = START_LIMIT_MS / INTERVAL.as_millis() as u64;
 /// the socket file at the path the host chose removed.
 #[test]
 fn a_child_not_serving_within_the_start_limit_fails_its_start() {
-    use angzarr_diagnostic::Diagnostic;
+    use coded_diagnostic::Diagnostic;
     use fake_child::{health, HEALTH_ENV};
     let tag = format!("not-serving-{}", std::process::id());
     let rows = [

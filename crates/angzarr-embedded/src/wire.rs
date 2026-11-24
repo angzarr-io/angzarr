@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
+use coded_diagnostic::{code, Arg, Diagnostic};
 
 /// A field of a decoded message that its domain type cannot hold.
 #[derive(Clone, PartialEq, Eq, Debug)]
@@ -28,7 +28,7 @@ pub enum WireError {
 
 impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

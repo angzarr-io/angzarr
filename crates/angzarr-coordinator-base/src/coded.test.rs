@@ -1,5 +1,5 @@
-use angzarr_diagnostic::{Arg, Report};
 use angzarr_proto::v1::AngzarrReason;
+use coded_diagnostic::{Arg, Report};
 
 use super::*;
 

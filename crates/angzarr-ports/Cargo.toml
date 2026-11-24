@@ -21,9 +21,9 @@ memory = []
 faulty = []
 
 [dependencies]
-# Every error is an angzarr_diagnostic::Diagnostic (zero dependencies;
-# re-exported as `angzarr_ports::angzarr_diagnostic`).
-angzarr-diagnostic = { workspace = true }
+# Every error is an coded_diagnostic::Diagnostic (zero dependencies;
+# re-exported as `angzarr_ports::coded_diagnostic`).
+coded-diagnostic = { workspace = true }
 # The wire types the ports speak (Cover, EventPage, EventRef, Snapshot),
 # and `uuid` through its re-export. (The withdrawn Edition and
 # CreateEditionRequest live in src/pending_editions.rs until the editions
@@ -45,9 +45,9 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] 
 wasm-bindgen-test = "=0.3.79"
 
 # The build writes the catalog's source under the crate's name
-# (angzarr_diagnostic::build): no catalog spells its crate's name.
+# (coded_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { workspace = true, features = ["build"] }
+coded-diagnostic = { workspace = true, features = ["build"] }
 
 # The shared crates' lints: the workspace's (the root Cargo.toml).
 [lints]

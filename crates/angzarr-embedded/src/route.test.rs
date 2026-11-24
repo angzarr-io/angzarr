@@ -1,7 +1,7 @@
 use prost_types::Any;
 
 use crate::v1::EventPage;
-use angzarr_diagnostic::code;
+use coded_diagnostic::code;
 
 /// A fold that fails on a persisted event says why as its cause, a key and
 /// args (decision 14.37: `FoldFailure.cause`, flattened as `cause` and
@@ -58,8 +58,8 @@ fn a_fold_that_fails_carries_its_cause_as_a_key_and_args() {
 /// 14.95): no `Rejected` reads it.
 #[test]
 fn a_refusal_goes_out_and_reads_back_under_each_business_status() {
-    use angzarr_diagnostic::Diagnostic;
     use angzarr_router::error::{BusinessStatus, CodedError, GrpcCode, HandlerError};
+    use coded_diagnostic::Diagnostic;
 
     use super::{rejection, Rejected};
 
@@ -164,8 +164,8 @@ mod counted {
 /// nothing behind.
 #[test]
 fn a_stream_of_distinct_child_codes_leaks_nothing() {
-    use angzarr_diagnostic::Diagnostic;
     use angzarr_router::error::{BusinessStatus, CodedError};
+    use coded_diagnostic::Diagnostic;
 
     let answered = |n: usize| {
         let refusal = CodedError::refused(

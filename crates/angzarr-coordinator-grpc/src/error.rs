@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 #[cfg(unix)]
 use std::path::Path;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
+use coded_diagnostic::{code, Arg, Diagnostic};
 
 /// Why a listener could not be bound, or stopped serving.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -83,7 +83,7 @@ impl ListenError {
 
 impl fmt::Display for ListenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

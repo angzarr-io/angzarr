@@ -536,7 +536,7 @@ fn a_malformed_reaction_is_refused() {
 
 #[test]
 fn a_malformations_code_is_its_own_and_names_its_args() {
-    use angzarr_diagnostic::Diagnostic;
+    use coded_diagnostic::Diagnostic;
     assert_eq!(
         Malformed::BadRoot { len: 3 }.to_string(),
         concat!(code!("malformed-bad-root"), " len=3")

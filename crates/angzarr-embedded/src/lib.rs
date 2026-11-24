@@ -147,10 +147,6 @@ mod reexports;
 /// angzarr core's bus interface, which [`Bus`] implements,
 /// re-exported so a dependent names the one this crate is built on.
 pub use angzarr_bus;
-/// angzarr-diagnostic, the crate every error here implements
-/// (`Diagnostic`, `Arg`, `Report`, `display`, and its `catalog` parity
-/// check), re-exported so a dependent names the one this crate is built on.
-pub use angzarr_diagnostic;
 /// angzarr-ports, angzarr's shared storage contract, which the kernel runs
 /// on, re-exported. Its en-US catalog, the messages for the store errors
 /// this crate forwards under their own codes ([`KernelError::Store`]), is
@@ -177,6 +173,10 @@ pub use book::{CommandBookExt, CoverExt};
 pub use bus::{Bus, BusPolicy, Clock, Host, KernelDispatch, StoreFed};
 pub use catalog::{Catalog, Description};
 pub use check::{check, Arm, Body, Checked, Identified, Malformed, Sampled};
+/// coded-diagnostic, the crate every error here implements
+/// (`Diagnostic`, `Arg`, `Report`, `display`, and its `catalog` parity
+/// check), re-exported so a dependent names the one this crate is built on.
+pub use coded_diagnostic;
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
 pub use digest::Folded;
 pub use domain::{Domain, NotSnapshotted, State};
@@ -228,7 +228,7 @@ pub use prost_types::{Any, Duration, Timestamp};
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's diagnostics. The text of
 /// `locales/en-US/messages.ftl`, its ids under the crate's package name
-/// (`angzarr_diagnostic::build`).
+/// (`coded_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
     env!("CARGO_PKG_NAME"),
     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
@@ -246,10 +246,10 @@ pub fn not_before(floor: Option<&Timestamp>, now: Timestamp) -> Timestamp {
 /// One value of every error this crate defines, each variant once, for the
 /// catalog parity test: each one's code must have a message in every locale,
 /// using exactly its args. Its messages are in [`EN_US`].
-pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
-    fn boxed<E: angzarr_diagnostic::Diagnostic + 'static>(
+pub fn diagnostic_samples() -> Vec<Box<dyn coded_diagnostic::Diagnostic>> {
+    fn boxed<E: coded_diagnostic::Diagnostic + 'static>(
         errors: impl IntoIterator<Item = E>,
-    ) -> impl Iterator<Item = Box<dyn angzarr_diagnostic::Diagnostic>> {
+    ) -> impl Iterator<Item = Box<dyn coded_diagnostic::Diagnostic>> {
         errors.into_iter().map(|e| Box::new(e) as _)
     }
     let mut samples = Vec::new();
@@ -303,8 +303,8 @@ const SAMPLE_MISSING: WireError = WireError::Missing {
 };
 
 /// [`SAMPLE_MISSING`], reported.
-fn sample_report() -> angzarr_diagnostic::Report {
-    angzarr_diagnostic::Report::of(&SAMPLE_MISSING)
+fn sample_report() -> coded_diagnostic::Report {
+    coded_diagnostic::Report::of(&SAMPLE_MISSING)
 }
 
 /// Each [`Malformed`] variant.
@@ -332,7 +332,7 @@ fn malformed_samples() -> Vec<Malformed> {
 /// Each [`KernelError`] variant but `Store` ([`store_samples`]) and
 /// `Router` ([`router_samples`]).
 fn kernel_samples() -> Vec<KernelError> {
-    use angzarr_diagnostic::Report;
+    use coded_diagnostic::Report;
     vec![
         KernelError::RetryCapExhausted {
             stream: sample_stream(),
@@ -581,7 +581,7 @@ pub(crate) fn misconfigured_samples() -> Vec<Misconfigured> {
 fn upcast_samples() -> Vec<UpcastError> {
     vec![
         UpcastError::Unavailable {
-            cause: angzarr_diagnostic::Report::of(&KernelError::HandlerUnavailable {
+            cause: coded_diagnostic::Report::of(&KernelError::HandlerUnavailable {
                 stream: sample_stream(),
                 cause: "not-running".to_string(),
             }),

@@ -4,9 +4,9 @@
 
 use std::collections::BTreeSet;
 
-use angzarr_diagnostic::code;
 use angzarr_ports::angzarr_proto::v1::{self, Cover};
 use angzarr_ports::{Arg, Cause, Recovery, StoreError};
+use coded_diagnostic::code;
 
 fn stream() -> Cover {
     Cover {
@@ -415,12 +415,12 @@ fn the_stream_is_read_without_the_box() {
     assert_eq!(StoreError::EditionNameRequired.stream(), None);
 }
 
-/// The error is an `angzarr_diagnostic::Diagnostic`, with the same code and
+/// The error is an `coded_diagnostic::Diagnostic`, with the same code and
 /// args as its own methods give, a cause nested whole as a diagnostic of its
 /// own: what a runtime forwards, and what a catalog renders.
 #[test]
 fn every_error_is_a_diagnostic_with_its_own_code_and_args() {
-    use angzarr_ports::angzarr_diagnostic::{self as diagnostic, Diagnostic};
+    use angzarr_ports::coded_diagnostic::{self as diagnostic, Diagnostic};
     fn same(theirs: &diagnostic::Arg, ours: &Arg) -> bool {
         match (theirs, ours) {
             (diagnostic::Arg::Uint(a), Arg::Uint(b)) => a == b,
@@ -480,7 +480,7 @@ fn the_catalog_has_a_message_for_every_code_with_exactly_its_args() {
     let every: BTreeSet<String> = every().iter().map(|(_, c, _)| c.to_string()).collect();
     assert_eq!(sampled, every);
     assert_eq!(
-        angzarr_ports::angzarr_diagnostic::catalog::check(name, text, &samples),
+        angzarr_ports::coded_diagnostic::catalog::check(name, text, &samples),
         []
     );
 }

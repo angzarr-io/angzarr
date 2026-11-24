@@ -25,7 +25,7 @@ mod usage;
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic};
+use coded_diagnostic::{Arg, Diagnostic};
 
 pub use app::AppError;
 pub use markup::MarkupError;
@@ -36,7 +36,7 @@ pub use usage::UseError;
 /// `texts![message, component]`. An arg is named as the field it carries.
 macro_rules! texts {
     ($($field:ident),+ $(,)?) => {
-        vec![$((stringify!($field), ::angzarr_diagnostic::Arg::from($field.as_str()))),+]
+        vec![$((stringify!($field), ::coded_diagnostic::Arg::from($field.as_str()))),+]
     };
 }
 pub(crate) use texts;
@@ -93,7 +93,7 @@ impl From<AppError> for CodegenError {
 
 impl fmt::Display for CodegenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -135,7 +135,7 @@ pub(crate) fn text(field: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use angzarr_diagnostic::{Arg, Diagnostic, code};
+    use coded_diagnostic::{Arg, Diagnostic, code};
 
     use super::{CodegenError, MarkupError, diagnostic_samples, text};
 

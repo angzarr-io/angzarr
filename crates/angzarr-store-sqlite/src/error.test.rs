@@ -1,7 +1,7 @@
 use angzarr_ports::{Arg, StoreError};
 
 use super::{causes, damaged, unavailable, Damage, SqlError};
-use angzarr_ports::angzarr_diagnostic::code;
+use angzarr_ports::coded_diagnostic::code;
 
 /// An error's `Display` is its code, then its args (` name=value` each),
 /// never English of angzarr's (decision 14.37): text is rendered only

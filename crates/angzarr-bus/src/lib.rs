@@ -95,12 +95,12 @@ pub use transport::{
     Transport,
 };
 
-/// The diagnostic crate a failure's cause is, as the bus uses it.
-pub use angzarr_diagnostic;
 /// The ports' bounds that differ by target, as the bus uses them.
 pub use angzarr_ports::{MaybeSend, MaybeSync};
 /// The wire types, as the bus names them.
 pub use angzarr_proto;
+/// The diagnostic crate a failure's cause is, as the bus uses it.
+pub use coded_diagnostic;
 
 /// A bus: subscriptions served from a stream store. See the crate.
 pub trait Bus {
@@ -112,10 +112,10 @@ pub trait Bus {
     /// Why a subscription is refused: a name another subscription on the
     /// bus has (the name keys its positions and, for a policy, its
     /// outputs' ids), or a handler the bus cannot serve.
-    type Refused: angzarr_diagnostic::Diagnostic;
+    type Refused: coded_diagnostic::Diagnostic;
     /// Why serving stopped: what the bus cannot hold and hand again (a
     /// store that fails).
-    type Error: angzarr_diagnostic::Diagnostic;
+    type Error: coded_diagnostic::Diagnostic;
 
     /// Serve `subscription` too, from the next [`Bus::serve`] on.
     fn subscribe(

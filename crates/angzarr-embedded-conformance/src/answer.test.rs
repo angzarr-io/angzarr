@@ -8,8 +8,8 @@
 
 use std::collections::BTreeMap;
 
-use angzarr_embedded::angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_embedded::angzarr_router::error::{CodedError, GrpcCode};
+use angzarr_embedded::coded_diagnostic::{Arg, Diagnostic};
 use angzarr_embedded::v1::DeliveryOutcome;
 use angzarr_embedded::{Any, Failure, Handled, KernelError, Recovery, Rejected, StepError};
 

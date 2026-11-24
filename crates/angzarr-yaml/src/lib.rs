@@ -65,7 +65,7 @@
 //! [`is_ascii_id`] checks; display text in values can be any Unicode.
 //!
 //! A document that does not parse gives an [`Error`]: the line and a
-//! [`ParseProblem`]. Every error here is an [`angzarr_diagnostic::Diagnostic`],
+//! [`ParseProblem`]. Every error here is an [`coded_diagnostic::Diagnostic`],
 //! with its en-US messages in `locales/en-US/messages.ftl` ([`EN_US`]).
 //!
 //! [`decode`] turns a [`Value`] into any serde type, strictly: scalars parsed
@@ -1304,7 +1304,7 @@ fn block(v: &Value, indent: usize, depth: usize, flow_depth: usize, out: &mut St
 /// This crate's en-US Fluent catalog, its name first: what a dependent
 /// embeds to render this crate's diagnostics. The text of
 /// `locales/en-US/messages.ftl`, its ids under the crate's package name
-/// (`angzarr_diagnostic::build`).
+/// (`coded_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
     env!("CARGO_PKG_NAME"),
     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
@@ -1312,7 +1312,7 @@ pub const EN_US: (&str, &str) = (
 
 /// This crate's catalogs by locale, under the same name: every
 /// `locales/<locale>/messages.ftl`, from the table the build writes
-/// (`angzarr_diagnostic::build`), so a locale added there is offered with
+/// (`coded_diagnostic::build`), so a locale added there is offered with
 /// no other edit. en-US alone ships.
 pub const LOCALES: (&str, &[(&str, &str)]) = (
     env!("CARGO_PKG_NAME"),
@@ -1322,7 +1322,7 @@ pub const LOCALES: (&str, &[(&str, &str)]) = (
 /// One value of every error this crate defines, each variant once, for the
 /// catalog parity test: each one's code must have a message in every locale,
 /// using exactly its args. Its messages are in [`EN_US`].
-pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
+pub fn diagnostic_samples() -> Vec<Box<dyn coded_diagnostic::Diagnostic>> {
     let text = |s: &str| s.to_string();
     let parse = [
         ParseProblem::LoneCarriageReturn,
@@ -1353,7 +1353,7 @@ pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
         },
         ParseProblem::UnterminatedQuote,
     ];
-    let mut samples: Vec<Box<dyn angzarr_diagnostic::Diagnostic>> = Vec::new();
+    let mut samples: Vec<Box<dyn coded_diagnostic::Diagnostic>> = Vec::new();
     samples.extend(
         parse
             .into_iter()

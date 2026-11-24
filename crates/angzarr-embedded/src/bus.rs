@@ -42,11 +42,11 @@ use angzarr_bus::{
     Admitted, Answer, Handler, Hub, Item, Pumped, RetryPolicy, Scope, StoreRead, StoreTransport,
     Transport,
 };
-use angzarr_diagnostic::Report;
 use angzarr_ports::BoxFuture;
 use angzarr_proto::v1::Cover;
 use angzarr_router::policy::PolicyDispatch;
 use angzarr_router::router::{DynProjectorHandler, PolicyComponent};
+use coded_diagnostic::Report;
 use prost_types::Timestamp;
 
 use super::error::{Failure, KernelError};

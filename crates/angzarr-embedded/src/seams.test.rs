@@ -364,7 +364,7 @@ fn a_domains_refusal_comes_back_typed_as_its_rejection() {
         Some(&Refused::Overdrawn { short: 8 })
     );
     assert_eq!(
-        angzarr_diagnostic::Diagnostic::code(rejected.report()),
+        coded_diagnostic::Diagnostic::code(rejected.report()),
         "ANGZARR_REASON_COMMAND_REFUSED",
         "a typed refusal, keyed as the wire keys one"
     );
@@ -632,16 +632,16 @@ struct Mark(u8);
 
 impl std::fmt::Display for Mark {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
-impl angzarr_diagnostic::Diagnostic for Mark {
+impl coded_diagnostic::Diagnostic for Mark {
     fn code(&self) -> &str {
         "toy-till-marked"
     }
 
-    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, coded_diagnostic::Arg)> {
         vec![("stream", u64::from(self.0).into())]
     }
 }

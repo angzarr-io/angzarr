@@ -55,7 +55,10 @@ fn base_depends_on_nothing_above_ports() {
     // other angzarr crate.
     let allowed: BTreeSet<_> = ALLOWED.iter().map(ToString::to_string).collect();
     assert_eq!(angzarr, allowed, "the angzarr crates in the closure");
-    assert!(every.contains("diagnostic"), "diagnostic is in the closure");
+    assert!(
+        every.contains("coded-diagnostic"),
+        "coded-diagnostic is in the closure"
+    );
 
     for banned in [
         "tonic",
@@ -78,7 +81,7 @@ fn base_depends_on_nothing_above_ports() {
     }
 }
 
-/// Directly, the two angzarr crates, `diagnostic` and `prost-types` (for `Any`), and
+/// Directly, the two angzarr crates, `coded-diagnostic` and `prost-types` (for `Any`), and
 /// no other third-party crate.
 #[test]
 fn base_links_no_third_party_crate_of_its_own_but_prost_types() {
@@ -89,7 +92,7 @@ fn base_links_no_third_party_crate_of_its_own_but_prost_types() {
         .collect();
     let allowed: BTreeSet<_> = ALLOWED
         .iter()
-        .chain(&["diagnostic", "prost-types"])
+        .chain(&["coded-diagnostic", "prost-types"])
         .map(ToString::to_string)
         .collect();
     assert_eq!(own, allowed);

@@ -42,7 +42,7 @@ fn tree(depth: Option<u32>) -> BTreeSet<String> {
 const ALLOWED: [&str; 3] = ["angzarr-coordinator-base", "angzarr-ports", "angzarr-proto"];
 
 /// The angzarr crates under this one are exactly base, ports and proto, and
-/// `diagnostic` is linked; every command-side crate, transport and runtime is absent.
+/// `coded-diagnostic` is linked; every command-side crate, transport and runtime is absent.
 #[test]
 fn reads_depends_on_no_command_side_crate() {
     let every = tree(None);
@@ -53,7 +53,10 @@ fn reads_depends_on_no_command_side_crate() {
         .collect();
     let allowed: BTreeSet<_> = ALLOWED.iter().map(ToString::to_string).collect();
     assert_eq!(angzarr, allowed, "the angzarr crates in the closure");
-    assert!(every.contains("diagnostic"), "diagnostic is in the closure");
+    assert!(
+        every.contains("coded-diagnostic"),
+        "coded-diagnostic is in the closure"
+    );
 
     for banned in [
         "angzarr-pipeline",
@@ -83,7 +86,7 @@ fn reads_depends_on_no_command_side_crate() {
     }
 }
 
-/// Directly: the three angzarr crates, `diagnostic` and `prost`/`prost-types`, and no other
+/// Directly: the three angzarr crates, `coded-diagnostic` and `prost`/`prost-types`, and no other
 /// third-party crate.
 #[test]
 fn reads_links_no_third_party_crate_of_its_own_but_prost() {
@@ -93,7 +96,7 @@ fn reads_links_no_third_party_crate_of_its_own_but_prost() {
         .collect();
     let allowed: BTreeSet<_> = ALLOWED
         .iter()
-        .chain(&["diagnostic", "prost", "prost-types"])
+        .chain(&["coded-diagnostic", "prost", "prost-types"])
         .map(ToString::to_string)
         .collect();
     assert_eq!(own, allowed);

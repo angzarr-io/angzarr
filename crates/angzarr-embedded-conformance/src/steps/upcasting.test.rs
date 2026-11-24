@@ -8,12 +8,12 @@ use std::sync::{Arc, Mutex};
 
 use cucumber::{given, then, when};
 
-use angzarr_embedded::angzarr_diagnostic::Report;
 use angzarr_embedded::angzarr_router::error::GrpcCode;
 use angzarr_embedded::angzarr_router::hpb::{
     self, upcast_request, upcasted, HandleRequest, UpcastRequest, UpcastResponse,
 };
 use angzarr_embedded::angzarr_router::send::BoxFuture;
+use angzarr_embedded::coded_diagnostic::Report;
 use angzarr_embedded::v1::command_page;
 use angzarr_embedded::{Any, UpcastError, UpcastPort};
 

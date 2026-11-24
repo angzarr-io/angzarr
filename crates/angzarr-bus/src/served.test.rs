@@ -2,8 +2,8 @@
 //! each failure, named by subscription, stream and sequence.
 
 use super::*;
-use angzarr_diagnostic::Report;
 use angzarr_proto::v1::{Cover, Uuid};
+use coded_diagnostic::Report;
 
 fn failed(subscription: &str, sequence: Option<u64>) -> Failed {
     Failed {

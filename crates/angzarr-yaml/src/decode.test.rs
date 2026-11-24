@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
+use coded_diagnostic::{code, Arg, Diagnostic};
 use serde::Deserialize;
 
 use super::*;

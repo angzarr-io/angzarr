@@ -36,7 +36,7 @@ use std::any::{Any, TypeId};
 use std::fmt;
 use std::sync::Arc;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
+use coded_diagnostic::{code, Arg, Diagnostic};
 
 use super::markup::{DomainMessage, TypeName};
 use super::policy::CommandTarget;
@@ -171,7 +171,7 @@ pub struct UndoTargetsCommand {
 
 impl fmt::Display for UndoTargetsCommand {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

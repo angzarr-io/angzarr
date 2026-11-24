@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use angzarr_diagnostic::Diagnostic;
 use angzarr_yaml::versioned::LoadProblem;
+use coded_diagnostic::Diagnostic;
 
 use super::*;
 
@@ -51,7 +51,7 @@ fn refused_at(body: &str) -> (String, String) {
                 .args()
                 .into_iter()
                 .find_map(|(name, arg)| match (name, arg) {
-                    ("key_path", angzarr_diagnostic::Arg::Str(path)) => Some(path),
+                    ("key_path", coded_diagnostic::Arg::Str(path)) => Some(path),
                     _ => None,
                 })
                 .expect("a decode's refusal names its key path");

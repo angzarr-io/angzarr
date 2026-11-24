@@ -1,7 +1,7 @@
 # angzarr-coordinator: the edge, transport-free: routing and reach (Arrival,
 # Reach, Hidden, Served) and, behind the `commands` feature, the Commands
 # trait and its caller. No tonic, no tokio; depends on angzarr-coordinator-base,
-# angzarr-ports, angzarr-proto and angzarr-diagnostic only. A member of
+# angzarr-ports, angzarr-proto and coded-diagnostic only. A member of
 # angzarr-core's workspace: every recipe names this package, and --locked
 # means the workspace's Cargo.lock. Runs on the host, not in core's toolchain
 # container (`just -f crates/angzarr-coordinator/justfile check`).

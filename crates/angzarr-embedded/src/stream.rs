@@ -1,9 +1,9 @@
 //! A stream: an append-only log of stamped events and the state folded from
 //! it.
 
-use angzarr_diagnostic::Report;
 use angzarr_proto::v1::event_meta::Causation;
 use angzarr_proto::v1::{Cover, EventBook, EventMeta, EventPage, FactOrigin, Snapshot, Uuid};
+use coded_diagnostic::Report;
 use prost::{Message, Name};
 use prost_types::Timestamp;
 

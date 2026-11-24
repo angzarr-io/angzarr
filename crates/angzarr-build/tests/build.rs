@@ -161,7 +161,7 @@ fn test_markup_domain_into_reports_a_proto_protoc_cannot_find() {
 fn test_every_error_has_a_catalog_message_with_its_args() {
     let ftl = angzarr_build::EN_US.1;
     let samples = angzarr_build::diagnostic_samples();
-    let problems = angzarr_diagnostic::catalog::check(angzarr_build::EN_US.0, ftl, &samples);
+    let problems = coded_diagnostic::catalog::check(angzarr_build::EN_US.0, ftl, &samples);
     assert!(problems.is_empty(), "{problems:#?}");
     // Fluent's own parser and formatter agree: every message formats with
     // exactly its error's args.
@@ -224,7 +224,7 @@ fn test_a_failing_build_script_prints_the_errors_english() {
 fn test_every_error_displays_as_its_code_and_args() {
     let (krate, ftl) = angzarr_build::EN_US;
     let problems =
-        angzarr_diagnostic::catalog::check(krate, ftl, &angzarr_build::diagnostic_samples());
+        coded_diagnostic::catalog::check(krate, ftl, &angzarr_build::diagnostic_samples());
     assert_eq!(problems, Vec::new());
 }
 

@@ -14,7 +14,7 @@
 //! that package's domain type, at its layer's path. A type derives
 //! `Default` where every field has one.
 
-use angzarr_diagnostic::code;
+use coded_diagnostic::code;
 use proc_macro2::{Span, TokenStream};
 use prost_reflect::{EnumDescriptor, FieldDescriptor, Kind, MessageDescriptor};
 use quote::{format_ident, quote};
@@ -453,12 +453,12 @@ fn handler_context() -> TokenStream {
 
         impl ::std::error::Error for Bug {}
 
-        impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for Bug {
+        impl ::angzarr_embedded::coded_diagnostic::Diagnostic for Bug {
             fn code(&self) -> &str {
                 self.key
             }
 
-            fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+            fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
                 self.args
                     .iter()
                     .map(|(name, value)| (*name, value.as_str().into()))
@@ -554,16 +554,16 @@ fn refusal_diagnostic(message: &MessageDescriptor) -> TokenStream {
 
         impl ::std::fmt::Display for #name {
             fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-                f.write_str(::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(self))
+                f.write_str(::angzarr_embedded::coded_diagnostic::Diagnostic::code(self))
             }
         }
 
-        impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for #name {
+        impl ::angzarr_embedded::coded_diagnostic::Diagnostic for #name {
             fn code(&self) -> &str {
                 #code
             }
 
-            fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+            fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
                 #args
             }
         }
@@ -659,16 +659,16 @@ fn refusal_choice(input: &crate::model::Input) -> TokenStream {
             }
         }
 
-        impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for #name {
+        impl ::angzarr_embedded::coded_diagnostic::Diagnostic for #name {
             fn code(&self) -> &str {
                 match self {
-                    #(#name::#types(refusal) => ::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(refusal),)*
+                    #(#name::#types(refusal) => ::angzarr_embedded::coded_diagnostic::Diagnostic::code(refusal),)*
                 }
             }
 
-            fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+            fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
                 match self {
-                    #(#name::#types(refusal) => ::angzarr_embedded::angzarr_diagnostic::Diagnostic::args(refusal),)*
+                    #(#name::#types(refusal) => ::angzarr_embedded::coded_diagnostic::Diagnostic::args(refusal),)*
                 }
             }
         }
@@ -706,7 +706,7 @@ fn field_arg(field: &FieldDescriptor) -> Option<TokenStream> {
     {
         return None;
     }
-    let arg = quote!(::angzarr_embedded::angzarr_diagnostic::Arg);
+    let arg = quote!(::angzarr_embedded::coded_diagnostic::Arg);
     let value = match field.kind() {
         Kind::Message(_) => return None,
         Kind::Enum(e) => {

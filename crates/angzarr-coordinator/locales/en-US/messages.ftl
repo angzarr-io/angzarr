@@ -1,6 +1,6 @@
 # Messages for angzarr-coordinator's errors. Each id is an error's code
 # without the crate's name, which the build prefixes
-# (angzarr_diagnostic::build); the variables are its args.
+# (coded_diagnostic::build); the variables are its args.
 # The crate exports this as angzarr_coordinator::EN_US.
 
 hidden = a request for "{ $domain }" from { $arrival } was answered as an unknown domain: its reach is { $reach }

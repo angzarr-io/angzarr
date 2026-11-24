@@ -52,7 +52,6 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::Arc;
 
-use angzarr_diagnostic::Report;
 use angzarr_embedded::v1::{CommandBook, Cover, EventBook, EventPage};
 use angzarr_embedded::{Answered, Catalog, Misconfigured};
 use angzarr_embedded::{
@@ -62,6 +61,7 @@ use angzarr_embedded::{
 };
 use angzarr_proto::v1::ComponentKind;
 use angzarr_store_sqlite::SqliteStore;
+use coded_diagnostic::Report;
 
 use crate::config::{on_policy_bug, on_retryable, snapshot_policy, Expose, HostConfig, Languages};
 use crate::error::HostError;

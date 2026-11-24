@@ -15,7 +15,7 @@ publish = false
 # (tests/dependencies.rs pins it).
 [dependencies]
 # Every error is a Diagnostic; the catalog's parity test is its.
-angzarr-diagnostic = { workspace = true }
+coded-diagnostic = { workspace = true }
 # The wire types (EventPage, EventBook, DeliveryOutcome, AngzarrReason).
 angzarr-proto = { path = "../angzarr-proto" }
 # The ports' StoreError, and the ports' MaybeSend and BoxFuture.
@@ -24,9 +24,9 @@ angzarr-ports = { path = "../angzarr-ports" }
 prost-types = "0.14"
 
 # The build writes the catalog's source under the crate's name
-# (angzarr_diagnostic::build): no catalog spells its crate's name.
+# (coded_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { workspace = true, features = ["build"] }
+coded-diagnostic = { workspace = true, features = ["build"] }
 
 # The shared crates' lints: the workspace's (the root Cargo.toml).
 [lints]

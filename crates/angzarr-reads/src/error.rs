@@ -5,8 +5,8 @@
 use std::fmt;
 
 use angzarr_coordinator_base::{Code, Coded, Refusal};
-use angzarr_diagnostic::{code, Arg, Diagnostic};
 use angzarr_ports::StoreError;
+use coded_diagnostic::{code, Arg, Diagnostic};
 
 /// A request this crate refuses, whatever the store holds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,7 +44,7 @@ impl Invalid {
 
 impl fmt::Display for Invalid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -128,7 +128,7 @@ impl Refusal for ReadError {
 
 impl fmt::Display for ReadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

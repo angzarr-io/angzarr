@@ -1,6 +1,6 @@
 # angzarr-store-transfer: a store carried across a proto generation as
 # JSONL (the store export/import plan). Depends on angzarr-ports,
-# angzarr-diagnostic, prost-reflect and serde_json. A member of
+# coded-diagnostic, prost-reflect and serde_json. A member of
 # angzarr-core's workspace: every recipe names this package, and --locked
 # means the workspace's Cargo.lock. Runs on the host, not in core's
 # toolchain container (`just -f crates/angzarr-store-transfer/justfile check`).

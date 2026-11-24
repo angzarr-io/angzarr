@@ -9,7 +9,7 @@ publish = false
 rust-version = "1.96"
 
 [dependencies]
-angzarr-diagnostic = { workspace = true }
+coded-diagnostic = { workspace = true }
 # The store and the ports it speaks, directly: the kernel is not linked.
 angzarr-ports = { path = "../angzarr-ports" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
@@ -23,8 +23,8 @@ tokio = { version = "1", features = ["rt"] }
 
 [build-dependencies]
 # The build writes the catalog's source under the crate's name
-# (angzarr_diagnostic::build): no catalog spells its crate's name.
-angzarr-diagnostic = { workspace = true, features = ["build"] }
+# (coded_diagnostic::build): no catalog spells its crate's name.
+coded-diagnostic = { workspace = true, features = ["build"] }
 
 [features]
 # `diagnostic_samples`, for other crates' catalog tests: their dev-dependency

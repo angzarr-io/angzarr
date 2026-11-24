@@ -4,8 +4,8 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
 use angzarr_ports::{self, StoreError};
+use coded_diagnostic::{code, Arg, Diagnostic};
 
 /// This crate's en-US messages, its name first: what an edge's catalog
 /// embeds to render its diagnostics.
@@ -35,7 +35,7 @@ pub enum OpenError {
 
 impl fmt::Display for OpenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

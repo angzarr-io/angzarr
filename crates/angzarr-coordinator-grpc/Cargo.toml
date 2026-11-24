@@ -38,7 +38,7 @@ angzarr-coordinator-base = { path = "../angzarr-coordinator-base" }
 # The edge: Coordinator, Session, Gate, Credential, Arrival, Reach, Commands.
 angzarr-coordinator = { path = "../angzarr-coordinator", default-features = false }
 # Every error is a Diagnostic; the catalog's parity test is this crate's.
-angzarr-diagnostic = { workspace = true }
+coded-diagnostic = { workspace = true }
 # The ports' BoxFuture.
 angzarr-ports = { path = "../angzarr-ports" }
 # The wire messages the services speak.
@@ -65,9 +65,9 @@ tonic-health = "0.14"
 http-body = "1"
 
 # The build writes the catalog's source under the crate's name
-# (angzarr_diagnostic::build): no catalog spells its crate's name.
+# (coded_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { workspace = true, features = ["build"] }
+coded-diagnostic = { workspace = true, features = ["build"] }
 
 [dev-dependencies]
 # The tests' counter domain's store.

@@ -1,7 +1,7 @@
 //! The errors' codes and args, the catalog, and the error as the store's.
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
 use angzarr_ports::{self, StoreError};
+use coded_diagnostic::{code, Arg, Diagnostic};
 
 use super::{diagnostic_samples, OpenError, EN_US};
 
@@ -26,7 +26,7 @@ fn every_code_is_under_the_crates_name_with_its_message() {
         4,
         "create-dir, unplaced, predates-embedded, restrict"
     );
-    assert_eq!(angzarr_diagnostic::catalog::check(name, text, &own), []);
+    assert_eq!(coded_diagnostic::catalog::check(name, text, &own), []);
 }
 
 #[test]

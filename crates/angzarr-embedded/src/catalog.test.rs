@@ -2,8 +2,8 @@
 //! descriptor; every registration fallible the one way, a refused one
 //! listing and keeping nothing.
 
-use angzarr_diagnostic::Diagnostic;
 use angzarr_router::policy::PolicyDispatch;
+use coded_diagnostic::Diagnostic;
 
 use crate::angzarr_router::hpb::{ProjectRequest, ProjectResponse};
 use crate::toys::registry;
@@ -174,7 +174,7 @@ fn a_remote_domain_is_listed_apart_and_keeps_its_readers_out() {
 /// descriptor's, is refused under a spec key, its args exactly the key's.
 #[test]
 fn every_misconfiguration_is_a_spec_key_with_its_declared_args() {
-    use angzarr_diagnostic::Diagnostic as _;
+    use coded_diagnostic::Diagnostic as _;
     let samples = crate::misconfigured_samples();
     let mut keys: Vec<&str> = samples.iter().map(|m| m.code()).collect();
     keys.sort_unstable();

@@ -11,8 +11,8 @@ publish = false
 # the workspace declares no [workspace.package], so nothing is inherited.
 
 [dependencies]
-# Every error is an angzarr_diagnostic::Diagnostic.
-angzarr-diagnostic = { workspace = true }
+# Every error is an coded_diagnostic::Diagnostic.
+coded-diagnostic = { workspace = true }
 # The Export port, the ledger (Migrations), and the wire types through its
 # angzarr-proto re-export (FILE_DESCRIPTOR_SET among them).
 angzarr-ports = { path = "../angzarr-ports" }
@@ -38,9 +38,9 @@ tokio = { version = "1", features = ["macros", "rt"] }
 prost-types = "0.14"
 
 # The build writes the catalog's source under the crate's name
-# (angzarr_diagnostic::build): no catalog spells its crate's name.
+# (coded_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { workspace = true, features = ["build"] }
+coded-diagnostic = { workspace = true, features = ["build"] }
 
 # The shared crates' lints: the workspace's (the root Cargo.toml).
 [lints]

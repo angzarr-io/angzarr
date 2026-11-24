@@ -101,7 +101,7 @@ pub const CODEGEN_PROTO: (&str, &str) = (
 );
 
 /// This crate's en-US messages: its package name, and its catalog, each id
-/// under that name (written by the build, `angzarr_diagnostic::build`).
+/// under that name (written by the build, `coded_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
     env!("CARGO_PKG_NAME"),
     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),

@@ -7,7 +7,7 @@
 use angzarr_embedded::markup::DomainMessage;
 use angzarr_embedded::v1::{CommandBook, Cover, Uuid};
 use angzarr_embedded::{CommandBookExt, Sampled, Timestamp, pack};
-use angzarr_embedded::angzarr_diagnostic::{Arg, Diagnostic};
+use angzarr_embedded::coded_diagnostic::{Arg, Diagnostic};
 use angzarr_embedded_host::App;
 use kinds_app::domain::*;
 use kinds_app::domain::LedgerState;

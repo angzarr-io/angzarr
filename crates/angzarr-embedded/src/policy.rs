@@ -39,7 +39,6 @@
 
 use std::sync::Arc;
 
-use angzarr_diagnostic::Report;
 use angzarr_proto::v1::angzarr_dead_letter::Payload as Letter;
 use angzarr_proto::v1::{
     reaction_delivery, Cover, EventBook, EventMeta, EventRef, ReactionDelivery, Uuid,
@@ -47,6 +46,7 @@ use angzarr_proto::v1::{
 use angzarr_router::error::{AngzarrReason, BusinessStatus, CodedError};
 use angzarr_router::hpb;
 use angzarr_router::policy::{PolicyDispatch, RefusalContext};
+use coded_diagnostic::Report;
 use prost_types::Any;
 
 use super::catalog::Catalog;
@@ -65,23 +65,23 @@ pub(crate) struct OutputNoBody;
 
 impl std::fmt::Display for OutputNoBody {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
-impl angzarr_diagnostic::Diagnostic for OutputNoBody {
+impl coded_diagnostic::Diagnostic for OutputNoBody {
     fn code(&self) -> &str {
-        angzarr_diagnostic::code!("policy-output-no-body")
+        coded_diagnostic::code!("policy-output-no-body")
     }
 
-    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, coded_diagnostic::Arg)> {
         Vec::new()
     }
 }
 
 /// [`OutputNoBody`], as the bug the policy's answer is refused with.
 fn output_no_body() -> CodedError {
-    use angzarr_diagnostic::Diagnostic as _;
+    use coded_diagnostic::Diagnostic as _;
     CodedError::bug(OutputNoBody.code(), [])
 }
 
@@ -584,7 +584,7 @@ pub(crate) fn dispatch<P: Policy>(policy: P) -> PolicyDispatch {
     table.on_refused(move |command, refusal, ctx| {
         let refused = Refused::of(command, refusal, ctx);
         translating.on_refused(&refused).map_err(|failure| {
-            use angzarr_diagnostic::Diagnostic;
+            use coded_diagnostic::Diagnostic;
             match failure.code() == AngzarrReason::NoRefusalHandler.as_str_name() {
                 true => angzarr_router::error::HandlerError::Coded(super::route::spec_coded(
                     AngzarrReason::NoRefusalHandler,

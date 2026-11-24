@@ -231,7 +231,7 @@ fn a_refusal_reads_back_its_command_its_typed_object_and_its_status() {
     assert_eq!(refused.trigger(), &trigger);
     let report = super::no_refusal_handler(&refused);
     assert_eq!(
-        angzarr_diagnostic::Diagnostic::code(&report),
+        coded_diagnostic::Diagnostic::code(&report),
         "ANGZARR_REASON_NO_REFUSAL_HANDLER"
     );
 }

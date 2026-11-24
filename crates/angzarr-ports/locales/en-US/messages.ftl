@@ -1,6 +1,6 @@
 # Messages for angzarr-ports' store errors. Each id is a StoreError code
 # without the crate's name, which the build prefixes
-# (angzarr_diagnostic::build); the variables are its args. $stream names a
+# (coded_diagnostic::build); the variables are its args. $stream names a
 # stream as domain/root, with @edition outside the main timeline; $cause is
 # the adapter's own error, rendered by its own message, from the adapter's
 # catalog. A runtime that forwards these errors under their own codes

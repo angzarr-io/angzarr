@@ -5,7 +5,7 @@ use crate::{pack, type_name, Any, Payload, PayloadError};
 use prost::Message;
 
 use crate::toys::{account, AccountEvent};
-use angzarr_diagnostic::code;
+use coded_diagnostic::code;
 
 #[test]
 fn payloads_are_any_packed_by_their_prost_name() {
@@ -128,7 +128,7 @@ fn decode_as_converts_a_valid_wire_message_to_its_domain_type() {
 #[test]
 fn decode_as_refuses_a_wire_message_its_domain_type_cannot_hold() {
     use crate::decode_as;
-    use angzarr_diagnostic::Diagnostic;
+    use coded_diagnostic::Diagnostic;
     use wire_and_domain::{Stamped, StampedDomain};
 
     let error = decode_as::<Stamped, StampedDomain>(&pack(&Stamped { at: None }))

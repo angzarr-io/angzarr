@@ -5,7 +5,7 @@
 //! with two steps, each undone by a fact of its destination's; `Ship` is
 //! the destination's command.
 
-use angzarr_diagnostic::Diagnostic as _;
+use coded_diagnostic::Diagnostic as _;
 
 use super::*;
 use crate::markup::{CommandTarget, DomainMessage, TypeName};
@@ -169,7 +169,7 @@ fn the_refusal_is_a_diagnostic_naming_its_step_and_command() {
         .args()
         .into_iter()
         .map(|(name, arg)| match arg {
-            angzarr_diagnostic::Arg::Str(text) => (name, text),
+            coded_diagnostic::Arg::Str(text) => (name, text),
             other => panic!("{name}: {other:?}"),
         })
         .collect();

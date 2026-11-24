@@ -6,7 +6,7 @@
 use std::fmt;
 
 use angzarr_coordinator_base::{Code, Coded};
-use angzarr_diagnostic::{code, Arg, Diagnostic};
+use coded_diagnostic::{code, Arg, Diagnostic};
 
 /// The endpoint does not implement `operation` (`handle_async`,
 /// `handle_sync`, `deliver`): UNIMPLEMENTED, keyed, with the operation.
@@ -24,7 +24,7 @@ impl Unimplemented {
 
 impl fmt::Display for Unimplemented {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -55,7 +55,7 @@ impl Unauthenticated {
 
 impl fmt::Display for Unauthenticated {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -89,7 +89,7 @@ impl FrameworkOnly {
 
 impl fmt::Display for FrameworkOnly {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

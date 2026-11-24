@@ -65,7 +65,10 @@ fn the_listener_links_only_the_edge_the_reads_and_the_wire() {
         .collect();
     let allowed: BTreeSet<_> = ALLOWED.iter().map(ToString::to_string).collect();
     assert_eq!(angzarr, allowed, "the angzarr crates in the closure");
-    assert!(every.contains("diagnostic"), "diagnostic is in the closure");
+    assert!(
+        every.contains("coded-diagnostic"),
+        "coded-diagnostic is in the closure"
+    );
     assert!(every.contains("test-dir"), "test-dir is in the closure");
 }
 
@@ -92,7 +95,7 @@ fn the_listener_links_no_third_party_crate_outside_the_tonic_stack() {
     let allowed: BTreeSet<_> = [
         "angzarr-coordinator",
         "angzarr-coordinator-base",
-        "diagnostic",
+        "coded-diagnostic",
         "angzarr-ports",
         "angzarr-proto",
         "angzarr-proto-transport-distributed",

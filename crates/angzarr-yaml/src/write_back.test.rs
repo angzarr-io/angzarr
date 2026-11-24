@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use angzarr_diagnostic::{code, Report};
+use coded_diagnostic::{code, Report};
 
 use super::*;
 use crate::versioned::{rename_key, Loader, MigrationError, Migrations};

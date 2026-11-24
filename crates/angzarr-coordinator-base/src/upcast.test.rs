@@ -1,8 +1,8 @@
 use std::sync::Mutex;
 
-use angzarr_diagnostic::Diagnostic;
 use angzarr_proto::v1::event_page::Body;
 use angzarr_proto::v1::{EventMeta, EventPage, MetaEvent};
+use coded_diagnostic::Diagnostic;
 
 use super::*;
 use crate::support::block_on;

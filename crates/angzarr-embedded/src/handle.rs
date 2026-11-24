@@ -94,8 +94,8 @@ use super::stream::{Envelope, Stream};
 use super::sync::Waited;
 use super::target::Target;
 use super::upcast::upcast_pages;
-use angzarr_diagnostic::Report;
 use angzarr_router::router::DynProjectorHandler;
+use coded_diagnostic::Report;
 
 /// How deep a chain may go before it is a [`KernelError::ChainTooDeep`],
 /// unless the kernel says otherwise ([`Kernel::limit`]).

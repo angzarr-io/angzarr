@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use angzarr_diagnostic::{Arg, Diagnostic, catalog, code};
+use coded_diagnostic::{Arg, Diagnostic, catalog, code};
 
 pub use angzarr_codegen::{
     ANGZARR_BUILD_GIT, ANGZARR_BUILD_REV, ANGZARR_EMBEDDED_REV, AppLint, AppSeed, DomainCrate,
@@ -28,7 +28,7 @@ pub use angzarr_codegen::{
 };
 
 /// This crate's en-US messages: its package name, and its catalog, each id
-/// under that name (written by the build, `angzarr_diagnostic::build`).
+/// under that name (written by the build, `coded_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
     env!("CARGO_PKG_NAME"),
     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
@@ -921,7 +921,7 @@ pub enum BuildError {
 /// (its `Debug`).
 impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -979,9 +979,9 @@ impl BuildError {
     /// What the user can do about it, a coded message, when there is
     /// something: a generated path holding an unmarked file is restored or
     /// deleted, so the next run writes it.
-    pub fn remedy(&self) -> Option<angzarr_diagnostic::Report> {
+    pub fn remedy(&self) -> Option<coded_diagnostic::Report> {
         match self {
-            BuildError::GeneratedUnmarked { .. } => Some(angzarr_diagnostic::Report::new(code!(
+            BuildError::GeneratedUnmarked { .. } => Some(coded_diagnostic::Report::new(code!(
                 "generated-unmarked-remedy"
             ))),
             _ => None,
@@ -1024,7 +1024,7 @@ fn error_samples() -> Vec<BuildError> {
 
 #[cfg(test)]
 mod tests {
-    use angzarr_diagnostic::{Diagnostic, code};
+    use coded_diagnostic::{Diagnostic, code};
 
     use super::{BuildError, EN_US, English, error_samples};
 

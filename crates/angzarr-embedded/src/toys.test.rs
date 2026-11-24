@@ -28,7 +28,7 @@ use crate::{
     Sampled, State, Timestamp, Upcaster,
 };
 use crate::{EventStore, ListStreams, PositionKey, PositionStore, Store, StreamRef};
-use angzarr_diagnostic::{Arg, Diagnostic, Report};
+use coded_diagnostic::{Arg, Diagnostic, Report};
 
 /// A message under `package`, with its `prost::Name`.
 macro_rules! named {

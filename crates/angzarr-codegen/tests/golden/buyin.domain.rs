@@ -417,11 +417,11 @@ impl ::std::fmt::Display for Bug {
     }
 }
 impl ::std::error::Error for Bug {}
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for Bug {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for Bug {
     fn code(&self) -> &str {
         self.key
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         self.args.iter().map(|(name, value)| (*name, value.as_str().into())).collect()
     }
 }
@@ -931,19 +931,19 @@ impl ::core::convert::From<Bug> for Failed<DepositRefused> {
 }
 impl ::std::fmt::Display for DepositRefused {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        f.write_str(::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(self))
+        f.write_str(::angzarr_embedded::coded_diagnostic::Diagnostic::code(self))
     }
 }
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for DepositRefused {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for DepositRefused {
     fn code(&self) -> &str {
         "buyin-v1-depositrefused"
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         let mut args = Vec::new();
         let value = &self.reason;
         args.push((
             "reason",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(value.as_str()),
+            ::angzarr_embedded::coded_diagnostic::Arg::from(value.as_str()),
         ));
         args
     }
@@ -979,17 +979,17 @@ impl ::core::convert::From<Bug> for Failed<InsufficientFunds> {
 }
 impl ::std::fmt::Display for InsufficientFunds {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        f.write_str(::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(self))
+        f.write_str(::angzarr_embedded::coded_diagnostic::Diagnostic::code(self))
     }
 }
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for InsufficientFunds {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for InsufficientFunds {
     fn code(&self) -> &str {
         "buyin-v1-insufficientfunds"
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         let mut args = Vec::new();
         let value = &self.short;
-        args.push(("short", ::angzarr_embedded::angzarr_diagnostic::Arg::from(*value)));
+        args.push(("short", ::angzarr_embedded::coded_diagnostic::Arg::from(*value)));
         args
     }
 }
@@ -1022,19 +1022,19 @@ impl ::core::convert::From<Bug> for Failed<BuyInRefused> {
 }
 impl ::std::fmt::Display for BuyInRefused {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        f.write_str(::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(self))
+        f.write_str(::angzarr_embedded::coded_diagnostic::Diagnostic::code(self))
     }
 }
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for BuyInRefused {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for BuyInRefused {
     fn code(&self) -> &str {
         "buyin-v1-buyinrefused"
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         let mut args = Vec::new();
         let value = &self.reason;
         args.push((
             "reason",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(value.as_str()),
+            ::angzarr_embedded::coded_diagnostic::Arg::from(value.as_str()),
         ));
         args
     }

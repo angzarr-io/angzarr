@@ -11,11 +11,11 @@ It is a deterministic application engine on CQRS/ES: small Rust
 crates, knowing nothing of the applications that use them. angzarr-embedded
 depends on angzarr's wire types (angzarr-proto, prost, prost-types), which
 its kernel operates on directly, on angzarr's shared store contract
-(angzarr-ports) and on its localizable errors (angzarr-diagnostic), all
+(angzarr-ports) and on its localizable errors (coded-diagnostic), all
 three angzarr core's shared crates; angzarr-store-sqlite depends on
 angzarr-ports, sea-query and sqlx. Every error is localizable: a stable code
-and named args (angzarr core's `angzarr-diagnostic`, re-exported as
-`angzarr_embedded::angzarr_diagnostic`), with an en-US Fluent catalog per
+and named args (angzarr core's `coded-diagnostic`, re-exported as
+`angzarr_embedded::coded_diagnostic`), with an en-US Fluent catalog per
 crate under `crates/<crate>/locales/`. The host config, `angzarr.yaml`, is read
 through angzarr core's strict YAML reader with versioned documents
 (`angzarr-yaml`), in angzarr-embedded-host-config.
@@ -24,7 +24,7 @@ An application pins none of the crates beneath angzarr-embedded: only this
 repository's crates it uses (angzarr-embedded, and angzarr-embedded-macros or
 -host) and angzarr-cli, for its generated code. angzarr-embedded re-exports, at its root, the crates the
 kernel is built on, `angzarr_embedded::angzarr_proto`, `angzarr_ports`,
-`angzarr_diagnostic`, `angzarr_router` and `angzarr_bus`, and, with its `sqlite` feature
+`coded_diagnostic`, `angzarr_router` and `angzarr_bus`, and, with its `sqlite` feature
 (off by default: it brings sqlx and SQLite), `angzarr_store_sqlite`. The
 kernel is the crate root (`angzarr_embedded::Kernel`); until 2026-10-31 it
 was `angzarr_embedded::next`, and that path is gone, with no alias.

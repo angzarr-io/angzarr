@@ -30,11 +30,11 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic, Report, code};
 use angzarr_embedded_host_config::angzarr_yaml::{self, Value};
 use angzarr_embedded_host_config::{
     ComponentConfig, ComponentKindConfig as Kind, Expose, FILE_NAME, HostConfig, KEY,
 };
+use coded_diagnostic::{Arg, Diagnostic, Report, code};
 use serde::Deserialize;
 
 use crate::common::snake;
@@ -368,7 +368,7 @@ pub enum AppLint {
 /// Its code and args (decision 14.37), like every error here.
 impl fmt::Display for AppLint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

@@ -15,7 +15,6 @@
 use std::path::Path;
 use std::time::Duration;
 
-use angzarr_diagnostic::Diagnostic;
 use angzarr_embedded::angzarr_router::error::{CodedError, GrpcCode};
 use angzarr_embedded::angzarr_router::hpb;
 use angzarr_embedded::angzarr_router::router::{CommandHandler, PolicyComponent, ProjectorHandler};
@@ -28,6 +27,7 @@ use angzarr_embedded::{
     Timestamp,
 };
 use angzarr_ports::memory::MemoryStore;
+use coded_diagnostic::Diagnostic;
 
 use super::{Hooks, Host};
 use crate::config::{ComponentConfig, ComponentKindConfig};
@@ -812,7 +812,7 @@ fn a_child_of_another_kind_than_configured_is_refused() {
 /// (C-0747; decision 14.55): there is no wildcard domain.
 #[test]
 fn a_reader_child_with_no_input_is_refused_under_its_key() {
-    use angzarr_diagnostic::Diagnostic;
+    use coded_diagnostic::Diagnostic;
     let policy_log = log_file("policy-no-input");
     let projector_log = log_file("projector-no-input");
     let mut policy = policy_domain(&policy_log);

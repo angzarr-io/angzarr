@@ -5,8 +5,8 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use angzarr_diagnostic::{code, Diagnostic};
 use angzarr_proto::v1 as pb;
+use coded_diagnostic::{code, Diagnostic};
 use prost_types::Any;
 
 use super::*;

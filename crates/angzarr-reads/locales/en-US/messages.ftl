@@ -1,5 +1,5 @@
 # Messages for angzarr-reads's errors. Each id is an Invalid code without
-# the crate's name, which the build prefixes (angzarr_diagnostic::build);
+# the crate's name, which the build prefixes (coded_diagnostic::build);
 # the variables are its args. The crate exports this as
 # angzarr_reads::EN_US.
 

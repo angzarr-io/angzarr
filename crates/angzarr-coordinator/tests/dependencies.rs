@@ -65,7 +65,10 @@ fn coordinator_depends_on_no_transport_or_runtime() {
         .collect();
     let allowed: BTreeSet<_> = ALLOWED.iter().map(ToString::to_string).collect();
     assert_eq!(angzarr, allowed, "the angzarr crates in the closure");
-    assert!(every.contains("diagnostic"), "diagnostic is in the closure");
+    assert!(
+        every.contains("coded-diagnostic"),
+        "coded-diagnostic is in the closure"
+    );
 
     for banned in [
         "tonic",
@@ -89,7 +92,7 @@ fn coordinator_depends_on_no_transport_or_runtime() {
     }
 }
 
-/// Directly, the four angzarr crates and `diagnostic` (rust-support's), and no
+/// Directly, the four angzarr crates and `coded-diagnostic` (rust-support's), and no
 /// other third-party crate.
 #[test]
 fn coordinator_links_no_third_party_crate_of_its_own() {
@@ -100,7 +103,7 @@ fn coordinator_links_no_third_party_crate_of_its_own() {
         .collect();
     let allowed: BTreeSet<_> = ALLOWED
         .iter()
-        .chain(&["diagnostic"])
+        .chain(&["coded-diagnostic"])
         .map(ToString::to_string)
         .collect();
     assert_eq!(own, allowed);

@@ -1,6 +1,6 @@
 # Messages for angzarr-coordinator-grpc's errors. Each id is an error's code
 # without the crate's name, which the build prefixes
-# (angzarr_diagnostic::build); the variables are its args.
+# (coded_diagnostic::build); the variables are its args.
 # The crate exports this as angzarr_coordinator_grpc::EN_US.
 
 authorization-repeated = the request carries more than one authorization header

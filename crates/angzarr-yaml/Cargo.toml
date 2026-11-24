@@ -11,10 +11,10 @@ publish = false
 # A member of angzarr-core's workspace, with every package field set here:
 # the workspace declares no [workspace.package], so nothing is inherited.
 
-# No dependencies beyond angzarr-diagnostic and serde's traits (no derive),
+# No dependencies beyond coded-diagnostic and serde's traits (no derive),
 # and nothing from any program that uses it.
 [dependencies]
-angzarr-diagnostic = { workspace = true }
+coded-diagnostic = { workspace = true }
 # The strict decode (src/decode.rs) is a serde Deserializer over Value.
 serde = { version = "1.0.228", default-features = false, features = ["std"] }
 
@@ -23,9 +23,9 @@ serde = { version = "1.0.228", default-features = false, features = ["std"] }
 serde = { version = "1.0.228", features = ["derive"] }
 
 # The build writes the catalog's source under the crate's name
-# (angzarr_diagnostic::build): no catalog spells its crate's name.
+# (coded_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { workspace = true, features = ["build"] }
+coded-diagnostic = { workspace = true, features = ["build"] }
 
 # The shared crates' lints: the workspace's (the root Cargo.toml).
 [lints]

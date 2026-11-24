@@ -20,9 +20,9 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 use angzarr_ports::StoreError;
 use angzarr_proto::v1::{Cover, EventBook, EventRef, Uuid};
+use coded_diagnostic::{code, Arg, Diagnostic, Report};
 
 use super::check::Malformed;
 use super::route::SpecKey;
@@ -548,7 +548,7 @@ fn stream(cover: &Cover) -> Arg {
 
 impl<R: Diagnostic> fmt::Display for Failure<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -583,7 +583,7 @@ impl<R: Diagnostic> Diagnostic for Failure<R> {
 
 impl fmt::Display for StepError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -614,7 +614,7 @@ impl From<StoreError> for KernelError {
 
 impl fmt::Display for KernelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -809,7 +809,7 @@ fn router_recovery(error: &angzarr_router::error::CodedError) -> Recovery {
 
 impl fmt::Display for ReplayError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -871,7 +871,7 @@ pub(crate) fn unreadable(stream: &Cover, sequence: u64, reason: Report) -> Kerne
 
 impl fmt::Display for PayloadError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -901,7 +901,7 @@ impl Diagnostic for PayloadError {
 
 impl fmt::Display for UpcastError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
@@ -930,7 +930,7 @@ impl Diagnostic for UpcastError {
 
 impl fmt::Display for UpcastChainError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

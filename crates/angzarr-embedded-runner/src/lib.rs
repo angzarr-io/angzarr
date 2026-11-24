@@ -39,13 +39,13 @@ use std::pin::Pin;
 use std::sync::{Mutex, PoisonError};
 use std::time::Duration;
 
-use angzarr_diagnostic::Report;
 use angzarr_embedded::markup::DomainMessage;
 use angzarr_embedded::v1::{CommandBook, Cover, Uuid};
 use angzarr_embedded::{
     DeadLetter, Domain, Failure, Handled, Kernel, OnRetryable, Payload, Recovery, Registry,
     Rejected, Sampled, Store, Wait,
 };
+use coded_diagnostic::Report;
 
 mod ports;
 

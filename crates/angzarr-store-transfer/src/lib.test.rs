@@ -21,5 +21,5 @@ fn the_catalog_has_a_message_for_every_code_with_exactly_its_args() {
     let samples = diagnostic_samples();
     let codes: BTreeSet<&str> = samples.iter().map(|d| d.code()).collect();
     assert_eq!(codes.len(), samples.len(), "one sample per variant");
-    assert_eq!(angzarr_diagnostic::catalog::check(name, text, &samples), []);
+    assert_eq!(coded_diagnostic::catalog::check(name, text, &samples), []);
 }

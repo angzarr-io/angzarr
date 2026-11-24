@@ -1,5 +1,5 @@
 use super::*;
-use angzarr_diagnostic::code;
+use coded_diagnostic::code;
 
 fn s(x: &str) -> Value {
     Value::scalar(x)
@@ -777,7 +777,7 @@ fn the_catalog_has_a_message_for_every_code_with_exactly_its_args() {
     let (name, text) = EN_US;
     assert_eq!(name, env!("CARGO_PKG_NAME"));
     assert_eq!(
-        angzarr_diagnostic::catalog::check(name, text, &diagnostic_samples()),
+        coded_diagnostic::catalog::check(name, text, &diagnostic_samples()),
         []
     );
 }

@@ -6,9 +6,9 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_proto::v1::reason_args as args;
 use angzarr_proto::v1::{component_descriptor, AngzarrReason, ComponentDescriptor, ComponentKind};
+use coded_diagnostic::{Arg, Diagnostic};
 
 /// Why a component could not be registered: angzarr refuses the same
 /// configuration when it is loaded or the component registers. Every
@@ -60,7 +60,7 @@ pub enum Misconfigured {
 
 impl fmt::Display for Misconfigured {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

@@ -619,11 +619,11 @@ impl ::std::fmt::Display for Bug {
     }
 }
 impl ::std::error::Error for Bug {}
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for Bug {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for Bug {
     fn code(&self) -> &str {
         self.key
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         self.args.iter().map(|(name, value)| (*name, value.as_str().into())).collect()
     }
 }
@@ -1231,22 +1231,22 @@ impl ::core::convert::From<Bug> for Failed<PostRefused> {
 }
 impl ::std::fmt::Display for PostRefused {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        f.write_str(::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(self))
+        f.write_str(::angzarr_embedded::coded_diagnostic::Diagnostic::code(self))
     }
 }
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for PostRefused {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for PostRefused {
     fn code(&self) -> &str {
         match self.reason {
             PostRefusedReason::Closed => "kinds-v1-postrefused-closed",
             PostRefusedReason::OverLimit => "kinds-v1-postrefused-over-limit",
         }
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         let mut args = Vec::new();
         let value = &self.reason;
         args.push((
             "reason",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(
+            ::angzarr_embedded::coded_diagnostic::Arg::from(
                 match value {
                     PostRefusedReason::Closed => "CLOSED",
                     PostRefusedReason::OverLimit => "OVER_LIMIT",
@@ -1254,44 +1254,44 @@ impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for PostRefused {
             ),
         ));
         let value = &self.small;
-        args.push(("small", ::angzarr_embedded::angzarr_diagnostic::Arg::from(*value)));
+        args.push(("small", ::angzarr_embedded::coded_diagnostic::Arg::from(*value)));
         let value = &self.big;
-        args.push(("big", ::angzarr_embedded::angzarr_diagnostic::Arg::from(*value)));
+        args.push(("big", ::angzarr_embedded::coded_diagnostic::Arg::from(*value)));
         let value = &self.count;
-        args.push(("count", ::angzarr_embedded::angzarr_diagnostic::Arg::from(*value)));
+        args.push(("count", ::angzarr_embedded::coded_diagnostic::Arg::from(*value)));
         let value = &self.total;
-        args.push(("total", ::angzarr_embedded::angzarr_diagnostic::Arg::from(*value)));
+        args.push(("total", ::angzarr_embedded::coded_diagnostic::Arg::from(*value)));
         let value = &self.text;
         args.push((
             "text",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(value.as_str()),
+            ::angzarr_embedded::coded_diagnostic::Arg::from(value.as_str()),
         ));
         let value = &self.data;
         args.push((
             "data",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(
+            ::angzarr_embedded::coded_diagnostic::Arg::from(
                 value.iter().map(|b| format!("{b:02x}")).collect::<String>(),
             ),
         ));
         let value = &self.flag;
         args.push((
             "flag",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(value.to_string()),
+            ::angzarr_embedded::coded_diagnostic::Arg::from(value.to_string()),
         ));
         let value = &self.ratio;
         args.push((
             "ratio",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(value.to_string()),
+            ::angzarr_embedded::coded_diagnostic::Arg::from(value.to_string()),
         ));
         let value = &self.share;
         args.push((
             "share",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(value.to_string()),
+            ::angzarr_embedded::coded_diagnostic::Arg::from(value.to_string()),
         ));
         let value = &self.tone;
         args.push((
             "tone",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(
+            ::angzarr_embedded::coded_diagnostic::Arg::from(
                 match value {
                     Tone::Loud => "LOUD",
                 },
@@ -1300,13 +1300,13 @@ impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for PostRefused {
         if let Some(value) = &self.limit {
             args.push((
                 "limit",
-                ::angzarr_embedded::angzarr_diagnostic::Arg::from(*value),
+                ::angzarr_embedded::coded_diagnostic::Arg::from(*value),
             ));
         }
         if let Some(value) = &self.maybe {
             args.push((
                 "maybe",
-                ::angzarr_embedded::angzarr_diagnostic::Arg::from(
+                ::angzarr_embedded::coded_diagnostic::Arg::from(
                     match value {
                         Tone::Loud => "LOUD",
                     },
@@ -1345,19 +1345,19 @@ impl ::core::convert::From<Bug> for Failed<Unreasoned> {
 }
 impl ::std::fmt::Display for Unreasoned {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        f.write_str(::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(self))
+        f.write_str(::angzarr_embedded::coded_diagnostic::Diagnostic::code(self))
     }
 }
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for Unreasoned {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for Unreasoned {
     fn code(&self) -> &str {
         "kinds-v1-unreasoned"
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         let mut args = Vec::new();
         let value = &self.reason;
         args.push((
             "reason",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(
+            ::angzarr_embedded::coded_diagnostic::Arg::from(
                 match value {
                     Tone::Loud => "LOUD",
                 },
@@ -1395,14 +1395,14 @@ impl ::core::convert::From<Bug> for Failed<Listed> {
 }
 impl ::std::fmt::Display for Listed {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        f.write_str(::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(self))
+        f.write_str(::angzarr_embedded::coded_diagnostic::Diagnostic::code(self))
     }
 }
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for Listed {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for Listed {
     fn code(&self) -> &str {
         "kinds-v1-listed"
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         Vec::new()
     }
 }
@@ -1435,19 +1435,19 @@ impl ::core::convert::From<Bug> for Failed<Elsewhere> {
 }
 impl ::std::fmt::Display for Elsewhere {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        f.write_str(::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(self))
+        f.write_str(::angzarr_embedded::coded_diagnostic::Diagnostic::code(self))
     }
 }
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for Elsewhere {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for Elsewhere {
     fn code(&self) -> &str {
         "kinds-v1-elsewhere"
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         let mut args = Vec::new();
         let value = &self.why;
         args.push((
             "why",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(
+            ::angzarr_embedded::coded_diagnostic::Arg::from(
                 match value {
                     ElsewhereReason::Away => "AWAY",
                 },
@@ -1485,19 +1485,19 @@ impl ::core::convert::From<Bug> for Failed<Mislabeled> {
 }
 impl ::std::fmt::Display for Mislabeled {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        f.write_str(::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(self))
+        f.write_str(::angzarr_embedded::coded_diagnostic::Diagnostic::code(self))
     }
 }
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for Mislabeled {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for Mislabeled {
     fn code(&self) -> &str {
         "kinds-v1-mislabeled"
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         let mut args = Vec::new();
         let value = &self.reason;
         args.push((
             "reason",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(
+            ::angzarr_embedded::coded_diagnostic::Arg::from(
                 match value {
                     MislabeledCause::Late => "LATE",
                 },
@@ -1619,42 +1619,42 @@ impl ::std::fmt::Display for PostRefuses {
         }
     }
 }
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for PostRefuses {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for PostRefuses {
     fn code(&self) -> &str {
         match self {
             PostRefuses::PostRefused(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::code(refusal)
             }
             PostRefuses::Unreasoned(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::code(refusal)
             }
             PostRefuses::Listed(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::code(refusal)
             }
             PostRefuses::Elsewhere(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::code(refusal)
             }
             PostRefuses::Mislabeled(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::code(refusal)
             }
         }
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         match self {
             PostRefuses::PostRefused(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::args(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::args(refusal)
             }
             PostRefuses::Unreasoned(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::args(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::args(refusal)
             }
             PostRefuses::Listed(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::args(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::args(refusal)
             }
             PostRefuses::Elsewhere(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::args(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::args(refusal)
             }
             PostRefuses::Mislabeled(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::args(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::args(refusal)
             }
         }
     }
@@ -1744,24 +1744,24 @@ impl ::std::fmt::Display for AuditRefuses {
         }
     }
 }
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for AuditRefuses {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for AuditRefuses {
     fn code(&self) -> &str {
         match self {
             AuditRefuses::PostRefused(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::code(refusal)
             }
             AuditRefuses::Unreasoned(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::code(refusal)
             }
         }
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         match self {
             AuditRefuses::PostRefused(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::args(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::args(refusal)
             }
             AuditRefuses::Unreasoned(refusal) => {
-                ::angzarr_embedded::angzarr_diagnostic::Diagnostic::args(refusal)
+                ::angzarr_embedded::coded_diagnostic::Diagnostic::args(refusal)
             }
         }
     }

@@ -24,8 +24,8 @@
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-use angzarr_diagnostic::code;
 use angzarr_proto::v1::{Cover, EventPage, Snapshot};
+use coded_diagnostic::code;
 
 use crate::store::{
     ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore, ListStreams,

@@ -30,7 +30,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
+use coded_diagnostic::{code, Arg, Diagnostic};
 
 use crate::{
     flow, inline, is_item, lines, parse, scalar_text, split_key, strip_comment, write, At, Error,
@@ -1084,7 +1084,7 @@ fn path_text(path: &[String]) -> String {
 
 impl fmt::Display for EditError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

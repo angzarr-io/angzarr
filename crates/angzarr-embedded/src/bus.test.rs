@@ -1404,7 +1404,7 @@ async fn an_ephemeral_policy_is_refused_naming_it() {
             component: "bookkeeping".to_string()
         }
     );
-    use angzarr_diagnostic::Diagnostic as _;
+    use coded_diagnostic::Diagnostic as _;
     assert_eq!(refused.code(), "angzarr-embedded-ephemeral-policy");
     assert!(bus.subscribe(bookkeeping()).is_ok(), "durable, it is taken");
 }

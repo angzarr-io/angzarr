@@ -1,5 +1,5 @@
 # angzarr-yaml: the strict YAML subset, versioned documents, in-place edits
-# and the strict serde decode. Depends on angzarr-diagnostic and serde only. A member of angzarr-core's workspace: every recipe names this
+# and the strict serde decode. Depends on coded-diagnostic and serde only. A member of angzarr-core's workspace: every recipe names this
 # package, and --locked means the workspace's Cargo.lock. Runs on the host,
 # not in core's toolchain container (`just -f crates/angzarr-yaml/justfile check`).
 

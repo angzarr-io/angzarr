@@ -4,7 +4,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic, code};
+use coded_diagnostic::{Arg, Diagnostic, code};
 
 use super::{text, texts};
 
@@ -59,7 +59,7 @@ pub enum ProtoError {
 
 impl fmt::Display for ProtoError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

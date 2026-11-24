@@ -125,7 +125,7 @@ fn a_refused_policy_step_that_is_not_translated_keeps_the_commands_commit_and_is
     );
     assert!(
         matches!(error, StepError::PolicyFailed(r)
-            if angzarr_diagnostic::Diagnostic::code(r) == "ANGZARR_REASON_NO_REFUSAL_HANDLER"),
+            if coded_diagnostic::Diagnostic::code(r) == "ANGZARR_REASON_NO_REFUSAL_HANDLER"),
         "{error:?}"
     );
     assert_eq!(failure.recovery(), Recovery::Bug);

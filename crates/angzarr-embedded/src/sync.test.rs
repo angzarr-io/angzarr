@@ -21,7 +21,7 @@ use crate::{
     DeadlinePassed, Failure, Kernel, KernelError, MemoryDeadLetters, Payload, Recovery, Registry,
     DEFAULT_SYNC_DEADLINE,
 };
-use angzarr_diagnostic::{Diagnostic, Report};
+use coded_diagnostic::{Diagnostic, Report};
 
 fn deposit(n: u128, cents: i64) -> CommandBook {
     command(cover("account", 1), AccountCmd::Deposit(cents).to_any()).id(n)
@@ -705,7 +705,7 @@ fn a_passed_deadline_is_coded_with_its_milliseconds() {
     assert_eq!(passed.code(), "angzarr-embedded-sync-deadline-passed");
     assert!(matches!(
         passed.args()[..],
-        [("deadline_ms", angzarr_diagnostic::Arg::Uint(1500))]
+        [("deadline_ms", coded_diagnostic::Arg::Uint(1500))]
     ));
     assert_eq!(
         passed.to_string(),

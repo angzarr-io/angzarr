@@ -94,8 +94,8 @@ fn the_limits_and_an_unreachable_handler_are_coded_under_their_keys() {
 fn the_retryable_store_and_sidecar_failures_are_coded_under_their_keys() {
     use std::collections::BTreeMap;
 
-    use angzarr_diagnostic::Report;
     use angzarr_router::error::GrpcCode;
+    use coded_diagnostic::Report;
 
     use super::{KernelError, UpcastError};
     use angzarr_proto::v1::AngzarrReason;
@@ -179,7 +179,7 @@ fn the_retryable_store_and_sidecar_failures_are_coded_under_their_keys() {
 /// coordinator's, or answers under the coordinator's key for it.
 #[test]
 fn a_spec_keyed_kernel_error_is_its_key_with_its_declared_args() {
-    use angzarr_diagnostic::Diagnostic;
+    use coded_diagnostic::Diagnostic;
 
     use super::KernelError;
     let stream = || angzarr_proto::v1::Cover {
@@ -243,7 +243,7 @@ fn spec_keyed(
         (
             KernelError::FactDeadLettered {
                 stream: stream(),
-                cause: angzarr_diagnostic::Report::new("x-bad"),
+                cause: coded_diagnostic::Report::new("x-bad"),
             },
             GrpcCode::Internal,
         ),

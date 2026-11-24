@@ -11,12 +11,12 @@ rust-version = "1.89"
 # No library to speak of and no dependencies: the check is src/lib.test.rs.
 [dependencies]
 
-# angzarr-diagnostic's `catalog` checks the catalogs against the samples.
+# coded-diagnostic's `catalog` checks the catalogs against the samples.
 # Test-only: nothing in angzarr-embedded renders Fluent; the client does.
 [dev-dependencies]
 angzarr-embedded = { path = "../angzarr-embedded" }
 # Its `build` feature for build::SOURCE, the catalog source's file name.
-angzarr-diagnostic = { workspace = true, features = ["build"] }
+coded-diagnostic = { workspace = true, features = ["build"] }
 angzarr-embedded-host = { path = "../angzarr-embedded-host" }
 # The local-process transport's keys and their English (decision 14.64):
 # the host codes a child's failures under them.

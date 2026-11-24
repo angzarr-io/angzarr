@@ -1,12 +1,12 @@
 //! The one validator every component meets (decision 14.65): each of the
 //! descriptor rules a `kind` oneof leaves to check, under its spec key.
 
-use angzarr_diagnostic::Diagnostic;
 use angzarr_proto::v1::component_descriptor::Kind;
 use angzarr_proto::v1::{
     AggregateDescriptor, ComponentDescriptor, ComponentKind, PolicyDescriptor,
     ProcessManagerDescriptor, ProjectorDescriptor, StateDescriptor,
 };
+use coded_diagnostic::Diagnostic;
 
 use super::{kind_of, validate_descriptor};
 

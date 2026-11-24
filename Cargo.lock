@@ -23,7 +23,7 @@ version = "0.1.0"
 dependencies = [
  "angzarr-codegen",
  "angzarr-proto",
- "diagnostic",
+ "coded-diagnostic",
  "presentation",
  "prost-build",
  "syn 3.0.10",
@@ -36,7 +36,7 @@ version = "0.1.0"
 dependencies = [
  "angzarr-ports",
  "angzarr-proto",
- "diagnostic",
+ "coded-diagnostic",
  "prost-types",
  "tokio",
 ]
@@ -47,8 +47,8 @@ version = "0.1.0"
 dependencies = [
  "angzarr-embedded-host-config",
  "angzarr-proto",
+ "coded-diagnostic",
  "cucumber",
- "diagnostic",
  "presentation",
  "prettyplease 0.3.0",
  "proc-macro2",
@@ -71,7 +71,7 @@ dependencies = [
  "angzarr-ports",
  "angzarr-proto",
  "angzarr-reads",
- "diagnostic",
+ "coded-diagnostic",
 ]
 
 [[package]]
@@ -80,7 +80,7 @@ version = "0.1.0"
 dependencies = [
  "angzarr-ports",
  "angzarr-proto",
- "diagnostic",
+ "coded-diagnostic",
  "prost-types",
 ]
 
@@ -94,7 +94,7 @@ dependencies = [
  "angzarr-proto",
  "angzarr-proto-transport-distributed",
  "angzarr-reads",
- "diagnostic",
+ "coded-diagnostic",
  "http-body",
  "hyper-util",
  "prost",
@@ -119,7 +119,7 @@ dependencies = [
  "angzarr-proto",
  "angzarr-router",
  "angzarr-store-sqlite",
- "diagnostic",
+ "coded-diagnostic",
  "prost",
  "prost-types",
  "tokio",
@@ -134,7 +134,7 @@ dependencies = [
  "angzarr-ports",
  "angzarr-proto-transport-embedded",
  "angzarr-store-sqlite",
- "diagnostic",
+ "coded-diagnostic",
  "fluent-bundle 0.16.0",
 ]
 
@@ -159,7 +159,7 @@ dependencies = [
  "angzarr-proto-transport-embedded",
  "angzarr-router",
  "angzarr-store-sqlite",
- "diagnostic",
+ "coded-diagnostic",
  "hyper-util",
  "libc",
  "prost",
@@ -179,7 +179,7 @@ name = "angzarr-embedded-host-config"
 version = "0.1.0"
 dependencies = [
  "angzarr-yaml",
- "diagnostic",
+ "coded-diagnostic",
  "serde",
 ]
 
@@ -188,7 +188,7 @@ name = "angzarr-embedded-macros"
 version = "0.1.0"
 dependencies = [
  "angzarr-embedded",
- "diagnostic",
+ "coded-diagnostic",
  "proc-macro2",
  "prost",
  "quote",
@@ -201,7 +201,7 @@ version = "0.1.0"
 dependencies = [
  "angzarr-embedded",
  "angzarr-embedded-macros",
- "diagnostic",
+ "coded-diagnostic",
  "prost",
 ]
 
@@ -210,7 +210,7 @@ name = "angzarr-ports"
 version = "0.1.0"
 dependencies = [
  "angzarr-proto",
- "diagnostic",
+ "coded-diagnostic",
  "prost",
  "prost-types",
  "tokio",
@@ -288,7 +288,7 @@ dependencies = [
  "angzarr-coordinator-base",
  "angzarr-ports",
  "angzarr-proto",
- "diagnostic",
+ "coded-diagnostic",
  "prost",
  "prost-types",
 ]
@@ -328,7 +328,7 @@ version = "0.1.0"
 dependencies = [
  "angzarr-ports",
  "angzarr-reads",
- "diagnostic",
+ "coded-diagnostic",
  "prost",
  "prost-types",
  "sea-query",
@@ -342,7 +342,7 @@ name = "angzarr-store-transfer"
 version = "0.1.0"
 dependencies = [
  "angzarr-ports",
- "diagnostic",
+ "coded-diagnostic",
  "prost",
  "prost-reflect",
  "prost-types",
@@ -355,7 +355,7 @@ dependencies = [
 name = "angzarr-yaml"
 version = "0.1.0"
 dependencies = [
- "diagnostic",
+ "coded-diagnostic",
  "serde",
 ]
 
@@ -635,6 +635,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 
 [[package]]
+name = "coded-diagnostic"
+version = "0.1.0"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479#2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -849,11 +854,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "diagnostic"
-version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/rust-support?rev=a3a9507ebb27187855b57862dcef9f2577a309bf#a3a9507ebb27187855b57862dcef9f2577a309bf"
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -916,7 +916,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -949,9 +949,9 @@ checksum = "da7c62ceae207dd37ea5b845da6a0696c799f85e97da1ab5b7910be3c1c80223"
 [[package]]
 name = "file-system"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/rust-support?rev=a3a9507ebb27187855b57862dcef9f2577a309bf#a3a9507ebb27187855b57862dcef9f2577a309bf"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479#2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479"
 dependencies = [
- "diagnostic",
+ "coded-diagnostic",
  "os",
  "tempfile",
 ]
@@ -1053,9 +1053,9 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -1714,7 +1714,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cde48f36530cbd91b65f050101e6c056d6eb743cea2a8f0f19beef69c6742ff8"
 dependencies = [
  "scopeguard",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -1949,7 +1949,7 @@ version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7957b9740744892f114936ab4a57b3f487491bbeafaf8083688b16841a4240e5"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
@@ -2033,7 +2033,7 @@ dependencies = [
 [[package]]
 name = "os"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/rust-support?rev=a3a9507ebb27187855b57862dcef9f2577a309bf#a3a9507ebb27187855b57862dcef9f2577a309bf"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479#2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479"
 dependencies = [
  "fs4",
  "junction",
@@ -2225,9 +2225,9 @@ dependencies = [
 [[package]]
 name = "presentation"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/rust-support?rev=a3a9507ebb27187855b57862dcef9f2577a309bf#a3a9507ebb27187855b57862dcef9f2577a309bf"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479#2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479"
 dependencies = [
- "diagnostic",
+ "coded-diagnostic",
  "fluent-bundle 0.15.3",
  "fluent-langneg",
  "serde",
@@ -2508,7 +2508,7 @@ dependencies = [
  "errno",
  "libc",
  "linux-raw-sys",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2838,7 +2838,7 @@ version = "0.1.0"
 dependencies = [
  "angzarr-ports",
  "angzarr-store-sqlite",
- "diagnostic",
+ "coded-diagnostic",
  "file-system",
  "os",
  "tokio",
@@ -3140,7 +3140,7 @@ dependencies = [
  "getrandom 0.4.3",
  "once_cell",
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -3150,13 +3150,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
 dependencies = [
  "rustix",
- "windows-sys 0.61.2",
+ "windows-sys 0.59.0",
 ]
 
 [[package]]
 name = "test-dir"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/rust-support?rev=a3a9507ebb27187855b57862dcef9f2577a309bf#a3a9507ebb27187855b57862dcef9f2577a309bf"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479#2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479"
 
 [[package]]
 name = "textwrap"
@@ -3651,9 +3651,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",
@@ -3847,7 +3847,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]

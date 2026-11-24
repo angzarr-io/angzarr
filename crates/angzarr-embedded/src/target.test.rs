@@ -26,7 +26,7 @@ use crate::{
     pack, Any, Failure, Handled, Kernel, KernelError, Malformed, MemoryDeadLetters, Misconfigured,
     Registry,
 };
-use angzarr_diagnostic::Diagnostic;
+use coded_diagnostic::Diagnostic;
 
 fn any(type_url: &str) -> Any {
     Any {

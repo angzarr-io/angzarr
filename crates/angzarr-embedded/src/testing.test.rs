@@ -118,7 +118,7 @@ fn a_refusal_is_answered_and_records_nothing() {
         Some(&crate::toys::Refused::NotOpen)
     );
     assert_eq!(
-        angzarr_diagnostic::Diagnostic::code(&refused),
+        coded_diagnostic::Diagnostic::code(&refused),
         "ANGZARR_REASON_COMMAND_REFUSED"
     );
     assert!(harness.pages().is_empty());

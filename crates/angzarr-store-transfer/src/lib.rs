@@ -86,7 +86,7 @@ pub const FORMAT_VERSION: u32 = 1;
 pub const GENERATION: &str = "20261019";
 
 /// This crate's en-US Fluent catalog, its name first (its ids under the
-/// crate's package name: `angzarr_diagnostic::build`).
+/// crate's package name: `coded_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
     env!("CARGO_PKG_NAME"),
     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
@@ -100,10 +100,10 @@ pub const LOCALES: (&str, &[(&str, &str)]) = (
 
 /// One value of every [`ExportError`] variant, each once, for the catalog
 /// parity test.
-pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
+pub fn diagnostic_samples() -> Vec<Box<dyn coded_diagnostic::Diagnostic>> {
     error::samples()
         .into_iter()
-        .map(|e| Box::new(e) as Box<dyn angzarr_diagnostic::Diagnostic>)
+        .map(|e| Box::new(e) as Box<dyn coded_diagnostic::Diagnostic>)
         .collect()
 }
 

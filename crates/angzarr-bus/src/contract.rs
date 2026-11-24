@@ -58,10 +58,10 @@ use std::pin::{pin, Pin};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 
-use angzarr_diagnostic::Report;
 use angzarr_ports::{BoxFuture, CommitSignal, MaybeSend, MaybeSync, StoreError};
 use angzarr_proto::ids::policy_command_id;
 use angzarr_proto::v1::{event_meta::Causation, Cover, EventPage, EventRef, Uuid};
+use coded_diagnostic::Report;
 
 use super::transport::{
     Body, Delivery as Carried, Feed, Next, Opening, OrderingKey, PullTransport, Settle,

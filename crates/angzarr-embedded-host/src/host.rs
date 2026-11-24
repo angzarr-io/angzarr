@@ -1036,7 +1036,7 @@ impl Supervisor {
             description
                 .replace(descriptor.clone())
                 .map_err(|cause| HostError::Register {
-                    cause: angzarr_diagnostic::Report::of(&cause),
+                    cause: coded_diagnostic::Report::of(&cause),
                 })?;
         }
         registered.descriptor = descriptor.clone();

@@ -7,8 +7,8 @@
 //! the build writes.
 
 use angzarr_codegen::{CodegenError, MarkupError, Warning};
-use angzarr_diagnostic::Diagnostic as _;
 use angzarr_proto::v1::component_descriptor::Kind;
+use coded_diagnostic::Diagnostic as _;
 use cucumber::{then, when};
 
 use crate::protos::full;

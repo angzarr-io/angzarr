@@ -1,6 +1,6 @@
 # angzarr-coordinator-base: the coordinators' shared vocabulary (Code, Coded,
 # Refusal, the Upcast port and its drivers, Wait, Answered). Transport-free:
-# no tonic, no tokio; depends on angzarr-diagnostic, angzarr-proto and
+# no tonic, no tokio; depends on coded-diagnostic, angzarr-proto and
 # angzarr-ports only. A member of angzarr-core's workspace: every recipe names
 # this package, and --locked means the workspace's Cargo.lock. Runs on the
 # host, not in core's toolchain container

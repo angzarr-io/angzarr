@@ -36,7 +36,7 @@ pub use wait::Wait;
 
 /// This crate's en-US Fluent catalog, its name first: what a runtime that
 /// shows these errors embeds to render them (`locales/en-US/messages.ftl`,
-/// its ids under the crate's package name; `angzarr_diagnostic::build`).
+/// its ids under the crate's package name; `coded_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
     env!("CARGO_PKG_NAME"),
     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
@@ -51,17 +51,17 @@ pub const LOCALES: (&str, &[(&str, &str)]) = (
 
 /// One value of every [`UpcastError`] variant, each once, for the catalog
 /// parity test: each one's code must have a message in every locale, using
-/// exactly its args ([`angzarr_diagnostic::catalog::check`]).
-pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
+/// exactly its args ([`coded_diagnostic::catalog::check`]).
+pub fn diagnostic_samples() -> Vec<Box<dyn coded_diagnostic::Diagnostic>> {
     upcast::samples()
         .into_iter()
-        .map(|e| Box::new(e) as Box<dyn angzarr_diagnostic::Diagnostic>)
+        .map(|e| Box::new(e) as Box<dyn coded_diagnostic::Diagnostic>)
         .collect()
 }
 
-/// The diagnostic crate every error here implements, as this crate uses it.
-pub use angzarr_diagnostic;
 /// The ports, as this crate uses them (`StoreError`, `BoxFuture`).
 pub use angzarr_ports;
 /// The wire types, as this crate uses them.
 pub use angzarr_proto;
+/// The diagnostic crate every error here implements, as this crate uses it.
+pub use coded_diagnostic;

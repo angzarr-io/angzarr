@@ -1,5 +1,5 @@
 //! The host's errors: why a remote component could not be started. Each is a
-//! code and its args (`angzarr_diagnostic::Diagnostic`), and its
+//! code and its args (`coded_diagnostic::Diagnostic`), and its
 //! `Display` is those, never English. A failure once a domain is running is not
 //! one of these: it is the router's [`CodedError`], from
 //! [`RemoteCommandHandler`]'s dispatch.
@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
+use coded_diagnostic::{code, Arg, Diagnostic, Report};
 // A child's failures are the local-process transport's keys (decision
 // 14.64).
 use angzarr_proto_transport_embedded::v1::{reason_args, EmbeddedReason};
@@ -141,7 +141,7 @@ pub enum HostError {
 
 impl fmt::Display for HostError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

@@ -15,7 +15,7 @@ rust-version = "1.96"
 [dependencies]
 angzarr-codegen.workspace = true
 angzarr-proto.workspace = true
-angzarr-diagnostic.workspace = true
+coded-diagnostic.workspace = true
 prost-build = "0.14"
 
 [dev-dependencies]
@@ -24,9 +24,9 @@ test-dir.workspace = true
 syn = { version = "3.0.9", features = ["full"] }
 
 # The build writes the catalog's source under the crate's name
-# (angzarr_diagnostic::build): no catalog spells its crate's name.
+# (coded_diagnostic::build): no catalog spells its crate's name.
 [build-dependencies]
-angzarr-diagnostic = { workspace = true, features = ["build"] }
+coded-diagnostic = { workspace = true, features = ["build"] }
 
 [lints]
 workspace = true

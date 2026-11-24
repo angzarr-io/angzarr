@@ -11,7 +11,7 @@
 //! Each crate's catalog sources, `crates/<crate>/locales/<locale>/messages.ftl`,
 //! named by the codes' suffixes, are read under the crate's name as its
 //! build writes them ([`catalog::prefixed`]) and checked against them by
-//! angzarr-diagnostic's [`catalog::check`]: a message for every code with
+//! coded-diagnostic's [`catalog::check`]: a message for every code with
 //! exactly its args, an error for every message, codes under the crate's
 //! name, and a display of the code and args. A nested cause of another
 //! crate's is that crate's to check (angzarr-ports' store errors, which
@@ -36,10 +36,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use angzarr_diagnostic::build::SOURCE;
-use angzarr_diagnostic::catalog::{self, Catalog};
-use angzarr_diagnostic::{Arg, Diagnostic};
 use angzarr_embedded::angzarr_proto;
+use coded_diagnostic::build::SOURCE;
+use coded_diagnostic::catalog::{self, Catalog};
+use coded_diagnostic::{Arg, Diagnostic};
 
 /// A checked crate's exported en-US catalog: its package name and its text.
 type Exported = (&'static str, &'static str);
@@ -401,7 +401,7 @@ fn every_checked_crate_exports_its_en_us_catalog() {
 #[test]
 fn a_crates_codes_are_its_code_calls_under_its_name() {
     let source = "x => code!(\"one\"),\n\
-                  y => angzarr_diagnostic::code!( \"two-2\" ),\n\
+                  y => coded_diagnostic::code!( \"two-2\" ),\n\
                   z => code!(\n    \"three\"\n),\n\
                   // w => code!(\"commented\"),\n\
                   v => code!(SUFFIX), u => code!(\"Not-Kebab\"), t => \"code!(\",\n";
@@ -552,7 +552,7 @@ fn the_spec_catalog_renders_every_key_with_its_declared_args() {
 /// one its message names, is caught.
 #[test]
 fn a_spec_keyed_error_is_held_to_its_keys_args() {
-    use angzarr_diagnostic::Report;
+    use coded_diagnostic::Report;
     let mut problems = Vec::new();
     spec_keyed(
         &Report::new("ANGZARR_REASON_CHAIN_TOO_DEEP").arg("stream", "a/b"),

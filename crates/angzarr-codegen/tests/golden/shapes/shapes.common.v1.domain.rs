@@ -109,11 +109,11 @@ impl ::std::fmt::Display for Bug {
     }
 }
 impl ::std::error::Error for Bug {}
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for Bug {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for Bug {
     fn code(&self) -> &str {
         self.key
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         self.args.iter().map(|(name, value)| (*name, value.as_str().into())).collect()
     }
 }

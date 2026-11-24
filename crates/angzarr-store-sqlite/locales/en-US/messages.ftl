@@ -4,7 +4,7 @@
 # result code is errno, where SQLite answered: a driver failure without one
 # is driver-failed. A Damage, which an integrity check returns, has its
 # args. Each id is a code without the crate's name, which the build prefixes
-# (angzarr_diagnostic::build).
+# (coded_diagnostic::build).
 
 unavailable = the database failed (SQLite code { $errno }): { $ext_err_txt }
 driver-failed = the database driver failed: { $ext_err_txt }

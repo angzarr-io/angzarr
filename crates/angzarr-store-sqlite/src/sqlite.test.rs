@@ -36,7 +36,7 @@ use sqlx::{ConnectOptions, Connection};
 use super::{into_wal, pause, SqliteStore, BUSY_TIMEOUT, MIGRATOR};
 use crate::test_database::{database, database_in, Database};
 use crate::{Damage, Integrity};
-use angzarr_ports::angzarr_diagnostic::code;
+use angzarr_ports::coded_diagnostic::code;
 
 /// A database left where this test's would be, by a run before the
 /// guards removed theirs, or one killed before its guard dropped, and in

@@ -17,8 +17,8 @@ fn angzarr_ports_and_angzarr_diagnostic_are_the_kernels_own() {
         ::angzarr_embedded::angzarr_ports::EN_US,
         angzarr_ports::EN_US
     );
-    let _: Option<Box<dyn ::angzarr_embedded::angzarr_diagnostic::Diagnostic>> =
-        None::<Box<dyn angzarr_diagnostic::Diagnostic>>;
+    let _: Option<Box<dyn ::angzarr_embedded::coded_diagnostic::Diagnostic>> =
+        None::<Box<dyn coded_diagnostic::Diagnostic>>;
 }
 
 #[test]

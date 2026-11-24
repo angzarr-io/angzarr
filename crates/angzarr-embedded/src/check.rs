@@ -24,12 +24,12 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
 use angzarr_proto::ids::{self, UuidError};
 use angzarr_proto::v1::{
     command_page, reaction_delivery, CommandBook, CommandPage, Cover, EventRef, FactOrigin,
     Handling, ReactionDelivery, Uuid,
 };
+use coded_diagnostic::{code, Arg, Diagnostic};
 use prost_types::{Any, Timestamp};
 
 use super::catalog::Catalog;
@@ -79,7 +79,7 @@ pub enum Malformed {
 
 impl fmt::Display for Malformed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

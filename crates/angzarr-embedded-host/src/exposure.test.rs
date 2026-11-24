@@ -1,5 +1,5 @@
 use super::*;
-use angzarr_diagnostic::code;
+use coded_diagnostic::code;
 
 /// Loopback is admitted by "loopback" and "ip"; the network by "ip"
 /// alone; "none" admits nothing.

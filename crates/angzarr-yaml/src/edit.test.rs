@@ -6,7 +6,7 @@
 use crate::edit::{Document, EditError, EditProblem};
 use crate::rng::Rng;
 use crate::{parse, write, Value};
-use angzarr_diagnostic::{code, Diagnostic};
+use coded_diagnostic::{code, Diagnostic};
 
 fn s(x: &str) -> Value {
     Value::scalar(x)

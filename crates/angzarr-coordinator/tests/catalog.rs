@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 
-use angzarr_coordinator::angzarr_diagnostic::catalog;
+use angzarr_coordinator::coded_diagnostic::catalog;
 
 /// The crate offers its catalogs by locale under the same name, built from
 /// `locales/` with no list of its own: en-US alone, the same text as

@@ -7,7 +7,7 @@
 mod common;
 
 use angzarr_codegen::markup_domain;
-use angzarr_diagnostic::code;
+use coded_diagnostic::code;
 use common::*;
 use quote::ToTokens;
 

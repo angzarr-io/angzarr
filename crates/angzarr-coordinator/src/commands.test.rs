@@ -1,8 +1,8 @@
 use std::collections::BTreeMap;
 
 use angzarr_coordinator_base::{Code, Coded, Refusal};
-use angzarr_diagnostic::Diagnostic;
 use angzarr_proto::v1::{Cover, EventBook};
+use coded_diagnostic::Diagnostic;
 
 use super::*;
 use crate::support::block_on;

@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use ::angzarr_embedded::markup::{self, Context, DomainMessage, Refuses};
 use ::angzarr_embedded::{Any, Payload, PayloadError, Timestamp, WireError};
-use angzarr_diagnostic::{code, Arg, Diagnostic};
 use angzarr_embedded_macros::{aggregate, applies, handles_cmd};
+use coded_diagnostic::{code, Arg, Diagnostic};
 
 use crate::{Clock, Delay, Jitter};
 
@@ -176,7 +176,7 @@ pub enum NoteRejection {
 
 impl fmt::Display for NoteRejection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

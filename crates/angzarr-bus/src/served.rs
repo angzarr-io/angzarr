@@ -1,7 +1,7 @@
 //! What a bus served.
 
-use angzarr_diagnostic::Report;
 use angzarr_proto::v1::Cover;
+use coded_diagnostic::Report;
 
 /// What a bus served since it last asked: how many items its handlers
 /// returned handled (events, and gone streams handed to a projector), and

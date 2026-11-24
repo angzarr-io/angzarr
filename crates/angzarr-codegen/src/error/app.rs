@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{Arg, Diagnostic, code};
+use coded_diagnostic::{Arg, Diagnostic, code};
 
 use super::{text, texts};
 
@@ -12,7 +12,7 @@ pub enum AppError {
     /// A host config that does not load: `cause` is the reader's error,
     /// naming for a decode the key path where it goes wrong
     /// (`component[1].kind`).
-    Config { cause: angzarr_diagnostic::Report },
+    Config { cause: coded_diagnostic::Report },
     /// The host config has lints ([`crate::AppLint`]), each reported on its
     /// own.
     Refused { lints: Vec<crate::AppLint> },
@@ -25,7 +25,7 @@ pub enum AppError {
 
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

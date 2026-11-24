@@ -19,9 +19,9 @@ contract = []
 # depend on this workspace, so nothing here names them): no router, no
 # runtime, no transport.
 [dependencies]
-# A failure's cause is an angzarr_diagnostic::Report; the trait's errors
+# A failure's cause is an coded_diagnostic::Report; the trait's errors
 # are Diagnostics.
-angzarr-diagnostic = { workspace = true }
+coded-diagnostic = { workspace = true }
 # `MaybeSend`/`MaybeSync`, the ports' one bound that differs by target.
 angzarr-ports = { path = "../angzarr-ports" }
 # The wire types a delivery names (Cover, EventPage, EventRef, UUID) and

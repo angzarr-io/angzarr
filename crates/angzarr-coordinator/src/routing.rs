@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic};
+use coded_diagnostic::{code, Arg, Diagnostic};
 
 /// Where a request arrived from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -113,7 +113,7 @@ pub struct Hidden {
 
 impl fmt::Display for Hidden {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

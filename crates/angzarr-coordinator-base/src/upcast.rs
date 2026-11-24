@@ -11,10 +11,10 @@
 
 use std::fmt;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 use angzarr_ports::{BoxFuture, MaybeSend, MaybeSync};
 use angzarr_proto::v1::event_page::Body;
 use angzarr_proto::v1::{reason_args, AngzarrReason, EventPage};
+use coded_diagnostic::{code, Arg, Diagnostic, Report};
 use prost_types::Any;
 
 use crate::{flat_args, Code, Coded};
@@ -83,7 +83,7 @@ impl UpcastError {
 
 impl fmt::Display for UpcastError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

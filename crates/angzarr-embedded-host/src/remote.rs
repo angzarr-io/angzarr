@@ -39,13 +39,13 @@ use tonic::transport::Channel;
 use tonic::Code;
 
 use crate::rpc::google_rpc::{ErrorInfo, Status as RpcStatus, ERROR_INFO_NAME};
-use angzarr_diagnostic::Report;
 use angzarr_embedded::{Description, KernelError, UpcastError, UpcastPort};
 use angzarr_proto::v1::reason_args as args;
 use angzarr_proto_component::v1::command_handler_service_client::CommandHandlerServiceClient;
 use angzarr_proto_component::v1::policy_service_client::PolicyServiceClient;
 use angzarr_proto_component::v1::projector_service_client::ProjectorServiceClient;
 use angzarr_proto_component::v1::upcaster_service_client::UpcasterServiceClient;
+use coded_diagnostic::Report;
 
 /// The values of a remote handler's `cause` when it could not be reached
 /// (`ANGZARR_REASON_HANDLER_UNAVAILABLE`, whose `domain` names the

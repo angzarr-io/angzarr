@@ -107,12 +107,12 @@ pub use store::{
 pub use stream::{Head, PositionKey, Slice, StreamRef};
 
 /// The diagnostic crate every error here implements, as the ports use it.
-pub use angzarr_diagnostic;
+pub use coded_diagnostic;
 
 /// This crate's en-US Fluent catalog, its name first: what a runtime that
 /// shows these errors embeds to render them. The text of
 /// `locales/en-US/messages.ftl`, its ids under the crate's package name
-/// (`angzarr_diagnostic::build`).
+/// (`coded_diagnostic::build`).
 pub const EN_US: (&str, &str) = (
     env!("CARGO_PKG_NAME"),
     include_str!(concat!(env!("OUT_DIR"), "/en-US.ftl")),
@@ -120,7 +120,7 @@ pub const EN_US: (&str, &str) = (
 
 /// This crate's catalogs by locale, under the same name: every
 /// `locales/<locale>/messages.ftl`, from the table the build writes
-/// (`angzarr_diagnostic::build`), so a locale added there is offered with
+/// (`coded_diagnostic::build`), so a locale added there is offered with
 /// no other edit. en-US alone ships.
 pub const LOCALES: (&str, &[(&str, &str)]) = (
     env!("CARGO_PKG_NAME"),
@@ -129,11 +129,11 @@ pub const LOCALES: (&str, &[(&str, &str)]) = (
 
 /// One value of every [`StoreError`] variant, each once, for the catalog
 /// parity test: each one's code must have a message in every locale, using
-/// exactly its args ([`angzarr_diagnostic::catalog::check`]).
-pub fn diagnostic_samples() -> Vec<Box<dyn angzarr_diagnostic::Diagnostic>> {
+/// exactly its args ([`coded_diagnostic::catalog::check`]).
+pub fn diagnostic_samples() -> Vec<Box<dyn coded_diagnostic::Diagnostic>> {
     error::samples()
         .into_iter()
-        .map(|e| Box::new(e) as Box<dyn angzarr_diagnostic::Diagnostic>)
+        .map(|e| Box::new(e) as Box<dyn coded_diagnostic::Diagnostic>)
         .collect()
 }
 

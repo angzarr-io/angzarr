@@ -6,7 +6,7 @@ client router (`angzarr-router`), the in-process runtime (`angzarr-embedded*`,
 `angzarr-store-sqlite`, `sqlite-store-opener`) and the code generator
 (`angzarr-build`, `angzarr-codegen`). They were five repositories; their
 histories are not here. README.md has the crate and licence table. The generic
-substrate (`diagnostic`, `presentation`, `os`, `file-system`, `file-lock`,
+substrate (`coded-diagnostic`, `presentation`, `os`, `file-system`, `file-lock`,
 `test-dir`) is rust-support's, not this workspace's.
 
 The spec, protos and design docs are the `angzarr-project` submodule
@@ -22,12 +22,10 @@ runtime is retired and to be brought back (README, "Retired").
   to a core crate must keep every dependent green in the same commit.
 - Never add a git dependency on this repository's own crates. Third-party crates
   come from crates.io only, but for rust-support (github.com/benjaminabbitt/rust-support,
-  the generic substrate: `diagnostic`, `presentation`, `test-dir`, `os`,
+  the generic substrate: `coded-diagnostic`, `presentation`, `test-dir`, `os`,
   `file-system`), the one git source `deny.toml` allows, pinned by full commit in
   the root `Cargo.toml` (all of its crates at the one rev; bump it on purpose, in
-  a commit of its own). Its `diagnostic` is the dependency `angzarr-diagnostic`
-  (`package = "diagnostic"`), imported as `angzarr_diagnostic`: a crate named
-  `diagnostic` shadows rustc's `#[diagnostic::on_unimplemented]`.
+  a commit of its own). Its error crate is `coded-diagnostic`, imported as `coded_diagnostic`.
 - **A new dependency** is named, with why, in the docs of the crate that takes
   it, and passes `just lint-deps`. Third-party licences must be permissive;
   copyleft fails the gate. Changing `deny.toml` needs a stated reason.
@@ -132,7 +130,7 @@ Nothing is done until tests that execute prove it. Never write a blank `pass` te
 ## Errors, docs, wire
 
 - **Errors are a key and args.** Every public error implements
-  `angzarr_diagnostic::Diagnostic` (rust-support's `diagnostic`): a stable kebab-case code written
+  `coded_diagnostic::Diagnostic` (rust-support's `coded-diagnostic`): a stable kebab-case code written
   `code!("suffix")` (prefixed by the crate name), named args, and a `Display` that
   is the code and args, never English. A new variant needs a code and an en-US
   message in `locales/en-US/messages.ftl` using exactly its args. Codes are never

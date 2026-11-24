@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use angzarr_diagnostic::{Arg, Diagnostic, Report};
 use angzarr_store_sqlite::SqliteStore;
+use coded_diagnostic::{Arg, Diagnostic, Report};
 
 use crate::toys::{self, cover, cover_in, ledger, ledger_root, AccountCmd, Bookkeeping, Edit};
 use crate::v1::{command_page, Command, CommandBook, CommandPage, Cover, Snapshot, Uuid};

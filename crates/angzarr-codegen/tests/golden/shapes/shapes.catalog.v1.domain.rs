@@ -303,11 +303,11 @@ impl ::std::fmt::Display for Bug {
     }
 }
 impl ::std::error::Error for Bug {}
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for Bug {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for Bug {
     fn code(&self) -> &str {
         self.key
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         self.args.iter().map(|(name, value)| (*name, value.as_str().into())).collect()
     }
 }
@@ -494,19 +494,19 @@ impl ::core::convert::From<Bug> for Failed<ItemRefused> {
 }
 impl ::std::fmt::Display for ItemRefused {
     fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        f.write_str(::angzarr_embedded::angzarr_diagnostic::Diagnostic::code(self))
+        f.write_str(::angzarr_embedded::coded_diagnostic::Diagnostic::code(self))
     }
 }
-impl ::angzarr_embedded::angzarr_diagnostic::Diagnostic for ItemRefused {
+impl ::angzarr_embedded::coded_diagnostic::Diagnostic for ItemRefused {
     fn code(&self) -> &str {
         "shapes-catalog-v1-itemrefused"
     }
-    fn args(&self) -> Vec<(&str, ::angzarr_embedded::angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, ::angzarr_embedded::coded_diagnostic::Arg)> {
         let mut args = Vec::new();
         let value = &self.kind;
         args.push((
             "kind",
-            ::angzarr_embedded::angzarr_diagnostic::Arg::from(value.as_str()),
+            ::angzarr_embedded::coded_diagnostic::Arg::from(value.as_str()),
         ));
         args
     }

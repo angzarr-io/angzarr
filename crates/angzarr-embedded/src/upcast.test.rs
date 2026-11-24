@@ -418,14 +418,14 @@ fn an_upcaster_is_checked_for_order_and_untyped_rules_are_not_followed() {
 fn an_upcast_rule_reports_its_own_failure_and_bytes_it_cannot_read() {
     let refusing =
         Upcaster::new("u", "account").rule::<account::v0::Credited, account::Deposited>(|_| {
-            Err(angzarr_diagnostic::Report::new("toy-refused"))
+            Err(coded_diagnostic::Report::new("toy-refused"))
         });
     let old = pack(&account::v0::Credited { euros: 2 });
     assert_eq!(
         refusing.upcast_event(&old),
         Err(crate::UpcastError::Rule {
             source: "toy.account.v0.Credited".to_string(),
-            error: angzarr_diagnostic::Report::new("toy-refused")
+            error: coded_diagnostic::Report::new("toy-refused")
         })
     );
     let garbled = crate::Any {

@@ -33,13 +33,13 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use angzarr_diagnostic::Report;
 use angzarr_embedded::{OnPolicyBug, OnRetryable, SnapshotPolicy};
 pub use angzarr_embedded_host_config::{
     loader, stamped, ComponentConfig, ComponentKindConfig, ComponentScaffold, DomainSnapshots,
     Expose, HostConfig, OnBug, PolicyConfig, RetryConfig, SnapshotsConfig, StoreConfig,
     Supervision, CURRENT, FILE_NAME, FIXTURES, KEY, KIND,
 };
+use coded_diagnostic::Report;
 
 use crate::error::HostError;
 

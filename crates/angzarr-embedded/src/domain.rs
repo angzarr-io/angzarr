@@ -1,7 +1,7 @@
 //! What the kernel knows of a domain's types: its state and how its events
 //! fold into it.
 
-use angzarr_diagnostic::Diagnostic;
+use coded_diagnostic::Diagnostic;
 
 use super::payload::Payload;
 use angzarr_router::PageContext;
@@ -47,8 +47,8 @@ pub trait State: Default + Clone + Send + 'static {
     /// that takes none always replays. ([`Stream::resume`](super::Stream::resume),
     /// handed a snapshot directly, reports a refusal as the snapshot
     /// unreadable, [`PayloadError::Invalid`](super::PayloadError).)
-    fn restore(&mut self, _anchor: Self::Anchor) -> Result<(), angzarr_diagnostic::Report> {
-        Err(angzarr_diagnostic::Report::of(&NotSnapshotted::of::<
+    fn restore(&mut self, _anchor: Self::Anchor) -> Result<(), coded_diagnostic::Report> {
+        Err(coded_diagnostic::Report::of(&NotSnapshotted::of::<
             Self::Anchor,
         >()))
     }
@@ -76,16 +76,16 @@ impl NotSnapshotted {
 
 impl std::fmt::Display for NotSnapshotted {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 
 impl Diagnostic for NotSnapshotted {
     fn code(&self) -> &str {
-        angzarr_diagnostic::code!("not-snapshotted")
+        coded_diagnostic::code!("not-snapshotted")
     }
 
-    fn args(&self) -> Vec<(&str, angzarr_diagnostic::Arg)> {
+    fn args(&self) -> Vec<(&str, coded_diagnostic::Arg)> {
         vec![("anchor", self.anchor.as_str().into())]
     }
 }

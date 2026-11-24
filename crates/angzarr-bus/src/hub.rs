@@ -43,11 +43,11 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 
-use angzarr_diagnostic::{Diagnostic, Report};
 use angzarr_ports::{
     CommitSignal, EventRead, EventStore, MaybeSend, MaybeSync, PositionStore, StoreError,
 };
 use angzarr_proto::v1::{Cover, EventPage};
+use coded_diagnostic::{Diagnostic, Report};
 
 use super::positions::{DurablePositions, Positions};
 use super::recovery::{Pages, Recover, Resolve, StoreRead};

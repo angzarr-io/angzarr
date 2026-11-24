@@ -43,7 +43,7 @@ use ::angzarr_embedded::{
     MemoryDeadLetters, OnRetryable, Payload, PayloadError, Registry, Sampled, State, Timestamp,
     WireError,
 };
-use angzarr_diagnostic::{Arg, Diagnostic, Report};
+use coded_diagnostic::{Arg, Diagnostic, Report};
 
 // ---------------------------------------------------------------- the wire
 
@@ -178,7 +178,7 @@ impl DomainMessage for TooBig {
 
 impl fmt::Display for TooBig {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

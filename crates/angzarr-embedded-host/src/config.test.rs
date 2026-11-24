@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use angzarr_diagnostic::Report;
+use coded_diagnostic::Report;
 
 use super::*;
 
@@ -228,7 +228,7 @@ fn exposing_anything_but_a_domain_is_refused_at_start() {
 /// not load is refused as invalid, naming the file and, as its cause, the
 /// reader's error with the key path where it goes wrong.
 mod strict {
-    use angzarr_diagnostic::{Arg, Diagnostic};
+    use coded_diagnostic::{Arg, Diagnostic};
 
     use super::*;
 

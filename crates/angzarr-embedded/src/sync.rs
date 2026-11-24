@@ -32,10 +32,10 @@ use std::pin::Pin;
 use std::task::Poll;
 use std::time::Duration;
 
-use angzarr_diagnostic::{code, Arg, Diagnostic, Report};
 use angzarr_ports::BoxFuture;
 use angzarr_proto::v1::{Cover, EventBook, Projection};
 use angzarr_router::router::DynProjectorHandler;
+use coded_diagnostic::{code, Arg, Diagnostic, Report};
 
 use super::error::KernelError;
 use super::handle::{Handled, Wait};
@@ -67,7 +67,7 @@ pub struct DeadlinePassed {
 
 impl fmt::Display for DeadlinePassed {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        angzarr_diagnostic::display(self, f)
+        coded_diagnostic::display(self, f)
     }
 }
 

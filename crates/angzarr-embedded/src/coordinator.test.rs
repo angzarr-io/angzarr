@@ -559,7 +559,7 @@ mod snapshot {
     use super::super::{steps::Coordinator, Deduplicated};
     use crate::v1::Snapshot;
     use crate::{check, pack, Payload, Stream};
-    use angzarr_diagnostic::code;
+    use coded_diagnostic::code;
 
     use crate::toys::{
         account, at, command, cover, opened, registry, root, set, shelf, Account, AccountCmd, Edit,
@@ -988,7 +988,7 @@ mod snapshot {
     #[test]
     fn a_snapshot_whose_wire_form_is_not_a_valid_state_is_unreadable() {
         use crate::KernelError;
-        use angzarr_diagnostic::Diagnostic;
+        use coded_diagnostic::Diagnostic;
         let snapshot = Snapshot {
             sequence: 0,
             state: Some(pack(&crate::toys::ledger::LedgerSnapshot {
@@ -1141,7 +1141,7 @@ mod upcasting {
             Result<crate::angzarr_router::hpb::UpcastResponse, crate::UpcastError>,
         > {
             Box::pin(std::future::ready(Err(crate::UpcastError::Unavailable {
-                cause: angzarr_diagnostic::Report::new("toy-sidecar-down"),
+                cause: coded_diagnostic::Report::new("toy-sidecar-down"),
             })))
         }
     }
@@ -1533,7 +1533,7 @@ mod admission {
         let identified = check(deposit, registry.catalog()).unwrap().identify(&at(1));
         let failed: Result<crate::Any, UpcastError> = Err(UpcastError::Rule {
             source: "toy.account.cmd.v1.Deposit".to_string(),
-            error: angzarr_diagnostic::Report::new("toy-broken"),
+            error: coded_diagnostic::Report::new("toy-broken"),
         });
         let refused = admit(&registry, &identified, &failed, Vec::new(), false)
             .err()

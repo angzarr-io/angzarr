@@ -1,5 +1,5 @@
 use angzarr_coordinator_base::{Code, Refusal};
-use angzarr_diagnostic::Diagnostic;
+use coded_diagnostic::Diagnostic;
 
 use super::*;
 
