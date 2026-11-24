@@ -10,6 +10,7 @@ use crate::{
 };
 
 use crate::toys::{account, at, command, cover, fact, reason, registry, Account, Edit};
+use crate::DiagnosticToWire;
 use coded_diagnostic::code;
 
 /// The stream of account 1, as a reason names it.
@@ -252,16 +253,16 @@ fn a_panicking_ingests_dead_letter_carries_its_code_not_english() {
 /// `"` and `\` escaped; any other value bare.
 #[test]
 fn a_dead_letters_ambiguous_value_is_quoted() {
-    let pairs = |pairs: &[(&str, &str)]| {
+    let pairs = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
         pairs
             .iter()
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect()
     };
     let letter = AngzarrDeadLetter {
-        why: Some(Why::Reason(Diagnostic {
-            code: "toy-store-down".to_string(),
-            args: pairs(&[
+        why: Some(Why::Reason(Diagnostic::with_text_args(
+            "toy-store-down",
+            pairs(&[
                 ("ext_err_txt", "database is locked"),
                 ("empty", ""),
                 ("path", "C:\\dir"),
@@ -269,7 +270,7 @@ fn a_dead_letters_ambiguous_value_is_quoted() {
                 ("seat", "3"),
                 ("note", "k=v"),
             ]),
-        })),
+        ))),
         source_component: "account".to_string(),
         ..AngzarrDeadLetter::default()
     };
@@ -277,6 +278,37 @@ fn a_dead_letters_ambiguous_value_is_quoted() {
         dead_letter_line(&letter),
         "DEAD_LETTER account: toy-store-down empty=\"\" ext_err_txt=\"database is locked\" \
          note=\"k=v\" path=\"C:\\\\dir\" said=\"say \\\"hi\\\"\" seat=3"
+    );
+}
+
+/// A line has no room for structure: a number is its decimal text, a
+/// nested cause is its code under the arg's name with each of its args
+/// under `<name>.<arg>`, and a cause with no args is its code alone.
+#[test]
+fn a_dead_letters_typed_args_are_flattened_in_its_line() {
+    use crate::v1::diagnostic_arg::Value;
+    use crate::v1::DiagnosticArg;
+    let letter = AngzarrDeadLetter {
+        why: Some(Why::Reason(Diagnostic {
+            code: "toy-store-down".to_string(),
+            typed_args: vec![
+                DiagnosticArg {
+                    name: "seat".into(),
+                    value: Some(Value::Uint(3)),
+                },
+                DiagnosticArg::nested(
+                    "cause",
+                    Diagnostic::with_text_args("toy-io", [("errno".to_string(), "10".to_string())]),
+                ),
+                DiagnosticArg::nested("bare", Diagnostic::with_text_args("toy-closed", [])),
+            ],
+        })),
+        source_component: "account".to_string(),
+        ..AngzarrDeadLetter::default()
+    };
+    assert_eq!(
+        dead_letter_line(&letter),
+        "DEAD_LETTER account: toy-store-down bare=toy-closed cause=toy-io cause.errno=10 seat=3"
     );
 }
 
@@ -414,7 +446,7 @@ fn a_kernel_error_with_no_spec_key_keeps_its_own_code() {
         domain: "account".to_string(),
     };
     let letter = letter_for(Cause::Kernel(&error));
-    let diagnostic = crate::route::diagnostic(&error);
+    let diagnostic = error.to_wire();
     assert_eq!(diagnostic.code, code!("unregistered-domain"));
     assert_eq!(letter.why, Some(Why::Reason(diagnostic)));
     assert_eq!(letter.retry_count, 0);
@@ -537,7 +569,11 @@ fn a_malformed_books_letter_names_its_payloads_type() {
     .identify(&at(30))
     .to_book();
     let command_type = |letter: AngzarrDeadLetter| match letter.why {
-        Some(Why::Reason(reason)) => reason.args.get("command_type").cloned(),
+        Some(Why::Reason(reason)) => reason
+            .flat_args()
+            .into_iter()
+            .find(|(name, _)| name == "command_type")
+            .map(|(_, v)| v),
         _ => None,
     };
     let letter = super::letter(

@@ -102,10 +102,7 @@ impl std::error::Error for Coded {}
 /// This error as a key and args on the wire (types.proto's `Diagnostic`).
 impl From<&Coded> for angzarr_proto::v1::Diagnostic {
     fn from(coded: &Coded) -> Self {
-        angzarr_proto::v1::Diagnostic {
-            code: coded.key.clone(),
-            args: coded.args.clone().into_iter().collect(),
-        }
+        angzarr_proto::v1::Diagnostic::with_text_args(coded.key.clone(), coded.args.clone())
     }
 }
 

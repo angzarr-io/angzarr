@@ -267,7 +267,11 @@ fn policy_bug(w: &mut Coordinator, reason: String, naming: String) {
         "one dead letter of {reason}: {:?}",
         w.log.letters()
     );
-    let args = &reason_of(&letters[0]).expect("a reason").args;
+    let args: std::collections::BTreeMap<String, String> = reason_of(&letters[0])
+        .expect("a reason")
+        .flat_args()
+        .into_iter()
+        .collect();
     let mut wanted = crate::tests::outcomes::named(&naming);
     let word = |after: &str| {
         let at = naming.find(after)? + after.len();
@@ -337,8 +341,10 @@ fn triggering_event_dead_lettered(
     );
     let letter = &letters[0];
     assert_eq!(
-        reason_of(letter).and_then(|r| r.args.get(&arg)),
-        Some(&value)
+        reason_of(letter)
+            .and_then(|r| r.flat_args().into_iter().find(|(name, _)| name == &arg))
+            .map(|(_, v)| v),
+        Some(value)
     );
     let Some(Payload::RejectedEvents(book)) = &letter.payload else {
         panic!("rejected events: {letter:?}");

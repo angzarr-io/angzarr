@@ -1,99 +1,141 @@
-//! Errors carry a key and an argument map, never rendered English
-//! (decision 14.37): `Diagnostic { code, args }`, with its numbers. A
-//! dead letter's why (a typed refusal, a reason or a transport's why) is
-//! tested in `roundtrip.rs`; `PayloadRetrievalFailed` is the distributed
-//! transport's (decision 14.64), tested in
+//! Errors carry a key and typed args, never rendered English (decision
+//! 14.37, amended 2026-11-24): `Diagnostic { code, typed_args }`, with its
+//! numbers. A dead letter's why (a typed refusal, a reason or a
+//! transport's why) is tested in `roundtrip.rs`; `PayloadRetrievalFailed`
+//! is the distributed transport's (decision 14.64), tested in
 //! angzarr-proto-transport-distributed.
 
-use angzarr_proto::v1::Diagnostic;
+use angzarr_proto::v1::diagnostic_arg::Value;
+use angzarr_proto::v1::{Diagnostic, DiagnosticArg};
 use prost::{Message, Name};
 
 fn round_trip<M: Message + Default>(m: &M) -> M {
     M::decode(&*m.encode_to_vec()).expect("decodes")
 }
 
-/// The first byte of an encoding: the first field's tag, as
-/// `(number << 3) | wire type`.
-fn first_tag<M: Message>(m: &M) -> u8 {
-    m.encode_to_vec()[0]
+fn arg(name: &str, value: Value) -> DiagnosticArg {
+    DiagnosticArg {
+        name: name.into(),
+        value: Some(value),
+    }
 }
 
-fn no_root() -> Diagnostic {
+/// Every arg type, a nested cause with args and one with none.
+fn typed() -> Diagnostic {
     Diagnostic {
-        code: "ANGZARR_REASON_POLICY_COMMAND_NO_ROOT".into(),
-        args: [
-            ("domain".to_string(), "inventory".to_string()),
-            ("command_type".to_string(), "ReserveStock".to_string()),
-        ]
-        .into(),
+        code: "angzarr-ports-store-unavailable".into(),
+        typed_args: vec![
+            arg("stream", Value::Text("inventory".into())),
+            arg("errno", Value::Int(-10)),
+            arg("attempts", Value::Uint(u64::MAX)),
+            arg(
+                "cause",
+                Value::Nested(Diagnostic::with_text_args(
+                    "annals-store-sql-io",
+                    [("detail".to_string(), "refused".to_string())],
+                )),
+            ),
+            arg(
+                "bare",
+                Value::Nested(Diagnostic {
+                    code: "annals-store-closed".into(),
+                    typed_args: vec![],
+                }),
+            ),
+        ],
     }
 }
 
 #[test]
-fn a_diagnostic_is_a_code_and_its_args_in_fields_1_and_2() {
+fn a_diagnostic_is_a_code_and_its_typed_args_in_fields_1_and_3() {
     assert_eq!(Diagnostic::full_name(), "io.angzarr.v1.Diagnostic");
-    let d = no_root();
-    assert_eq!(round_trip(&d), d);
+    assert_eq!(DiagnosticArg::full_name(), "io.angzarr.v1.DiagnosticArg");
+    let bytes = Diagnostic {
+        code: "X".into(),
+        typed_args: vec![arg("k", Value::Text("v".into()))],
+    }
+    .encode_to_vec();
     assert_eq!(
-        first_tag(&Diagnostic {
-            code: "X".into(),
-            ..Default::default()
-        }),
-        (1 << 3) | 2
-    );
-    assert_eq!(
-        first_tag(&Diagnostic {
-            args: [("k".to_string(), "v".to_string())].into(),
-            ..Default::default()
-        }),
-        (2 << 3) | 2
+        bytes,
+        [
+            (1 << 3) | 2,
+            1,
+            b'X',
+            (3 << 3) | 2,
+            6, // name (1+1+1) and text (1+1+1)
+            (1 << 3) | 2,
+            1,
+            b'k',
+            (2 << 3) | 2,
+            1,
+            b'v'
+        ]
     );
 }
 
+/// An arg keeps its type through the wire: a number is not text, and a
+/// cause with no args of its own is still a cause (nested), not its code
+/// as text.
 #[test]
-fn a_wrapped_cause_is_flattened_into_the_args() {
-    // The cause's code under the arg's name, its args under "<name>.<arg>".
-    let d = Diagnostic {
-        code: "angzarr-ports-store-unavailable".into(),
-        args: [
-            ("cause".to_string(), "annals-store-sql-io".to_string()),
-            ("cause.errno".to_string(), "10".to_string()),
-        ]
-        .into(),
-    };
-    assert_eq!(round_trip(&d), d);
+fn typed_args_round_trip_with_their_types_and_order() {
+    let d = typed();
+    let back = round_trip(&d);
+    assert_eq!(back, d);
+    let names: Vec<&str> = back.typed_args.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, ["stream", "errno", "attempts", "cause", "bare"]);
+    assert!(matches!(
+        &back.typed_args[4].value,
+        Some(Value::Nested(cause)) if cause.code == "annals-store-closed" && cause.typed_args.is_empty()
+    ));
 }
 
 /// One fact must have one byte form: event bytes are compared and hashed.
-/// A `HashMap` iterates in a per-process random order, so a Diagnostic with
-/// several args would encode differently from one encode to the next;
-/// the args are a `BTreeMap`, encoded in key order whatever the insertion order.
+/// The args are a list in the diagnostic's own order, so the same value
+/// always encodes to the same bytes.
 #[test]
-fn a_diagnostic_encodes_to_the_same_bytes_whatever_the_order_its_args_were_added_in() {
-    let args = [("zeta", "1"), ("alpha", "2"), ("mid", "3"), ("beta", "4")];
-    let build = |order: &[usize]| {
-        let mut d = Diagnostic {
-            code: "angzarr-test-order".into(),
-            ..Default::default()
-        };
-        for &i in order {
-            d.args.insert(args[i].0.to_string(), args[i].1.to_string());
-        }
-        d.encode_to_vec()
-    };
-    let forward = build(&[0, 1, 2, 3]);
-    assert_eq!(forward, build(&[3, 2, 1, 0]));
-    assert_eq!(forward, build(&[2, 0, 3, 1]));
+fn a_diagnostic_encodes_to_the_same_bytes_every_time() {
+    assert_eq!(typed().encode_to_vec(), typed().encode_to_vec());
+    assert_eq!(
+        typed().encode_to_vec(),
+        round_trip(&typed()).encode_to_vec()
+    );
+}
 
-    // The entries follow the code in key order: alpha, beta, mid, zeta.
-    let mut expected = vec![(1 << 3) | 2, 18];
-    expected.extend_from_slice(b"angzarr-test-order");
-    for (key, value) in [("alpha", "2"), ("beta", "4"), ("mid", "3"), ("zeta", "1")] {
-        expected.extend_from_slice(&[(2 << 3) | 2, (2 + key.len() + 2 + value.len()) as u8]);
-        expected.extend_from_slice(&[(1 << 3) | 2, key.len() as u8]);
-        expected.extend_from_slice(key.as_bytes());
-        expected.extend_from_slice(&[(2 << 3) | 2, value.len() as u8]);
-        expected.extend_from_slice(value.as_bytes());
-    }
-    assert_eq!(forward, expected);
+/// Old data carried `map<string, string> args` in field 2. That field is
+/// retired and there is no legacy decode: a reader yields the code with no
+/// args.
+#[test]
+fn old_map_bytes_decode_to_the_code_with_no_args() {
+    let mut old = vec![(1 << 3) | 2, 3];
+    old.extend_from_slice(b"old");
+    // One map entry, field 2: key "k", value "v".
+    old.extend_from_slice(&[
+        (2 << 3) | 2,
+        6,
+        (1 << 3) | 2,
+        1,
+        b'k',
+        (2 << 3) | 2,
+        1,
+        b'v',
+    ]);
+    let d = Diagnostic::decode(&*old).expect("old bytes decode");
+    assert_eq!(d.code, "old");
+    assert!(d.typed_args.is_empty());
+}
+
+#[test]
+fn flat_args_are_the_text_pairs_a_flat_transport_carries() {
+    assert_eq!(
+        typed().flat_args(),
+        [
+            ("stream", "inventory"),
+            ("errno", "-10"),
+            ("attempts", "18446744073709551615"),
+            ("cause", "annals-store-sql-io"),
+            ("cause.detail", "refused"),
+            ("bare", "annals-store-closed"),
+        ]
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+    );
 }

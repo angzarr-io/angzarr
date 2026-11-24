@@ -29,6 +29,7 @@ use coded_diagnostic::{Arg, Diagnostic, Report};
 use prost::Message;
 use prost_types::Any;
 
+use super::diagnostic::DiagnosticToWire;
 use super::domain::{Domain, State};
 use super::error::PayloadError;
 use super::payload::{type_name, Payload};
@@ -344,36 +345,11 @@ pub(crate) fn internal(
     }
 }
 
-/// A diagnostic's args, flattened as angzarr carries them (decision
-/// 14.37): each by its name, a wrapped cause as its code under the arg's
-/// name and each of its args under `<name>.<arg>`.
+/// A diagnostic's args as text pairs ([`angzarr_proto::v1::Diagnostic::flat_args`]):
+/// the flat form a coded error's extras and a transport's metadata carry
+/// (decision 14.37).
 pub(crate) fn flat_args(diagnostic: &dyn Diagnostic) -> Vec<(String, String)> {
-    let mut flat = Vec::new();
-    for (name, arg) in diagnostic.args() {
-        match arg {
-            Arg::Int(n) => flat.push((name.to_string(), n.to_string())),
-            Arg::Uint(n) => flat.push((name.to_string(), n.to_string())),
-            Arg::Str(s) => flat.push((name.to_string(), s)),
-            Arg::Nested(cause) => {
-                flat.push((name.to_string(), cause.code().to_string()));
-                flat.extend(
-                    flat_args(cause.as_ref())
-                        .into_iter()
-                        .map(|(inner, value)| (format!("{name}.{inner}"), value)),
-                );
-            }
-        }
-    }
-    flat
-}
-
-/// `diagnostic` as angzarr's wire `Diagnostic`: its code and its args,
-/// flattened ([`flat_args`]).
-pub(crate) fn diagnostic(diagnostic: &dyn Diagnostic) -> angzarr_proto::v1::Diagnostic {
-    angzarr_proto::v1::Diagnostic {
-        code: diagnostic.code().to_string(),
-        args: flat_args(diagnostic).into_iter().collect(),
-    }
+    diagnostic.to_wire().flat_args()
 }
 
 /// The router's `error` as a report: its key, its args.
@@ -410,7 +386,7 @@ pub(crate) fn table<D: Domain>(
                 };
                 let failed = |cause: &dyn Diagnostic| FoldFailure {
                     page_index: Some(index),
-                    cause: Some(diagnostic(cause)),
+                    cause: Some(cause.to_wire()),
                 };
                 let event = D::Event::from_any(any).map_err(|e| failed(&e))?;
                 let page = PageContext {

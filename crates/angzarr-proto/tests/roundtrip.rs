@@ -392,10 +392,10 @@ fn a_component_descriptor_names_its_kind_by_arm() {
 // typed refusal, a reason or a transport's own why.
 #[test]
 fn a_dead_letter_has_one_payload_and_one_why() {
-    let reason = Diagnostic {
-        code: "ANGZARR_REASON_HANDLER_UNAVAILABLE".into(),
-        args: [("domain".to_string(), "draws".to_string())].into(),
-    };
+    let reason = Diagnostic::with_text_args(
+        "ANGZARR_REASON_HANDLER_UNAVAILABLE",
+        [("domain".to_string(), "draws".to_string())],
+    );
     let whys = [
         angzarr_dead_letter::Why::Refusal(any(
             "/io.angzarr.v1.ExpectedSequenceMismatch",

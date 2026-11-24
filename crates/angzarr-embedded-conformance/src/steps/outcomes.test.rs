@@ -380,9 +380,9 @@ fn dead_lettered(w: &mut Coordinator, text: String) {
             .to_string(),
         None => text.clone(),
     };
+    let flat: std::collections::BTreeMap<String, String> = why.flat_args().into_iter().collect();
     for (name, value) in named(&rest) {
-        let arg = why
-            .args
+        let arg = flat
             .get(&name)
             .unwrap_or_else(|| panic!("no {name} in {letter:?}"));
         // A type is named by its bare name: `AddItem` for orders.v1.AddItem.
@@ -406,7 +406,9 @@ fn router_answers_fact(w: &mut Coordinator, _domain: String, reason: String) {
         .unwrap_or_else(|| panic!("no answer of {reason}: {letters:?}"));
     let why = reason_of(letter).expect("a reason");
     assert!(
-        why.args.get("type_url").is_some_and(|t| !t.is_empty()),
+        why.flat_args()
+            .iter()
+            .any(|(name, t)| name == "type_url" && !t.is_empty()),
         "{letter:?}"
     );
 }

@@ -68,10 +68,10 @@ fn letter() -> DeadLetter {
         stream: stream().to_cover(),
         at: DeadLetterAt::Sequence(1),
         letter: AngzarrDeadLetter {
-            why: Some(Why::Reason(Diagnostic {
-                code: "ROUTER_REASON_UNHANDLED_HANDLER_ERROR".to_string(),
-                args: [("why".to_string(), "test".to_string())].into(),
-            })),
+            why: Some(Why::Reason(Diagnostic::with_text_args(
+                "ROUTER_REASON_UNHANDLED_HANDLER_ERROR",
+                [("why".to_string(), "test".to_string())],
+            ))),
             source_component: "projector".to_string(),
             occurred_at: Some(Timestamp {
                 seconds: 7,

@@ -89,6 +89,7 @@ mod check;
 mod compensation;
 mod coordinator;
 mod dead_letter;
+mod diagnostic;
 mod digest;
 mod domain;
 mod error;
@@ -178,6 +179,7 @@ pub use check::{check, Arm, Body, Checked, Identified, Malformed, Sampled};
 /// check), re-exported so a dependent names the one this crate is built on.
 pub use coded_diagnostic;
 pub use dead_letter::{dead_letter_line, DeadLetterLog, MemoryDeadLetters, DEAD_LETTER_PREFIX};
+pub use diagnostic::{DiagnosticToWire, WireDiagnosticExt};
 pub use digest::Folded;
 pub use domain::{Domain, NotSnapshotted, State};
 pub use error::{

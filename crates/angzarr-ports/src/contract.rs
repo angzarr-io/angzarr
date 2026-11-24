@@ -2587,10 +2587,10 @@ pub fn dead_letter(
 ) -> DeadLetter {
     use angzarr_proto::v1::angzarr_dead_letter::{Payload, Why};
     use angzarr_proto::v1::Diagnostic;
-    let reason = Diagnostic {
-        code: "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR".to_string(),
-        args: [("body".to_string(), body.to_string())].into(),
-    };
+    let reason = Diagnostic::with_text_args(
+        "ANGZARR_REASON_UNHANDLED_HANDLER_ERROR",
+        [("body".to_string(), body.to_string())],
+    );
     DeadLetter {
         stream: stream.to_cover(),
         at,

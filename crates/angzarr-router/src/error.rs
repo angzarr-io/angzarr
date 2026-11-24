@@ -442,7 +442,11 @@ impl CodedError {
     pub fn diagnostic(&self) -> angzarr_proto::v1::Diagnostic {
         angzarr_proto::v1::Diagnostic {
             code: self.code.clone(),
-            args: self.extras.clone().into_iter().collect(),
+            typed_args: self
+                .extras
+                .iter()
+                .map(|(name, value)| angzarr_proto::v1::DiagnosticArg::text(name, value))
+                .collect(),
         }
     }
 
@@ -513,7 +517,7 @@ impl CodedError {
             state_type_url.to_string(),
         ));
         if let Some(cause) = cause {
-            details.extend(flatten(reason_args::CAUSE, &cause.code, cause.args.clone()));
+            details.extend(flatten(reason_args::CAUSE, &cause.code, cause.flat_args()));
         }
         Self::keyed(reason, details)
     }

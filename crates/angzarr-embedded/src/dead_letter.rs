@@ -83,9 +83,10 @@ use prost_types::Timestamp;
 
 use super::catalog::Catalog;
 use super::check::{Identified, Malformed};
+use super::diagnostic::DiagnosticToWire;
 use super::error::{cover_text, KernelError};
 use super::payload::type_name;
-use super::route::{self, diagnostic};
+use super::route;
 use super::store::{DeadLetter, DeadLetterAt, StreamRef};
 use angzarr_proto::v1::{reason_args as args, AngzarrReason};
 
@@ -120,9 +121,7 @@ pub fn dead_letter_line(letter: &AngzarrDeadLetter) -> String {
     match &letter.why {
         Some(Why::Reason(reason)) => {
             line.push_str(&format!(" {}", reason.code));
-            let mut pairs: Vec<(String, String)> = (reason.args.iter())
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
+            let mut pairs = reason.flat_args();
             pairs.sort();
             fields.extend(pairs);
         }
@@ -336,7 +335,7 @@ pub(crate) fn why(cause: &Cause, payload: &Payload) -> Why {
         Cause::Kernel(KernelError::Router(error)) => coded(error),
         Cause::Kernel(error) => error
             .as_coded()
-            .map_or_else(|| diagnostic(*error), |error| coded(&error)),
+            .map_or_else(|| error.to_wire(), |error| coded(&error)),
     })
 }
 
@@ -396,20 +395,13 @@ fn malformed_reason(malformed: &Malformed, named: (&str, &str)) -> angzarr_proto
     match malformed {
         Malformed::NoRoot | Malformed::BadRoot { .. } => naming(AngzarrReason::PolicyCommandNoRoot),
         Malformed::UnknownDomain { .. } => naming(AngzarrReason::PolicyCommandUnknownDomain),
-        other => diagnostic(other),
+        other => other.to_wire(),
     }
 }
 
-/// `error` as angzarr's wire `Diagnostic`: its key and its metadata.
+/// `error` as angzarr's wire `Diagnostic`: its key and its extras as text args.
 fn coded(error: &CodedError) -> angzarr_proto::v1::Diagnostic {
-    angzarr_proto::v1::Diagnostic {
-        code: error.code.clone(),
-        args: error
-            .extras
-            .iter()
-            .map(|(name, value)| (name.clone(), value.clone()))
-            .collect(),
-    }
+    angzarr_proto::v1::Diagnostic::with_text_args(error.code.clone(), error.extras.clone())
 }
 
 /// Dead letters kept in memory, whole and as their lines: for tests.

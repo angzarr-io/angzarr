@@ -1296,15 +1296,15 @@ pub use crate::testing::{block_on_ready as ready, Ready};
 
 // ---------------------------------------------------------------- dead letters
 
-/// angzarr's wire `Diagnostic`: a key, as the spec spells it, and its args.
+/// angzarr's wire `Diagnostic`: a key, as the spec spells it, and its args
+/// as text, in name order: the order a kernel error's extras (a map by
+/// name) are written in.
 pub fn wire(code: &str, args: &[(&str, &str)]) -> crate::v1::Diagnostic {
-    crate::v1::Diagnostic {
-        code: code.to_string(),
-        args: args
-            .iter()
-            .map(|(name, value)| (name.to_string(), value.to_string()))
-            .collect(),
-    }
+    let by_name: std::collections::BTreeMap<String, String> = args
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    crate::v1::Diagnostic::with_text_args(code, by_name)
 }
 
 /// A letter's why: the reason `code` with `args` (decision 14.101).

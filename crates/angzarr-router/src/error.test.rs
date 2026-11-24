@@ -270,10 +270,7 @@ fn undecodable_bytes_name_the_message_type() {
 // `fold_message` text entry is gone.
 #[test]
 fn a_fold_failures_own_failure_is_its_cause_not_text() {
-    let cause = pb::Diagnostic {
-        code: "BAD_VARINT".to_string(),
-        args: [arg("offset", "3")].into_iter().collect(),
-    };
+    let cause = pb::Diagnostic::with_text_args("BAD_VARINT", [arg("offset", "3")]);
     let err = CodedError::fold_failed(
         AngzarrReason::FoldFailed,
         FoldAt::Page {

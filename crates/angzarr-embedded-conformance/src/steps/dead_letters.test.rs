@@ -148,9 +148,10 @@ fn listed_args(text: &str) -> Vec<(String, Option<String>)> {
 pub(crate) fn has(diagnostic: Option<&angzarr_embedded::v1::Diagnostic>, code: &str, rest: &str) {
     let diagnostic = diagnostic.expect("a reason");
     assert_eq!(diagnostic.code, code, "{diagnostic:?}");
+    let flat: std::collections::BTreeMap<String, String> =
+        diagnostic.flat_args().into_iter().collect();
     for (name, value) in listed_args(rest) {
-        let given = diagnostic
-            .args
+        let given = flat
             .get(&name)
             .unwrap_or_else(|| panic!("no {name} in {diagnostic:?}"));
         if let Some(value) = value {

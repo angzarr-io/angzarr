@@ -1943,10 +1943,10 @@ fn unchecked_refusal(
         } => error,
         other => panic!("the policy's bug: {other:?}"),
     };
-    let why = crate::v1::angzarr_dead_letter::Why::Reason(crate::v1::Diagnostic {
-        code: error.code.clone(),
-        args: error.extras.clone().into_iter().collect(),
-    });
+    let why = crate::v1::angzarr_dead_letter::Why::Reason(crate::v1::Diagnostic::with_text_args(
+        error.code.clone(),
+        error.extras.clone(),
+    ));
     let letter = crate::toys::one_letter(log.letters());
     crate::toys::assert_letter(&letter, crate::v1::ComponentKind::Policy, &why, 0);
     assert!(

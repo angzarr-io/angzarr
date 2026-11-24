@@ -1059,10 +1059,21 @@ async fn a_missing_predecessor_is_dead_lettered_naming_what_is_missing() {
             "the book is of the stream"
         );
         let stream = "account/0a000000-0000-0000-0000-000000000002";
-        let why = crate::toys::reason(
-            "angzarr-embedded-predecessor-missing",
-            &[("sequence", "1"), ("stream", stream), ("missing", "0")],
-        );
+        // The counts are typed: the kernel's error holds them as numbers.
+        let why = crate::v1::angzarr_dead_letter::Why::Reason(crate::v1::Diagnostic {
+            code: "angzarr-embedded-predecessor-missing".to_string(),
+            typed_args: vec![
+                crate::v1::DiagnosticArg::text("stream", stream),
+                crate::v1::DiagnosticArg {
+                    name: "sequence".to_string(),
+                    value: Some(crate::v1::diagnostic_arg::Value::Uint(1)),
+                },
+                crate::v1::DiagnosticArg {
+                    name: "missing".to_string(),
+                    value: Some(crate::v1::diagnostic_arg::Value::Uint(0)),
+                },
+            ],
+        });
         assert_eq!(letter.why.as_ref(), Some(&why));
     }
 }

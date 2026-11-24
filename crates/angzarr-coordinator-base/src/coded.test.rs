@@ -141,13 +141,17 @@ fn a_coded_displays_as_its_key_then_its_args() {
 }
 
 /// On the wire a Coded is types.proto's `Diagnostic`: its key as the code
-/// and its args by name.
+/// and its args as text args, in name order.
 #[test]
 fn a_coded_is_the_wire_diagnostic() {
     let coded = Coded::new(Code::Internal, "K", args([("a", "1"), ("b", "2")]));
     let wire = angzarr_proto::v1::Diagnostic::from(&coded);
     assert_eq!(wire.code, "K");
-    assert_eq!(wire.args.len(), 2);
-    assert_eq!(wire.args.get("a").map(String::as_str), Some("1"));
-    assert_eq!(wire.args.get("b").map(String::as_str), Some("2"));
+    assert_eq!(
+        wire.typed_args,
+        [
+            angzarr_proto::v1::DiagnosticArg::text("a", "1"),
+            angzarr_proto::v1::DiagnosticArg::text("b", "2"),
+        ]
+    );
 }

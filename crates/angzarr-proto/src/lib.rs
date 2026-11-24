@@ -125,6 +125,7 @@ pub fn reason_key_args(key: &str) -> Option<&'static [&'static str]> {
         .map(v1::AngzarrReason::args)
 }
 
+mod diagnostic;
 pub mod ids;
 pub mod protos;
 

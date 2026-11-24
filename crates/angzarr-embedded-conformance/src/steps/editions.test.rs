@@ -477,7 +477,11 @@ fn fact_dead_lettered(
         panic!("a fact: {delivery:?}");
     };
     assert_eq!(bare(payload), fact);
-    let args = &reason_of(letter).expect("a reason").args;
+    let args: std::collections::BTreeMap<String, String> = reason_of(letter)
+        .expect("a reason")
+        .flat_args()
+        .into_iter()
+        .collect();
     assert_eq!(
         args.get("stream"),
         Some(&stream_text(w, &domain, &name, &edition))
@@ -670,11 +674,7 @@ pub(crate) fn reaction_letter(w: &Coordinator) -> Option<Answered> {
     Some(Answered::Failed {
         status: key.grpc()?,
         reason: reason.code.clone(),
-        args: reason
-            .args
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect(),
+        args: reason.flat_args().into_iter().collect(),
         refusal: None,
     })
 }
