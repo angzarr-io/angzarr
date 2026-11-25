@@ -63,7 +63,13 @@ fn coordinator_depends_on_no_transport_or_runtime() {
         .filter(|name| name.starts_with("angzarr-") && *name != env!("CARGO_PKG_NAME"))
         .cloned()
         .collect();
-    let allowed: BTreeSet<_> = ALLOWED.iter().map(ToString::to_string).collect();
+    // The spec package angzarr-proto builds its protos from is a build
+    // dependency of proto, so it is in every closure that holds proto.
+    let allowed: BTreeSet<_> = ALLOWED
+        .iter()
+        .chain(&["angzarr-project"])
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(angzarr, allowed, "the angzarr crates in the closure");
     assert!(
         every.contains("coded-diagnostic"),

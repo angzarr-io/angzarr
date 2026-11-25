@@ -53,7 +53,13 @@ fn base_depends_on_nothing_above_ports() {
         .collect();
     // Ports' own closure: diagnostic and proto (and what they link), no
     // other angzarr crate.
-    let allowed: BTreeSet<_> = ALLOWED.iter().map(ToString::to_string).collect();
+    // The spec package angzarr-proto builds its protos from is a build
+    // dependency of proto, so it is in every closure that holds proto.
+    let allowed: BTreeSet<_> = ALLOWED
+        .iter()
+        .chain(&["angzarr-project"])
+        .map(ToString::to_string)
+        .collect();
     assert_eq!(angzarr, allowed, "the angzarr crates in the closure");
     assert!(
         every.contains("coded-diagnostic"),
