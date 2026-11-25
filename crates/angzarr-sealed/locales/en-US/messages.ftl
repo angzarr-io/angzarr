@@ -4,7 +4,7 @@
 
 ## Opening a Sealed.
 
-open-failed = the sealed value could not be opened with this key (it was altered, made for another key or context, or made with another key)
+open-failed = the sealed value could not be opened with this key (it was altered, made for another key or other data, or made with another key)
 open-unsupported-algorithm = the sealed value names an algorithm this crate does not implement
 open-malformed = the sealed value is malformed: { $field } is { $why }
 open-key-destroyed = the data key was destroyed
@@ -20,6 +20,7 @@ key-set-current-key = "{ $key_id }" is the current key: mark another current bef
 seal-weak-shared-secret = the recipient key is a low-order point: the shared secret is all zero
 seal-rng-failed = the system random number generator failed
 seal-key-destroyed = the data key was destroyed
+seal-too-long = { $field } is longer than 4294967295 bytes, which the associated data cannot length-prefix
 
 ## Wrapping a data key.
 

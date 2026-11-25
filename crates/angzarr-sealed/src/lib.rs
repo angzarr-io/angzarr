@@ -13,7 +13,7 @@
 //! HKDF-SHA256, ChaCha20-Poly1305 (RFC 9180 section 7: kem_id 0x0020,
 //! kdf_id 0x0001, aead_id 0x0003). [`rfc9180`] holds its steps, held to the
 //! RFC's Appendix A.2 test vectors. The `key_id`, the algorithm and the
-//! field's own `context` are bound as associated data ([`associated_data`]),
+//! field's own `data` are bound as associated data ([`associated_data`]),
 //! so a value cannot be moved to another field, another key or another
 //! suite.
 //!

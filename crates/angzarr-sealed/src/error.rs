@@ -14,14 +14,26 @@ pub enum SealError {
     RngFailed,
     /// The data key was destroyed.
     KeyDestroyed,
+    /// A `key_id` or the caller's `data` is longer than `u32::MAX` bytes,
+    /// which the associated data's 4-byte length prefix cannot say.
+    TooLong {
+        /// The field: `key_id` or `data`.
+        field: &'static str,
+    },
 }
 
 /// Why a [`Sealed`](crate::Sealed) was not opened. Every cryptographic
 /// failure is the one `Failed`: it says nothing of which field was wrong.
+///
+/// A service that relays errors to an untrusted party should map
+/// [`OpenError::UnknownKey`] and [`OpenError::Failed`] to one failure:
+/// `UnknownKey` is for the key holder (it tells her a rotation has not
+/// reached her or the value is for another consumer); told to a sender it
+/// would say which key ids the holder has.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OpenError {
     /// The authentication failed: the value was altered (any field), was
-    /// made for another key, or was sealed for another context.
+    /// made for another key, or was sealed for other data.
     Failed,
     /// The algorithm is not the one suite this crate implements.
     UnsupportedAlgorithm,
@@ -126,7 +138,11 @@ diagnostic!(SealError {
     Self::WeakSharedSecret => code!("seal-weak-shared-secret"),
     Self::RngFailed => code!("seal-rng-failed"),
     Self::KeyDestroyed => code!("seal-key-destroyed"),
-}, |_: &SealError| Vec::new());
+    Self::TooLong { .. } => code!("seal-too-long"),
+}, |e: &SealError| match e {
+    SealError::TooLong { field } => vec![("field", Arg::from(*field))],
+    _ => Vec::new(),
+});
 
 diagnostic!(OpenError {
     Self::Failed => code!("open-failed"),
@@ -163,6 +179,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         Box::new(SealError::WeakSharedSecret),
         Box::new(SealError::RngFailed),
         Box::new(SealError::KeyDestroyed),
+        Box::new(SealError::TooLong { field: "data" }),
         Box::new(OpenError::Failed),
         Box::new(OpenError::UnsupportedAlgorithm),
         Box::new(OpenError::Malformed {

@@ -27,5 +27,5 @@ pub(crate) fn key_id() -> KeyId {
     KeyId::new("launcher/2026-11")
 }
 
-pub(crate) const CONTEXT: &[u8] = b"RunEnqueued.env/ANTHROPIC_API_KEY@projects/p/sessions/s";
+pub(crate) const DATA: &[u8] = b"RunEnqueued.env/ANTHROPIC_API_KEY@projects/p/sessions/s";
 pub(crate) const SECRET: &[u8] = b"sk-ant-not-a-real-key-0123456789";

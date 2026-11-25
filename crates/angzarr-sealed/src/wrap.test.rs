@@ -4,7 +4,7 @@
 //! must not move to another subject.
 
 use super::*;
-use crate::testkit::{key_id, CONTEXT, SECRET};
+use crate::testkit::{key_id, DATA, SECRET};
 
 const SUBJECT: &[u8] = b"projects/p/sessions/s";
 
@@ -15,10 +15,10 @@ fn kek() -> KeyEncryptionKey {
 #[test]
 fn a_wrapped_data_key_unwraps_to_a_key_that_opens_what_the_original_sealed() {
     let data = DataKey::generate().expect("generate");
-    let sealed = data.seal(&key_id(), CONTEXT, SECRET).expect("seal");
+    let sealed = data.seal(&key_id(), DATA, SECRET).expect("seal");
     let wrapped = wrap(&kek(), &key_id(), SUBJECT, &data).expect("wrap");
     let again = unwrap(&kek(), &wrapped, SUBJECT).expect("unwrap");
-    assert_eq!(again.open(&sealed, CONTEXT), Ok(SECRET.to_vec()));
+    assert_eq!(again.open(&sealed, DATA), Ok(SECRET.to_vec()));
 }
 
 #[test]
@@ -95,7 +95,7 @@ fn a_wrong_size_nonce_is_malformed_not_a_panic() {
 #[test]
 fn a_data_key_sealed_value_fails_each_tamper() {
     let data = DataKey::from_bytes([5; 32]);
-    let good = data.seal(&key_id(), CONTEXT, SECRET).expect("seal");
+    let good = data.seal(&key_id(), DATA, SECRET).expect("seal");
     assert!(good.encapsulated_key.is_empty());
     assert_eq!(good.nonce.len(), 12);
 
@@ -103,21 +103,21 @@ fn a_data_key_sealed_value_fails_each_tamper() {
     let mut c = s.ciphertext.to_vec();
     c[0] ^= 1;
     s.ciphertext = c.into();
-    assert_eq!(data.open(&s, CONTEXT), Err(OpenError::Failed));
+    assert_eq!(data.open(&s, DATA), Err(OpenError::Failed));
 
     let mut s = good.clone();
     let mut n = s.nonce.to_vec();
     n[0] ^= 1;
     s.nonce = n.into();
-    assert_eq!(data.open(&s, CONTEXT), Err(OpenError::Failed));
+    assert_eq!(data.open(&s, DATA), Err(OpenError::Failed));
 
     let mut s = good.clone();
     s.key_id = "other".to_string();
-    assert_eq!(data.open(&s, CONTEXT), Err(OpenError::Failed));
+    assert_eq!(data.open(&s, DATA), Err(OpenError::Failed));
 
     assert_eq!(data.open(&good, b"another field"), Err(OpenError::Failed));
     assert_eq!(
-        DataKey::from_bytes([6; 32]).open(&good, CONTEXT),
+        DataKey::from_bytes([6; 32]).open(&good, DATA),
         Err(OpenError::Failed)
     );
 }
@@ -125,12 +125,12 @@ fn a_data_key_sealed_value_fails_each_tamper() {
 #[test]
 fn a_destroyed_data_key_seals_and_opens_nothing() {
     let mut data = DataKey::from_bytes([5; 32]);
-    let sealed = data.seal(&key_id(), CONTEXT, SECRET).expect("seal");
+    let sealed = data.seal(&key_id(), DATA, SECRET).expect("seal");
     data.destroy();
     assert!(data.is_destroyed());
-    assert_eq!(data.open(&sealed, CONTEXT), Err(OpenError::KeyDestroyed));
+    assert_eq!(data.open(&sealed, DATA), Err(OpenError::KeyDestroyed));
     assert_eq!(
-        data.seal(&key_id(), CONTEXT, SECRET).unwrap_err(),
+        data.seal(&key_id(), DATA, SECRET).unwrap_err(),
         SealError::KeyDestroyed
     );
 }
@@ -141,12 +141,12 @@ fn a_destroyed_data_key_seals_and_opens_nothing() {
 #[test]
 fn shredding_the_wrapped_record_leaves_the_sealed_value_unrecoverable() {
     let data = DataKey::generate().expect("generate");
-    let sealed = data.seal(&key_id(), CONTEXT, SECRET).expect("seal");
+    let sealed = data.seal(&key_id(), DATA, SECRET).expect("seal");
     let wrapped = wrap(&kek(), &key_id(), SUBJECT, &data).expect("wrap");
     drop(data);
     drop(wrapped);
     let guess = DataKey::from_bytes([0; 32]);
-    assert_eq!(guess.open(&sealed, CONTEXT), Err(OpenError::Failed));
+    assert_eq!(guess.open(&sealed, DATA), Err(OpenError::Failed));
 }
 
 #[test]

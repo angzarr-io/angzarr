@@ -41,19 +41,19 @@ impl DataKey {
     /// Seals `plaintext` under this key with ChaCha20-Poly1305 and a fresh
     /// random nonce: the result has no `encapsulated_key` and carries its
     /// `nonce`; `key_id`, the algorithm (its kem and kdf unspecified, its aead
-    /// ChaCha20-Poly1305) and `context` are the aad
+    /// ChaCha20-Poly1305) and `data` are the aad
     /// ([`associated_data`](crate::associated_data)).
     pub fn seal(
         &self,
         _key_id: &KeyId,
-        _context: &[u8],
+        _data: &[u8],
         _plaintext: &[u8],
     ) -> Result<Sealed, SealError> {
         todo!("AEAD seal")
     }
 
     /// Opens what [`DataKey::seal`] sealed.
-    pub fn open(&self, _sealed: &Sealed, _context: &[u8]) -> Result<Vec<u8>, OpenError> {
+    pub fn open(&self, _sealed: &Sealed, _data: &[u8]) -> Result<Vec<u8>, OpenError> {
         todo!("AEAD open")
     }
 }

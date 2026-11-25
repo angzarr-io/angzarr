@@ -66,7 +66,7 @@ impl KeySet {
     }
 
     /// Seals to the current key, named by its id.
-    pub fn seal(&self, _context: &[u8], _plaintext: &[u8]) -> Result<Sealed, SealError> {
+    pub fn seal(&self, _data: &[u8], _plaintext: &[u8]) -> Result<Sealed, SealError> {
         todo!("crate::seal to the current key")
     }
 }
@@ -83,7 +83,7 @@ impl fmt::Debug for KeySet {
 /// [`OpenError::UnknownKey`] when the set holds no such key (the value is
 /// not authenticated yet: nothing was tried); otherwise as
 /// [`open`](crate::open).
-pub fn open_with(_set: &KeySet, _sealed: &Sealed, _context: &[u8]) -> Result<Vec<u8>, OpenError> {
+pub fn open_with(_set: &KeySet, _sealed: &Sealed, _data: &[u8]) -> Result<Vec<u8>, OpenError> {
     todo!("lookup by sealed.key_id, then open")
 }
 
