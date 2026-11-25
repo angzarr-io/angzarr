@@ -298,3 +298,39 @@ fn the_too_long_refusal_names_its_field_and_has_a_message() {
     assert_eq!(err.args().len(), 1);
     assert!(err.to_string().contains("seal-too-long"), "{err}");
 }
+
+/// Why: a known answer of the crate's OWN format (not the RFC's): the
+/// vector's ephemeral and recipient keys, key id "k1", data "session:abc"
+/// and the vectors' plaintext, under `INFO` and the documented aad. It pins
+/// the whole composition (info, aad layout, suite) so a change to any byte of
+/// the format is a red test, and it equals the RFC-checked schedule driven by
+/// hand.
+#[test]
+fn the_crates_own_format_has_a_known_answer() {
+    let ephemeral = RecipientPrivateKey::from_bytes(unhex_n(SKEM));
+    let pk_r = RecipientPublicKey::from_bytes(unhex_n(PKRM));
+    let plaintext = unhex(ENCRYPTIONS[0].1);
+    let key_id = KeyId::new("k1");
+    let sealed =
+        seal_with_ephemeral(&ephemeral, &pk_r, &key_id, b"session:abc", &plaintext).expect("seal");
+    assert_eq!(sealed.ciphertext.to_vec(), unhex("6f6d5064ef886ec4269f6a3e11a09657f7901f67808a0cc39015ab4f6533e621d646e3ba142b8a94dd5a7d2876"));
+    let aad = associated_data(&key_id, &suite(), b"session:abc").expect("aad");
+    let mut by_hand = crate::rfc9180::key_schedule(&unhex_n(SHARED_SECRET), INFO);
+    assert_eq!(sealed.ciphertext.to_vec(), by_hand.seal(&aad, &plaintext));
+}
+
+/// Why: an HPKE value has no nonce field (the nonce is derived), so a
+/// non-empty one is a second encoding of the same value: refused, not
+/// ignored.
+#[test]
+fn a_hpke_value_with_a_nonce_is_malformed() {
+    let (private, mut sealed) = sealed();
+    sealed.nonce = vec![1; 12].into();
+    assert_eq!(
+        open(&private, &sealed, DATA),
+        Err(OpenError::Malformed {
+            field: "nonce",
+            why: "not empty"
+        })
+    );
+}

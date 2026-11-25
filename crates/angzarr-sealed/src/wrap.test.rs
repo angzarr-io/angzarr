@@ -203,3 +203,19 @@ fn a_data_key_seal_names_its_algorithm_and_refuses_another() {
 fn the_key_encryption_keys_debug_names_the_type() {
     assert!(format!("{:?}", kek()).contains("KeyEncryptionKey"));
 }
+
+/// Why: a data-key value has no encapsulated key, so a non-empty one is a
+/// second encoding of the same value: refused, not ignored.
+#[test]
+fn a_data_key_value_with_an_encapsulated_key_is_malformed() {
+    let data = DataKey::from_bytes([5; 32]);
+    let mut sealed = data.seal(&key_id(), DATA, SECRET).expect("seal");
+    sealed.encapsulated_key = vec![1; 32].into();
+    assert_eq!(
+        data.open(&sealed, DATA),
+        Err(OpenError::Malformed {
+            field: "encapsulated_key",
+            why: "not empty"
+        })
+    );
+}
