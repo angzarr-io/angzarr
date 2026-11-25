@@ -1,6 +1,6 @@
 //! Generates angzarr's component contract, `io.angzarr.component.v1`
 //! (decision 14.64): every `.proto` under `io/angzarr/component/v1/` of
-//! angzarr-project's `proto/` (the `angzarr-project` submodule), found by
+//! angzarr-project's `proto/` (the `angzarr-project` cargo package), found by
 //! walking the directory. One tonic-prost-build pass writes the package's
 //! own messages (`DescribeRequest`) and every service's client and server
 //! modules, on the handler layer's messages (decision 14.78), extern-pathed

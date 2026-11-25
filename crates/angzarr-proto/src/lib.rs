@@ -2,7 +2,7 @@
 //! only, no tonic and no service (decisions 1.12 and 14.64).
 //!
 //! Generated from angzarr-project's `proto/` (the `angzarr-project`
-//! submodule of angzarr-core): every message of `io.angzarr.v1`, from every
+//! cargo package): every message of `io.angzarr.v1`, from every
 //! file under `io/angzarr/v1/`, the coordinator's records and envelopes. That
 //! is the books and pages (the `CommandPage` body, `Command` with its
 //! `Handling` or `Fact` with its `origin`; decision 14.79), covers,

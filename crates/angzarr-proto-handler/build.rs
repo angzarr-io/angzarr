@@ -1,6 +1,6 @@
 //! Generates angzarr's handler layer, `io.angzarr.handler.v1` (decision
 //! 14.78): every `.proto` under `io/angzarr/handler/v1/` of
-//! angzarr-project's `proto/` (the `angzarr-project` submodule), found by
+//! angzarr-project's `proto/` (the `angzarr-project` cargo package), found by
 //! walking the directory. One prost pass writes the package's messages, with
 //! core's extern-pathed onto angzarr-proto (`::angzarr_proto::v1`), so none
 //! is generated twice. The layer depends on core only, and core on nothing

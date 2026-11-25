@@ -1,8 +1,7 @@
 # angzarr, one workspace: core, router, embedded, build and platform.
 #
 # Flat layout: every crate is crates/<crate-name> (tools/archlint besides), so
-# a crate's `../angzarr-project/...` and `../<sibling>` paths are the ones it
-# had in its own repository. Crates between families are path dependencies;
+# a crate's `../<sibling>` paths are the ones it had in its own repository. Crates between families are path dependencies;
 # there is no pin, no [patch], no lockstep check.
 [workspace]
 members = [
@@ -34,10 +33,8 @@ members = [
     "crates/sqlite-store-opener",
     "tools/archlint",
 ]
-# sererr is a submodule with its own cargo workspace (its protos feed the
-# docs' `just buf-docs`); angzarr-project's crates are standalone workspaces.
 # families/ holds each source repository's non-crate files, not code.
-exclude = ["sererr", "angzarr-project", "families"]
+exclude = ["families"]
 # Resolver 2, as core, embedded, platform and router had it: resolver 3
 # (angzarr-build's) is MSRV-aware, and with embedded's rust-version 1.77 in
 # the same workspace it would resolve every dependency down to 1.77.
@@ -57,6 +54,10 @@ angzarr-proto = { path = "crates/angzarr-proto" }
 angzarr-proto-handler = { path = "crates/angzarr-proto-handler" }
 angzarr-ports = { path = "crates/angzarr-ports" }
 angzarr-embedded-host-config = { path = "crates/angzarr-embedded-host-config" }
+# The spec (proto/ and features/) as a cargo package, by git revision: Cargo.lock
+# is its one pin, and a local checkout overrides it through `[patch]`
+# (`cargo local-pins`), as for any other dependency.
+angzarr-project = { git = "https://github.com/angzarr-io/angzarr-project", rev = "7cd12058f4747be1ec3939d5bd3ee17e66fba380" }
 # rust-support (github.com/benjaminabbitt/rust-support), the generic substrate: localizable
 # errors, their rendering at the driving edge, a test's scratch directory, and the
 # platform seams (os, file-system) the SQLite store's opener opens files through. One

@@ -8,29 +8,15 @@
 
 use std::path::{Path, PathBuf};
 
-/// Resolves the proto root: the `ANGZARR_PROJECT_PROTO` override first,
-/// then the angzarr-project submodule's `proto/` at the repository root
-/// (two levels above every crate under `crates/`).
+/// The proto root: the spec package's `proto/` (`angzarr-project`, a
+/// build-dependency of every crate that includes this file). Cargo.lock pins
+/// the package; a local checkout overrides it through `[patch]`.
 pub fn proto_root() -> PathBuf {
-    println!("cargo:rerun-if-env-changed=ANGZARR_PROJECT_PROTO");
     println!("cargo:rerun-if-env-changed=PROTOC");
-    if let Ok(root) = std::env::var("ANGZARR_PROJECT_PROTO") {
-        return PathBuf::from(root);
-    }
-    let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
-    let submodule = manifest.join("../../angzarr-project/proto");
-    if submodule.join("io/angzarr/v1/types.proto").exists() {
-        return without_verbatim(
-            submodule
-                .canonicalize()
-                .expect("canonicalize the proto root"),
-        );
-    }
-    panic!(
-        "angzarr protos not found at {} (is the angzarr-project submodule checked out, at a \
-         revision with proto/io/angzarr/v1?); set ANGZARR_PROJECT_PROTO",
-        submodule.display()
-    );
+    let root = angzarr_project::proto_dir();
+    without_verbatim(root.canonicalize().unwrap_or_else(|e| {
+        panic!("the angzarr-project package's proto/ at {}: {e}", root.display())
+    }))
 }
 
 /// `path` without Windows' verbatim prefix (`\\?\`), which `canonicalize`

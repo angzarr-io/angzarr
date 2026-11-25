@@ -1,7 +1,7 @@
 //! Generates angzarr's distributed transport,
 //! `io.angzarr.transport.distributed.v1` (decision 14.64): every `.proto`
 //! under `io/angzarr/transport/distributed/v1/` of angzarr-project's
-//! `proto/` (the `angzarr-project` submodule). A prost pass first generates
+//! `proto/` (the `angzarr-project` cargo package). A prost pass first generates
 //! `sererr/v1/sererr.proto`, which its dead-letter envelope imports for the
 //! captured stack trace (the one package that imports sererr); then one
 //! tonic-prost-build pass writes the package's messages and every service's

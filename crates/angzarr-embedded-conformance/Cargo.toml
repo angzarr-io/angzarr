@@ -15,6 +15,7 @@ rust-version = "1.89"
 # (angzarr-router's conformance crate), at the same version. The kernel runs
 # over angzarr-ports' MemoryStore (angzarr-embedded's `test-support`).
 [dev-dependencies]
+angzarr-project.workspace = true
 angzarr-embedded = { path = "../angzarr-embedded", features = ["test-support"] }
 cucumber = "0.21"
 # The compensation fixture's messages (handler-contract/compensation.feature):

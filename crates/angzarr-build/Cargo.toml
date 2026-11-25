@@ -19,6 +19,7 @@ coded-diagnostic.workspace = true
 prost-build = "0.14"
 
 [dev-dependencies]
+angzarr-project.workspace = true
 presentation.workspace = true
 test-dir.workspace = true
 syn = { version = "3.0.9", features = ["full"] }

@@ -1,7 +1,7 @@
 //! Generates every `io.angzarr.v1` message from the canonical protos:
-//! angzarr-project's `proto/`, which this repository carries as the
-//! `angzarr-project` submodule (the crate moved here from angzarr-project's
-//! `rust/`).
+//! angzarr-project's `proto/`, which this crate takes from the
+//! `angzarr-project` cargo package (a build-dependency, pinned by
+//! Cargo.lock).
 //!
 //! Core's package only (decision 14.64): every `.proto` under
 //! `io/angzarr/v1/` is compiled, found by walking the directory, so a file

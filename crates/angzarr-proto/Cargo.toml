@@ -22,9 +22,11 @@ uuid = { version = "1", default-features = false, features = ["v5"] }
 # No features, and no tonic (decision 1.12, restored by 14.64): the services
 # are angzarr-proto-component's and the transports' crates', beside this one.
 [build-dependencies]
+angzarr-project.workspace = true
 prost-build = "0.14"
 
 [dev-dependencies]
+angzarr-project.workspace = true
 # The protos tests' scratch directory (std alone).
 test-dir.workspace = true
 

@@ -1,3 +1,4 @@
+include = [{ path = "local-pins.toml", optional = true }]
 # Cargo configuration for faster builds
 # mold is a high-performance linker (50-80% faster linking)
 

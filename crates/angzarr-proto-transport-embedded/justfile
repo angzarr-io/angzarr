@@ -1,7 +1,7 @@
 # angzarr-proto-transport-embedded: the local-process transport
 # (io.angzarr.transport.embedded.v1): its constants and keys, prost only. Needs protoc on
-# PATH (or PROTOC set) and the angzarr-project submodule checked out
-# (build.rs reads its proto/). A member of angzarr-core's workspace: every
+# PATH (or PROTOC set) and network access to github.com for the
+# angzarr-project package (build.rs reads its proto/). A member of angzarr-core's workspace: every
 # recipe names this package, and --locked means the workspace's Cargo.lock.
 # Runs on the host (`just -f crates/angzarr-proto-transport-embedded/justfile check`).
 

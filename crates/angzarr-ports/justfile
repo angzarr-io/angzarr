@@ -1,7 +1,7 @@
 # angzarr-ports: the shared storage contract and its conformance suite.
 # Needs protoc on PATH (or PROTOC set, for angzarr-proto), the
-# wasm32-unknown-unknown target, and the angzarr-project submodule checked
-# out (angzarr-proto's build.rs reads its proto/). A member of angzarr-core's
+# wasm32-unknown-unknown target, and network access to github.com for the
+# angzarr-project package (angzarr-proto's build.rs reads its proto/). A member of angzarr-core's
 # workspace: every recipe names this package, and --locked means the
 # workspace's Cargo.lock. Runs on the host, not in core's toolchain container
 # (`just -f crates/angzarr-ports/justfile check`).

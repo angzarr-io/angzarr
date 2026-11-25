@@ -1,7 +1,7 @@
 //! Generates angzarr's local-process transport,
 //! `io.angzarr.transport.embedded.v1` (decision 14.64): every `.proto`
 //! under `io/angzarr/transport/embedded/v1/` of angzarr-project's `proto/`
-//! (the `angzarr-project` submodule), prost only, core's messages
+//! (the `angzarr-project` cargo package), prost only, core's messages
 //! extern-pathed onto angzarr-proto. It declares no service.
 //!
 //! From the encoded `FileDescriptorSet` (also the library's

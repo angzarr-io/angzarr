@@ -114,3 +114,4 @@ dist/
 .scm/memory/
 target/
 mutants.out*/
+/.cargo/local-pins.toml

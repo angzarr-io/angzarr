@@ -25,6 +25,7 @@ tonic = { version = "0.14", default-features = false, features = ["codegen"] }
 tonic-prost = "0.14"
 
 [build-dependencies]
+angzarr-project.workspace = true
 prost-build = "0.14"
 # No default features: neither tonic-build's transport (build_transport(false))
 # nor prost-build's markdown clean-up of doc comments.
