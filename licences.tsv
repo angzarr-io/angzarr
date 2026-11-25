@@ -14,6 +14,7 @@ angzarr-embedded-catalog-check	B	test-only: error codes against Fluent catalogs	
 angzarr-embedded-conformance	B	test-only: the coordinator-contract tier on the kernel	Test-only, never linked into an application. Follows its family.
 angzarr-ports	B	the shared storage contract and its conformance suite	Shared by the distributed runtime and embedded: the owner's example of why the exception exists. Also a dependency of angzarr-router (C).
 angzarr-bus	B	the bus interface and its conformance kit	
+angzarr-sealed	C	a Sealed protobuf message and its HPKE seal/open and data-key wrap helpers	Client-linked by the rule: reusable by any process that carries a secret in a message. Depends on no angzarr crate.
 angzarr-yaml	B	a strict YAML subset	
 angzarr-store-transfer	B	a store carried across a proto generation	
 angzarr-proto	C	prost types of the wire contract	

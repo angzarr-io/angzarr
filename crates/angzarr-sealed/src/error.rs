@@ -1,0 +1,136 @@
+//! The crate's errors: a code, args and an en-US message each.
+
+use std::fmt;
+
+use coded_diagnostic::{code, Arg, Diagnostic};
+
+/// Why a [`Sealed`](crate::Sealed) was not made.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SealError {
+    /// The recipient key is a low-order point, so the Diffie-Hellman shared
+    /// secret is all zero (RFC 7748 section 6.1, RFC 9180 section 7.1.4).
+    WeakSharedSecret,
+    /// The system random source failed.
+    RngFailed,
+    /// The data key was destroyed.
+    KeyDestroyed,
+}
+
+/// Why a [`Sealed`](crate::Sealed) was not opened. Every cryptographic
+/// failure is the one `Failed`: it says nothing of which field was wrong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OpenError {
+    /// The authentication failed: the value was altered (any field), was
+    /// made for another key, or was sealed for another context.
+    Failed,
+    /// The algorithm is not the one suite this crate implements.
+    UnsupportedAlgorithm,
+    /// A field is the wrong size or missing.
+    Malformed {
+        /// The field's name.
+        field: &'static str,
+        /// What is wrong with it.
+        why: &'static str,
+    },
+    /// The data key was destroyed.
+    KeyDestroyed,
+}
+
+/// Why a data key was not wrapped or unwrapped.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WrapError {
+    /// The authentication failed: altered, another key-encryption key, or
+    /// another subject.
+    Failed,
+    /// A field is the wrong size or missing.
+    Malformed {
+        /// The field's name.
+        field: &'static str,
+        /// What is wrong with it.
+        why: &'static str,
+    },
+}
+
+/// The args of a `Malformed` variant: its field and why.
+trait Malformed {
+    fn malformed(&self) -> Option<(&'static str, &'static str)>;
+}
+impl Malformed for OpenError {
+    fn malformed(&self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Malformed { field, why } => Some((field, why)),
+            _ => None,
+        }
+    }
+}
+impl Malformed for WrapError {
+    fn malformed(&self) -> Option<(&'static str, &'static str)> {
+        match self {
+            Self::Malformed { field, why } => Some((field, why)),
+            _ => None,
+        }
+    }
+}
+fn malformed_args<E: Malformed>(e: &E) -> Vec<(&str, Arg)> {
+    e.malformed()
+        .map(|(field, why)| vec![("field", Arg::from(field)), ("why", Arg::from(why))])
+        .unwrap_or_default()
+}
+
+macro_rules! diagnostic {
+    ($type:ty { $($variant:pat => $code:expr),+ $(,)? }, $args:expr) => {
+        impl fmt::Display for $type {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                coded_diagnostic::display(self, f)
+            }
+        }
+        impl std::error::Error for $type {}
+        impl Diagnostic for $type {
+            fn code(&self) -> &str {
+                match self { $($variant => $code),+ }
+            }
+            fn args(&self) -> Vec<(&str, Arg)> {
+                $args(self)
+            }
+        }
+    };
+}
+
+diagnostic!(SealError {
+    Self::WeakSharedSecret => code!("seal-weak-shared-secret"),
+    Self::RngFailed => code!("seal-rng-failed"),
+    Self::KeyDestroyed => code!("seal-key-destroyed"),
+}, |_: &SealError| Vec::new());
+
+diagnostic!(OpenError {
+    Self::Failed => code!("open-failed"),
+    Self::UnsupportedAlgorithm => code!("open-unsupported-algorithm"),
+    Self::Malformed { .. } => code!("open-malformed"),
+    Self::KeyDestroyed => code!("open-key-destroyed"),
+}, malformed_args::<OpenError>);
+
+diagnostic!(WrapError {
+    Self::Failed => code!("wrap-failed"),
+    Self::Malformed { .. } => code!("wrap-malformed"),
+}, malformed_args::<WrapError>);
+
+/// One value of every error, each variant once.
+pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
+    vec![
+        Box::new(SealError::WeakSharedSecret),
+        Box::new(SealError::RngFailed),
+        Box::new(SealError::KeyDestroyed),
+        Box::new(OpenError::Failed),
+        Box::new(OpenError::UnsupportedAlgorithm),
+        Box::new(OpenError::Malformed {
+            field: "ciphertext",
+            why: "empty",
+        }),
+        Box::new(OpenError::KeyDestroyed),
+        Box::new(WrapError::Failed),
+        Box::new(WrapError::Malformed {
+            field: "nonce",
+            why: "not 12 bytes",
+        }),
+    ]
+}

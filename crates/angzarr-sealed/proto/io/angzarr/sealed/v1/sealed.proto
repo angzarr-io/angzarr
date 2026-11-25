@@ -1,0 +1,66 @@
+syntax = "proto3";
+
+// A secret field of a message, encrypted to the key of the process that will
+// use it, so the message may cross processes and machines and rest in a
+// store with the secret never in plaintext.
+//
+// The shape follows Kubernetes' KMS v2 EncryptedObject (key id, the
+// ciphertext, the algorithm) and Tink's HpkeParams (kem, kdf, aead named
+// apart). The construction is RFC 9180 HPKE, base mode, one suite.
+package io.angzarr.sealed.v1;
+
+// The key encapsulation mechanism, RFC 9180 section 7.1 (IANA HPKE KEM Ids).
+enum Kem {
+  KEM_UNSPECIFIED = 0;
+  // DHKEM(X25519, HKDF-SHA256), kem_id 0x0020.
+  KEM_DHKEM_X25519_HKDF_SHA256 = 1;
+}
+
+// The key derivation function, RFC 9180 section 7.2 (kdf_id).
+enum Kdf {
+  KDF_UNSPECIFIED = 0;
+  // HKDF-SHA256, kdf_id 0x0001.
+  KDF_HKDF_SHA256 = 1;
+}
+
+// The AEAD, RFC 9180 section 7.3 (aead_id).
+enum Aead {
+  AEAD_UNSPECIFIED = 0;
+  // ChaCha20-Poly1305, aead_id 0x0003.
+  AEAD_CHACHA20_POLY1305 = 1;
+}
+
+// The suite a Sealed was made with. It is bound as associated data, so a
+// stripped or rewritten algorithm fails to open.
+message Algorithm {
+  Kem kem = 1;
+  Kdf kdf = 2;
+  Aead aead = 3;
+}
+
+// A field's secret, sealed to a recipient's public key.
+message Sealed {
+  // Names the recipient key that can open it (its owner's choice of
+  // name, so a key can be rotated by naming the new one).
+  string key_id = 1;
+  Algorithm algorithm = 2;
+  // The KEM's encapsulated key (RFC 9180 `enc`): the sender's ephemeral
+  // public key. Empty for a Sealed made under a data key.
+  bytes encapsulated_key = 3;
+  // The AEAD's nonce where the construction does not derive it (a Sealed
+  // under a data key); empty for HPKE, whose nonce is derived.
+  bytes nonce = 4;
+  // The AEAD's output: the encrypted secret then its authentication tag.
+  bytes ciphertext = 5;
+}
+
+// A per-subject data key, encrypted under a key-encryption key (envelope
+// encryption). Destroying the key-encryption key or this record shreds
+// everything sealed under the data key.
+message WrappedKey {
+  // Names the key-encryption key that wrapped it.
+  string key_id = 1;
+  Aead aead = 2;
+  bytes nonce = 3;
+  bytes ciphertext = 4;
+}

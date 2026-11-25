@@ -28,6 +28,7 @@ members = [
     "crates/angzarr-reads",
     "crates/angzarr-router",
     "crates/angzarr-router-conformance",
+    "crates/angzarr-sealed",
     "crates/angzarr-store-sqlite",
     "crates/angzarr-store-transfer",
     "crates/angzarr-yaml",
