@@ -289,9 +289,14 @@ impl<T: EventStore + SnapshotStore + PositionStore + ?Sized> Store for T {}
 ///   holds (a snapshot, dead letters) and answers 0; a purge at more is a
 ///   conflict (a racing purge got there first).
 /// - An edition stream's head is its head as read (main's events below its
-///   fork, then its own); a purge removes only its own rows, never main's,
-///   and it reads as main's again: an edition stream is not tombstoned (it
-///   is re-forked).
+///   fork, then its own); a purge deletes only its own events, never main's
+///   and never its fork (which is what makes the edition), and appends a
+///   tombstone on the edition at that head. A reader of the edition then
+///   reads main's events below the fork (they are main's), the fork, and
+///   the tombstone: the edition's own history is closed, a fold restarts
+///   from its default state there, and what the edition writes after it
+///   continues past it. An edition stream with no row of its own reads as
+///   main's: a purge of it removes nothing and appends nothing.
 /// - A head is a length and sequences never restart, so a stream purged
 ///   and written again can never pass the guard or a position for the
 ///   stream it was.

@@ -1409,6 +1409,23 @@ where
         ),
         "main below the fork, the fork, the edition's tombstone"
     );
+}
+
+/// An edition's tombstone is a main stream's: a repeat purge with nothing
+/// after it is a no-op, the edition's writes continue past it, and a second
+/// purge keeps the first tombstone.
+pub async fn an_edition_purge_continues_and_repeats_like_a_mains<S>(store: S)
+where
+    S: Store + Purge,
+{
+    let main = main_stream("account", 1);
+    let e = edition_stream("account", 1, "what-if");
+    append(&store, main, 0, &[page(0, 1), page(1, 1)])
+        .await
+        .unwrap();
+    assert_eq!(fork(&store, e).await, 2);
+    append(&store, e, 3, &[page(3, 5)]).await.unwrap();
+    assert_eq!(store.purge(e, 4).await, Ok(1));
     assert_eq!(
         store.purge(e, 5).await,
         Ok(0),
@@ -4036,6 +4053,7 @@ macro_rules! store_contract {
             a_purge_deletes_a_snapshot_with_no_events,
             a_purged_stream_continues_after_its_tombstone,
             a_second_purge_keeps_the_first_tombstone,
+            an_edition_purge_continues_and_repeats_like_a_mains,
             a_purge_of_an_unforked_edition_stream_removes_nothing,
             a_purge_at_the_streams_head_removes_it,
             a_purge_at_a_stale_head_is_a_conflict_and_removes_nothing,

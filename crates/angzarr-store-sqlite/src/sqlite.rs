@@ -1234,11 +1234,18 @@ impl Purge for SqliteStore {
             return Err(StoreError::conflict(stream, expected, actual));
         }
         let cover = stream.to_cover();
-        let deleted = match stream.edition {
-            // A main stream is kept: the events after its last tombstone
-            // are deleted and a tombstone follows them, if there were any.
-            None => {
-                let mut from = 0;
+        // The stream is kept, main's or an edition's: the events after its
+        // last tombstone are deleted (an edition's fork stays, it is what
+        // makes the edition) and a tombstone follows them, if there were
+        // any, at the head as the stream reads.
+        let own = match stream.edition {
+            None => Some(-1),
+            Some(_) => ex.own_first(stream).await?,
+        };
+        let deleted = match own {
+            None => 0,
+            Some(fork) => {
+                let mut from = u64::try_from(fork + 1).unwrap_or(0);
                 let [domain, root, edition] = view_of(stream);
                 let candidates = ex
                     .pages(
@@ -1253,7 +1260,7 @@ impl Purge for SqliteStore {
                     )
                     .await?;
                 if let Some(last) = candidates.iter().find(|page| tombstone::is(page)) {
-                    from = last.sequence + 1;
+                    from = from.max(last.sequence + 1);
                 }
                 let deleted = ex
                     .built_execute(statements::delete_events_from::<SqliteDialect>(
@@ -1267,17 +1274,13 @@ impl Purge for SqliteStore {
                 }
                 deleted
             }
-            Some(_) => {
-                ex.built_execute(statements::delete_events::<SqliteDialect>(&cover))
-                    .await?
-            }
         };
         ex.built_execute(statements::delete_snapshot::<SqliteDialect>(&cover))
             .await?;
         // The positions on it stay: they are its drivers' record of what
         // their handlers processed, which a purge never touches (14.68).
         ex.delete_letters(stream).await?;
-        if deleted > 0 || stream.edition.is_some() {
+        if deleted > 0 {
             ex.touch(stream, true).await?;
         }
         ex.count();

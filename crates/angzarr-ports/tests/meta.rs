@@ -2370,6 +2370,7 @@ fn an_honest_broken_store_passes_every_check() {
         a_purge_never_takes_the_positions_on_its_stream,
         a_purge_of_a_forked_stream_is_guarded_by_its_head_as_read,
         a_purge_of_an_unforked_edition_stream_removes_nothing,
+        an_edition_purge_continues_and_repeats_like_a_mains,
         a_second_purge_keeps_the_first_tombstone,
         list_editions_derives_each_edition_from_its_fork_events,
         a_removed_edition_stream_loses_every_row_of_it,

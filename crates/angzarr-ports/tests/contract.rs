@@ -46,7 +46,9 @@
 //!   later write continues after the tombstone, and readers fold it as an
 //!   ordinary event. A repeat purge removes the events after the last
 //!   tombstone and adds a tombstone only if it removed any; old tombstones
-//!   stay. The positions on the stream stay and stay true. This supersedes
+//!   stay. An edition stream is tombstoned alike, on the edition, and keeps
+//!   its fork (the edition's own history is closed; main's events below the
+//!   fork are main's and stay). The positions on the stream stay and stay true. This supersedes
 //!   14.68 (a purge deleted the stream whole; a driver found it gone by its
 //!   listing and forgot it).
 //! - **RULED(11, B, C, E1) Editions are per-stream forks (14.32), each

@@ -181,7 +181,7 @@ impl Log {
     /// tombstone and the log holds one).
     fn has_events_after_tombstone(&self) -> bool {
         let from = self.last_tombstone().map_or(0, |at| at + 1);
-        self.range(from, self.len).next().is_some()
+        self.range(from, self.len).any(|page| !is_fork(page))
     }
 
     /// The position of the last tombstone, if any.
@@ -205,7 +205,8 @@ impl Log {
             }
             let pages = Arc::make_mut(pages);
             for (offset, page) in pages.iter_mut().enumerate() {
-                if *start + offset >= from && page.take().is_some() {
+                if *start + offset >= from && page.as_ref().is_some_and(|p| !is_fork(p)) {
+                    *page = None;
                     removed += 1;
                 }
             }
@@ -407,18 +408,28 @@ impl Data {
         let Some(log) = self.streams.get(k) else {
             return 0;
         };
-        if k.1.is_none() {
-            // A main stream is kept: its events after the last tombstone
-            // are deleted and a tombstone follows them, if any were.
-            if !log.has_events_after_tombstone() {
-                return 0;
-            }
-            let streams = Arc::make_mut(&mut self.streams);
-            let log = Arc::make_mut(streams.get_mut(k).expect("held above"));
-            let removed = log.empty_after_tombstone();
-            let head = log.len() as u64;
-            log.push(tombstone::page(head));
-            return removed;
+        // A stream is kept, main's or an edition's: its events after the
+        // last tombstone are deleted (an edition's fork stays: it is what
+        // makes the edition) and a tombstone follows them, if any were,
+        // at the next sequence as the stream reads.
+        if !log.has_events_after_tombstone() {
+            return 0;
+        }
+        let head = self.view(k).len() as u64;
+        let streams = Arc::make_mut(&mut self.streams);
+        let log = Arc::make_mut(streams.get_mut(k).expect("held above"));
+        let removed = log.empty_after_tombstone();
+        log.push(tombstone::page(head));
+        removed
+    }
+
+    /// Delete every own row of stream `k`: an edition stream's removal.
+    fn drop_stream(&mut self, k: &Key) -> u64 {
+        if self.snapshots.contains_key(k) {
+            Arc::make_mut(&mut self.snapshots).remove(k);
+        }
+        if self.letters_of(k).next().is_some() {
+            Arc::make_mut(&mut self.dead_letters).retain(|(stream, ..), _| stream != k);
         }
         Arc::make_mut(&mut self.streams)
             .remove(k)
@@ -436,7 +447,7 @@ impl Data {
         if self.outbox.iter().any(written_with) {
             Arc::make_mut(&mut self.outbox).retain(|p| !written_with(p));
         }
-        self.purge(k)
+        self.drop_stream(k)
     }
 }
 
@@ -696,7 +707,7 @@ impl State {
         self.commands.remove(k);
         let removed = Arc::make_mut(&mut self.data).purge(k);
         // A purge that removed no event lands nothing a follower reads.
-        if removed > 0 || k.1.is_some() {
+        if removed > 0 {
             self.changes.record(cover(k), true);
         }
         removed
