@@ -252,9 +252,7 @@ impl Harness for Embedded {
         let id = u128::from(self.commands.fetch_add(1, Ordering::Relaxed));
         // A new or purged stream (its last event a tombstone) is opened.
         let stored = pages(self.memory(), stream);
-        let fresh = stored
-            .last()
-            .is_none_or(|page| angzarr_ports::tombstone::is(page));
+        let fresh = stored.last().is_none_or(angzarr_ports::tombstone::is);
         let sampled = at(10 + id as i64);
         let handled = match (stream.domain.as_str(), fresh) {
             ("account", true) => {

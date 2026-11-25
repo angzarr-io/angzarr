@@ -79,6 +79,18 @@ const NO_EDITION_ADMIN: Tag = Tag {
     why: "the edition administration RPCs (ForkStream, ListEditions, DeleteEdition) are the distributed transport's: angzarr-embedded serves none",
 };
 
+/// A purge keeps its stream: it deletes the events and appends one
+/// tombstone ([`angzarr_ports::tombstone`]) at the next sequence, so
+/// sequences never restart. The stream stays listed, a projector is handed
+/// the tombstone as an ordinary event (no gone book), and a policy's driver
+/// moves its position past it without calling the policy, rather than
+/// forgetting the stream. The coordinator contract (decision 14.68) says a
+/// purged stream is gone: this tier's scenarios of it are superseded.
+const TOMBSTONE_PURGE: Tag = Tag {
+    name: "divergence_tombstone_purge",
+    why: "a purge keeps the stream and leaves a tombstone, an event like another: nothing is handed gone or forgotten (supersedes decision 14.68)",
+};
+
 /// No query interface. angzarr-embedded serves no query RPC
 /// (EventQueryService, ListStreams, a TemporalQuery) and no Subscribe: an
 /// application reads its streams through its store, and the kernel loads
@@ -209,6 +221,9 @@ const TAGGED: &[(&str, Tag)] = &[
     ("C-0556", NO_QUERY),
     ("C-0560", NO_QUERY),
     ("C-0558#4", IN_PROCESS_CHAIN),
+    // processed_state.feature
+    ("C-0772", TOMBSTONE_PURGE),
+    ("C-0773", TOMBSTONE_PURGE),
     // state_building.feature
     ("C-0281", UNBOUND_FOLD),
     ("C-0282", UNBOUND_FOLD),
