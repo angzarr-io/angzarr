@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::testkit::{key_id, DATA, SECRET};
+use crate::{Aead, Algorithm};
 
 const SUBJECT: &[u8] = b"projects/p/sessions/s";
 
@@ -164,4 +165,41 @@ fn the_keys_debug_renders_no_byte() {
             "{shown}"
         );
     }
+}
+
+/// Why: a fresh key must not read as destroyed, or a caller that checks
+/// before use would refuse every key.
+#[test]
+fn a_fresh_data_key_is_not_destroyed_and_a_destroyed_one_says_so_in_debug() {
+    let mut data = DataKey::from_bytes([5; 32]);
+    assert!(!data.is_destroyed());
+    assert!(format!("{data:?}").contains("destroyed: false"));
+    data.destroy();
+    assert!(format!("{data:?}").contains("destroyed: true"));
+}
+
+/// Why: a data-key seal names exactly its suite (no kem, no kdf,
+/// ChaCha20-Poly1305), and a value naming another suite is refused.
+#[test]
+fn a_data_key_seal_names_its_algorithm_and_refuses_another() {
+    let data = DataKey::from_bytes([5; 32]);
+    let mut sealed = data.seal(&key_id(), DATA, SECRET).expect("seal");
+    assert_eq!(
+        sealed.algorithm,
+        Some(Algorithm {
+            kem: 0,
+            kdf: 0,
+            aead: Aead::Chacha20Poly1305.into()
+        })
+    );
+    sealed.algorithm = Some(crate::suite());
+    assert_eq!(
+        data.open(&sealed, DATA),
+        Err(OpenError::UnsupportedAlgorithm)
+    );
+}
+
+#[test]
+fn the_key_encryption_keys_debug_names_the_type() {
+    assert!(format!("{:?}", kek()).contains("KeyEncryptionKey"));
 }

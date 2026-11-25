@@ -157,3 +157,12 @@ fn the_schedule_debug_renders_no_key_byte() {
         assert!(!shown.contains(secret), "{shown}");
     }
 }
+
+#[test]
+fn the_schedule_debug_names_the_type_and_the_sequence() {
+    let shown = format!("{:?}", schedule());
+    assert!(
+        shown.contains("Schedule") && shown.contains("sequence: 0"),
+        "{shown}"
+    );
+}
