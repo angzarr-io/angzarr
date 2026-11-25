@@ -388,7 +388,7 @@ impl Coordinator {
     /// Events of the types `names` appended to `cover`, at its head, as a
     /// command of the past recorded them.
     pub(crate) fn write(&mut self, cover: &Cover, names: &[&str]) {
-        let head = self.pages(cover).len() as u64;
+        let head = futures_head(&self.store, cover);
         let pages: Vec<EventPage> = (head..)
             .zip(names)
             .map(|(sequence, name)| EventPage {
@@ -800,4 +800,12 @@ pub(crate) fn origin_of(page: &CommandPage) -> Option<FactOrigin> {
         Some(command_page::Body::Fact(fact)) => fact.origin.clone(),
         _ => None,
     }
+}
+
+/// `cover`'s stream's next sequence, past its tombstones.
+fn futures_head(store: &impl angzarr_embedded::EventStore, cover: &Cover) -> u64 {
+    angzarr_embedded::EventStore::head(store, sref(cover))
+        .ready()
+        .expect("the in-memory store")
+        .next_sequence
 }
