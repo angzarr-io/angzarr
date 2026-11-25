@@ -71,10 +71,9 @@ handler layer's requests and answers from `angzarr-proto-handler`
 (`angzarr_router::hpb`, the same types as `angzarr_proto_handler::v1`). The
 router generates none and has no build script; the conformance harness's
 fixture pool imports the protos angzarr-proto embeds, and the handler
-layer's from the spec submodule. The repo-local `angzarr-project/`
-submodule (the org convention) supplies the handler-contract tier's
-features and fixtures, which `just check-core-lockstep` holds at the spec
-commit core built its crates from. The reason keys are core's
+layer's from the `angzarr-project` cargo package. The same package
+supplies the handler-contract tier's features and fixtures, at the one
+commit Cargo.lock pins for every crate. The reason keys are core's
 `AngzarrReason` (decision 14.104), the router raising those its comment
 says are raised by the router, each answered as its full value name
 (`as_str_name()`, e.g. `ANGZARR_REASON_DUPLICATE_COMPONENT`).

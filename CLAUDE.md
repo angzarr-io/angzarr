@@ -9,9 +9,14 @@ histories are not here. README.md has the crate and licence table. The generic
 substrate (`coded-diagnostic`, `presentation`, `os`, `file-system`, `file-lock`,
 `test-dir`) is rust-support's, not this workspace's.
 
-The spec, protos and design docs are the `angzarr-project` submodule
-(`git submodule update --init`); build scripts read its protos, so the
-submodule must be checked out and `protoc` on `PATH`. The distributed
+The spec (`proto/` and `features/`) is the `angzarr-project` cargo package, a
+git dependency pinned by full commit in the root `Cargo.toml` (Cargo.lock is
+the only pin): build scripts and tests read it through
+`angzarr_project::proto_dir()` and `features_dir()`, so building needs
+`protoc` on `PATH` and github.com reachable. To build against a local
+checkout of the spec, `cargo local-pins angzarr-project` writes the
+gitignored `[patch]` (never commit it or a Cargo.lock it rewrote); there is no
+other override. The distributed
 runtime is retired and to be brought back (README, "Retired").
 
 ## Layout and dependencies
@@ -38,7 +43,7 @@ runtime is retired and to be brought back (README, "Retired").
 - `angzarr-embedded` and `angzarr-router` must keep building for
   `wasm32-unknown-unknown` (`just wasm`, `just wasm-router`).
 - Only the root `Cargo.toml` profiles apply (size-optimised, `panic = "abort"` in
-  release). The submodule pointer moves only when the spec itself is bumped,
+  release). The `angzarr-project` rev moves only when the spec itself is bumped,
   never in passing.
 - The codegen constants `ANGZARR_EMBEDDED_REV` and `ANGZARR_BUILD_REV` name a
   commit already on main: a generated app is an external consumer. Move them in
@@ -80,8 +85,8 @@ Use `just`, never plain cargo for the gates; `just --list`. Each gate prints one
 `ok` line, or `FAIL`, the extract and a log in `target/logs/<gate>.log`
 (`VERBOSE=1` shows all). `just test` runs cargo-nextest (targets with
 `harness = false` run by `cargo test`); `just test-pkg <crate>...` is the quick
-loop; `just selftest` tests the gates; core's own recipes (buf, images,
-per-crate justfiles) are the `core` module: `just core::buf-lint`.
+loop; `just selftest` tests the gates; core's own recipes (images,
+per-crate justfiles) are the `core` module: `just core::check-shared-crates`.
 
 - Hooks are lefthook's (`just hooks-install`, once per clone). Pre-commit: fmt of
   the staged files, secrets (gitleaks; a fake secret in a test ends its line with
@@ -113,7 +118,7 @@ Nothing is done until tests that execute prove it. Never write a blank `pass` te
   cucumber (`angzarr-router-conformance`, `angzarr-embedded-conformance`).
 - **Every embedded scenario is bound or tagged** (`tags.test.rs`): a divergence from
   the distributed design is a tag with its reason, never prose. Moving the spec is
-  `just spec-vendor <rev>`, then bind or tag what is new.
+  a new `rev` of `angzarr-project` in the root `Cargo.toml`, then bind or tag what is new.
 - Gherkin describes what and why, never how: if the wording changes when the
   implementation changes, abstract it. Given is past state, When one action,
   Then a business outcome; no UI steps, conditionals or hard-coded data.

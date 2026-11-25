@@ -9,7 +9,7 @@ on:
     branches: [main]
     paths: &core_paths
       - 'proto/**'
-      - 'angzarr-project'
+      - 'Cargo.lock'
       - 'just/core.just'
       - 'crates/angzarr-proto*/**'
       - 'crates/angzarr-ports/**'
@@ -38,37 +38,16 @@ env:
   CARGO_DENY_VERSION: '0.20.2'
 
 jobs:
-  # Unbypassable guard against `--no-verify` / `LEFTHOOK=0` locally. Mirrors
-  # the parent-side check that lefthook runs on pre-commit. Pointer-only
-  # bumps pass; dirty submodule working trees fail.
-  submodules:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          submodules: true
-
-      - name: Install just
-        uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2.0.0
-        with:
-          just-version: ${{ env.JUST_VERSION }}
-
-      - name: Verify submodules are clean
-        run: just check-submodules-clean
-
-  # Every check of every shared crate (`just check-shared-crates`: the
-  # submodule cannot clash with them, then each crate's fmt-check, build,
-  # lint, test and, where it has them, wasm and wasm-test), on the runner
+  # Every check of every shared crate (`just check-shared-crates`: each
+  # crate's fmt-check, build, lint, test and, where it has them, wasm and
+  # wasm-test), on the runner
   # itself: the crates need protoc, the wasm32 target,
   # wasm-bindgen-test-runner and node.
   shared-crates:
     name: Shared crates
     runs-on: ubuntu-latest
-    needs: [submodules]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          submodules: true
 
       - name: Install just
         uses: extractions/setup-just@dd310ad5a97d8e7b41793f8ef055398d51ad4de6 # v2.0.0
@@ -109,40 +88,3 @@ jobs:
 
       - name: Every shared crate's checks
         run: just core::check-shared-crates
-
-  # The spec's protos, as the angzarr-project submodule pins them.
-  protos:
-    name: Protos (buf)
-    runs-on: ubuntu-latest
-    needs: [submodules]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-        with:
-          submodules: true
-
-      - name: Log in to Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Buf lint
-        run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace/angzarr-project/proto \
-            ghcr.io/angzarr-io/angzarr-rust:latest \
-            buf lint
-
-      - name: Buf breaking changes
-        if: github.event_name == 'pull_request'
-        run: |
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace/angzarr-project/proto \
-            ghcr.io/angzarr-io/angzarr-rust:latest \
-            buf breaking --against 'https://github.com/${{ github.repository }}.git#branch=main'
-        continue-on-error: true

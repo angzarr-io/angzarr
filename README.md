@@ -27,9 +27,9 @@ The generic substrate (localizable errors and their rendering, the operating-sys
 and filesystem seams, a test's scratch directory) is [rust-support](https://github.com/benjaminabbitt/rust-support),
 a git dependency pinned by full commit in the root `Cargo.toml`.
 
-`tools/archlint` checks module-level layering of the router crates. The spec,
-protos and design documents are the `angzarr-project` submodule, and `sererr`
-is a docs-only submodule. `docs/` holds the families' design notes. The
+`tools/archlint` checks module-level layering of the router crates. The spec
+(protos and features) is the `angzarr-project` cargo package, a git dependency
+pinned by full commit. `docs/` holds the families' design notes. The
 families' own former repositories are archived; their history is not carried
 here.
 
@@ -81,14 +81,14 @@ the `LICENSE-*` files, `deny.toml` and this table to it.
 ## Building
 
 ```bash
-git clone --recurse-submodules https://github.com/angzarr-io/angzarr
+git clone https://github.com/angzarr-io/angzarr
 cd angzarr
 just hooks-install   # lefthook; once per clone
 just build           # protoc on PATH; every crate, tests included
 just lint            # clippy -D warnings (complexity lints too), the licence table
 just test            # cargo-nextest over the workspace; `just test-pkg <crate>` for a few
 just lint-deps       # cargo-deny: permissive third-party licences, sources, advisories
-just --list          # the rest (mutation, wasm, spec-vendor); core's recipes: `just core::`
+just --list          # the rest (mutation, wasm); core's recipes: `just core::`
 ```
 
 The Linux builds link with mold and clang (`.cargo/config.toml`). The wasm
@@ -200,8 +200,8 @@ The root holds the licence texts: `LICENSE-AGPL`, `LICENSE-EXCEPTION`,
   generator and its proc-macros) is Apache-2.0 or BSD-3-Clause, at your option.
 - **Everything else.** Files outside `crates/` and `tools/` (documentation, scripts,
   CI, the justfile) are Apache-2.0 OR BSD-3-Clause, at your option, unless a file says otherwise. The vendored
-  protos under `proto/` keep their own licences (their headers), and the submodules
-  (`angzarr-project`, `sererr`) have licences of their own.
+  protos under `proto/` keep their own licences (their headers), and the `angzarr-project`
+  package (the spec) has its own licences.
 
 A commercial licence is potentially available for the distributed runtime, for
 those who want to keep their modifications to it private. Contact Benjamin Abbitt.

@@ -38,8 +38,6 @@ scope = "lib"
 allow = [
     "angzarr_router_conformance::**",
     "angzarr_router::**",
-    # the handler-contract tier's fixtures (decision 14.42)
-    "path:angzarr-project/features/handler-contract/fixture/**",
 ]
 
 [[rule]]

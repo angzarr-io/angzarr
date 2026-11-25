@@ -825,16 +825,6 @@ _scratch-tree source +recipe:
     if [ -s "$scratch/staged.patch" ]; then
         "${scrub[@]}" git -C "$tree" apply --index --binary --whitespace=nowarn "$scratch/staged.patch"
     fi
-    # The angzarr-project submodule is not in a worktree made --no-checkout:
-    # export the commit this tree pins (core's and router's push-check did) so
-    # build scripts that read angzarr-project/proto and /features find it.
-    sub=$("${scrub[@]}" git -C "$tree" ls-files -s angzarr-project | awk '{print $2}')
-    if [ -n "$sub" ]; then
-        git -C "$top/angzarr-project" cat-file -e "$sub^{commit}" 2>/dev/null \
-            || git -C "$top/angzarr-project" fetch --quiet origin "$sub"
-        rm -rf "$tree/angzarr-project"; mkdir -p "$tree/angzarr-project"
-        git -C "$top/angzarr-project" archive "$sub" | tar -x -C "$tree/angzarr-project"
-    fi
     cd "$tree"
     "${scrub[@]}" "CARGO_TARGET_DIR=$top/target/staged" "GATE_LOG_DIR=$top/target/logs" just --justfile "$tree/justfile" "$@"
 

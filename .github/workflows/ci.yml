@@ -5,8 +5,8 @@
 # (tonic, sqlx, the embedded host) is not asked to build there.
 #
 # All logic is in just recipes; the jobs install tools and call them. The
-# angzarr-project submodule is checked out: angzarr-proto's build script reads
-# its protos with protoc (3.21.12, ctxloom/ci's setup-protoc, the release zip
+# spec is the angzarr-project cargo package (a git dependency, pinned by
+# Cargo.lock): angzarr-proto's build script reads its protos with protoc (3.21.12, ctxloom/ci's setup-protoc, the release zip
 # checked against its pinned sha256), on every runner.
 #
 # Every action is pinned to a commit, its release in the comment; every tool
@@ -41,8 +41,6 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
       - name: Toolchain (rust-toolchain.toml) and the Windows target
         run: |
           rustup show active-toolchain || rustup toolchain install
@@ -57,7 +55,6 @@ jobs:
         with:
           tool: ${{ env.TOOLS }}
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-      - run: just check-submodules-clean
       - run: just build
       - run: just fmt-check
       - run: just lint
@@ -85,8 +82,6 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
       - name: Toolchain (rust-toolchain.toml)
         run: rustup show active-toolchain || rustup toolchain install
       - uses: ctxloom/ci/.github/actions/setup-protoc@fa01764571615bd3174313e84631bdd5c13a02e6 # main 2026-11-12, protoc 3.21.12 by checksum
@@ -109,8 +104,6 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          submodules: true
       - name: Toolchain (rust-toolchain.toml) and the wasm target
         run: |
           rustup show active-toolchain || rustup toolchain install

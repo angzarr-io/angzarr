@@ -3,28 +3,12 @@
 # (the embedded/platform gates: format the staged files, secrets, clippy over
 # the workspace, deps, tests of the staged files' crates and their dependents
 # at commit; the WHOLE workspace's tests per pushed commit at push).
-# Added here: the submodule guards core and router had, and archlint.
+# Added here: archlint.
 extends:
   - gates/lefthook.yml
 
-post-checkout:
-  commands:
-    install-submodule-hooks:
-      run: &install-submodule-hooks >-
-        if [ -f angzarr-project/submodule.just ]; then just install-submodule-hooks;
-        else echo "no submodule guard installed: angzarr-project is not checked out (git submodule update --init, then just install-submodule-hooks)";
-        fi
-
-post-merge:
-  commands:
-    install-submodule-hooks:
-      run: *install-submodule-hooks
-
 pre-commit:
   commands:
-    check-submodules-clean:
-      priority: 0
-      run: just check-submodules-clean
     archlint:
       priority: 3
       glob: "crates/{angzarr-router,angzarr-router-conformance}/**/*.rs"

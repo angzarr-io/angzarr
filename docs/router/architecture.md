@@ -106,7 +106,7 @@ coordinator.
 ## Testing
 
 - `just test`: the unit bank (`crates/router/src/*.test.rs`) and the
-  handler-contract tier, run whole from the submodule by cucumber-rs
+  handler-contract tier, run whole from the `angzarr-project` package by cucumber-rs
   (`crates/conformance`, one harness per tier feature).
 - `just mutation-test`: cargo-mutants over the router's modules and the
   architecture linter, every missed mutant a failure; weekly in CI.

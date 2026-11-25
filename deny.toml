@@ -67,7 +67,12 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 # rust-support's crates (diagnostic, presentation, test-dir, os, file-system),
 # pinned by full commit in the root Cargo.toml; Apache-2.0 OR BSD-3-Clause.
-allow-git = ["https://github.com/benjaminabbitt/rust-support"]
+# angzarr-project is the spec (proto/ and features/) as a package, pinned the
+# same way, under the same licence.
+allow-git = [
+    "https://github.com/benjaminabbitt/rust-support",
+    "https://github.com/angzarr-io/angzarr-project",
+]
 
 # BEGIN licences.sh (generated from licences.tsv)
 [[licenses.exceptions]]

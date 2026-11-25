@@ -1,16 +1,16 @@
 # The one justfile of the merged angzarr workspace (core, router, embedded, build,
 # platform). The git-hook gates (fmt, test, test-staged = affected crates + dependents,
 # test-commit, push-check, mutants-*, lint-deps, secrets-scan-staged) are
-# gates/gates.just, parameterised below for all crates. Core's own recipes (buf,
-# images, per-crate justfiles, lsp) are the `core` module: `just core::buf-lint`.
-# Needs protoc on PATH and the angzarr-project submodule checked out.
+# gates/gates.just, parameterised below for all crates. Core's own recipes
+# (images, per-crate justfiles, lsp) are the `core` module: `just core::check-shared-crates`.
+# Needs protoc on PATH and network access to github.com (the angzarr-project package
+# is a git dependency).
 
 # Git for Windows' bash by path: a bare `bash` is System32's WSL launcher, which the
 # process search finds first and which fails on a host without a distribution.
 set windows-shell := ["C:/Program Files/Git/bin/bash.exe", "-cu"]
 
 import 'gates/gates.just'
-import? 'angzarr-project/submodule.just'
 mod core 'just/core.just'
 
 # Mutation kill-rate thresholds, percent, by path prefix (longest wins). Every

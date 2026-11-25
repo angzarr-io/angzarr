@@ -3,14 +3,10 @@
 # angzarr core is a virtual workspace of the shared crates (crates/*), each
 # checked by its own justfile on the host: `just check-shared-crates` is the
 # whole gate, and build, fmt-check, lint and test run one of its steps
-# across every crate. The rest drives the protos (buf) and their docs, the
-# toolchain images under build/images, and editor tooling.
+# across every crate. The rest drives the toolchain images under build/images and
+# editor tooling.
 
 set shell := ["bash", "-c"]
-
-# Reusable submodule-protection recipes (install-submodule-hooks,
-# check-submodules-clean). Source of truth: angzarr-project/submodule.just.
-import? '../angzarr-project/submodule.just'
 
 TOP := `git rev-parse --show-toplevel`
 REGISTRY := "ghcr.io/angzarr-io"
@@ -63,60 +59,6 @@ fmt-python:
     just _lang-container python black scripts/
     just _lang-container python ruff check --fix --select I scripts/
 
-# === Buf Schema Registry ===
-
-# Run buf command in container (buf is installed in base image)
-[private]
-_buf +ARGS:
-    #!/usr/bin/env bash
-    if [ "${DEVCONTAINER:-}" = "true" ] || command -v buf &>/dev/null; then
-        cd "{{TOP}}/angzarr-project/proto" && buf {{ARGS}}
-    else
-        {{CONTAINER_RUN}} --network=host \
-            -v "{{TOP}}:/workspace:Z" \
-            -w /workspace/angzarr-project/proto \
-            {{REGISTRY}}/angzarr-base:latest \
-            buf {{ARGS}}
-    fi
-
-# Build and validate protos with buf
-buf-build:
-    just _buf build
-
-# Lint protos with buf
-buf-lint:
-    just _buf lint
-
-# Push protos to Buf Schema Registry (requires: buf registry login)
-buf-push:
-    just _buf push
-
-# Generate proto documentation (outputs to docs/docs/api/proto/)
-buf-docs:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mkdir -p "{{TOP}}/docs/docs/api/proto"
-    # List proto files (exclude health which is internal). Sererr's
-    # proto root is also mounted because types.proto imports
-    # `sererr/sererr.proto` from the `sererr/` submodule.
-    PROTOS=$(find "{{TOP}}/angzarr-project/proto" -name '*.proto' ! -path '*/health/*' -printf '%P\n' | sort)
-    SERERR_PROTO_DIR="{{TOP}}/sererr/proto"
-    {{CONTAINER_RUN}} \
-        -v "{{TOP}}/angzarr-project/proto:/protos:Z" \
-        -v "${SERERR_PROTO_DIR}:/sererr-protos:Z" \
-        -v "{{TOP}}/docs/docs/api/proto:/out:Z" \
-        docker.io/pseudomuto/protoc-gen-doc:1.5.1 \
-        --proto_path=/protos \
-        --proto_path=/sererr-protos \
-        --doc_opt=markdown,index.md \
-        $PROTOS
-    # Escape curly braces for MDX compatibility (handles google.api.http examples)
-    python3 "{{TOP}}/build/proto/escape_mdx.py" "{{TOP}}/docs/docs/api/proto/index.md"
-    # Fix anchors for Docusaurus compatibility (convert <a name=""> to heading IDs)
-    python3 "{{TOP}}/build/proto/fix_anchors.py" "{{TOP}}/docs/docs/api/proto/index.md"
-    # Add frontmatter for Docusaurus
-    sed -i '1i ---\ntitle: Protocol Buffer API\ndescription: Auto-generated documentation for Angzarr protobuf definitions\n---\n' "{{TOP}}/docs/docs/api/proto/index.md"
-
 # === Shared crates: build, lint, test ===
 # The five proto crates are the spec's five packages (decisions 14.64 and
 # 14.78): angzarr-proto core's messages (prost only, wasm32),
@@ -126,7 +68,7 @@ buf-docs:
 # Moved from angzarr-project's rust/. They run on the host, not in a
 # toolchain container: protoc, the wasm32-unknown-unknown target,
 # wasm-bindgen-test-runner (`just -f crates/angzarr-ports/justfile tools`)
-# and node. build.rs reads the protos from the angzarr-project submodule.
+# and node. build.rs reads the protos from the angzarr-project cargo package.
 
 # Every shared crate, in dependency order. Each has a justfile with check,
 # fmt, fmt-check, build, lint and test (crates/<crate>/justfile).
@@ -167,17 +109,17 @@ clean:
     cargo clean
 
 # Every check of the shared crates: fmt-check, build, lint, test, wasm, and
-# angzarr-ports' wasm-test; first, that the submodule cannot clash with them.
+# angzarr-ports' wasm-test.
 # Each crate's lint denies warnings, so the complexity lints the crates
 # inherit from the root Cargo.toml's [workspace.lints] (threshold in
 # crates/clippy.toml) are a gate here and in the pre-commit hook.
-check-shared-crates: check-proto-submodule (_each-crate "check")
+check-shared-crates: (_each-crate "check")
 
 # lefthook's pre-commit and pre-merge-commit check of the shared crates:
 # `check-shared-crates` under the red-on-branches rule. Every check but
 # running the tests (each crate's `check-untested`, the tests' build
 # included) is refused on every branch; then the tests (`test-commit`).
-check-shared-crates-commit: check-proto-submodule (_each-crate "check-untested") test-commit
+check-shared-crates-commit: (_each-crate "check-untested") test-commit
 
 # The red-on-branches rule: red tests may be committed on any branch but the
 # default one, and never reach it. Every shared crate's tests, built first
@@ -205,8 +147,6 @@ test-commit:
 # stdin: each pushed commit's tests (`test`), run in that commit's own tree
 # (target/push-tree, a detached worktree; its build in target/push), whatever
 # is or is not staged or checked out here. A deleted ref passes at once. The
-# push tree's angzarr-project is the pushed commit's submodule commit,
-# exported from this checkout's submodule (fetched if it is missing there).
 # The run's log is target/logs/push-tests.log.
 #
 # Red tests are allowed on a branch and kept out of the default branch
@@ -222,8 +162,7 @@ push-check remote *lefthook:
     #!/usr/bin/env bash
     set -euo pipefail
     # git exports repository-locating variables (GIT_DIR, ...) into a hook;
-    # with them, a git -C the push tree or a submodule would act on this
-    # checkout instead.
+    # with them, a git -C the push tree would act on this checkout instead.
     unset $(git rev-parse --local-env-vars)
     top='{{TOP}}'
     remote=$1
@@ -266,16 +205,6 @@ push-check remote *lefthook:
         fi
         git "${nohooks[@]}" -C "$tree" checkout --quiet --detach --force "$local_sha"
         git -C "$tree" clean -fdq
-        sub=$(git -C "$top" ls-tree "$local_sha" angzarr-project | awk '{print $3}')
-        if ! git -C "$top/angzarr-project" cat-file -e "$sub^{commit}" 2>/dev/null; then
-            git -C "$top/angzarr-project" fetch --quiet origin "$sub" || {
-                echo "FAIL push-check: angzarr-project $sub, the pushed commit's submodule, is not here (git submodule update --init)" >&2
-                exit 1
-            }
-        fi
-        rm -rf "$tree/angzarr-project"
-        mkdir -p "$tree/angzarr-project"
-        git -C "$top/angzarr-project" archive "$sub" | tar -x -C "$tree/angzarr-project"
         rc=0
         (cd "$tree" && CARGO_TARGET_DIR="$top/target/push" just --justfile "$tree/justfile" test) > "$log" 2>&1 9>&- || rc=$?
         if [ "$rc" -ne 0 ]; then
@@ -357,33 +286,6 @@ shared-mutation crate min timeout out patch="":
     sed 's/^/  /' "$out/mutants.out/missed.txt" >&2
     echo "Add or sharpen the test that would kill each survivor, commit it, and push again." >&2
     exit 1
-
-# The angzarr-project submodule is checked out at the commit this tree pins,
-# and that commit carries no Rust package named angzarr-proto or
-# angzarr-ports (its old rust/). Cargo resolves a git dependency on this
-# repository by package name across every Cargo.toml in the checkout,
-# submodules included: two packages of one name there and a consumer's
-# build fails. Pin the submodule only at an angzarr-project revision after
-# rust/ was removed.
-check-proto-submodule:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd '{{TOP}}'
-    unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE
-    sm=angzarr-project
-    pinned=$(git ls-tree HEAD "$sm" | awk '$2 == "commit" {print $3}')
-    [ -n "$pinned" ] || { echo "FAIL check-proto-submodule: $sm is not a submodule of HEAD" >&2; exit 1; }
-    head=$(git -C "$sm" rev-parse HEAD 2>/dev/null) || { echo "FAIL check-proto-submodule: $sm is not checked out (git submodule update --init $sm)" >&2; exit 1; }
-    [ "$head" = "$pinned" ] || { echo "FAIL check-proto-submodule: $sm is at $head, HEAD pins $pinned (git submodule update $sm)" >&2; exit 1; }
-    [ -f "$sm/proto/io/angzarr/v1/types.proto" ] || { echo "FAIL check-proto-submodule: $sm@${pinned:0:12} has no proto/io/angzarr/v1/types.proto" >&2; exit 1; }
-    clash=$(cd "$sm" && git ls-files -z -- 'Cargo.toml' '*/Cargo.toml' \
-        | xargs -0 -r grep -lE '^name[[:space:]]*=[[:space:]]*"angzarr-(proto|ports)"' || true)
-    if [ -n "$clash" ] || [ -n "$(git -C "$sm" ls-files -- rust)" ]; then
-        echo "FAIL check-proto-submodule: $sm@${pinned:0:12} still carries rust/ or a package named angzarr-proto or angzarr-ports:" >&2
-        { [ -n "$clash" ] && sed "s|^|  $sm/|" <<< "$clash"; git -C "$sm" ls-files -- rust | head -5 | sed "s|^|  $sm/|"; } >&2
-        exit 1
-    fi
-    echo "ok   check-proto-submodule ($sm@${pinned:0:12}: protos present, no angzarr-proto or angzarr-ports package)"
 
 # === Claude Code LSP Setup ===
 
