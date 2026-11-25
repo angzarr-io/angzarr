@@ -100,7 +100,10 @@ mod dedup {
             [AccountEvent::Opened]
         );
         let slice = slice(&store, &stream);
-        assert_eq!(slice.next_sequence, 1, "a new stream, from sequence 0");
+        assert_eq!(
+            slice.next_sequence, 3,
+            "after the tombstone, which keeps the sequence"
+        );
         assert_eq!(slice.last_recorded_at.unwrap().seconds, 22);
     }
 

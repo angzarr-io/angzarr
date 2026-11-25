@@ -9,7 +9,7 @@
 //! | [`a_held_delivery_is_delivered_again_one_attempt_more`] | a nack redelivered, its attempt counted where the transport counts |
 //! | [`a_held_delivery_waits_out_its_delay`] | held with a delay honoured |
 //! | [`credit_bounds_what_is_unsettled`] | instances, and one of a stream |
-//! | [`a_purged_stream_is_delivered_gone`] | gone streams |
+//! | [`a_purged_stream_delivers_its_tombstone_then_what_follows`] | purged streams |
 //!
 //! [`transport_contract!`](crate::transport_contract) stamps one test per
 //! check.
@@ -20,6 +20,7 @@ use std::pin::{pin, Pin};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+use angzarr_ports::tombstone;
 use angzarr_proto::v1::{Cover, EventPage, Uuid};
 
 use crate::transport::{Body, Delivery, Feed, Next, Opening, OrderingKey, PullTransport, Settle};
@@ -73,7 +74,6 @@ pub async fn a_delivery_carries_its_stream_sequence_key_and_body<H: TransportHar
         match delivery.body {
             Body::Event(page) => assert_eq!(Some(*page), stored),
             Body::Reference => assert!(stored.is_some(), "a reference resolves"),
-            Body::Gone => panic!("an event's delivery is not gone"),
         }
         settle(&feed, delivery.token, Settle::Handled).await;
     }
@@ -181,17 +181,28 @@ pub async fn credit_bounds_what_is_unsettled<H: TransportHarness>(harness: H) {
     assert_ne!(third.stream, second.stream, "one of a stream at a time");
 }
 
-/// A stream a subscription holds a position on, purged, is delivered gone.
-pub async fn a_purged_stream_is_delivered_gone<H: TransportHarness>(harness: H) {
+/// A stream a subscription holds a position on, purged, delivers its
+/// tombstone at the sequence its mark stands at, then what is written
+/// after it: sequences never restart, so a reopened transport (or one
+/// opened across a purge and a rewrite) loses and repeats nothing.
+pub async fn a_purged_stream_delivers_its_tombstone_then_what_follows<H: TransportHarness>(
+    harness: H,
+) {
     let a = stream(&harness.domain(), 1);
     append(&harness, &a, 1).await;
     harness.record(NAME, &a, 1).await;
     harness.purge(&a).await;
+    append(&harness, &a, 1).await;
     let transport = harness.transport();
     let scope = Scope::domain(&harness.domain());
     let feed = open(&transport, &scope, credit(1)).await;
-    let gone = delivered(&harness, &feed, "the gone stream").await;
-    assert_eq!((gone.stream, gone.body), (a, Body::Gone));
+    let tombstone = delivered(&harness, &feed, "the tombstone").await;
+    assert_eq!((&tombstone.stream, tombstone.sequence), (&a, 1));
+    let stored = harness.stored(&a, 1).await;
+    assert!(stored.as_ref().is_some_and(tombstone::is), "{stored:?}");
+    settle(&feed, tombstone.token, Settle::Handled).await;
+    let next = delivered(&harness, &feed, "what follows it").await;
+    assert_eq!((&next.stream, next.sequence), (&a, 2));
 }
 
 /// One test per check, under the caller's test attribute, each on a fresh
@@ -206,7 +217,7 @@ macro_rules! transport_contract {
             a_held_delivery_is_delivered_again_one_attempt_more,
             a_held_delivery_waits_out_its_delay,
             credit_bounds_what_is_unsettled,
-            a_purged_stream_is_delivered_gone,
+            a_purged_stream_delivers_its_tombstone_then_what_follows,
         );
     };
     (@each [$($a:tt)*], $f:expr; $check:ident, $($rest:ident,)*) => {
@@ -228,7 +239,7 @@ pub const CHECKS: &[&str] = &[
     "a_held_delivery_is_delivered_again_one_attempt_more",
     "a_held_delivery_waits_out_its_delay",
     "credit_bounds_what_is_unsettled",
-    "a_purged_stream_is_delivered_gone",
+    "a_purged_stream_delivers_its_tombstone_then_what_follows",
 ];
 
 fn stream(domain: &str, n: u8) -> Cover {

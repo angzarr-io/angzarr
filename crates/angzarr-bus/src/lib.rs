@@ -35,8 +35,9 @@
 //! - **A failure is held and handed again**, or, for a policy, what its
 //!   router's bug setting says (dead-lettered, the position past it, or
 //!   held).
-//! - **A purged stream** is handed to a projector once as gone, and
-//!   forgotten by a policy.
+//! - **A purged stream** is no special case: its tombstone
+//!   ([`angzarr_ports::tombstone`]) is an event delivered at its sequence, a
+//!   projector's reset and nothing a policy is called for.
 //!
 //! **Two layers.** [`Bus`] is the application's interface. Under it, a
 //! [`Transport`] carries each subscription's deliveries (a broker, the

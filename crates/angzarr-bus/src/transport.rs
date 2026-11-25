@@ -68,8 +68,6 @@ pub enum Body {
     /// A reference: the delivery's stream and sequence, resolved by reading
     /// the event store there (a claim check, or a notification).
     Reference,
-    /// The stream is gone (purged): no event, at sequence 0.
-    Gone,
 }
 
 /// One delivery of a subscription: everything the bus needs to place it.
@@ -88,7 +86,7 @@ pub struct Delivery {
     pub attempt: Option<u32>,
     /// Its stream's ordering key ([`OrderingKey::of`]).
     pub key: OrderingKey,
-    /// The event, a reference to it, or the stream gone.
+    /// The event, or a reference to it.
     pub body: Body,
 }
 

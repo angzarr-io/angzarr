@@ -39,12 +39,12 @@ impl ProjectorHandler for Sinking {
     async fn dispatch(&self, request: &ProjectRequest) -> Result<ProjectResponse, CodedError> {
         let book = request.events.clone().unwrap_or_default();
         let stream = book.cover.clone().unwrap_or_default();
-        let delivery = match book.pages.first() {
-            Some(page) => Delivery::Event {
-                stream,
-                sequence: page.sequence,
-            },
-            None => Delivery::Gone { stream },
+        let Some(page) = book.pages.first() else {
+            return Ok(ProjectResponse::default());
+        };
+        let delivery = Delivery::Event {
+            stream,
+            sequence: page.sequence,
         };
         match self.sink.handle(delivery).await {
             Ok(()) => Ok(ProjectResponse::default()),
@@ -250,10 +250,14 @@ impl Harness for Embedded {
 
     async fn append(&self, stream: &Cover) {
         let id = u128::from(self.commands.fetch_add(1, Ordering::Relaxed));
-        let head = pages(self.memory(), stream).len();
+        // A new or purged stream (its last event a tombstone) is opened.
+        let stored = pages(self.memory(), stream);
+        let fresh = stored
+            .last()
+            .is_none_or(|page| angzarr_ports::tombstone::is(page));
         let sampled = at(10 + id as i64);
-        let handled = match (stream.domain.as_str(), head) {
-            ("account", 0) => {
+        let handled = match (stream.domain.as_str(), fresh) {
+            ("account", true) => {
                 let book = command(stream.clone(), AccountCmd::Open.to_any()).id(id);
                 self.kernel
                     .handle::<Account, _>(self.memory(), book, &sampled)
@@ -276,7 +280,12 @@ impl Harness for Embedded {
     }
 
     async fn purge(&self, stream: &Cover) {
-        let head = pages(self.memory(), stream).len() as u64;
+        let head = self
+            .memory()
+            .read(sref(stream), 0, None)
+            .await
+            .unwrap()
+            .next_sequence;
         self.memory().purge(sref(stream), head).await.unwrap();
     }
 

@@ -2,7 +2,7 @@
 //! suite (`bus_contract.test.rs`): several streams at once, each event read
 //! once per handling, a store without push polled, a retryable failure
 //! held with retries off and dead-lettered at the kernel's cap with them
-//! on, a purged stream handed as gone to a new bus too, and policies served
+//! on, a purged stream's tombstone handed to a new bus too, and policies served
 //! as the kernel's chain steps them: never both inline and on the bus, a
 //! remote source refused, a policy moved from inline keeping its place, and
 //! `Kernel::resume` leaving it alone.
@@ -122,7 +122,10 @@ impl ProjectorHandler for Worker {
         let book = request.events.clone().unwrap_or_default();
         let cover = book.cover.clone().unwrap_or_default();
         let sequences: Vec<u64> = book.pages.iter().map(|page| page.sequence).collect();
-        let this = Some((cover.clone(), sequences.first().copied().unwrap_or(GONE)));
+        let this = Some((
+            cover.clone(),
+            sequences.first().copied().unwrap_or(u64::MAX),
+        ));
         let stream = format!("{cover:?}");
         let (fails, yields, buggy) = {
             let mut log = self.log();
@@ -156,9 +159,6 @@ impl ProjectorHandler for Worker {
         Ok(ProjectResponse::default())
     }
 }
-
-/// The sequence a worker's script names a gone book by.
-const GONE: u64 = u64::MAX;
 
 /// A timer that never fires: only a commit wakes the bus.
 struct Never;
@@ -297,8 +297,7 @@ async fn several_streams_are_served_at_once_each_in_order() {
 }
 
 /// Each event is read from the store once per handling, and a bus with
-/// nothing owed reads no event but the first of each stream it resumes
-/// (opening a serve); a store that does not push is served on
+/// nothing owed reads no event; a store that does not push is served on
 /// its poll.
 #[tokio::test]
 async fn no_event_is_read_twice_per_handling() {
@@ -320,9 +319,8 @@ async fn no_event_is_read_twice_per_handling() {
     drain(&mut bus).await;
     assert_eq!(
         store.pages.load(Ordering::SeqCst),
-        4 + 2,
-        "nothing owed, no event handled again: a serve's opening only reads the first event of \
-         each of the two streams it resumes, to tell it from one written again"
+        4,
+        "nothing owed, nothing read"
     );
 }
 
@@ -425,11 +423,11 @@ async fn a_retryable_failure_is_retried_then_dead_lettered_at_the_cap() {
     assert_eq!(store.dead_letters(sref(&at_cap)).ready().unwrap().len(), 1);
 }
 
-/// A stream handled and purged since is handed as gone (a book with no
-/// page at 0) and forgotten, by the bus that handled it and by a new one
-/// on the store.
+/// A stream handled and purged since is handed its tombstone, an event at
+/// the next sequence, by the bus that handled it and by a new one on the
+/// store; its position moves past it.
 #[tokio::test]
-async fn a_purged_stream_is_handed_as_gone_once() {
+async fn a_purged_stream_is_handed_its_tombstone() {
     let registry = registry();
     let store = MemoryStore::new();
     for n in [1, 2] {
@@ -443,24 +441,25 @@ async fn a_purged_stream_is_handed_as_gone_once() {
 
     store.purge(sref(&cover("account", 1)), 2).ready().unwrap();
     drain(&mut first).await;
-    assert_eq!(worker.handed()[4..], [(cover("account", 1), vec![])]);
-    assert_eq!(position(&store, "worker", &cover("account", 1)), 0);
+    assert_eq!(worker.handed()[4..], [(cover("account", 1), vec![2])]);
+    assert_eq!(position(&store, "worker", &cover("account", 1)), 3);
     drain(&mut first).await;
-    assert_eq!(worker.handed().len(), 5, "forgotten");
+    assert_eq!(worker.handed().len(), 5, "handed once");
 
     store.purge(sref(&cover("account", 2)), 2).ready().unwrap();
     let again = Worker::new("worker");
     let mut second = bus_on(&store, &kernel, &Never);
     work(&mut second, &again, 1).unwrap();
     drain(&mut second).await;
-    assert_eq!(again.handed(), [(cover("account", 2), vec![])]);
+    assert_eq!(again.handed(), [(cover("account", 2), vec![2])]);
 }
 
 /// A stream purged and written again to at least the length of the mark,
-/// while no bus runs, is not the stream the mark was on: a new bus hands it
-/// as gone, then from its start, never from the old mark.
+/// while no bus runs: sequences never restart, so a new bus hands the
+/// tombstone, then the new events, each once.
 #[tokio::test]
-async fn a_stream_purged_and_rewritten_while_the_bus_was_down_is_handed_afresh() {
+async fn a_stream_purged_and_rewritten_while_the_bus_was_down_is_handed_its_tombstone_then_the_new_events(
+) {
     let registry = registry();
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 5);
@@ -491,29 +490,58 @@ async fn a_stream_purged_and_rewritten_while_the_bus_was_down_is_handed_afresh()
     assert_eq!(
         again.handed(),
         [
-            (stream.clone(), vec![]),
-            (stream.clone(), vec![0]),
-            (stream.clone(), vec![1]),
             (stream.clone(), vec![2]),
+            (stream.clone(), vec![3]),
+            (stream.clone(), vec![4]),
+            (stream.clone(), vec![5]),
         ]
     );
-    assert_eq!(position(&store, "worker", &stream), 3);
+    assert_eq!(position(&store, "worker", &stream), 6);
 }
 
-/// A gone book that fails retryably, with retries off, is held: the
-/// stream is not forgotten until it is handed again and handled.
+/// A subscription new to a purged stream (no position on it) is handed the
+/// tombstone then what follows: the events below the tombstone are deleted
+/// and the stream goes on past them.
 #[tokio::test]
-async fn a_failed_gone_book_is_held_and_handed_again() {
+async fn a_new_subscription_to_a_purged_stream_is_handed_its_tombstone_then_what_follows() {
     let registry = registry();
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 5);
-    let gone = cover("account", 1);
-    let worker = Worker::new("worker").fail(gone.clone(), GONE);
+    let stream = cover("account", 1);
+    store.purge(sref(&stream), 2).ready().unwrap();
+    crate::toys::handle::<Account>(
+        &store,
+        &registry,
+        command(stream.clone(), AccountCmd::Open.to_any()).id(8),
+        &at(40),
+    )
+    .unwrap();
+    let worker = Worker::new("worker");
+    let kernel = kernel(&registry);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    work(&mut bus, &worker, 1).unwrap();
+    drain(&mut bus).await;
+    assert_eq!(
+        worker.handed(),
+        [(stream.clone(), vec![2]), (stream.clone(), vec![3])]
+    );
+    assert_eq!(position(&store, "worker", &stream), 4);
+}
+
+/// A tombstone's book that fails retryably, with retries off, is held and
+/// handed again like any event's.
+#[tokio::test]
+async fn a_failed_tombstone_book_is_held_and_handed_again() {
+    let registry = registry();
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 5);
+    let purged = cover("account", 1);
+    let worker = Worker::new("worker").fail(purged.clone(), 2);
     let kernel = kernel(&registry);
     let mut bus = bus_on(&store, &kernel, &Soon);
     work(&mut bus, &worker, 1).unwrap();
     drain(&mut bus).await;
-    store.purge(sref(&gone), 2).ready().unwrap();
+    store.purge(sref(&purged), 2).ready().unwrap();
     let mut asked = Vec::new();
     let more = |served: &angzarr_bus::Served| {
         asked.push(served.clone());
@@ -522,36 +550,36 @@ async fn a_failed_gone_book_is_held_and_handed_again() {
     soon(bus.serve(more)).await.unwrap();
     assert_eq!(
         failures(&asked),
-        [("worker".to_string(), gone.clone(), None)]
+        [("worker".to_string(), purged.clone(), Some(2))]
     );
     assert_eq!(handled(&asked), 1, "handed again, and handled");
-    let books = worker.handed().into_iter().filter(|(_, s)| s.is_empty());
-    assert_eq!(books.count(), 2, "the gone book twice");
-    assert_eq!(position(&store, "worker", &gone), 0);
+    let books = worker.handed().into_iter().filter(|(_, s)| s == &[2]);
+    assert_eq!(books.count(), 2, "the tombstone twice");
+    assert_eq!(position(&store, "worker", &purged), 3);
 }
 
-/// A gone book that fails with a bug is dead-lettered, and the stream
-/// forgotten all the same.
+/// A tombstone's book that fails with a bug is dead-lettered and the
+/// position moves past it, as an event's does.
 #[tokio::test]
-async fn a_gone_books_bug_is_dead_lettered_and_the_stream_forgotten() {
+async fn a_tombstone_books_bug_is_dead_lettered_and_passed() {
     let registry = registry();
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 5);
-    let gone = cover("account", 1);
-    let worker = Worker::new("worker").fail(gone.clone(), GONE).buggy();
+    let purged = cover("account", 1);
+    let worker = Worker::new("worker").fail(purged.clone(), 2).buggy();
     let kernel = kernel(&registry);
     let mut bus = bus_on(&store, &kernel, &Never);
     work(&mut bus, &worker, 1).unwrap();
     drain(&mut bus).await;
-    store.purge(sref(&gone), 2).ready().unwrap();
+    store.purge(sref(&purged), 2).ready().unwrap();
     let asked = drain(&mut bus).await;
     assert_eq!(
         failures(&asked),
-        [("worker".to_string(), gone.clone(), None)]
+        [("worker".to_string(), purged.clone(), Some(2))]
     );
-    assert_eq!(position(&store, "worker", &gone), 0, "forgotten");
+    assert_eq!(position(&store, "worker", &purged), 3, "passed");
     drain(&mut bus).await;
-    let books = worker.handed().into_iter().filter(|(_, s)| s.is_empty());
+    let books = worker.handed().into_iter().filter(|(_, s)| s == &[2]);
     assert_eq!(books.count(), 1, "not handed again");
 }
 
@@ -713,10 +741,10 @@ async fn a_policy_moved_from_inline_to_the_bus_keeps_its_place() {
     assert_eq!(position(&store, "bookkeeping", &cover("account", 1)), 3);
 }
 
-/// A purged stream a policy handled is forgotten without a call: nothing
-/// is handled, and its position is put back to 0.
+/// A purged stream's tombstone is no event a policy is called for: it is
+/// passed, and the position moves past it.
 #[tokio::test]
-async fn a_policy_forgets_a_purged_stream_uncalled() {
+async fn a_policy_is_not_called_for_a_tombstone() {
     let store = MemoryStore::new();
     let registry = registry();
     opened(&store, &registry, 1, 5);
@@ -726,10 +754,9 @@ async fn a_policy_forgets_a_purged_stream_uncalled() {
     assert_eq!(handled(&drain(&mut bus).await), 2);
     store.purge(sref(&cover("account", 1)), 2).ready().unwrap();
     let asked = drain(&mut bus).await;
-    assert_eq!(handled(&asked), 0, "the policy is not called for it");
     assert!(failures(&asked).is_empty());
-    assert_eq!(position(&store, "bookkeeping", &cover("account", 1)), 0);
-    assert_eq!(ledger_records(&store), [0, 1]);
+    assert_eq!(position(&store, "bookkeeping", &cover("account", 1)), 3);
+    assert_eq!(ledger_records(&store), [0, 1], "no record for it");
 }
 
 /// An edition's fork page is never a policy's trigger, but its sequence

@@ -75,6 +75,47 @@ fn replay_folds_each_event_and_keeps_the_version_that_decided_it() {
     assert_eq!((c, events.len(), state.cents), (cover("account", 1), 3, 89));
 }
 
+/// A tombstone (a purge's) puts the state back to the default before the
+/// next event and lets the log run on from its sequence: the events before
+/// it are gone and business code never sees it.
+#[test]
+fn replay_folds_a_tombstone_into_the_default_state() {
+    let mut pages = vec![angzarr_ports::tombstone::page(3)];
+    pages.push(page(4, pack(&account::Opened {})));
+    pages.push(page(5, pack(&account::Deposited { cents: 7 })));
+    let stream = replay(&pages).unwrap();
+    assert_eq!(stream.state().cents, 7, "only what follows the tombstone");
+    assert_eq!(stream.len(), 6, "the sequence runs on");
+    assert_eq!(stream.first(), 4);
+    assert_eq!(stream.events().len(), 2, "the tombstone is no event");
+
+    let mut again = log();
+    again.push(angzarr_ports::tombstone::page(3));
+    again.push(page(4, pack(&account::Opened {})));
+    let stream = replay(&again).unwrap();
+    assert_eq!(stream.state().cents, 0, "what it closed over is forgotten");
+    assert_eq!(stream.len(), 5);
+
+    let second = [
+        angzarr_ports::tombstone::page(3),
+        page(4, pack(&account::Opened {})),
+        angzarr_ports::tombstone::page(5),
+    ];
+    let stream = replay(&second).unwrap();
+    assert_eq!(
+        (stream.events().len(), stream.len()),
+        (0, 6),
+        "closed again"
+    );
+
+    let mut stale = log();
+    stale.push(angzarr_ports::tombstone::page(1));
+    assert!(
+        replay(&stale).is_err(),
+        "a tombstone below the log is out of sequence"
+    );
+}
+
 #[test]
 fn replay_refuses_a_log_that_does_not_hold_together() {
     let mut pages = log();

@@ -14,6 +14,7 @@ use crate::toys::prelude::*;
 use crate::toys::{at, command, cover, cover_in, opened, registry, Account, AccountCmd, Edit};
 use crate::v1::Cover;
 use crate::{CatchUp, KernelError, Payload as _, Registry};
+use crate::{PositionKey, Write};
 
 /// One book as the projector was handed it: its stream, its pages'
 /// sequences, and its `next_sequence`.
@@ -139,55 +140,6 @@ fn only_the_sources_streams_are_handed() {
     step(&mut catch_up, &store, &registry);
     let handed: Vec<Cover> = recorder.take().into_iter().map(|b| b.0).collect();
     assert_eq!(handed, [cover("account", 1)]);
-}
-
-/// A stream purged and written again to the same length between two steps
-/// is a new stream: told by its first event, it is handed from its start.
-#[test]
-fn a_stream_purged_and_written_again_is_handed_from_its_start() {
-    let registry = registry();
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 5);
-    let recorder = Recorder::default();
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
-    step(&mut catch_up, &store, &registry);
-    recorder.take();
-
-    purge(&store, 1);
-    // Written again by other commands, at other instants: the same length.
-    crate::toys::handle::<Account>(
-        &store,
-        &registry,
-        command(cover("account", 1), AccountCmd::Open.to_any()).id(8),
-        &at(40),
-    )
-    .unwrap();
-    deposit(&store, &registry, 1, 9, 6);
-    step(&mut catch_up, &store, &registry);
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
-    step(&mut catch_up, &store, &registry);
-    assert_eq!(recorder.take(), [], "the new stream, handed once");
-}
-
-/// A stream handed before and purged since is handed as gone: a book with
-/// no page at 0. Once: it is forgotten after.
-#[test]
-fn a_purged_stream_is_handed_as_gone_once() {
-    let registry = registry();
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 5);
-    opened(&store, &registry, 2, 7);
-    let recorder = Recorder::default();
-    let mut catch_up = CatchUp::new(&["account"], recorder.clone()).unwrap();
-    step(&mut catch_up, &store, &registry);
-    recorder.take();
-
-    purge(&store, 1);
-    let caught = catch_up.step(&store, registry.catalog()).ready().unwrap();
-    assert_eq!(caught.handed(), [cover("account", 1)]);
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![], 0)]);
-    step(&mut catch_up, &store, &registry);
-    assert_eq!(recorder.take(), [], "forgotten");
 }
 
 /// An edition's forked stream is a stream of its own (O-9), held or
@@ -323,9 +275,9 @@ fn a_purge_and_writes_landing_during_a_step_are_all_the_next_steps() {
     assert_eq!(
         recorder.take(),
         [
+            (cover("account", 1), vec![2], 3),
             (cover("account", 2), vec![2], 3),
             (cover("account", 3), vec![0, 1], 2),
-            (cover("account", 1), vec![], 0)
         ]
     );
 }
@@ -351,11 +303,62 @@ fn stored_positions_resume_in_a_new_catch_up() {
     assert_eq!(position(&store, "recorder", &cover("account", 1)), 3);
 }
 
-/// A purge keeps the stored positions on its stream, but a stream written
-/// again shorter than the position is seen by its head, so a stored
-/// catch-up hands it from its start.
+/// The account `n` opened again after a purge, then one deposit more:
+/// what a purged stream is written with, past its tombstone.
+fn written_again(store: &MemoryStore, registry: &Registry, n: u128) {
+    crate::toys::handle::<Account>(
+        store,
+        registry,
+        command(cover("account", n), AccountCmd::Open.to_any()).id(80 + n),
+        &at(40),
+    )
+    .unwrap();
+    deposit(store, registry, n, 90 + n, 6);
+}
+
+/// A purged stream is no gone stream: sequences never restart, so a
+/// projector is handed its tombstone, then what is written after it, as
+/// ordinary events in ordinary books, held or stored alike.
 #[test]
-fn a_stored_catch_up_hands_a_stream_written_again_from_its_start() {
+fn a_purged_stream_is_handed_its_tombstone_then_what_follows() {
+    let registry = registry();
+    for stored in [false, true] {
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 5);
+        let recorder = Recorder::default();
+        let mut catch_up = match stored {
+            true => CatchUp::stored(&["account"], recorder.clone()).unwrap(),
+            false => CatchUp::new(&["account"], recorder.clone()).unwrap(),
+        };
+        step(&mut catch_up, &store, &registry);
+        assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
+
+        purge(&store, 1);
+        step(&mut catch_up, &store, &registry);
+        assert_eq!(
+            recorder.take(),
+            [(cover("account", 1), vec![2], 3)],
+            "the tombstone, once ({stored})"
+        );
+        step(&mut catch_up, &store, &registry);
+        assert_eq!(recorder.take(), [], "then nothing new ({stored})");
+
+        written_again(&store, &registry, 1);
+        step(&mut catch_up, &store, &registry);
+        assert_eq!(
+            recorder.take(),
+            [(cover("account", 1), vec![3, 4], 5)],
+            "what follows it ({stored})"
+        );
+    }
+}
+
+/// A stream purged and written again to at least the length of the
+/// projector's position, and read by a catch-up started anew (a new
+/// process), is handed the tombstone then the new events, never the old
+/// stream's position applied to the new.
+#[test]
+fn a_new_stored_catch_up_folds_the_tombstone_then_the_new_events() {
     let registry = registry();
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 5);
@@ -367,188 +370,70 @@ fn a_stored_catch_up_hands_a_stream_written_again_from_its_start() {
     );
     recorder.take();
     purge(&store, 1);
-    crate::toys::handle::<Account>(
-        &store,
-        &registry,
-        command(cover("account", 1), AccountCmd::Open.to_any()).id(8),
-        &at(40),
-    )
-    .unwrap();
-    step(
-        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
-        &store,
-        &registry,
+    written_again(&store, &registry, 1);
+    deposit(&store, &registry, 1, 99, 7);
+    let mut again = CatchUp::stored(&["account"], recorder.clone()).unwrap();
+    step(&mut again, &store, &registry);
+    assert_eq!(
+        recorder.take(),
+        [(cover("account", 1), vec![2, 3, 4, 5], 6)]
     );
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![0], 1)]);
+    assert_eq!(position(&store, "recorder", &cover("account", 1)), 6);
 }
 
-/// A stream purged and written again to at least the length the projector
-/// was at, before the next step, is still a stream written again: the
-/// stored position alone cannot tell it, so its first event is kept beside
-/// it, and the stream is handed from its start.
+/// A second purge keeps the first tombstone and appends its own; the
+/// projector is handed the second.
 #[test]
-fn a_stored_catch_up_hands_a_stream_rewritten_past_its_position_from_its_start() {
+fn a_second_purge_hands_a_second_tombstone_and_keeps_the_first() {
     let registry = registry();
     let store = MemoryStore::new();
     opened(&store, &registry, 1, 5);
     let recorder = Recorder::default();
-    step(
-        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
-        &store,
-        &registry,
-    );
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
+    let mut catch_up = CatchUp::stored(&["account"], recorder.clone()).unwrap();
     purge(&store, 1);
-    crate::toys::handle::<Account>(
-        &store,
-        &registry,
-        command(cover("account", 1), AccountCmd::Open.to_any()).id(8),
-        &at(40),
-    )
-    .unwrap();
-    deposit(&store, &registry, 1, 9, 6);
-    deposit(&store, &registry, 1, 10, 7);
-    let mut again = CatchUp::stored(&["account"], recorder.clone()).unwrap();
-    step(&mut again, &store, &registry);
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1, 2], 3)]);
-    assert_eq!(position(&store, "recorder", &cover("account", 1)), 3);
-    step(&mut again, &store, &registry);
-    assert_eq!(recorder.take(), [], "then nothing new");
-}
-
-/// A stored catch-up started anew (a new process) knows, before its first
-/// step hands anything, every stream it holds a position on: one of them
-/// purged once it has started, with nothing new before, is handed gone.
-#[test]
-fn a_new_stored_catch_up_hands_gone_a_stream_it_was_handed_before() {
-    let registry = registry();
-    let store = MemoryStore::new();
-    opened(&store, &registry, 1, 5);
-    let recorder = Recorder::default();
-    step(
-        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
-        &store,
-        &registry,
-    );
-    recorder.take();
-    let mut again = CatchUp::stored(&["account"], recorder.clone()).unwrap();
-    step(&mut again, &store, &registry);
-    assert_eq!(recorder.take(), [], "nothing new");
+    written_again(&store, &registry, 1);
+    step(&mut catch_up, &store, &registry);
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![2, 3, 4], 5)]);
     purge(&store, 1);
-    step(&mut again, &store, &registry);
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![], 0)]);
-}
-
-/// A purge landing between a step's read and its position's write (forced
-/// here, from the projector's book) leaves that position, the record, on a
-/// stream that is gone: the step, reading the store as it began, still
-/// lists it; the next finds it no longer listed, hands it gone and puts its
-/// position back to 0 (decision 14.68), so the stream written again is
-/// handed from its start.
-#[test]
-fn a_position_left_by_a_racing_purge_is_handed_gone_and_cleared() {
-    let registry = Arc::new(registry());
-    let store = Arc::new(MemoryStore::new());
-    opened(&*store, &registry, 1, 5);
-    let recorder = Recorder::default();
-    let racing = Arc::clone(&store);
-    *recorder.meanwhile.lock().unwrap() = Some(Box::new(move || purge(&racing, 1)));
-    let mut stored = CatchUp::stored(&["account"], recorder.clone()).unwrap();
-    step(&mut stored, &store, &registry);
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
-    assert_eq!(position(&store, "recorder", &cover("account", 1)), 2);
-    step(&mut stored, &store, &registry);
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![], 0)]);
-    assert_eq!(position(&store, "recorder", &cover("account", 1)), 0);
-    crate::toys::handle::<Account>(
-        &*store,
-        &registry,
-        command(cover("account", 1), AccountCmd::Open.to_any()).id(8),
-        &at(40),
-    )
-    .unwrap();
-    step(&mut stored, &store, &registry);
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![0], 1)]);
-}
-
-/// A stream purged while no catch-up ran is found gone by the next: its
-/// position, the projector's record, outlives the purge (decision 14.68),
-/// and the store lists the stream no more (C-0772).
-#[test]
-fn a_stream_purged_while_no_catch_up_ran_is_handed_gone_by_the_next() {
-    let registry = Arc::new(registry());
-    let store = Arc::new(MemoryStore::new());
-    opened(&*store, &registry, 1, 5);
-    let recorder = Recorder::default();
-    step(
-        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
-        &store,
-        &registry,
-    );
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
-    purge(&store, 1);
+    step(&mut catch_up, &store, &registry);
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![5], 6)]);
+    let kept = store
+        .read(sref(&cover("account", 1)), 0, None)
+        .ready()
+        .unwrap();
     assert_eq!(
-        position(&store, "recorder", &cover("account", 1)),
-        2,
-        "the record outlives the purge"
+        kept.pages
+            .iter()
+            .map(|page| page.sequence)
+            .collect::<Vec<_>>(),
+        [2, 5],
+        "both tombstones, nothing between"
     );
-    let mut next = CatchUp::stored(&["account"], recorder.clone()).unwrap();
-    step(&mut next, &store, &registry);
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![], 0)]);
-    assert_eq!(
-        position(&store, "recorder", &cover("account", 1)),
-        0,
-        "forgotten"
-    );
-    step(&mut next, &store, &registry);
-    assert_eq!(recorder.take(), [], "handed gone once");
 }
 
-/// A stored position past a stream's head is a stream purged and written
-/// again before the catch-up ran: it is handed from its start.
+/// A stored position past a stream's head (an edition's stream removed,
+/// which reads as main's again) is handed from the start.
 #[test]
 fn a_stored_position_past_the_head_is_handed_from_the_start() {
-    let registry = Arc::new(registry());
-    let store = Arc::new(MemoryStore::new());
-    opened(&*store, &registry, 1, 5);
+    let registry = registry();
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 5);
+    let stream = cover("account", 1);
+    let positions = [(
+        PositionKey {
+            handler: "recorder",
+            stream: sref(&stream),
+        },
+        9,
+    )];
+    store.write(Write::positions(&positions)).ready().unwrap();
     let recorder = Recorder::default();
     step(
         &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
         &store,
         &registry,
     );
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
-    purge(&store, 1);
-    crate::toys::handle::<Account>(
-        &*store,
-        &registry,
-        command(cover("account", 1), AccountCmd::Open.to_any()).id(8),
-        &at(40),
-    )
-    .unwrap();
-    step(
-        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
-        &store,
-        &registry,
-    );
-    assert_eq!(recorder.take(), [(cover("account", 1), vec![0], 1)]);
-}
-
-/// A held catch-up's record is the same capability a stored one keeps in
-/// the store: every stream handed, with how far.
-#[test]
-fn a_held_record_is_the_processed_capability() {
-    use crate::Processed as _;
-    let registry = Arc::new(registry());
-    let store = Arc::new(MemoryStore::new());
-    opened(&*store, &registry, 1, 5);
-    let recorder = Recorder::default();
-    let mut held = CatchUp::new(&["account"], recorder.clone()).unwrap();
-    step(&mut held, &store, &registry);
-    assert_eq!(
-        held.record().expect("held").processed("recorder").ready(),
-        Ok(vec![(cover("account", 1), 2)])
-    );
+    assert_eq!(recorder.take(), [(stream, vec![0, 1], 2)]);
 }
 
 /// A position the projector's name holds outside its sources (another

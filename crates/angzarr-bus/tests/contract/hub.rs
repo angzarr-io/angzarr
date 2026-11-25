@@ -75,16 +75,14 @@ async fn yields() {
 /// What the spy handler saw.
 #[derive(Default)]
 struct Seen {
-    /// Each event handed: its sequence and the marker of its page (`gone`
-    /// for a stream gone).
+    /// Each event handed: its sequence and the marker of its page.
     handed: Vec<(u64, String)>,
     /// Each dead letter for a missing predecessor: the waiting sequence
     /// and the one missing.
     letters: Vec<(u64, u64)>,
     /// Calls made.
     calls: usize,
-    /// Each event handed, by the stream's first root byte and its sequence;
-    /// a gone stream as `u64::MAX`.
+    /// Each event handed, by the stream's first root byte and its sequence.
     trail: Vec<(u8, u64)>,
 }
 
@@ -133,13 +131,9 @@ impl Spy {
             yields().await;
         }
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
-        let marker = item.page.map_or("gone".to_string(), marker_of);
+        let marker = marker_of(item.page);
         let root = item.stream.root.as_ref().map_or(0, |root| root.value[0]);
-        let at = if item.page.is_some() {
-            item.sequence
-        } else {
-            u64::MAX
-        };
+        let at = item.sequence;
         let fails = {
             let mut failing = self.failing.lock().unwrap();
             match failing
@@ -646,40 +640,18 @@ async fn a_delivery_at_the_mark_is_never_past_the_room() {
 }
 
 #[tokio::test]
-async fn a_gone_stream_handled_is_counted_and_forgotten() {
+async fn a_purged_streams_tombstone_is_handed_as_an_event_and_the_position_moves_past_it() {
     let rig = Rig::with(2).await;
     let mut hub = rig.hub(rig.run.transport(&Soon));
     rig.project(&mut hub, "projector", 1);
     let spy = rig.spy.clone();
     serve(&mut hub, move |_| spy.handed().len() < 2).await;
     Harness::purge(&rig.run, &stream()).await;
-    let counted = Arc::new(AtomicUsize::new(0));
-    let (spy, count) = (rig.spy.clone(), counted.clone());
-    serve(&mut hub, move |served| {
-        count.fetch_add(served.handled() as usize, Ordering::SeqCst);
-        spy.handed().len() < 3
-    })
-    .await;
-    assert_eq!(rig.spy.markers().last().map(String::as_str), Some("gone"));
-    assert_eq!(
-        counted.load(Ordering::SeqCst),
-        1,
-        "the gone stream is handled"
-    );
-    assert_eq!(rig.position("projector").await, 0, "forgotten");
-}
-
-#[tokio::test]
-async fn a_gone_stream_is_settled_handled_when_its_projector_handles_it() {
-    let rig = Rig::with(1).await;
-    let script = Scripted::new([(stream(), 0, Body::Gone)]);
-    let mut hub = rig.hub(script.clone());
-    rig.project(&mut hub, "projector", 1);
     let spy = rig.spy.clone();
-    serve(&mut hub, move |_| spy.seen.lock().unwrap().calls < 1).await;
-    let settled = script.settled();
-    assert_eq!(settled.len(), 1);
-    assert_eq!(settled[0].3, Settle::Handled, "{settled:?}");
+    serve(&mut hub, move |_| spy.handed().len() < 3).await;
+    let handed = rig.spy.handed();
+    assert_eq!(handed.last().copied(), Some(2));
+    assert_eq!(rig.position("projector").await, 3, "past the tombstone");
 }
 
 /// A tracker that counts what the hub asks of it, and keeps marks in memory.

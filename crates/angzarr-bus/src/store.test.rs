@@ -1,5 +1,5 @@
 //! The store transport's feed, driven directly: which streams it keeps and
-//! delivers gone, what it owes while its credit is full, and how a held
+//! delivers its tombstone, what it owes while its credit is full, and how a held
 //! delivery is released, by its delay or by the poll.
 
 use std::future::Future;
@@ -162,7 +162,7 @@ where
 }
 
 #[tokio::test]
-async fn a_stream_delivered_and_then_purged_is_delivered_gone() {
+async fn a_stream_delivered_and_then_purged_is_delivered_its_tombstone() {
     let store = MemoryStore::default();
     append(&store, &stream(1), 1).await;
     let transport = StoreTransport::new(
@@ -176,46 +176,16 @@ async fn a_stream_delivered_and_then_purged_is_delivered_gone() {
     assert_eq!((first.sequence, first.body), (0, Body::Reference));
     feed.settle(token, Settle::Handled).await.unwrap();
     purge(&store, &stream(1)).await;
-    let (_, gone) = delivery(&feed).await;
-    assert_eq!((gone.stream, gone.body), (stream(1), Body::Gone));
-}
-
-#[tokio::test]
-async fn a_stream_with_no_position_and_no_events_is_not_delivered_gone() {
-    let store = MemoryStore::default();
-    append(&store, &stream(1), 1).await;
-    purge(&store, &stream(1)).await;
-    let transport = StoreTransport::new(
-        &store,
-        &Clock,
-        Duration::from_millis(1),
-        Following::FullScan,
+    let (_, next) = delivery(&feed).await;
+    assert_eq!(
+        (next.stream, next.sequence, next.body),
+        (stream(1), 1, Body::Reference),
+        "the tombstone, at the next sequence"
     );
-    let feed = open(&transport, &scope(), 1).await;
-    assert!(stays_idle(&feed, 3).await, "nothing was ever kept of it");
 }
 
 #[tokio::test]
-async fn a_stream_forgotten_is_not_delivered_gone_again() {
-    let store = MemoryStore::default();
-    append(&store, &stream(1), 1).await;
-    record(&store, &stream(1), 1).await;
-    purge(&store, &stream(1)).await;
-    let transport = StoreTransport::new(
-        &store,
-        &Clock,
-        Duration::from_millis(1),
-        Following::FullScan,
-    );
-    let feed = open(&transport, &scope(), 1).await;
-    let (token, gone) = delivery(&feed).await;
-    assert_eq!(gone.body, Body::Gone);
-    feed.settle(token, Settle::Handled).await.unwrap();
-    assert!(stays_idle(&feed, 3).await, "forgotten once it was handled");
-}
-
-#[tokio::test]
-async fn a_purged_and_written_again_stream_is_delivered_gone_then_from_its_start() {
+async fn a_purged_stream_is_delivered_from_the_mark_its_position_holds() {
     let store = MemoryStore::default();
     append(&store, &stream(1), 2).await;
     record(&store, &stream(1), 2).await;
@@ -228,14 +198,12 @@ async fn a_purged_and_written_again_stream_is_delivered_gone_then_from_its_start
         Following::FullScan,
     );
     let feed = open(&transport, &scope(), 1).await;
-    let (token, gone) = delivery(&feed).await;
-    assert_eq!(gone.body, Body::Gone);
-    feed.settle(token, Settle::Handled).await.unwrap();
-    let again = now(&feed).expect("it answers at once");
-    match again {
-        Ok(Next::Delivery(_, delivery)) => assert_eq!(delivery.sequence, 0, "from its start"),
-        _ => panic!("the rewritten stream is owed at once, with no new read"),
+    for expected in [2, 3] {
+        let (token, next) = delivery(&feed).await;
+        assert_eq!(next.sequence, expected, "the tombstone, then what follows");
+        feed.settle(token, Settle::Handled).await.unwrap();
     }
+    assert!(stays_idle(&feed, 3).await);
 }
 
 /// A feed of two instances' worth of streams with its one slot taken, and
@@ -282,28 +250,6 @@ async fn a_stream_owing_a_redelivery_while_the_credit_is_full_keeps_the_feed_fro
     assert_eq!(again.stream, a.stream, "delivered again, at once");
     let _ = second;
     assert!(now(&feed).is_none(), "owed more, its credit full");
-}
-
-#[tokio::test]
-async fn a_stream_owing_its_gone_delivery_while_the_credit_is_full_keeps_the_feed_from_idling() {
-    let store = MemoryStore::default();
-    append(&store, &stream(1), 1).await;
-    append(&store, &stream(2), 1).await;
-    record(&store, &stream(2), 1).await;
-    purge(&store, &stream(2)).await;
-    let transport = StoreTransport::new(
-        &store,
-        &Frozen,
-        Duration::from_secs(3600),
-        Following::FullScan,
-    );
-    let feed = open(&transport, &scope(), 1).await;
-    let (_token, out) = delivery(&feed).await;
-    assert!(
-        out.body != Body::Gone || out.stream == stream(2),
-        "one of the two is out"
-    );
-    assert!(now(&feed).is_none(), "the other is owed, its credit full");
 }
 
 #[tokio::test]
@@ -639,7 +585,7 @@ async fn told_what_a_commit_touched_a_new_stream_is_delivered_from_its_start() {
 }
 
 #[tokio::test]
-async fn told_what_a_commit_touched_a_stream_delivered_and_purged_is_delivered_gone() {
+async fn told_what_a_commit_touched_a_stream_delivered_and_purged_is_delivered_its_tombstone() {
     let store = MemoryStore::default();
     append(&store, &stream(1), 1).await;
     let transport = incremental(&store);
@@ -652,12 +598,13 @@ async fn told_what_a_commit_touched_a_stream_delivered_and_purged_is_delivered_g
         }
         purge(&store, &stream(1)).await;
     };
-    let (_, (_, gone)) = tokio::join!(purging, delivery(&feed));
-    assert_eq!((gone.stream, gone.body), (stream(1), Body::Gone));
+    let (_, (_, next)) = tokio::join!(purging, delivery(&feed));
+    assert_eq!((next.stream, next.sequence), (stream(1), 1));
 }
 
 #[tokio::test]
-async fn told_what_a_commit_touched_a_purged_and_written_again_stream_starts_over() {
+async fn told_what_a_commit_touched_a_purged_and_written_again_stream_continues_after_its_tombstone(
+) {
     let store = MemoryStore::default();
     append(&store, &stream(1), 3).await;
     let transport = incremental(&store);
@@ -673,68 +620,14 @@ async fn told_what_a_commit_touched_a_purged_and_written_again_stream_starts_ove
         purge(&store, &stream(1)).await;
         append(&store, &stream(1), 1).await;
     };
-    let (_, (token, gone)) = tokio::join!(rewriting, delivery(&feed));
+    let (_, (token, tombstone)) = tokio::join!(rewriting, delivery(&feed));
     assert_eq!(
-        gone.body,
-        Body::Gone,
-        "its head is below what was delivered"
+        tombstone.sequence, 3,
+        "its tombstone, past what was delivered"
     );
     feed.settle(token, Settle::Handled).await.unwrap();
     let (_, again) = delivery(&feed).await;
-    assert_eq!(
-        (again.stream, again.sequence),
-        (stream(1), 0),
-        "from its start"
-    );
-}
-
-#[tokio::test]
-async fn told_what_a_commit_touched_a_rewrite_as_long_as_what_was_delivered_is_still_noticed() {
-    let store = MemoryStore::default();
-    append(&store, &stream(1), 1).await;
-    let transport = incremental(&store);
-    let feed = open(&transport, &scope(), 1).await;
-    let (token, _) = delivery(&feed).await;
-    feed.settle(token, Settle::Handled).await.unwrap();
-    let rewriting = async {
-        for _ in 0..5 {
-            tokio::task::yield_now().await;
-        }
-        purge(&store, &stream(1)).await;
-        append(&store, &stream(1), 1).await;
-    };
-    let (_, (token, gone)) = tokio::join!(rewriting, delivery(&feed));
-    assert_eq!(
-        gone.body,
-        Body::Gone,
-        "the feed says it was purged, whatever its head"
-    );
-    feed.settle(token, Settle::Handled).await.unwrap();
-    let (_, again) = delivery(&feed).await;
-    assert_eq!((again.stream, again.sequence), (stream(1), 0));
-}
-
-#[tokio::test]
-async fn told_what_a_commit_touched_a_stream_never_delivered_that_is_purged_is_not_delivered_gone()
-{
-    let store = MemoryStore::default();
-    let transport = incremental(&store);
-    let feed = open(&transport, &scope(), 1).await;
-    let churn = async {
-        for _ in 0..5 {
-            tokio::task::yield_now().await;
-        }
-        append(&store, &stream(1), 1).await;
-        purge(&store, &stream(1)).await;
-    };
-    let nothing = async {
-        let delivered = tokio::time::timeout(Duration::from_millis(300), delivery(&feed)).await;
-        assert!(
-            delivered.is_err(),
-            "it was never delivered, so is never gone"
-        );
-    };
-    tokio::join!(churn, nothing);
+    assert_eq!((again.stream, again.sequence), (stream(1), 4));
 }
 
 // ---------------------------------------------------------------- a change feed that takes time

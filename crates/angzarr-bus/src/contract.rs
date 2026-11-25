@@ -26,7 +26,7 @@
 //! | [`a_held_failure_is_handed_again`] | a projector's retryable failure handed again |
 //! | [`a_projectors_bug_is_dead_lettered_and_its_stream_goes_on`] | a projector's bug dead-lettered, passed |
 //! | [`a_policys_bug_is_dead_lettered_or_held`] | a policy's failure is its router's |
-//! | [`a_purged_stream_is_handed_to_a_projector_once_as_gone_and_forgotten_by_a_policy`] | purged streams |
+//! | [`a_purged_stream_hands_a_projector_its_tombstone_then_what_follows`] | purged streams |
 //! | [`a_commit_wakes_the_bus_with_no_poll`] | the wake source |
 //! | [`out_of_order_deliveries_are_served_in_stream_order_from_the_store`] | order from the store, late originals not handled twice |
 //! | [`a_policys_out_of_order_triggers_are_reacted_to_in_stream_order`] | a policy's order from the store |
@@ -43,7 +43,7 @@
 //!
 //! **The transport's checks** ([`transport`]), for any transport (a broker
 //! adapter, the store's): what a delivery carries, redelivery of what was
-//! not settled and of what was held, credit, and gone streams.
+//! not settled and of what was held, credit, and purged streams.
 
 #[path = "transport_contract.rs"]
 pub mod transport;
@@ -99,11 +99,6 @@ pub enum Delivery {
         stream: Cover,
         /// The event's sequence.
         sequence: u64,
-    },
-    /// A stream that is gone (purged).
-    Gone {
-        /// The stream.
-        stream: Cover,
     },
 }
 
@@ -490,42 +485,28 @@ pub async fn a_policys_bug_is_dead_lettered_or_held<H: Harness>(harness: H) {
     }
 }
 
-/// A stream a projector and a policy handled is purged: the projector is
-/// handed it as gone once, the policy is not called, and both positions
-/// are put back to 0; written again, it is served from its start.
-pub async fn a_purged_stream_is_handed_to_a_projector_once_as_gone_and_forgotten_by_a_policy<
-    H: Harness,
->(
+/// A stream a projector handled is purged: sequences never restart, so the
+/// projector is handed the tombstone at the next sequence, then what is
+/// written after it, and its position moves past each.
+pub async fn a_purged_stream_hands_a_projector_its_tombstone_then_what_follows<H: Harness>(
     harness: H,
 ) {
     let domains = harness.domains();
     let a = stream(&domains.first, 1);
     append(&harness, &a, 2).await;
     let probe = Probe::new();
-    let relay = Relay::to(&[]);
     let mut bus = harness.bus(Wake::Poll);
     let scope = Scope::domain(&domains.first);
     project(&harness, &mut bus, PROBE, scope, credit(1), &probe);
-    react(&harness, &mut bus, RELAY, &domains.first, &relay);
-    serve(&harness, &mut bus, "before the purge", |t| t.handled >= 4).await;
+    serve(&harness, &mut bus, "before the purge", |t| t.handled >= 2).await;
     harness.purge(&a).await;
-    let gone = |t: &Tally| t.handled >= 1 && t.idles >= 3;
-    serve(&harness, &mut bus, "the purge", gone).await;
-    let is_gone = |d: &&Delivery| matches!(d, Delivery::Gone { stream } if *stream == a);
-    assert_eq!(
-        probe.handed().iter().filter(is_gone).count(),
-        1,
-        "gone once"
-    );
-    assert_eq!(relay.triggers().len(), 2, "the policy is not called");
-    assert_eq!(harness.position(PROBE, &a).await, 0);
-    assert_eq!(harness.position(RELAY, &a).await, 0);
+    serve(&harness, &mut bus, "the purge", |t| t.handled >= 1).await;
+    assert_eq!(probe.done(), [event(&a, 0), event(&a, 1), event(&a, 2)]);
+    assert_eq!(harness.position(PROBE, &a).await, 3);
     append(&harness, &a, 1).await;
-    serve(&harness, &mut bus, "written again", |t| t.handled >= 2).await;
-    let first = event(&a, 0);
-    assert_eq!(probe.done().iter().filter(|d| **d == first).count(), 2);
-    let again = relay.triggers();
-    assert_eq!(again.iter().filter(|t| **t == trigger(&a, 0)).count(), 2);
+    serve(&harness, &mut bus, "written again", |t| t.handled >= 1).await;
+    assert_eq!(probe.done().last(), Some(&event(&a, 3)));
+    assert_eq!(harness.position(PROBE, &a).await, 4);
 }
 
 /// A bus that is never polled, idle, is woken by a commit and hands the
@@ -1042,7 +1023,7 @@ macro_rules! bus_contract {
             a_held_failure_is_handed_again,
             a_projectors_bug_is_dead_lettered_and_its_stream_goes_on,
             a_policys_bug_is_dead_lettered_or_held,
-            a_purged_stream_is_handed_to_a_projector_once_as_gone_and_forgotten_by_a_policy,
+            a_purged_stream_hands_a_projector_its_tombstone_then_what_follows,
             a_commit_wakes_the_bus_with_no_poll,
             out_of_order_deliveries_are_served_in_stream_order_from_the_store,
             a_policys_out_of_order_triggers_are_reacted_to_in_stream_order,
@@ -1083,7 +1064,7 @@ pub const CHECKS: &[&str] = &[
     "a_held_failure_is_handed_again",
     "a_projectors_bug_is_dead_lettered_and_its_stream_goes_on",
     "a_policys_bug_is_dead_lettered_or_held",
-    "a_purged_stream_is_handed_to_a_projector_once_as_gone_and_forgotten_by_a_policy",
+    "a_purged_stream_hands_a_projector_its_tombstone_then_what_follows",
     "a_commit_wakes_the_bus_with_no_poll",
     "out_of_order_deliveries_are_served_in_stream_order_from_the_store",
     "a_policys_out_of_order_triggers_are_reacted_to_in_stream_order",
@@ -1572,7 +1553,7 @@ fn events(stream: &Cover, sequences: std::ops::Range<u64>) -> Vec<Delivery> {
 
 fn stream_of(delivery: &Delivery) -> &Cover {
     match delivery {
-        Delivery::Event { stream, .. } | Delivery::Gone { stream } => stream,
+        Delivery::Event { stream, .. } => stream,
     }
 }
 
@@ -1605,15 +1586,13 @@ fn causes(pages: &[EventPage]) -> Vec<Uuid> {
         .collect()
 }
 
-/// `deliveries` by stream, then sequence, a gone stream's after its events.
+/// `deliveries` by stream, then sequence.
 fn sorted(mut deliveries: Vec<Delivery>) -> Vec<Delivery> {
     deliveries.sort_by_key(|delivery| {
         let stream = stream_of(delivery);
         let root = stream.root.as_ref().map(|root| root.value.to_vec());
-        let sequence = match delivery {
-            Delivery::Event { sequence, .. } => *sequence,
-            Delivery::Gone { .. } => u64::MAX,
-        };
+        let Delivery::Event { sequence, .. } = delivery;
+        let sequence = *sequence;
         (stream.domain.clone(), root, sequence)
     });
     deliveries

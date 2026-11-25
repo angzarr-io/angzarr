@@ -32,6 +32,8 @@ angzarr-proto = { path = "../angzarr-proto" }
 # to fail on demand, on tokio's runtime and timer; `Any` for its events.
 [dev-dependencies]
 angzarr-ports = { path = "../angzarr-ports", features = ["memory", "faulty"] }
+# Its own suite, so `test-pkg angzarr-bus` builds it alone.
+angzarr-bus = { path = ".", features = ["contract"] }
 prost-types = "0.14"
 tokio = { version = "1", features = ["macros", "rt", "time"] }
 
