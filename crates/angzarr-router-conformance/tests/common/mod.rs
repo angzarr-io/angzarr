@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 /// A handler-contract tier feature, by file name.
 pub fn tier(feature: &str) -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../angzarr-project/features/handler-contract")
+    PathBuf::from(env!("ANGZARR_SPEC_FEATURES"))
+        .join("handler-contract")
         .join(feature)
 }
 

@@ -1,6 +1,6 @@
 //! Binds angzarr-project's handler-contract tier
 //! (features/handler-contract/handling.feature; the spec is the source, read
-//! from the submodule) to the Rust core: the order aggregate, the
+//! from the `angzarr-project` package) to the Rust core: the order aggregate, the
 //! fulfillment process manager (a domain, decision 14.31) and the
 //! order-fulfillment policy, built by hand over the tier's orders.v1
 //! fixture messages, on the handler layer's messages (decision 14.78).

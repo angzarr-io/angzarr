@@ -40,18 +40,22 @@ const FILE_DESCRIPTOR_SET: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/con
 
 // The orthogonal request skeletons — structural scaffold only; the
 // test-meaningful field is omitted and supplied by the step definitions.
-const SKEL_INCREASE: &str = include_str!(
-    "../../../angzarr-project/features/handler-contract/fixture/txtpb/command_increase.txtpb"
-);
-const SKEL_FAILHARD: &str = include_str!(
-    "../../../angzarr-project/features/handler-contract/fixture/txtpb/command_failhard.txtpb"
-);
-const SKEL_UNHANDLED: &str = include_str!(
-    "../../../angzarr-project/features/handler-contract/fixture/txtpb/command_unhandled.txtpb"
-);
-const SKEL_INCREASED_EVENT: &str = include_str!(
-    "../../../angzarr-project/features/handler-contract/fixture/txtpb/event_increased.txtpb"
-);
+const SKEL_INCREASE: &str = include_str!(concat!(
+    env!("ANGZARR_SPEC_FEATURES"),
+    "/handler-contract/fixture/txtpb/command_increase.txtpb"
+));
+const SKEL_FAILHARD: &str = include_str!(concat!(
+    env!("ANGZARR_SPEC_FEATURES"),
+    "/handler-contract/fixture/txtpb/command_failhard.txtpb"
+));
+const SKEL_UNHANDLED: &str = include_str!(concat!(
+    env!("ANGZARR_SPEC_FEATURES"),
+    "/handler-contract/fixture/txtpb/command_unhandled.txtpb"
+));
+const SKEL_INCREASED_EVENT: &str = include_str!(concat!(
+    env!("ANGZARR_SPEC_FEATURES"),
+    "/handler-contract/fixture/txtpb/event_increased.txtpb"
+));
 
 const HANDLE_REQUEST: &str = "io.angzarr.handler.v1.HandleRequest";
 const EVENT_PAGE: &str = "io.angzarr.v1.EventPage";

@@ -12,17 +12,21 @@ use std::path::PathBuf;
 /// only — the descriptor set still carries those files for the pool. The
 /// framework protos are the ones angzarr-proto embeds (the files its types
 /// were generated from, written out by `protos::write_include_dir`), so the
-/// pool describes exactly those types; only the fixtures come from this
-/// repository's angzarr-project submodule.
+/// pool describes exactly those types; only the fixtures come from the
+/// `angzarr-project` cargo package, whose features directory this script
+/// also hands the crate's sources and tests (`ANGZARR_SPEC_FEATURES`).
 fn main() {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let top = manifest.join("../..");
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let framework_proto = angzarr_proto::protos::write_include_dir(&out_dir.join("angzarr-proto"))
         .expect("write angzarr-proto's protos");
     // The handler-contract tier's fixtures (decision 14.42): the router's
     // complete contract, shared by every router.
-    let fixture = top.join("angzarr-project/features/handler-contract/fixture");
+    let features = angzarr_project::features_dir();
+    println!(
+        "cargo:rustc-env=ANGZARR_SPEC_FEATURES={}",
+        features.display()
+    );
+    let fixture = features.join("handler-contract/fixture");
     let counter = fixture.join("counter.proto");
     let order = fixture.join("order.proto");
     // The fixture pool parses the handler layer's requests (HandleRequest,
@@ -30,10 +34,10 @@ fn main() {
     // message-annotation counter.proto imports neither, so the harness
     // names them explicitly — its descriptor needs are its own, not an
     // artifact of what the fixture proto imports. The handler layer's
-    // protos come from this repository's angzarr-project submodule, held to
-    // the same spec commit as core's (`just check-core-lockstep`); core's
-    // resolve from angzarr-proto's embedded copies, the first include.
-    let spec_proto = top.join("angzarr-project/proto");
+    // protos come from the angzarr-project package, the one core's are
+    // generated from; core's resolve from angzarr-proto's embedded copies,
+    // the first include.
+    let spec_proto = angzarr_project::proto_dir().to_path_buf();
     let types = framework_proto.join("io/angzarr/v1/types.proto");
     let command_handler = spec_proto.join("io/angzarr/handler/v1/command_handler.proto");
 
