@@ -152,6 +152,47 @@ impl Fingerprint {
             recorded_at: meta.and_then(|meta| meta.recorded_at),
         }
     }
+
+    /// The fingerprint as a nonzero number a position can hold (0 is no
+    /// position): FNV-1a over its cause and instant.
+    fn digest(&self) -> u64 {
+        use prost::Message as _;
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut feed = |bytes: &[u8]| {
+            for byte in bytes {
+                hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3);
+            }
+        };
+        match &self.cause {
+            Some(cause) => {
+                feed(&[1]);
+                feed(
+                    &angzarr_proto::v1::EventMeta {
+                        causation: Some(cause.clone()),
+                        ..Default::default()
+                    }
+                    .encode_to_vec(),
+                );
+            }
+            None => feed(&[0]),
+        }
+        match &self.recorded_at {
+            Some(at) => {
+                feed(&[1]);
+                feed(&at.seconds.to_le_bytes());
+                feed(&at.nanos.to_le_bytes());
+            }
+            None => feed(&[0]),
+        }
+        hash.max(1)
+    }
+}
+
+/// The handler name a stored catch-up keeps a stream's first-event digest
+/// under, beside its own position: a second position on the same stream,
+/// written in the same step, so no format of the store changes.
+fn first_handler(handler: &str) -> String {
+    format!("{handler}\u{1}first")
 }
 
 /// A stream as a catch-up tells streams apart: its domain, root and
@@ -398,13 +439,33 @@ impl<P: ProjectorHandler> CatchUp<P> {
         cover: &Cover,
     ) -> Result<(u64, Option<Fingerprint>), StoreError> {
         let stream = StreamRef::try_from(cover)?;
+        let mut seen = None;
         let from = match &self.record {
             Record::Stored => {
                 let handler = self.projector.name();
                 let at = store.position(PositionKey { handler, stream }).await?;
-                match reads.head(stream).await?.next_sequence < at {
-                    true => 0,
-                    false => at,
+                match (at, reads.head(stream).await?.next_sequence < at) {
+                    (0, _) | (_, true) => 0,
+                    _ => {
+                        let start = reads.read(stream, 0, Some(1)).await?;
+                        let now = Fingerprint::of(start.pages.first());
+                        let kept = first_handler(handler);
+                        let kept = store
+                            .position(PositionKey {
+                                handler: &kept,
+                                stream,
+                            })
+                            .await?;
+                        // No digest kept (a position from before them) is
+                        // taken as it stands, and kept at this step.
+                        match kept == 0 || kept == now.digest() {
+                            true => {
+                                seen = Some(now);
+                                at
+                            }
+                            false => 0,
+                        }
+                    }
                 }
             }
             Record::Held(held) => match held.seen.get(&key(cover)) {
@@ -423,7 +484,8 @@ impl<P: ProjectorHandler> CatchUp<P> {
             Record::Stored => None,
         }
         .filter(|_| from > 0)
-        .map(|seen| seen.first.clone());
+        .map(|seen| seen.first.clone())
+        .or(seen);
         Ok((from, first))
     }
 
@@ -437,7 +499,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
         next: u64,
     ) -> Result<(), StoreError> {
         match &mut self.record {
-            Record::Stored => self.store_position(store, cover, next).await,
+            Record::Stored => self.store_position(store, cover, Some(&first), next).await,
             Record::Held(held) => {
                 let cover = cover.clone();
                 held.seen.insert(key(&cover), Seen { cover, first, next });
@@ -446,20 +508,32 @@ impl<P: ProjectorHandler> CatchUp<P> {
         }
     }
 
-    /// Put the projector's position on `cover`'s stream at `next`, in the
+    /// Put the projector's position on `cover`'s stream at `next`, with the
+    /// digest of its first event beside it, in the
     /// store.
     async fn store_position<S: Store>(
         &self,
         store: &S,
         cover: &Cover,
+        first: Option<&Fingerprint>,
         next: u64,
     ) -> Result<(), StoreError> {
         let handler = self.projector.name();
         let stream = StreamRef::try_from(cover)?;
-        store
-            .write(Write::positions(&[(PositionKey { handler, stream }, next)]))
-            .await
-            .map(drop)
+        let kept = first_handler(handler);
+        let digest = first.map_or(0, Fingerprint::digest);
+        let positions = [
+            (PositionKey { handler, stream }, next),
+            (
+                PositionKey {
+                    handler: &kept,
+                    stream,
+                },
+                // A stream forgotten forgets its digest with it.
+                if next == 0 { 0 } else { digest },
+            ),
+        ];
+        store.write(Write::positions(&positions)).await.map(drop)
     }
 
     /// Hand every stream of the sources the record holds that the step's
@@ -495,7 +569,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
                     held.seen.remove(&key(&cover));
                 }
                 Record::Stored => {
-                    if let Err(error) = self.store_position(store, &cover, 0).await {
+                    if let Err(error) = self.store_position(store, &cover, None, 0).await {
                         caught.failures.push((cover, KernelError::Store(error)));
                         continue;
                     }
