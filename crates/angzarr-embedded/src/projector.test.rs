@@ -351,8 +351,9 @@ fn stored_positions_resume_in_a_new_catch_up() {
     assert_eq!(position(&store, "recorder", &cover("account", 1)), 3);
 }
 
-/// A purge removes the stored positions on its stream, so a stored
-/// catch-up hands a stream written again from its start.
+/// A purge keeps the stored positions on its stream, but a stream written
+/// again shorter than the position is seen by its head, so a stored
+/// catch-up hands it from its start.
 #[test]
 fn a_stored_catch_up_hands_a_stream_written_again_from_its_start() {
     let registry = registry();

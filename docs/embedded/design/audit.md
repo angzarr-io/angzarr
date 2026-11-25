@@ -1011,8 +1011,8 @@ A store's own failure is a `Cause` (its code and args) inside
 as `ext_err_txt` and SQLite's primary result code as `errno`.
 
 **Opt-in capabilities**, each a trait of its own with its own section of
-the suite: `Purge` (a stream, its snapshot, its command ids and every
-position on it, in one call), `ReadStore` (a read-only unit whose reads
+the suite: `Purge` (a stream, its snapshot, its command ids and its dead
+letters, in one call; the positions on it stay, decision 14.68), `ReadStore` (a read-only unit whose reads
 all see the moment it began, so a reader listing `covers` and reading each
 stream never mixes two moments), `Watch` (a change token: equal tokens
 from one handle mean nothing was committed between), `ReadUntilTime`,

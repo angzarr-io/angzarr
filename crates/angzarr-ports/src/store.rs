@@ -283,7 +283,10 @@ impl<T: EventStore + SnapshotStore + PositionStore + ?Sized> Store for T {}
 ///   fork, then its own); a purge removes only its own rows, never main's,
 ///   and it reads as main's again.
 /// - A known limit (ABA): a head is a length, so a stream purged and
-///   re-created to the same length in between passes the guard.
+///   re-created to the same length in between passes the guard. The same
+///   holds for a position, which a purge keeps: a driver that resumes
+///   from one tells a stream written again by its first event's digest
+///   ([`crate::first`]).
 ///
 /// Answers how many events it removed.
 pub trait Purge: MaybeSend + MaybeSync {

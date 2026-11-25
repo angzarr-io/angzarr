@@ -394,8 +394,10 @@ impl<P: ProjectorHandler> CatchUp<P> {
     /// handed. Held, a stream seen before is owed from where it was
     /// handed to, unless its first event is not the one seen first: then
     /// it is a stream written again, owed from its start. Stored, the
-    /// store's position, unless the stream's head is below it: then it is
-    /// one purged and written again, owed from its start.
+    /// store's position, unless the stream's head is below it, or its first
+    /// event's digest (kept beside the position, [`angzarr_ports::first`])
+    /// is not the one kept: then it is one purged and written again, owed
+    /// from its start.
     async fn owed<S: Store, U: ReadUnit>(
         &self,
         store: &S,
