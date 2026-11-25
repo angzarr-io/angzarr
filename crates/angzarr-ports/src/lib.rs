@@ -77,6 +77,7 @@ mod notify;
 mod send;
 mod store;
 mod stream;
+pub mod tombstone;
 
 pub mod dyn_store;
 pub mod migrate;

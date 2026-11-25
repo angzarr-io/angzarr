@@ -2034,7 +2034,7 @@ fn the_purge_checks_catch_what_a_purge_leaves() {
         PurgeKeepsSnapshot
     );
     catches!(
-        a_purged_stream_starts_again_from_nothing,
+        a_purged_stream_continues_after_its_tombstone,
         broken,
         PurgeIsANoOp
     );
@@ -2363,7 +2363,7 @@ fn an_honest_broken_store_passes_every_check() {
         a_purge_deletes_a_streams_events_snapshot_and_command_ids,
         a_purge_keeps_the_streams_positions,
         a_purge_deletes_a_snapshot_with_no_events,
-        a_purged_stream_starts_again_from_nothing,
+        a_purged_stream_continues_after_its_tombstone,
         a_purge_at_the_streams_head_removes_it,
         a_purge_at_a_stale_head_is_a_conflict_and_removes_nothing,
         a_purge_of_an_absent_stream_is_at_zero,
