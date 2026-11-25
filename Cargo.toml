@@ -61,11 +61,11 @@ angzarr-embedded-host-config = { path = "crates/angzarr-embedded-host-config" }
 # errors, their rendering at the driving edge, a test's scratch directory, and the
 # platform seams (os, file-system) the SQLite store's opener opens files through. One
 # commit of one repository, pinned by full hash.
-coded-diagnostic = { git = "https://github.com/benjaminabbitt/rust-support", rev = "2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479" }
-presentation = { git = "https://github.com/benjaminabbitt/rust-support", rev = "2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479" }
-test-dir = { git = "https://github.com/benjaminabbitt/rust-support", rev = "2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479" }
-os = { git = "https://github.com/benjaminabbitt/rust-support", rev = "2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479" }
-file-system = { git = "https://github.com/benjaminabbitt/rust-support", rev = "2f7d2670a66f00dcf9ad4b2b5a8e20e5d9d3e479" }
+coded-diagnostic = { git = "https://github.com/benjaminabbitt/rust-support", rev = "dcb930d198706371d8e7496ec5ec35efb067b92f" }
+presentation = { git = "https://github.com/benjaminabbitt/rust-support", rev = "dcb930d198706371d8e7496ec5ec35efb067b92f" }
+test-dir = { git = "https://github.com/benjaminabbitt/rust-support", rev = "dcb930d198706371d8e7496ec5ec35efb067b92f" }
+os = { git = "https://github.com/benjaminabbitt/rust-support", rev = "dcb930d198706371d8e7496ec5ec35efb067b92f" }
+file-system = { git = "https://github.com/benjaminabbitt/rust-support", rev = "dcb930d198706371d8e7496ec5ec35efb067b92f" }
 
 # Third-party (from platform, build and router; one entry each, no conflicts).
 serde = { version = "1", features = ["derive"] }
