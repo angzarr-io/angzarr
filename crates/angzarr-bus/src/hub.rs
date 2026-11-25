@@ -819,7 +819,10 @@ where
             return Ok(false);
         }
         if !run.pool.is_policy() {
-            self.write(at, stream, sequence + 1).await?;
+            // The stream's first event is handed here: its digest is kept
+            // with the mark (`Positions::record_first`).
+            let first = (sequence == 0).then(|| angzarr_ports::first::of(Some(page)));
+            self.write(at, stream, sequence + 1, first).await?;
         }
         {
             let mut state = run.lock();
@@ -930,12 +933,23 @@ where
     }
 
     /// Put subscription `at`'s position on `stream` at `mark`.
-    async fn write(&self, at: usize, stream: &Cover, mark: u64) -> Result<(), D::Error> {
+    async fn write(
+        &self,
+        at: usize,
+        stream: &Cover,
+        mark: u64,
+        first: Option<u64>,
+    ) -> Result<(), D::Error> {
         let pool = self.runs[at].pool;
-        self.shared
-            .tracker(pool)
-            .record(&pool.name, stream, mark)
-            .await?;
+        let tracker = self.shared.tracker(pool);
+        match first {
+            Some(first) => {
+                tracker
+                    .record_first(&pool.name, stream, mark, first)
+                    .await?
+            }
+            None => tracker.record(&pool.name, stream, mark).await?,
+        }
         Ok(())
     }
 
@@ -978,7 +992,7 @@ where
 
     /// Put the position on `stream` back to 0, and its lane away.
     async fn forget(&self, at: usize, stream: &Cover) -> Result<(), D::Error> {
-        self.write(at, stream, 0).await?;
+        self.write(at, stream, 0, None).await?;
         self.runs[at].lock().lanes.remove(&key(stream));
         Ok(())
     }

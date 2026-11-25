@@ -59,6 +59,23 @@ pub trait Positions: MaybeSend + MaybeSync {
         stream: &'a Cover,
         mark: u64,
     ) -> BoxFuture<'a, Result<(), StoreError>>;
+
+    /// As [`record`](Positions::record), with `first`, the digest
+    /// ([`angzarr_ports::first::of`]) of the stream's first event, when the
+    /// handler has just answered that event: a tracker that outlives the
+    /// serve keeps it beside the mark, so a stream purged and written again
+    /// to the mark's length is told from the one the mark was kept on. A
+    /// tracker that keeps none ignores it, by default.
+    fn record_first<'a>(
+        &'a self,
+        name: &'a str,
+        stream: &'a Cover,
+        mark: u64,
+        first: u64,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        let _ = first;
+        self.record(name, stream, mark)
+    }
 }
 
 /// Positions in the event store's position records. See the module.
@@ -103,13 +120,60 @@ impl<S: EventStore + PositionStore> Positions for DurablePositions<'_, S> {
         mark: u64,
     ) -> BoxFuture<'a, Result<(), StoreError>> {
         Box::pin(async move {
-            let positions = [(
-                PositionKey {
-                    handler: name,
-                    stream: StreamRef::try_from(stream)?,
-                },
-                mark,
-            )];
+            let stream = StreamRef::try_from(stream)?;
+            // A forgotten stream forgets its first event's digest with it.
+            let kept = angzarr_ports::first::handler(name);
+            let positions = [
+                (
+                    PositionKey {
+                        handler: name,
+                        stream,
+                    },
+                    mark,
+                ),
+                (
+                    PositionKey {
+                        handler: &kept,
+                        stream,
+                    },
+                    0,
+                ),
+            ];
+            let written = match mark {
+                0 => &positions[..],
+                _ => &positions[..1],
+            };
+            self.store.write(Write::positions(written)).await?;
+            Ok(())
+        })
+    }
+
+    fn record_first<'a>(
+        &'a self,
+        name: &'a str,
+        stream: &'a Cover,
+        mark: u64,
+        first: u64,
+    ) -> BoxFuture<'a, Result<(), StoreError>> {
+        Box::pin(async move {
+            let stream = StreamRef::try_from(stream)?;
+            let kept = angzarr_ports::first::handler(name);
+            let positions = [
+                (
+                    PositionKey {
+                        handler: name,
+                        stream,
+                    },
+                    mark,
+                ),
+                (
+                    PositionKey {
+                        handler: &kept,
+                        stream,
+                    },
+                    first,
+                ),
+            ];
             self.store.write(Write::positions(&positions)).await?;
             Ok(())
         })

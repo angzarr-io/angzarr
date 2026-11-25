@@ -148,9 +148,19 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> PullTransport
             true => self.store.processed(opening.name).await?,
             false => Vec::new(),
         };
-        let lanes = (marks.into_iter())
+        let marks: Vec<(Cover, u64)> = (marks.into_iter())
             .filter(|(cover, _)| opening.scope.holds(cover))
-            .map(|(cover, mark)| (key(&cover), Lane::new(cover, mark)))
+            .collect();
+        let rewritten = self.rewritten(opening.name, &marks).await?;
+        let lanes = (marks.into_iter())
+            .map(|(cover, mark)| {
+                let key = key(&cover);
+                let mut lane = Lane::new(cover, mark);
+                // A stream written again since its mark was kept is owed
+                // its gone delivery, then from its start.
+                lane.gone = rewritten.contains(&key);
+                (key, lane)
+            })
             .collect();
         // Armed before the cursor and the first scan, like the cursor.
         let commit = self.push.map(CommitNotify::next_commit);
@@ -180,6 +190,43 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> PullTransport
             delayed: Mutex::default(),
             settled: CommitSignal::new(),
         })
+    }
+}
+
+impl<S: ReadStore + Processed, W: Timer + ?Sized> StoreTransport<'_, S, W> {
+    /// The streams among `marks` (subscription `name`'s positions) that are
+    /// not the streams the mark was kept on: a purge keeps the positions, so
+    /// a stream purged and written again to the length of its mark while no
+    /// feed was open passes for it. Told by the first event's digest kept
+    /// beside the mark ([`angzarr_ports::first`]); a mark with none kept is
+    /// taken as it stands.
+    async fn rewritten(
+        &self,
+        name: &str,
+        marks: &[(Cover, u64)],
+    ) -> Result<BTreeSet<Key>, StoreError> {
+        if marks.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let kept: BTreeMap<Key, u64> = self
+            .store
+            .processed(&angzarr_ports::first::handler(name))
+            .await?
+            .into_iter()
+            .map(|(cover, digest)| (key(&cover), digest))
+            .collect();
+        let mut reads = self.store.begin_read().await?;
+        let mut rewritten = BTreeSet::new();
+        for (cover, _) in marks.iter().filter(|(_, mark)| *mark > 0) {
+            let Some(kept) = kept.get(&key(cover)) else {
+                continue;
+            };
+            let start = reads.read(StreamRef::try_from(cover)?, 0, Some(1)).await?;
+            if angzarr_ports::first::of(start.pages.first()) != *kept {
+                rewritten.insert(key(cover));
+            }
+        }
+        Ok(rewritten)
     }
 }
 

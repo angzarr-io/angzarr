@@ -297,7 +297,8 @@ async fn several_streams_are_served_at_once_each_in_order() {
 }
 
 /// Each event is read from the store once per handling, and a bus with
-/// nothing owed reads no event; a store that does not push is served on
+/// nothing owed reads no event but the first of each stream it resumes
+/// (opening a serve); a store that does not push is served on
 /// its poll.
 #[tokio::test]
 async fn no_event_is_read_twice_per_handling() {
@@ -319,8 +320,9 @@ async fn no_event_is_read_twice_per_handling() {
     drain(&mut bus).await;
     assert_eq!(
         store.pages.load(Ordering::SeqCst),
-        4,
-        "nothing owed, nothing read"
+        4 + 2,
+        "nothing owed, no event handled again: a serve's opening only reads the first event of \
+         each of the two streams it resumes, to tell it from one written again"
     );
 }
 
