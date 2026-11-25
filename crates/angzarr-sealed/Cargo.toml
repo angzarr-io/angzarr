@@ -1,0 +1,41 @@
+[package]
+name = "angzarr-sealed"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.77"
+license = "Apache-2.0 OR BSD-3-Clause"
+description = "A Sealed protobuf message and its seal/open helpers: a field's secret encrypted (RFC 9180 HPKE base mode, X25519/HKDF-SHA256/ChaCha20-Poly1305) to its consumer's public key, so it crosses processes and machines; and per-subject data keys wrapped for crypto-shredding"
+repository = "https://github.com/angzarr-io/angzarr"
+publish = false
+
+# A member of angzarr's workspace, with every package field set here.
+# Crates know no application: nothing here names angzarr's other crates
+# or any domain; the message is this crate's own proto (proto/), so it can
+# be exported and reused alone.
+
+[dependencies]
+# `bytes` fields map to bytes::Bytes, as in angzarr-proto.
+bytes = "1"
+prost = "0.14"
+# Two new third-party dependencies (CLAUDE.md "A new dependency"):
+# - ring (already in the lock through the TLS stack): HKDF (the RFC 9180
+#   labeled extract/expand over its hmac and hkdf), the ChaCha20-Poly1305
+#   AEAD, the system RNG. Not a hand-rolled primitive anywhere.
+# - x25519-dalek (dalek-cryptography, BSD-3-Clause): the X25519 function
+#   RFC 9180's DHKEM needs and ring does not expose for static keys.
+#   No default features and no optional ones: only the `x25519` function
+#   is used; our own key types wipe themselves. Its `zeroize` feature is not
+#   enabled: it would add the zeroize_derive proc-macro crate (and syn) to the
+#   lock, for a function that takes and returns plain arrays.
+ring = "0.17"
+x25519-dalek = { version = "2", default-features = false }
+# A private key, a data key and a key-encryption key are wiped on drop.
+zeroize = "1"
+coded-diagnostic = { workspace = true }
+
+[build-dependencies]
+coded-diagnostic = { workspace = true, features = ["build"] }
+prost-build = "0.14"
+
+[lints]
+workspace = true
