@@ -37,6 +37,12 @@ prost = "0.14"
 # return-position `impl Future`; the dyn adapter boxes with std alone.
 
 # The tests' runtimes only: the suite itself is runtime-agnostic.
+# The crate's own tests need the suite and the backends it holds to it: it
+# dev-depends on itself with their features, so `test-pkg angzarr-ports`
+# alone builds them.
+[dev-dependencies]
+angzarr-ports = { path = ".", features = ["contract", "memory", "faulty"] }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
 
