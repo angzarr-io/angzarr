@@ -1360,8 +1360,13 @@ where
 
 /// 14.43, editions: an edition stream's purge is guarded by its head as
 /// read (main's events below its fork, then its own), not main's head nor
-/// its own row count. It removes only the stream's own rows; main is
-/// untouched, and the stream reads as main's again.
+/// its own row count. It deletes only the stream's own EVENTS (never
+/// main's, and never its fork, which keeps the edition) and appends a
+/// tombstone on the edition at its next sequence, as a main stream's: what
+/// a reader of the edition then sees is main's events below the fork (they
+/// are main's, untouched), the fork, and the tombstone, which closes the
+/// edition's own history (a fold restarts from its default state there);
+/// the edition's own events written after it continue past it.
 pub async fn a_purge_of_a_forked_stream_is_guarded_by_its_head_as_read<S>(store: S)
 where
     S: Store + Purge,
@@ -1389,17 +1394,59 @@ where
         4,
         "refused: the fork kept"
     );
-    assert_eq!(store.purge(e, 4).await, Ok(2), "its own two rows");
+    assert_eq!(store.purge(e, 4).await, Ok(1), "its one own event");
     assert_eq!(
         store.read(main, 0, None).await.unwrap().pages,
         [page(0, 1), page(1, 1), page(2, 3)],
         "main untouched"
     );
+    let closed = store.read(e, 0, None).await.unwrap();
+    assert_eq!(
+        (closed.next_sequence, closed.pages),
+        (
+            5,
+            vec![page(0, 1), page(1, 1), created_page(2), tombstone::page(4)]
+        ),
+        "main below the fork, the fork, the edition's tombstone"
+    );
+    assert_eq!(
+        store.purge(e, 5).await,
+        Ok(0),
+        "nothing after the tombstone"
+    );
+    assert_eq!(
+        append(&store, e, 5, &[page(5, 6)]).await,
+        Ok(6),
+        "continues after the tombstone"
+    );
+    assert_eq!(store.purge(e, 6).await, Ok(1), "the events after it");
+    let twice = store.read(e, 0, None).await.unwrap();
+    assert_eq!(
+        twice.pages.iter().map(|p| p.sequence).collect::<Vec<_>>(),
+        [0, 1, 2, 4, 6],
+        "both tombstones, the fork, main's below it"
+    );
+}
+
+/// An edition stream with no row of its own reads as main's: a purge of it
+/// at main's head removes nothing and appends nothing (a tombstone is its
+/// own row, and the first own row of an edition is its fork).
+pub async fn a_purge_of_an_unforked_edition_stream_removes_nothing<S>(store: S)
+where
+    S: Store + Purge,
+{
+    let main = main_stream("account", 1);
+    let other = edition_stream("account", 2, "what-if");
+    let e = edition_stream("account", 1, "what-if");
+    append(&store, main, 0, &[page(0, 1)]).await.unwrap();
+    assert_eq!(fork(&store, other).await, 0, "the edition exists");
+    assert_eq!(store.purge(e, 1).await, Ok(0));
     assert_eq!(
         store.read(e, 0, None).await.unwrap().pages,
-        [page(0, 1), page(1, 1), page(2, 3)],
-        "reads as main's again"
+        [page(0, 1)],
+        "still main's"
     );
+    assert_eq!(store.read(main, 0, None).await.unwrap().pages, [page(0, 1)]);
 }
 
 // --------------------------------------------------------- editions (opt-in)
@@ -3989,6 +4036,7 @@ macro_rules! store_contract {
             a_purge_deletes_a_snapshot_with_no_events,
             a_purged_stream_continues_after_its_tombstone,
             a_second_purge_keeps_the_first_tombstone,
+            a_purge_of_an_unforked_edition_stream_removes_nothing,
             a_purge_at_the_streams_head_removes_it,
             a_purge_at_a_stale_head_is_a_conflict_and_removes_nothing,
             a_purge_of_an_absent_stream_is_at_zero,
