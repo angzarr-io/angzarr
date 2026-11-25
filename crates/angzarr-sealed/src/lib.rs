@@ -29,6 +29,7 @@
 #![forbid(unsafe_code)]
 
 mod error;
+mod key_set;
 mod keys;
 mod seal;
 mod wrap;
@@ -42,12 +43,13 @@ pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/io.angzarr.sealed.v1.rs"));
 }
 
-pub use error::{OpenError, SealError, WrapError};
+pub use error::{KeySetError, OpenError, SealError, WrapError};
+pub use key_set::{open_with, KeySet};
 pub use keys::{KeyId, RecipientPrivateKey, RecipientPublicKey};
 pub use proto::{Aead, Algorithm, Kdf, Kem, Sealed, WrappedKey};
 #[doc(hidden)]
 pub use seal::seal_with_ephemeral;
-pub use seal::{associated_data, open, seal, suite};
+pub use seal::{associated_data, open, seal, suite, AAD_LABEL, INFO};
 pub use wrap::{unwrap, wrap, DataKey, KeyEncryptionKey};
 
 /// This crate's en-US Fluent catalog, its name first: what a dependent

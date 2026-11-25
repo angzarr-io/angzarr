@@ -34,6 +34,32 @@ pub enum OpenError {
     },
     /// The data key was destroyed.
     KeyDestroyed,
+    /// [`open_with`](crate::open_with): the key set holds no key named by the
+    /// value's `key_id`. Distinct from `Failed` so a holder can tell "not my
+    /// key" (a rotation not yet distributed, a value for another consumer)
+    /// from "my key, but altered". The id is the value's own clear text, so
+    /// naming it tells the holder nothing it did not already hold; the error
+    /// is for the holder, and a service that relays errors to an untrusted
+    /// sender should answer both as one failure.
+    UnknownKey {
+        /// The `key_id` the value names.
+        key_id: String,
+    },
+}
+
+/// Why a [`KeySet`](crate::KeySet) was not changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeySetError {
+    /// No key of that id is in the set.
+    NoSuchKey {
+        /// The id asked for.
+        key_id: String,
+    },
+    /// The current key cannot be removed: mark another current first.
+    CurrentKey {
+        /// The current key's id.
+        key_id: String,
+    },
 }
 
 /// Why a data key was not wrapped or unwrapped.
@@ -107,7 +133,24 @@ diagnostic!(OpenError {
     Self::UnsupportedAlgorithm => code!("open-unsupported-algorithm"),
     Self::Malformed { .. } => code!("open-malformed"),
     Self::KeyDestroyed => code!("open-key-destroyed"),
-}, malformed_args::<OpenError>);
+    Self::UnknownKey { .. } => code!("open-unknown-key"),
+}, open_args);
+
+diagnostic!(KeySetError {
+    Self::NoSuchKey { .. } => code!("key-set-no-such-key"),
+    Self::CurrentKey { .. } => code!("key-set-current-key"),
+}, |e: &KeySetError| match e {
+    KeySetError::NoSuchKey { key_id } | KeySetError::CurrentKey { key_id } => {
+        vec![("key_id", Arg::from(key_id.as_str()))]
+    }
+});
+
+fn open_args(e: &OpenError) -> Vec<(&str, Arg)> {
+    match e {
+        OpenError::UnknownKey { key_id } => vec![("key_id", Arg::from(key_id.as_str()))],
+        other => malformed_args(other),
+    }
+}
 
 diagnostic!(WrapError {
     Self::Failed => code!("wrap-failed"),
@@ -127,6 +170,15 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             why: "empty",
         }),
         Box::new(OpenError::KeyDestroyed),
+        Box::new(OpenError::UnknownKey {
+            key_id: "k1".into(),
+        }),
+        Box::new(KeySetError::NoSuchKey {
+            key_id: "k1".into(),
+        }),
+        Box::new(KeySetError::CurrentKey {
+            key_id: "k1".into(),
+        }),
         Box::new(WrapError::Failed),
         Box::new(WrapError::Malformed {
             field: "nonce",

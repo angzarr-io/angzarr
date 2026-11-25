@@ -7,6 +7,7 @@ use super::*;
 use crate::rfc9180_a2::*;
 use crate::testkit::{key_id, recipient, unhex, unhex_n, CONTEXT, SECRET as SECRET_TEXT};
 use crate::{Aead, Kdf, Kem};
+use crate::{AAD_LABEL, INFO};
 
 fn sealed() -> (RecipientPrivateKey, Sealed) {
     let (private, public) = recipient();
@@ -236,4 +237,30 @@ fn a_generated_private_key_matches_its_public_key_and_two_differ() {
     let sealed = seal(&a.public_key(), &key_id(), CONTEXT, SECRET_TEXT).expect("seal");
     assert_eq!(open(&a, &sealed, CONTEXT), Ok(SECRET_TEXT.to_vec()));
     assert_eq!(open(&b, &sealed, CONTEXT), Err(OpenError::Failed));
+}
+
+/// The worked example the owner reviews: the exact bytes of `info` and of
+/// the associated data for key id "k1", the suite and context
+/// "session:abc", field by field. Why: these bytes are the format; a
+/// change to one is a change to every sealed value ever made.
+#[test]
+fn the_worked_example_bytes_are_the_documented_ones() {
+    assert_eq!(INFO, &unhex("616e677a6172722d7365616c6564207631")[..]);
+    assert_eq!(INFO, b"angzarr-sealed v1");
+    assert_eq!(
+        AAD_LABEL,
+        &unhex("616e677a6172722d7365616c656420763120616164")[..]
+    );
+    let want = [
+        "616e677a6172722d7365616c656420763120616164",
+        "00000002",
+        "6b31",
+        "000000010000000100000001",
+        "0000000b",
+        "73657373696f6e3a616263",
+    ]
+    .concat();
+    let got = associated_data(&KeyId::new("k1"), &suite(), b"session:abc");
+    assert_eq!(got, unhex(&want));
+    assert_eq!(got.len(), 54);
 }

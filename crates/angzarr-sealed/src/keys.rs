@@ -8,7 +8,7 @@ use crate::SealError;
 
 /// Names a recipient key (or a key-encryption key). It is the owner's
 /// choice of text, carried in the clear and bound as associated data.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct KeyId(String);
 
 impl KeyId {

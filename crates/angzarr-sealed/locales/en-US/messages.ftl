@@ -8,6 +8,12 @@ open-failed = the sealed value could not be opened with this key (it was altered
 open-unsupported-algorithm = the sealed value names an algorithm this crate does not implement
 open-malformed = the sealed value is malformed: { $field } is { $why }
 open-key-destroyed = the data key was destroyed
+open-unknown-key = the key set holds no key named "{ $key_id }"
+
+## A key set.
+
+key-set-no-such-key = the key set holds no key named "{ $key_id }"
+key-set-current-key = "{ $key_id }" is the current key: mark another current before removing it
 
 ## Sealing.
 
