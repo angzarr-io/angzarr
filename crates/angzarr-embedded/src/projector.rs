@@ -153,46 +153,10 @@ impl Fingerprint {
         }
     }
 
-    /// The fingerprint as a nonzero number a position can hold (0 is no
-    /// position): FNV-1a over its cause and instant.
+    /// The fingerprint as the digest a position can hold.
     fn digest(&self) -> u64 {
-        use prost::Message as _;
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        let mut feed = |bytes: &[u8]| {
-            for byte in bytes {
-                hash = (hash ^ u64::from(*byte)).wrapping_mul(0x0100_0000_01b3);
-            }
-        };
-        match &self.cause {
-            Some(cause) => {
-                feed(&[1]);
-                feed(
-                    &angzarr_proto::v1::EventMeta {
-                        causation: Some(cause.clone()),
-                        ..Default::default()
-                    }
-                    .encode_to_vec(),
-                );
-            }
-            None => feed(&[0]),
-        }
-        match &self.recorded_at {
-            Some(at) => {
-                feed(&[1]);
-                feed(&at.seconds.to_le_bytes());
-                feed(&at.nanos.to_le_bytes());
-            }
-            None => feed(&[0]),
-        }
-        hash.max(1)
+        angzarr_ports::first::digest(self.cause.as_ref(), self.recorded_at.as_ref())
     }
-}
-
-/// The handler name a stored catch-up keeps a stream's first-event digest
-/// under, beside its own position: a second position on the same stream,
-/// written in the same step, so no format of the store changes.
-fn first_handler(handler: &str) -> String {
-    format!("{handler}\u{1}first")
 }
 
 /// A stream as a catch-up tells streams apart: its domain, root and
@@ -449,7 +413,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
                     _ => {
                         let start = reads.read(stream, 0, Some(1)).await?;
                         let now = Fingerprint::of(start.pages.first());
-                        let kept = first_handler(handler);
+                        let kept = angzarr_ports::first::handler(handler);
                         let kept = store
                             .position(PositionKey {
                                 handler: &kept,
@@ -520,7 +484,7 @@ impl<P: ProjectorHandler> CatchUp<P> {
     ) -> Result<(), StoreError> {
         let handler = self.projector.name();
         let stream = StreamRef::try_from(cover)?;
-        let kept = first_handler(handler);
+        let kept = angzarr_ports::first::handler(handler);
         let digest = first.map_or(0, Fingerprint::digest);
         let positions = [
             (PositionKey { handler, stream }, next),

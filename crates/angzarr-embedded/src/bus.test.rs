@@ -454,6 +454,50 @@ async fn a_purged_stream_is_handed_as_gone_once() {
     assert_eq!(again.handed(), [(cover("account", 2), vec![])]);
 }
 
+/// A stream purged and written again to at least the length of the mark,
+/// while no bus runs, is not the stream the mark was on: a new bus hands it
+/// as gone, then from its start, never from the old mark.
+#[tokio::test]
+async fn a_stream_purged_and_rewritten_while_the_bus_was_down_is_handed_afresh() {
+    let registry = registry();
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 5);
+    let stream = cover("account", 1);
+    let worker = Worker::new("worker");
+    let kernel = kernel(&registry);
+    let mut first = bus_on(&store, &kernel, &Never);
+    work(&mut first, &worker, 1).unwrap();
+    drain(&mut first).await;
+    assert_eq!(position(&store, "worker", &stream), 2);
+    drop(first);
+
+    store.purge(sref(&stream), 2).ready().unwrap();
+    crate::toys::handle::<Account>(
+        &store,
+        &registry,
+        command(stream.clone(), AccountCmd::Open.to_any()).id(8),
+        &at(40),
+    )
+    .unwrap();
+    deposit(&store, &registry, 1, 9, 6);
+    deposit(&store, &registry, 1, 10, 7);
+
+    let again = Worker::new("worker");
+    let mut second = bus_on(&store, &kernel, &Never);
+    work(&mut second, &again, 1).unwrap();
+    drain(&mut second).await;
+    assert_eq!(
+        again.handed(),
+        [
+            (stream.clone(), vec![]),
+            (stream.clone(), vec![0]),
+            (stream.clone(), vec![1]),
+            (stream.clone(), vec![2]),
+        ]
+    );
+    assert_eq!(position(&store, "worker", &stream), 3);
+}
+
 /// A gone book that fails retryably, with retries off, is held: the
 /// stream is not forgotten until it is handed again and handled.
 #[tokio::test]
