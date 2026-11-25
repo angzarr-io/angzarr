@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::path::Path;
 use std::process::Command;
 
 use test_dir::TestDir;
@@ -212,7 +211,7 @@ pub fn compile(files: &BTreeMap<String, String>) -> Vec<u8> {
     }
     let angzarr =
         angzarr_proto::protos::write_include_dir(&dir.join("angzarr")).expect("angzarr's protos");
-    let spec = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../angzarr-project/proto");
+    let spec = angzarr_project::proto_dir();
     let out = dir.join("set.bin");
     let protoc = std::env::var("PROTOC").unwrap_or_else(|_| "protoc".to_string());
     let status = Command::new(protoc)

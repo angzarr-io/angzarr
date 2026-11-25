@@ -5,7 +5,7 @@
 //! policy context, the spec's policy names, and the generated register
 //! composing with a hand-written component. The plan is
 //! `rust-table-generation.plan.md` (session inept-sixth-stick). Every
-//! fixture is the spec submodule's protos ([`spec`]) except
+//! fixture is the `angzarr-project` package's protos ([`spec`]) except
 //! `refusals/v1/refusals.proto`, a declared rejection code's shape
 //! (decision 14.50) in small.
 

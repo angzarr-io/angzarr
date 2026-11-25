@@ -1,5 +1,5 @@
-//! The spec's codegen tier (`angzarr-project/features/codegen`, the
-//! submodule's), run by cucumber against angzarr-codegen: every scenario
+//! The spec's codegen tier (`features/codegen` of the
+//! `angzarr-project` package), run by cucumber against angzarr-codegen: every scenario
 //! not tagged ([`tags`]) runs; one with a step that matches no binding, or
 //! a step that fails, fails the run. A tagged scenario is not run, and the
 //! run lists it with its tag; with `SPEC_RUN_TAGGED=1` in the environment
@@ -27,11 +27,10 @@ mod tags;
 #[path = "spec/world.rs"]
 mod world;
 
-/// Where the tier is: the angzarr-project submodule's.
-const FEATURES: &str = concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../angzarr-project/features/codegen"
-);
+/// Where the tier is: the `angzarr-project` package's.
+fn features() -> String {
+    format!("{}/codegen", angzarr_project::FEATURES_DIR)
+}
 
 /// Wakes the thread blocked in [`block_on`].
 struct Unpark(Thread);
@@ -64,11 +63,11 @@ fn codegen_tier() {
         world::Generator::cucumber()
             .with_default_cli()
             .fail_on_skipped()
-            .filter_run(FEATURES, move |_, _, scenario| {
+            .filter_run(features(), move |_, _, scenario| {
                 run_tagged || tags::of(scenario).is_none()
             }),
     );
-    print!("{}", tags::listing(FEATURES));
+    print!("{}", tags::listing(&features()));
     assert!(
         !writer.execution_has_failed(),
         "{} scenarios failed ({} steps failed, {} skipped), {} parsing errors: see the output above",
@@ -82,5 +81,5 @@ fn codegen_tier() {
 /// Every scenario carries one ID, and every tag names one of them.
 #[test]
 fn every_tag_names_a_scenario_of_the_tier() {
-    tags::check(FEATURES);
+    tags::check(&features());
 }

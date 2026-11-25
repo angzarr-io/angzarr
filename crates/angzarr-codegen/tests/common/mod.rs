@@ -19,10 +19,10 @@ pub const BUYIN: &[&str] = &[
 ];
 pub const BUYIN_WIRE: &[(&str, &str)] = &[("buyin.v1", "::buyin_proto::v1")];
 
-/// The spec's protos: the angzarr-project submodule's `proto`, which holds
+/// The spec's protos: the `angzarr-project` package's `proto`, which holds
 /// the blackjack example's (`io/angzarr/examples/v1`).
 pub fn spec() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../angzarr-project/proto")
+    angzarr_project::proto_dir().to_path_buf()
 }
 
 /// protoc's descriptor set for `files` under `tests/fixtures` or the spec's
