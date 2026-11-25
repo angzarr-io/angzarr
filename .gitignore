@@ -8,6 +8,8 @@
 *.swo
 .DS_Store
 *.db
+# the store opener's frozen stores are test fixtures, read by include_bytes!
+!crates/sqlite-store-opener/testdata/*.db
 *-shm
 *-wal
 /data/
