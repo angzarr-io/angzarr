@@ -15,8 +15,8 @@
 //!   one event (a fork page is passed over, its sequence counted), and its
 //!   failure classed as an inline projector's is: a retryable one retried
 //!   to the kernel's cap, then dead-lettered and passed; any other
-//!   dead-lettered at once (`Kernel::project_served`). A gone stream is
-//!   handed its gone book.
+//!   dead-lettered at once (`Kernel::project_served`). A purged stream's
+//!   tombstone is such an event.
 //! - **A policy's item is a step through the outbox**
 //!   (`Kernel::react_served`): the kernel reacts, routes and stamps the
 //!   outputs (their ids `ids::policy_command_id`'s), writes them to the

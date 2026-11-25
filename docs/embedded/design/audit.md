@@ -772,9 +772,10 @@ kernel.resume(&store, &sampled).await?;                      // -> Recorded
 - **Resumed by position.** A policy's position on a source stream is the
   next sequence it has yet to handle, in angzarr-ports' `PositionStore`:
   its record of what it processed (`Processed`), which a purge never
-  touches. `Kernel::resume` first forgets, for each policy, every stream of
-  its record the store no longer lists (`Kernel::forget_gone`: its
-  position put back to 0; decision 14.68). `Kernel::resume` runs, for
+  touches. A purged stream stays listed and keeps its sequences (its
+  tombstone is no event a policy is called for; its position moves past
+  it), so nothing is forgotten (`Kernel::forget_gone` is gone; decision
+  14.68 is superseded). `Kernel::resume` runs, for
   every stream of every policy's source, each policy on each event from its
   position on: after a crash, after a failed step, or for a policy new to a
   domain with history. A command owes steps for its own events only: a
@@ -849,18 +850,18 @@ runs two ways, and a third on [the bus](#the-bus):
   durable read model resumes, as a policy does). Either way it is the
   projector's record of what it handled, angzarr-ports' one capability for
   it, `Processed` (a held catch-up's is a `HeldRecord`), which a purge
-  never touches (decision 14.68): each step compares it with the read
-  unit's listing of the sources' streams, and a stream it holds that the
-  store no longer lists is handed gone and forgotten, whether it was
-  purged while a catch-up ran or not. A book the projector fails keeps its
+  never touches: a purged stream keeps its sequences, so the record stays
+  true and the projector is handed the stream's tombstone, then what follows
+  it, as ordinary events (decision 14.68's gone books are superseded). A
+  book the projector fails keeps its
   stream where it was, for the next step; the other streams go on.
 
 What a projector is handed, either way: a stream's events after the last
-it was handed of it; a book from sequence 0 starts the stream afresh (one
-purged and written again; held positions tell it by its first event's
-cause and instant, since each stream starts at 0, and stored ones by the
-stream's head below the position, which a purge leaves in place); and,
-caught up or on the bus, a book with no page at 0 says the stream is gone.
+it was handed of it, a purged stream's TOMBSTONE among them (an ordinary
+event: it resets that stream, and the events after it are the stream's
+again). Sequences never restart, so no book from sequence 0 starts a stream
+afresh and none says a stream is gone; a stream whose last event is a
+tombstone is destroyed.
 
 ### The bus
 
@@ -921,9 +922,10 @@ reads the predecessors from the store and hands them first.
   stream waiting for it. Attempts are counted in memory: a restart
   resets them. A policy's failure is
   its step's. Every failure is reported in what `more` is asked with. A
-  purged stream a projector handled is handed as gone and forgotten (a
-  policy forgets it uncalled), and one whose head is below its mark
-  starts afresh; a fork page is never handed, though its sequence counts.
+  purged stream is handed its tombstone, an event at the next sequence (a
+  policy is not called for it; its position moves past it); a stream with
+  its events below a tombstone deleted is recovered from the tombstone; a
+  fork page is never handed, though its sequence counts.
 - **Runtime-agnostic.** The instances run concurrently inside the serve's
   one future, with no thread or task of its own; `more` is asked each
   time every pool is idle, and the serve returns when it says no.

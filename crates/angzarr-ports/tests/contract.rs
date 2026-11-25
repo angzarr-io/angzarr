@@ -39,12 +39,16 @@
 //!   come before the write.
 //! - **RULED(9) No commit position.** angzarr has no global or
 //!   store-wide position: ordering is per stream (decision 14.35).
-//! - **RULED(10) Purge** is opt-in, its own call, and deletes the stream, its
-//!   snapshot, command ids and dead letters; the positions on it stay (14.68:
-//!   they are how a driver finds the stream gone). A stream purged and written
-//!   again to the length of a position passes for the one the position was on,
-//!   so a driver that resumes from a stored position keeps the digest of the
-//!   first event it saw beside it (`angzarr_ports::first`).
+//! - **RULED(10) Purge** is opt-in, its own call, and deletes a stream's
+//!   events, snapshot, command ids and dead letters but KEEPS the stream: it
+//!   appends ONE tombstone (`angzarr_ports::tombstone::StreamClosed`) at the
+//!   next sequence, so sequences never restart, the stream stays listed, a
+//!   later write continues after the tombstone, and readers fold it as an
+//!   ordinary event. A repeat purge removes the events after the last
+//!   tombstone and adds a tombstone only if it removed any; old tombstones
+//!   stay. The positions on the stream stay and stay true. This supersedes
+//!   14.68 (a purge deleted the stream whole; a driver found it gone by its
+//!   listing and forgot it).
 //! - **RULED(11, B, C, E1) Editions are per-stream forks (14.32), each
 //!   fork a framework META-EVENT**: an `EditionCreated` in the page's
 //!   `meta_event` arm (14.106), which a store recognises by that arm

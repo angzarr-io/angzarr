@@ -117,6 +117,26 @@ fn a_fresh_book_drops_what_was_delivered_and_moves_the_watermark() {
     assert_eq!(position.next, 6);
 }
 
+/// Why: a purge keeps its stream and leaves a tombstone, an event like
+/// another: a subscriber following across a purge is sent the tombstone at
+/// its sequence, then what is written after it, with no gap to fill and
+/// none repeated, though the sequences below the tombstone are deleted.
+#[test]
+fn a_subscriber_across_a_purge_is_sent_the_tombstone_then_what_follows() {
+    let mut position = Position {
+        cover: cover(),
+        next: 2,
+    };
+    let mut purged = book(&[4]);
+    purged.pages.insert(0, angzarr_ports::tombstone::page(2));
+    let fresh = position
+        .fresh(purged)
+        .expect("the tombstone and what follows");
+    assert_eq!(sequences(&fresh), vec![2, 4]);
+    assert!(angzarr_ports::tombstone::is(&fresh.pages[0]));
+    assert_eq!(position.next, 5);
+}
+
 /// Why: an empty book (a caught-up read) is not sent, and moves nothing.
 #[test]
 fn an_empty_book_is_not_fresh() {

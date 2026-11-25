@@ -30,7 +30,7 @@
 //! | [`Watch`] | a cheap "anything committed?" | opt-in |
 //! | [`CommitNotify`] | a push when this process commits ([`CommitSignal`], [`CommitWait`], [`WeakCommitSignal`]); [`Watch`] is its fallback for other processes | opt-in |
 //! | [`ReadUntilTime`], [`ReadByCorrelation`], [`ListStreams`] | core's queries | opt-in |
-//! | [`Processed`] | a driver's record of what its handler processed: every stream it holds a position on, which a purge never touches (14.68) | opt-in |
+//! | [`Processed`] | a driver's record of what its handler processed: every stream it holds a position on, which a purge never touches: the tombstone is its next event | opt-in |
 //! | [`Outbox`] | the transactional outbox's relay side, kind-agnostic (entries are written in a [`Write`]) | opt-in |
 //! | [`DeadLetterStore`] | dead letters, read and drained per stream or by key (written in a [`Write`]) | opt-in |
 //! | [`Migrations`] | the build's migration set, the store's ledger, `info`, `validate` and `run` (every open runs it) | opt-in |

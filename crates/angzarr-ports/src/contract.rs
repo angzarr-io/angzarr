@@ -2371,10 +2371,9 @@ where
     assert_eq!(store.processed("nobody").await, Ok(vec![]));
 }
 
-/// 14.68: a handler's record of a stream outlives the stream's purge, so
-/// its driver, comparing the record with the store's listing, finds the
-/// stream gone; forgotten (its position put back to 0), it is out of the
-/// record.
+/// A handler's record of a stream outlives the stream's purge (the stream
+/// is kept, with its tombstone, and stays listed); forgotten (its position
+/// put back to 0), it is out of the record.
 pub async fn a_handlers_record_outlives_a_purge_until_forgotten<S>(store: S)
 where
     S: Store + Purge + Processed + ListStreams,
