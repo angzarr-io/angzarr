@@ -15,7 +15,10 @@ pub fn proto_root() -> PathBuf {
     println!("cargo:rerun-if-env-changed=PROTOC");
     let root = angzarr_project::proto_dir();
     without_verbatim(root.canonicalize().unwrap_or_else(|e| {
-        panic!("the angzarr-project package's proto/ at {}: {e}", root.display())
+        panic!(
+            "the angzarr-project package's proto/ at {}: {e}",
+            root.display()
+        )
     }))
 }
 
