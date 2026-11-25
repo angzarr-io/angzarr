@@ -1,7 +1,7 @@
 [package]
 name = "angzarr-embedded-conformance"
 version = "0.1.0"
-description = "Test-only: angzarr's coordinator-contract tier (the spec's .feature files, vendored in features/ at the revision SPEC_REV names) run against angzarr-embedded's kernel, and the handler-contract tier's compensation.feature against its markup's compensation tooling. Part of angzarr-embedded, angzarr's in-app runtime (embedded in your application, not a microcontroller); for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
+description = "Test-only: angzarr's coordinator-contract tier (the spec's .feature files, read through the angzarr-project package) run against angzarr-embedded's kernel, and the handler-contract tier's compensation.feature against its markup's compensation tooling. Part of angzarr-embedded, angzarr's in-app runtime (embedded in your application, not a microcontroller); for the distributed system see angzarr core, https://github.com/angzarr-io/angzarr."
 edition = "2021"
 license = "AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"
 publish.workspace = true
@@ -11,7 +11,7 @@ rust-version = "1.89"
 # No library to speak of and no dependencies: the runner is src/lib.test.rs.
 [dependencies]
 
-# cucumber runs the vendored features; it is the router's runner
+# cucumber runs the spec's features; it is the router's runner
 # (angzarr-router's conformance crate), at the same version. The kernel runs
 # over angzarr-ports' MemoryStore (angzarr-embedded's `test-support`).
 [dev-dependencies]

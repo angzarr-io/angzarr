@@ -350,7 +350,7 @@ pub(crate) fn of(scenario: &Scenario) -> Option<Tag> {
 /// Every scenario of the tier, its outlines expanded, in file order.
 fn scenarios(features: &str) -> Vec<Scenario> {
     let mut paths: Vec<_> = std::fs::read_dir(features)
-        .expect("the vendored tier")
+        .expect("the coordinator-contract tier")
         .map(|entry| entry.expect("a directory entry").path())
         .filter(|path| path.extension().is_some_and(|e| e == "feature"))
         .collect();
@@ -408,7 +408,7 @@ pub(crate) fn listing(features: &str) -> String {
 /// Every scenario carries one ID.
 #[test]
 fn every_scenario_has_one_id() {
-    for scenario in scenarios(super::FEATURES) {
+    for scenario in scenarios(&super::features()) {
         assert!(
             id(&scenario).is_some(),
             "{}: {:?}",
@@ -421,7 +421,7 @@ fn every_scenario_has_one_id() {
 /// Every tag names a scenario, or one of its rows, of the tier, once.
 #[test]
 fn every_tag_names_a_scenario_once() {
-    let all = scenarios(super::FEATURES);
+    let all = scenarios(&super::features());
     let keys: Vec<String> = all.iter().filter_map(key).collect();
     let ids: Vec<&str> = all.iter().filter_map(id).collect();
     for (n, (wanted, _)) in TAGGED.iter().enumerate() {

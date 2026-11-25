@@ -1,5 +1,5 @@
 //! The handler-contract tier's `compensation.feature` (angzarr decision
-//! 14.74), vendored in `handler-contract/`, run against the markup's
+//! 14.74), run against the markup's
 //! compensation tooling ([`Compensation`]): the shipment process manager of
 //! the tier's `fixture/compensation.proto`, its messages written here as
 //! prost declares them, its destinations as their stand-ins declare them

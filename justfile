@@ -84,30 +84,6 @@ _lint:
 licence-check:
     @scripts/licences.sh check
 
-# Vendor the spec's coordinator-contract tier at `rev` (any commit of
-# angzarr-project's) into crates/angzarr-embedded-conformance/features, and
-# the handler-contract tier's compensation.feature (the markup's PM
-# compensation tooling, angzarr decision 14.74) into its handler-contract,
-# the commit recorded in its SPEC_REV: the one way the vendored tiers change.
-# Run at SPEC_REV's commit, it changes nothing; a diff after it is drift.
-# `repo` is angzarr-project's URL or a local clone.
-spec-vendor rev repo="https://github.com/angzarr-io/angzarr-project.git":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    src=target/spec-src
-    [ -d "$src/.git" ] || git clone --quiet --no-checkout '{{repo}}' "$src"
-    git -C "$src" fetch --quiet '{{repo}}' '{{rev}}'
-    commit=$(git -C "$src" rev-parse --verify FETCH_HEAD^{commit})
-    crate=crates/angzarr-embedded-conformance
-    rm -rf "$crate/features"
-    mkdir -p "$crate/features"
-    git -C "$src" archive "$commit" features/coordinator-contract | tar -x --strip-components=2 -C "$crate/features"
-    rm -rf "$crate/handler-contract"
-    mkdir -p "$crate/handler-contract"
-    git -C "$src" archive "$commit" features/handler-contract/compensation.feature | tar -x --strip-components=2 -C "$crate/handler-contract"
-    echo "$commit" > "$crate/SPEC_REV"
-    echo "spec-vendor: the coordinator-contract tier and compensation.feature at $commit"
-
 # Build the crates that must run in a browser for wasm32-unknown-unknown.
 #   rustup target add wasm32-unknown-unknown
 wasm:

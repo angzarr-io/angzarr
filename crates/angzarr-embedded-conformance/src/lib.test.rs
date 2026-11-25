@@ -1,11 +1,12 @@
-//! The coordinator-contract tier, run: every scenario of `features/` that
+//! The coordinator-contract tier, run: every scenario of the
+//! `angzarr-project` package's `features/coordinator-contract/` that
 //! is not tagged ([`tags`]) runs against angzarr-embedded's kernel, through
 //! the [`world::Coordinator`] world and the step modules; one with a step
 //! that matches no binding, or a step that fails, fails the run. A tagged
 //! scenario is not run, and the run lists it with its tag; with
 //! `SPEC_RUN_TAGGED=1` in the environment every scenario runs, tagged or
 //! not, to see which tags no longer hold. And the handler-contract tier's
-//! `compensation.feature`, vendored in `handler-contract/`, every scenario
+//! `compensation.feature`, every scenario
 //! of it, against the markup's compensation tooling ([`compensation`]).
 
 use std::future::Future;
@@ -65,10 +66,19 @@ mod upcasting;
 #[path = "steps/versions.test.rs"]
 mod versions;
 
-/// Where the vendored tier is.
-const FEATURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/features");
-/// Where the vendored compensation.feature is.
-const HANDLER_CONTRACT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/handler-contract");
+/// Where the coordinator-contract tier is: the `angzarr-project` package's.
+fn features() -> String {
+    format!("{}/coordinator-contract", angzarr_project::FEATURES_DIR)
+}
+
+/// The handler-contract tier's compensation.feature, the one file of that
+/// tier this crate binds.
+fn compensation_feature() -> String {
+    format!(
+        "{}/handler-contract/compensation.feature",
+        angzarr_project::FEATURES_DIR
+    )
+}
 
 /// Wakes the thread blocked in [`block_on`].
 struct Unpark(Thread);
@@ -106,11 +116,11 @@ fn coordinator_contract() {
                 Box::pin(std::future::ready(()))
             })
             .fail_on_skipped()
-            .filter_run(FEATURES, move |_, _, scenario| {
+            .filter_run(features(), move |_, _, scenario| {
                 run_tagged || tags::of(scenario).is_none()
             }),
     );
-    print!("{}", tags::listing(FEATURES));
+    print!("{}", tags::listing(&features()));
     assert!(
         !writer.execution_has_failed(),
         "{} scenarios failed ({} steps failed, {} skipped), {} parsing errors: see the output above",
@@ -128,7 +138,7 @@ fn compensation_tooling() {
         compensation::Shipment::cucumber()
             .with_default_cli()
             .fail_on_skipped()
-            .run(HANDLER_CONTRACT),
+            .run(compensation_feature()),
     );
     assert!(
         !writer.execution_has_failed(),
