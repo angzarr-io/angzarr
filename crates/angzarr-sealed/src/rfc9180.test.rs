@@ -170,3 +170,16 @@ fn the_schedule_debug_names_the_type_and_the_sequence() {
         "{shown}"
     );
 }
+
+/// Why: the weak-secret check must see a nonzero output whose bytes cancel
+/// under XOR (two equal nonzero bytes), not only a single set byte.
+#[test]
+fn the_all_zero_check_sees_every_nonzero_output() {
+    assert!(is_all_zero(&[0; 32]));
+    let mut cancelling = [0u8; 32];
+    cancelling[3] = 1;
+    cancelling[9] = 1;
+    assert!(!is_all_zero(&cancelling));
+    cancelling[9] = 0;
+    assert!(!is_all_zero(&cancelling));
+}
