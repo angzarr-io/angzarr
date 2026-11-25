@@ -59,7 +59,7 @@
 //! chain's limit is a [`KernelError::ChainTooDeep`], which is how a cycle
 //! that never settles ends.
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::VecDeque;
 use std::convert::Infallible;
 use std::num::NonZeroU32;
 
@@ -86,14 +86,12 @@ use super::policy::{answered, check_outputs, Order};
 use super::registry::{PolicyEntry, Registry};
 use super::route::{self, Rejected};
 use super::snapshot_policy::{SnapshotPolicy, EVERY_WRITE};
-use super::store::{
-    DeadLetter, ListStreams, Port, PositionKey, Processed, Store, StoreError, StorePort, StreamRef,
-    Write,
-};
+use super::store::{DeadLetter, Port, PositionKey, Store, StoreError, StorePort, StreamRef, Write};
 use super::stream::{Envelope, Stream};
 use super::sync::Waited;
 use super::target::Target;
 use super::upcast::upcast_pages;
+use angzarr_ports::tombstone;
 use angzarr_router::router::DynProjectorHandler;
 use coded_diagnostic::Report;
 
@@ -840,18 +838,14 @@ impl<'k> Kernel<'k> {
     /// a step that landed before a crash is not repeated; one write each,
     /// its position written with it). What an application runs at start,
     /// after a crash, or after adding a policy to a domain with history.
-    /// First, each policy's record of every stream (its positions, which a
-    /// purge never touches) the store no longer lists is forgotten:
-    /// [`Kernel::forget_gone`]. Returns what the steps recorded, and the
-    /// dead letters they wrote.
-    pub async fn resume<S: Store + Processed + ListStreams>(
+    /// A purged stream is resumed like any: its tombstone is no event a
+    /// policy is called for, and its position moves past it with the next.
+    /// Returns what the steps recorded, and the dead letters they wrote.
+    pub async fn resume<S: Store>(
         &self,
         store: &S,
         sampled: &Sampled,
     ) -> Result<Recorded, Failure<Infallible>> {
-        self.forget_gone(store)
-            .await
-            .map_err(|e| Failure::Kernel(KernelError::Store(e)))?;
         let letters = CallLetters::new(self.dead_letters, Some(sampled.now));
         let mut port = StorePort::new(store, &letters);
         let resumed = self.resume_on(&mut port, &letters, sampled).await;
@@ -859,41 +853,6 @@ impl<'k> Kernel<'k> {
             Handled::Applied(recorded) => Ok(recorded),
             Handled::Duplicate(..) => unreachable!("a resume answers what it recorded"),
         }
-    }
-
-    /// The saga side of decision 14.68: each policy's driver keeps its
-    /// record of what the policy processed (its positions, [`Processed`]),
-    /// which a purge never touches; a stream of its source domain the record
-    /// holds and the store no longer lists ([`ListStreams`]) is gone. A
-    /// policy takes one event per call (decision 46, Q3), so it is not
-    /// called for a gone stream (processed_state.feature); the stream is
-    /// forgotten: its position put back to 0. Answers the streams
-    /// forgotten, by policy, in registration order.
-    pub async fn forget_gone<S: Store + Processed + ListStreams>(
-        &self,
-        store: &S,
-    ) -> Result<Vec<(String, Cover)>, StoreError> {
-        let streams = store.list_streams().await?;
-        let listed: BTreeSet<_> = streams.iter().map(cover_key).collect();
-        let mut forgotten = Vec::new();
-        for policy in self.registry.all_policies() {
-            let gone: Vec<Cover> = (store.processed(policy.name()).await?.into_iter())
-                .map(|(cover, _)| cover)
-                .filter(|cover| {
-                    cover.domain == policy.source() && !listed.contains(&cover_key(cover))
-                })
-                .collect();
-            for cover in gone {
-                let stream = StreamRef::try_from(&cover)?;
-                let key = PositionKey {
-                    handler: policy.name(),
-                    stream,
-                };
-                store.write(Write::positions(&[(key, 0)])).await?;
-                forgotten.push((policy.name().to_string(), cover));
-            }
-        }
-        Ok(forgotten)
     }
 
     /// [`Kernel::resume`] on `port`.
@@ -1168,14 +1127,6 @@ type Failed = (Vec<Step>, StepError);
 enum Caller {
     Waiting,
     Kernel,
-}
-
-/// A stream as [`Kernel::forget_gone`] looks it up, its cover's own fields
-/// (a cover's equality), so the store's listing is a set and not a list
-/// searched once for every stream a policy processed.
-fn cover_key(cover: &Cover) -> (&str, Option<&str>, Option<&[u8]>) {
-    let root = cover.root.as_ref().map(|root| &root.value[..]);
-    (&cover.domain, cover.edition.as_deref(), root)
 }
 
 /// A chain in progress: the streams whose policies may owe steps, each with
@@ -1498,7 +1449,7 @@ impl<'k> Run<'k> {
         let slice = port.read_from(source, from).await.map_err(store)?;
         let sidecar = registry.catalog().upcast_port(&source.domain);
         for page in &slice.pages {
-            if angzarr_router::page_event(page).is_none() {
+            if angzarr_router::page_event(page).is_none() || tombstone::is(page) {
                 continue;
             }
             let event = match sidecar {

@@ -29,6 +29,7 @@
 //! refuse a chain that cannot finish (a duplicate source, rules out of
 //! order, a dead end) before anything is read.
 
+use angzarr_ports::tombstone;
 use angzarr_proto::v1::{event_page, EventPage};
 use angzarr_router::hpb::{self, upcast_request, upcasted, UpcastRequest, UpcastResponse};
 use angzarr_router::send::BoxFuture;
@@ -108,7 +109,7 @@ pub(crate) async fn upcast_pages(
 ) -> Result<Vec<EventPage>, UpcastError> {
     let sent: Vec<EventPage> = pages
         .iter()
-        .filter(|page| angzarr_router::page_event(page).is_some())
+        .filter(|page| angzarr_router::page_event(page).is_some() && !tombstone::is(page))
         .cloned()
         .collect();
     if sent.is_empty() {
@@ -140,10 +141,12 @@ pub(crate) async fn upcast_pages(
     Ok(pages
         .iter()
         .map(|page| match by_sequence.remove(&page.sequence) {
-            Some(event) if angzarr_router::page_event(page).is_some() => EventPage {
-                body: Some(event_page::Body::Event(event)),
-                ..page.clone()
-            },
+            Some(event) if angzarr_router::page_event(page).is_some() && !tombstone::is(page) => {
+                EventPage {
+                    body: Some(event_page::Body::Event(event)),
+                    ..page.clone()
+                }
+            }
             _ => page.clone(),
         })
         .collect())

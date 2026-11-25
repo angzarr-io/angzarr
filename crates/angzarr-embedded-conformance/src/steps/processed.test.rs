@@ -102,7 +102,7 @@ fn policy_processed(
     processed_to(w, &name, &order, n);
 }
 
-#[when(regex = r#"^order "([\w-]+)" is purged(?: while "\w+" is not running)?$"#)]
+#[when(regex = r#"^order "([\w-]+)" is purged$"#)]
 fn purged(w: &mut Coordinator, order: String) {
     let cover = w.cover("order", &order);
     let stream = StreamRef::try_from(&cover).unwrap();
@@ -110,7 +110,7 @@ fn purged(w: &mut Coordinator, order: String) {
     futures_ready(w.store.purge(stream, head));
 }
 
-#[given(regex = r#"^order "([\w-]+)" is purged while "\w+" is not running$"#)]
+#[given(regex = r#"^order "([\w-]+)" is purged(?: while "\w+" is not running)?$"#)]
 fn purged_given(w: &mut Coordinator, order: String) {
     purged(w, order);
 }
@@ -159,18 +159,20 @@ fn handed(w: &Coordinator, name: &str, cover: &Cover) -> Vec<EventBook> {
         .collect()
 }
 
-#[then(regex = r#"^"(\w+)" is handed order "([\w-]+)" as gone(, and answers nothing)?$"#)]
-fn handed_gone(w: &mut Coordinator, name: String, order: String, nothing: String) {
+#[then(
+    regex = r#"^"(\w+)" is handed the tombstone of order "([\w-]+)" at sequence (\d+)(, and answers nothing)?$"#
+)]
+fn handed_tombstone(w: &mut Coordinator, name: String, order: String, n: u64, nothing: String) {
     let cover = w.cover("order", &order);
     let books = handed(w, &name, &cover);
-    assert_eq!(
-        books,
-        [EventBook {
-            cover: Some(cover),
-            ..EventBook::default()
-        }],
-        "its gone book alone"
-    );
+    let [book] = books.as_slice() else {
+        panic!("one book: {books:?}");
+    };
+    let sequences: Vec<u64> = book.pages.iter().map(|p| p.sequence).collect();
+    assert_eq!(sequences, [n], "the tombstone alone");
+    assert!(angzarr_embedded::angzarr_ports::tombstone::is(
+        &book.pages[0]
+    ));
     if !nothing.is_empty() {
         let others: Vec<String> = (w.domains.keys())
             .filter(|d| d.as_str() != "order")
@@ -207,12 +209,127 @@ fn builds_projection(w: &mut Coordinator, order: String, name: String, n: u64) {
     still_holds(w, name, order, n);
 }
 
-#[then(regex = r#"^the record of "(\w+)" no longer holds order "([\w-]+)"$"#)]
-fn no_longer_holds(w: &mut Coordinator, name: String, order: String) {
+/// `order`'s stream as the store holds it: every page.
+fn stored(w: &Coordinator, cover: &Cover) -> Vec<angzarr_embedded::v1::EventPage> {
+    let stream = StreamRef::try_from(cover).unwrap();
+    futures_ready(w.store.read(stream, 0, None)).pages
+}
+
+fn tombstones(pages: &[angzarr_embedded::v1::EventPage]) -> Vec<u64> {
+    (pages.iter())
+        .filter(|p| angzarr_embedded::angzarr_ports::tombstone::is(p))
+        .map(|p| p.sequence)
+        .collect()
+}
+
+#[then(
+    regex = r#"^order "([\w-]+)" is destroyed: its last event is a tombstone at sequence (\d+)$"#
+)]
+fn destroyed(w: &mut Coordinator, order: String, n: u64) {
     let cover = w.cover("order", &order);
-    let record = futures_ready(w.store.processed(&name));
-    assert!(record.iter().all(|(c, _)| *c != cover), "{record:?}");
-    assert!(!futures_ready(w.store.list_streams()).contains(&cover));
+    let pages = stored(w, &cover);
+    let last = pages.last().expect("a stream");
+    assert!(
+        angzarr_embedded::angzarr_ports::tombstone::is(last),
+        "{last:?}"
+    );
+    assert_eq!(last.sequence, n);
+}
+
+#[then(regex = r#"^order "([\w-]+)" is still listed$"#)]
+fn still_listed(w: &mut Coordinator, order: String) {
+    let cover = w.cover("order", &order);
+    assert!(futures_ready(w.store.list_streams()).contains(&cover));
+}
+
+#[when(regex = r#"^an event is appended to order "([\w-]+)"$"#)]
+fn appended(w: &mut Coordinator, order: String) {
+    let cover = w.cover("order", &order);
+    w.write(&cover, &["Happened"]);
+}
+
+#[then(regex = r#"^order "([\w-]+)" holds an event at sequence (\d+) after the tombstone$"#)]
+fn holds_after(w: &mut Coordinator, order: String, n: u64) {
+    let cover = w.cover("order", &order);
+    let pages = stored(w, &cover);
+    let last = pages.last().expect("a stream");
+    assert_eq!(last.sequence, n);
+    assert!(!angzarr_embedded::angzarr_ports::tombstone::is(last));
+}
+
+#[then(regex = r#"^order "([\w-]+)" holds one tombstone, at sequence (\d+)$"#)]
+fn one_tombstone(w: &mut Coordinator, order: String, n: u64) {
+    let cover = w.cover("order", &order);
+    assert_eq!(tombstones(&stored(w, &cover)), [n]);
+}
+
+#[then(regex = r#"^order "([\w-]+)" holds tombstones at sequences (\d+) and (\d+)$"#)]
+fn two_tombstones(w: &mut Coordinator, order: String, a: u64, b: u64) {
+    let cover = w.cover("order", &order);
+    assert_eq!(tombstones(&stored(w, &cover)), [a, b]);
+}
+
+/// `order` in `edition`.
+fn in_edition(w: &Coordinator, order: &str, edition: &str) -> Cover {
+    Cover {
+        edition: Some(edition.to_string()),
+        ..w.cover("order", order)
+    }
+}
+
+#[given(
+    regex = r#"^order "([\w-]+)" is forked into edition "([\w-]+)" with one event of its own$"#
+)]
+fn forked(w: &mut Coordinator, order: String, edition: String) {
+    let cover = in_edition(w, &order, &edition);
+    let head = futures_ready(w.store.head(StreamRef::try_from(&cover).unwrap())).next_sequence;
+    let fork = angzarr_embedded::v1::EventPage {
+        sequence: head,
+        body: Some(angzarr_embedded::v1::event_page::Body::MetaEvent(
+            angzarr_embedded::v1::MetaEvent {
+                kind: Some(angzarr_embedded::v1::meta_event::Kind::Created(
+                    angzarr_embedded::v1::EditionCreated {},
+                )),
+            },
+        )),
+        ..Default::default()
+    };
+    let stream = StreamRef::try_from(&cover).unwrap();
+    futures_ready(w.store.write(Write::append(stream, head, &[fork])));
+    w.write(&cover, &["Happened"]);
+}
+
+#[when(regex = r#"^the edition "([\w-]+)" of order "([\w-]+)" is purged$"#)]
+fn edition_purged(w: &mut Coordinator, edition: String, order: String) {
+    let cover = in_edition(w, &order, &edition);
+    let stream = StreamRef::try_from(&cover).unwrap();
+    let head = futures_ready(w.store.head(stream)).next_sequence;
+    futures_ready(w.store.purge(stream, head));
+}
+
+#[then(
+    regex = r#"^the edition "([\w-]+)" of order "([\w-]+)" ends with a tombstone at sequence (\d+)$"#
+)]
+fn edition_ends(w: &mut Coordinator, edition: String, order: String, n: u64) {
+    let cover = in_edition(w, &order, &edition);
+    let pages = stored(w, &cover);
+    let last = pages.last().expect("a stream");
+    assert!(
+        angzarr_embedded::angzarr_ports::tombstone::is(last),
+        "{last:?}"
+    );
+    assert_eq!(last.sequence, n);
+    assert!(
+        pages.iter().any(angzarr_embedded::angzarr_ports::is_fork),
+        "its fork is kept"
+    );
+}
+
+#[then(regex = r#"^order "([\w-]+)" in main still holds events at sequences 0 to (\d+)$"#)]
+fn main_still_holds(w: &mut Coordinator, order: String, last: u64) {
+    let cover = w.cover("order", &order);
+    let sequences: Vec<u64> = stored(w, &cover).iter().map(|p| p.sequence).collect();
+    assert_eq!(sequences, (0..=last).collect::<Vec<_>>());
 }
 
 #[then(regex = r#"^"(\w+)"'s React is not called for order "([\w-]+)"$"#)]

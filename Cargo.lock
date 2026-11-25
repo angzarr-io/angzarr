@@ -35,6 +35,7 @@ dependencies = [
 name = "angzarr-bus"
 version = "0.1.0"
 dependencies = [
+ "angzarr-bus",
  "angzarr-ports",
  "angzarr-proto",
  "coded-diagnostic",
@@ -212,6 +213,7 @@ dependencies = [
 name = "angzarr-ports"
 version = "0.1.0"
 dependencies = [
+ "angzarr-ports",
  "angzarr-proto",
  "coded-diagnostic",
  "prost",

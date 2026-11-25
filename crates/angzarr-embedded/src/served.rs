@@ -8,7 +8,7 @@
 
 use prost::Message as _;
 
-use angzarr_ports::{Outbox, OutboxEntry};
+use angzarr_ports::{tombstone, Outbox, OutboxEntry};
 
 use super::*;
 use crate::policy::Order;
@@ -59,7 +59,7 @@ impl<'k> Kernel<'k> {
     ) -> Result<Recorded, Failure<Infallible>> {
         let position = [(policy.name(), source, page.sequence + 1)];
         let store_failed = |e| Failure::Kernel(KernelError::Store(e));
-        if angzarr_router::page_event(page).is_none() {
+        if angzarr_router::page_event(page).is_none() || tombstone::is(page) {
             port.write_positions(&position)
                 .await
                 .map_err(store_failed)?;

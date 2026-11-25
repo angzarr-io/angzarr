@@ -113,7 +113,7 @@ impl<S: EventRead> Pages for StorePages<'_, S> {
     type Error = StoreError;
 
     async fn next(&mut self) -> Option<Result<Recovered, StoreError>> {
-        if self.read.is_empty() && !self.ended && self.next < self.to {
+        while self.read.is_empty() && !self.ended && self.next < self.to {
             let stream = match StreamRef::try_from(self.stream) {
                 Ok(stream) => stream,
                 Err(error) => return Some(Err(error)),
@@ -121,7 +121,10 @@ impl<S: EventRead> Pages for StorePages<'_, S> {
             let to = self.to.min(self.next + PAGE);
             match self.store.read(stream, self.next, Some(to)).await {
                 Ok(slice) => {
-                    self.ended = slice.pages.is_empty();
+                    // No page here but a head beyond: the events of a
+                    // purged stream below its tombstone are deleted, and
+                    // the stream goes on past them.
+                    self.ended = slice.pages.is_empty() && slice.next_sequence <= to;
                     self.next = to;
                     self.read.extend(slice.pages);
                 }

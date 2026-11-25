@@ -20,9 +20,10 @@
 //! - **Attempts are not counted** ([`Delivery::attempt`] is `None`): the
 //!   bus counts them, in memory, so after a restart a poison event's count
 //!   starts again.
-//! - **Gone**: a stream the subscription holds a position on that the
-//!   store no longer lists, or whose head is below its cursor (purged and
-//!   written again), is delivered gone, then (written again) from 0.
+//! - **A purged stream** is no different: its tombstone
+//!   ([`angzarr_ports::tombstone`]) is an event like another, delivered at
+//!   its sequence, and what is written after it follows. Sequences never
+//!   restart, so a mark stays valid across a purge, a restart included.
 //! - **Woken by a commit** (the store's [`CommitNotify`], armed before each
 //!   read), and by the poll on the caller's [`Timer`], comparing the
 //!   store's [`Watch`] token: a store without push has the poll alone.
@@ -125,12 +126,11 @@ impl<'s, S, W: Timer + ?Sized> StoreTransport<'s, S, W> {
     }
 }
 
-/// A store delivery's handle: its stream and sequence, or its stream gone.
+/// A store delivery's handle: its stream and sequence.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreToken {
     stream: Cover,
     sequence: u64,
-    gone: bool,
 }
 
 impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> PullTransport
@@ -213,8 +213,6 @@ struct Lane {
     delayed: bool,
     /// Released: owed again.
     again: Option<u64>,
-    /// Owed its gone delivery.
-    gone: bool,
     /// Whether the store lists it.
     listed: bool,
 }
@@ -229,37 +227,32 @@ impl Lane {
             held: None,
             delayed: false,
             again: None,
-            gone: false,
             listed: false,
         }
     }
 
-    /// Whether anything of it is kept or out: a gone stream is owed its
-    /// gone delivery only then.
+    /// Whether anything of it is kept or out.
     fn kept(&self) -> bool {
         self.cursor > 0 || self.out.is_some()
     }
 
-    /// What it owes next, if nothing of it is out or held: its gone
-    /// delivery, a released sequence, or its next one.
-    fn owed(&self) -> Option<(u64, bool)> {
+    /// What it owes next, if nothing of it is out or held: a released
+    /// sequence, or its next one.
+    fn owed(&self) -> Option<u64> {
         if self.out.is_some() || self.held.is_some() {
             return None;
         }
-        if self.gone {
-            return Some((0, true));
-        }
         if let Some(again) = self.again {
-            return Some((again, false));
+            return Some(again);
         }
-        (self.cursor < self.head).then_some((self.cursor, false))
+        (self.cursor < self.head).then_some(self.cursor)
     }
 
     /// Whether it owes anything, credit and holds aside.
     fn owes(&self) -> bool {
         self.out.is_none()
             && self.held.is_none()
-            && (self.gone || self.again.is_some() || self.cursor < self.head)
+            && (self.again.is_some() || self.cursor < self.head)
     }
 }
 
@@ -326,24 +319,15 @@ impl State {
     }
 
     /// A stream the change feed named, at `head` (its next sequence, 0 if
-    /// the store holds nothing of it), `purged` if it was purged since the
-    /// feed was last read: what was delivered of it (or is out) is gone,
-    /// whatever its head now, and it is owed its gone delivery, then from its
-    /// start. A stream with no events is forgotten unless it is owed that.
-    fn seen(&mut self, cover: Cover, head: u64, purged: bool) {
+    /// the store holds nothing of it: an edition's stream removed). A
+    /// purge is a write like another: the tombstone is its next event.
+    fn seen(&mut self, cover: Cover, head: u64) {
         let key = key(&cover);
-        if purged {
-            // What was delivered of it is gone, whatever its head now.
-            if let Some(lane) = self.lanes.get_mut(&key) {
-                if lane.kept() {
-                    lane.gone = true;
-                }
-            }
-        }
         if head == 0 {
             if let Some(lane) = self.lanes.get_mut(&key) {
                 lane.listed = false;
-                if !lane.gone {
+                lane.head = 0;
+                if !lane.kept() {
                     self.lanes.remove(&key);
                 }
             }
@@ -416,15 +400,10 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> StoreFeed<'_, S, W> {
                 .or_insert_with(|| Lane::new(cover, 0));
             lane.listed = true;
             lane.head = head;
-            if head < lane.cursor && lane.out.is_none() {
-                lane.gone = true;
-            }
         }
-        state
-            .lanes
-            .retain(|_, lane| lane.listed || lane.kept() || lane.gone);
+        state.lanes.retain(|_, lane| lane.listed || lane.kept());
         for lane in state.lanes.values_mut().filter(|lane| !lane.listed) {
-            lane.gone = true;
+            lane.head = 0;
         }
         state.sync_all();
         Ok(())
@@ -455,7 +434,7 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> StoreFeed<'_, S, W> {
                     let mut state = self.lock();
                     for change in changes {
                         if self.scope.holds(&change.stream) {
-                            state.seen(change.stream, change.head, change.purged);
+                            state.seen(change.stream, change.head);
                         }
                     }
                     state.cursor = Some(next.clone());
@@ -517,15 +496,10 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> StoreFeed<'_, S, W> {
         }
         let at = state.owed.iter().next()?.clone();
         let lane = state.lanes.get_mut(&at)?;
-        let (sequence, gone) = lane.owed()?;
-        let body = match gone {
-            true => Body::Gone,
-            false => {
-                lane.again = None;
-                lane.cursor = lane.cursor.max(sequence + 1);
-                Body::Reference
-            }
-        };
+        let sequence = lane.owed()?;
+        lane.again = None;
+        lane.cursor = lane.cursor.max(sequence + 1);
+        let body = Body::Reference;
         lane.out = Some(sequence);
         let stream = lane.cover.clone();
         let ordering = OrderingKey::of(&stream);
@@ -534,7 +508,6 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> StoreFeed<'_, S, W> {
         let token = StoreToken {
             stream: stream.clone(),
             sequence,
-            gone,
         };
         let delivery = Delivery {
             key: ordering,
@@ -665,24 +638,15 @@ impl<S: ReadStore + Processed + Watch, W: Timer + ?Sized> Feed for StoreFeed<'_,
             let lane = state.lanes.get_mut(&key);
             if let Some(lane) = lane.filter(|lane| lane.out == Some(token.sequence)) {
                 lane.out = None;
-                match (token.gone, settle) {
-                    (true, Settle::Held { .. }) => {}
-                    (true, _) => {
-                        lane.gone = false;
-                        lane.cursor = 0;
-                        if !lane.listed {
-                            lane.head = 0;
-                        }
-                    }
-                    (false, Settle::Held { after }) => match after {
+                if let Settle::Held { after } = settle {
+                    match after {
                         Some(after) if after.is_zero() => lane.again = Some(token.sequence),
                         after => {
                             lane.held = Some(token.sequence);
                             lane.delayed = after.is_some();
                             delay = after;
                         }
-                    },
-                    (false, _) => {}
+                    }
                 }
             }
             state.sync(&key);

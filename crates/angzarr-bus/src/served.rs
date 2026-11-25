@@ -4,8 +4,7 @@ use angzarr_proto::v1::Cover;
 use coded_diagnostic::Report;
 
 /// What a bus served since it last asked: how many items its handlers
-/// returned handled (events, and gone streams handed to a projector), and
-/// every failure.
+/// returned handled, and every failure.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Served {
     handled: u64,
@@ -35,7 +34,7 @@ pub struct Failed {
     pub subscription: String,
     /// The stream.
     pub stream: Cover,
-    /// The event's sequence; `None` for a gone stream's.
+    /// The event's sequence.
     pub sequence: Option<u64>,
     /// Why.
     pub cause: Report,

@@ -623,11 +623,10 @@ async fn a_resumes_round_trips_grow_with_its_streams_linearly() {
     assert_eq!(forty - none, 2 * (twenty - none), "{spent:?}");
 }
 
-/// A stream a policy processed is forgotten once the store no longer
-/// lists it, and only then: of two settled accounts, the purged one is
-/// forgotten, its position back to 0, and the other keeps its position.
+/// A purged stream is resumed like any: its tombstone is no event a policy
+/// is called for, and every position stays where it was.
 #[tokio::test]
-async fn forget_gone_forgets_a_purged_stream_alone() {
+async fn a_resume_over_a_purged_stream_calls_no_policy_and_keeps_every_position() {
     use crate::Purge;
     let mut registry = toys::registry();
     registry.policy(Bookkeeping).unwrap();
@@ -649,13 +648,13 @@ async fn forget_gone_forgets_a_purged_stream_alone() {
         .purge(StreamRef::try_from(&purged).unwrap(), head)
         .await
         .unwrap();
-    let forgotten = kernel.forget_gone(&store).await.unwrap();
-    assert_eq!(forgotten, [("bookkeeping".to_string(), purged.clone())]);
-    for (stream, expected) in [(&kept, 2), (&purged, 0)] {
+    let recorded = kernel.resume(&store, &sampled(20)).await.unwrap();
+    assert!(recorded.steps().is_empty(), "nothing owed");
+    for stream in [&kept, &purged] {
         let key = PositionKey {
             handler: "bookkeeping",
             stream: StreamRef::try_from(stream).unwrap(),
         };
-        assert_eq!(store.position(key).await, Ok(expected));
+        assert_eq!(store.position(key).await, Ok(2));
     }
 }

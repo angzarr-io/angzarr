@@ -39,8 +39,6 @@ enum Flaw {
     EarlyLetter,
     /// A policy's bug is held, never passed (allowed).
     HoldsBugs,
-    /// A gone stream is not handed to a projector.
-    GoneIgnored,
     // ---- the transport, under the hub
     /// It delivers more at once than the credit says.
     Greedy,
@@ -72,8 +70,6 @@ enum Flaw {
     WrongKey,
     /// A delivery carries an event that is not the stored one.
     WrongBody,
-    /// An event's delivery is a gone stream's.
-    GoneEvents,
     /// A first delivery says it is the second.
     EarlyAttempt,
     /// A redelivery's attempt is two more.
@@ -84,8 +80,6 @@ enum Flaw {
     Renames,
     /// A held delivery's delay is ignored.
     IgnoresDelay,
-    /// A purged stream is not delivered gone.
-    DropsGone,
     /// It answers idle at once, and again, never waiting for anything.
     Chatters,
 }
@@ -297,21 +291,19 @@ impl Dispatch for Flawed<'_> {
         name: &'a str,
         item: Item<'a>,
     ) -> Answer {
-        let event = item.page.is_some();
         let answer = match self.flaw {
             Some(Flaw::Twice) => {
                 self.inner.project(projector, name, item).await;
                 self.inner.project(projector, name, item).await
             }
-            Some(Flaw::Skips) if event && item.sequence == 1 => Answer::Handled,
-            Some(Flaw::Swaps) if event && item.sequence < 2 => {
+            Some(Flaw::Skips) if item.sequence == 1 => Answer::Handled,
+            Some(Flaw::Swaps) if item.sequence < 2 => {
                 let swapped = Item {
                     sequence: item.sequence ^ 1,
                     ..item
                 };
                 self.inner.project(projector, name, swapped).await
             }
-            Some(Flaw::GoneIgnored) if !event => Answer::Handled,
             _ => self.inner.project(projector, name, item).await,
         };
         self.bent(answer)
@@ -615,10 +607,7 @@ where
         };
         let at = (delivery.key.clone(), delivery.sequence);
         let again = !self.seen.lock().unwrap().insert(at.clone());
-        let gone = delivery.body == Body::Gone;
-        if (self.flaw == Some(Flaw::Forgets) && again)
-            || (self.flaw == Some(Flaw::DropsGone) && gone)
-        {
+        if self.flaw == Some(Flaw::Forgets) && again {
             self.inner.settle(token, Settle::Handled).await?;
             return Ok(Next::Idle);
         }
@@ -634,7 +623,6 @@ where
             Some(Flaw::WrongBody) => {
                 delivery.body = Body::Event(Box::default());
             }
-            Some(Flaw::GoneEvents) => delivery.body = Body::Gone,
             Some(Flaw::EarlyAttempt) => delivery.attempt = Some(1),
             Some(Flaw::WrongAttempt) => delivery.attempt = Some(times * 2),
             _ => {}
@@ -836,10 +824,9 @@ mod bus_checks {
     }
 
     #[tokio::test]
-    async fn the_purge_check_fails_a_bus_that_hands_no_gone_stream() {
-        let check =
-            kit::a_purged_stream_is_handed_to_a_projector_once_as_gone_and_forgotten_by_a_policy;
-        catches(Flaw::GoneIgnored, "gone once", check).await;
+    async fn the_purge_check_fails_a_bus_that_skips_a_tombstone() {
+        let check = kit::a_purged_stream_hands_a_projector_its_tombstone_then_what_follows;
+        catches(Flaw::Skips, "left == right", check).await;
     }
 
     #[tokio::test]
@@ -996,12 +983,6 @@ mod transport_checks {
     }
 
     #[tokio::test]
-    async fn the_delivery_check_fails_an_event_delivered_as_gone() {
-        let check = kit::a_delivery_carries_its_stream_sequence_key_and_body;
-        catches(Flaw::GoneEvents, "is not gone", check).await;
-    }
-
-    #[tokio::test]
     async fn the_delivery_check_fails_a_first_delivery_that_is_a_second() {
         let check = kit::a_delivery_carries_its_stream_sequence_key_and_body;
         catches(Flaw::EarlyAttempt, "a first delivery", check).await;
@@ -1045,14 +1026,8 @@ mod transport_checks {
 
     #[tokio::test]
     async fn every_check_that_waits_fails_a_feed_that_only_answers_idle() {
-        let check = kit::a_purged_stream_is_delivered_gone;
+        let check = kit::a_purged_stream_delivers_its_tombstone_then_what_follows;
         catches(Flaw::Chatters, "timed out", check).await;
-    }
-
-    #[tokio::test]
-    async fn the_gone_check_fails_a_transport_that_drops_a_purged_stream() {
-        let check = kit::a_purged_stream_is_delivered_gone;
-        catches(Flaw::DropsGone, "timed out", check).await;
     }
 }
 

@@ -15,8 +15,8 @@
 //!   one event (a fork page is passed over, its sequence counted), and its
 //!   failure classed as an inline projector's is: a retryable one retried
 //!   to the kernel's cap, then dead-lettered and passed; any other
-//!   dead-lettered at once (`Kernel::project_served`). A gone stream is
-//!   handed its gone book.
+//!   dead-lettered at once (`Kernel::project_served`). A purged stream's
+//!   tombstone is such an event.
 //! - **A policy's item is a step through the outbox**
 //!   (`Kernel::react_served`): the kernel reacts, routes and stamps the
 //!   outputs (their ids `ids::policy_command_id`'s), writes them to the
@@ -30,8 +30,7 @@
 //!   [`OnPolicyBug::MovePast`](super::OnPolicyBug), or held).
 //! - **A policy on the bus** ([`BusPolicy`]) is one the registry does not
 //!   hold, never both: no chain runs it, and
-//!   [`Kernel::resume`](super::Kernel::resume) and
-//!   [`Kernel::forget_gone`](super::Kernel::forget_gone) never touch it. Its
+//!   [`Kernel::resume`](super::Kernel::resume) never touches it. Its
 //!   position is an inline policy's (the next sequence, under its name), so
 //!   a policy moved between the two keeps its place.
 
@@ -42,7 +41,7 @@ use angzarr_bus::{
     Admitted, Answer, Handler, Hub, Item, Pumped, RetryPolicy, Scope, StoreRead, StoreTransport,
     Transport,
 };
-use angzarr_ports::BoxFuture;
+use angzarr_ports::{tombstone, BoxFuture};
 use angzarr_proto::v1::Cover;
 use angzarr_router::policy::PolicyDispatch;
 use angzarr_router::router::{DynProjectorHandler, PolicyComponent};
@@ -52,11 +51,12 @@ use prost_types::Timestamp;
 use super::error::{Failure, KernelError};
 use super::handle::{Kernel, Wait};
 use super::misconfigured::Misconfigured;
-use super::projector::{gone_request, project_request};
+use super::projector::project_request;
 use super::registry::PolicyEntry;
 use super::route::Rejected;
 use super::store::{
     CommitNotify, Outbox, PositionKey, Processed, ReadStore, Store, StoreError, StreamRef, Watch,
+    Write,
 };
 
 /// A policy a bus serves, never the registry: written by hand or marked up
@@ -368,22 +368,19 @@ impl<S: Store + Outbox> angzarr_bus::Dispatch for KernelDispatch<'_, S> {
         name: &'a str,
         item: Item<'a>,
     ) -> Answer {
-        let (book, at) = match item.page {
-            None => (gone_request(item.stream).events.unwrap_or_default(), None),
-            Some(page) => {
-                let catalog = self.kernel.registry().catalog();
-                let next = item.sequence + 1;
-                let pages = vec![page.clone()];
-                match project_request(catalog, item.stream, pages, next).await {
-                    Err(error) => return Answer::Held(Report::of(&error)),
-                    Ok(request) => {
-                        let book = request.events.unwrap_or_default();
-                        // A fork page is never handed, but its sequence counts.
-                        if book.pages.is_empty() {
-                            return Answer::Handled;
-                        }
-                        (book, Some((item.stream, item.sequence)))
+        let (book, at) = {
+            let catalog = self.kernel.registry().catalog();
+            let next = item.sequence + 1;
+            let pages = vec![item.page.clone()];
+            match project_request(catalog, item.stream, pages, next).await {
+                Err(error) => return Answer::Held(Report::of(&error)),
+                Ok(request) => {
+                    let book = request.events.unwrap_or_default();
+                    // A fork page is never handed, but its sequence counts.
+                    if book.pages.is_empty() {
+                        return Answer::Handled;
                     }
+                    (book, Some((item.stream, item.sequence)))
                 }
             }
         };
@@ -423,9 +420,31 @@ impl<S: Store + Outbox> angzarr_bus::Dispatch for KernelDispatch<'_, S> {
     }
 
     async fn react<'a>(&'a self, policy: &'a BusPolicy, name: &'a str, item: Item<'a>) -> Answer {
-        let Some(page) = item.page else {
-            return Answer::Handled;
-        };
+        let page = item.page;
+        // A tombstone is no event a policy is called for: its position
+        // moves past it, alone.
+        if tombstone::is(page) {
+            let moved = match StreamRef::try_from(item.stream) {
+                Ok(stream) => {
+                    let position = [(
+                        PositionKey {
+                            handler: name,
+                            stream,
+                        },
+                        item.sequence + 1,
+                    )];
+                    self.store
+                        .write(Write::positions(&position))
+                        .await
+                        .map(drop)
+                }
+                Err(error) => Err(error),
+            };
+            return match moved {
+                Ok(()) => Answer::Handled,
+                Err(error) => Answer::Held(Report::of(&KernelError::Store(error))),
+            };
+        }
         let now = (self.clock)();
         let reacted = self
             .kernel

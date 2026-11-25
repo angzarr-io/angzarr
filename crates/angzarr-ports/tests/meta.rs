@@ -1195,7 +1195,7 @@ impl Broken {
                 .collect();
         }
         if self.is(Bug::ChangesDropsPurge) {
-            changes.retain(|c| !(c.purged && c.head == 0));
+            changes.retain(|c| !c.purged);
         }
         if self.is(Bug::ChangesDropsRewrite) {
             for change in &mut changes {
@@ -2034,7 +2034,7 @@ fn the_purge_checks_catch_what_a_purge_leaves() {
         PurgeKeepsSnapshot
     );
     catches!(
-        a_purged_stream_starts_again_from_nothing,
+        a_purged_stream_continues_after_its_tombstone,
         broken,
         PurgeIsANoOp
     );
@@ -2363,12 +2363,15 @@ fn an_honest_broken_store_passes_every_check() {
         a_purge_deletes_a_streams_events_snapshot_and_command_ids,
         a_purge_keeps_the_streams_positions,
         a_purge_deletes_a_snapshot_with_no_events,
-        a_purged_stream_starts_again_from_nothing,
+        a_purged_stream_continues_after_its_tombstone,
         a_purge_at_the_streams_head_removes_it,
         a_purge_at_a_stale_head_is_a_conflict_and_removes_nothing,
         a_purge_of_an_absent_stream_is_at_zero,
         a_purge_never_takes_the_positions_on_its_stream,
         a_purge_of_a_forked_stream_is_guarded_by_its_head_as_read,
+        a_purge_of_an_unforked_edition_stream_removes_nothing,
+        an_edition_purge_continues_and_repeats_like_a_mains,
+        a_second_purge_keeps_the_first_tombstone,
         list_editions_derives_each_edition_from_its_fork_events,
         a_removed_edition_stream_loses_every_row_of_it,
         an_edition_is_deleted_by_removing_each_forked_stream,
@@ -3455,7 +3458,10 @@ fn the_change_feed_checks_catch_a_feed_that_misses_invents_or_misreports() {
         a_stream_that_did_not_change_is_not_reported,
         ChangesReportsUnchanged
     );
-    catches_feed!(a_purge_is_reported_purged_with_no_head, ChangesDropsPurge);
+    catches_feed!(
+        a_purge_is_reported_purged_at_its_tombstones_head,
+        ChangesDropsPurge
+    );
     catches_feed!(
         a_purge_then_rewrite_is_reported_purged_with_its_new_head,
         ChangesDropsRewrite

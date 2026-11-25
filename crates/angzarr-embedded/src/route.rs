@@ -20,6 +20,7 @@ use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 
+use angzarr_ports::tombstone;
 use angzarr_router::domain::DomainDispatch;
 use angzarr_router::error::{BusinessStatus, CodedError, GrpcCode, HandlerError};
 use angzarr_router::hpb;
@@ -378,9 +379,15 @@ pub(crate) fn table<D: Domain>(
 ) -> DomainDispatch<D::State> {
     let anchor = <<D::State as State>::Anchor as prost::Name>::full_name();
     let restore_fresh = Arc::clone(&fresh);
+    let reset = Arc::clone(&fresh);
     let rebuilder = Rebuilder::new(move || fresh())
         .with_fold(move |state, pages, cover| {
             for (index, page) in pages.iter().enumerate() {
+                // A tombstone puts the state back to the default.
+                if tombstone::is(page) {
+                    *state = reset();
+                    continue;
+                }
                 let Some(any) = angzarr_router::page_event(page) else {
                     continue;
                 };

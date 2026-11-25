@@ -122,12 +122,9 @@ impl Dispatch for Reference<'_> {
         item: Item<'a>,
     ) -> Answer {
         let stream = item.stream.clone();
-        let delivery = match item.page {
-            Some(_) => Delivery::Event {
-                stream,
-                sequence: item.sequence,
-            },
-            None => Delivery::Gone { stream },
+        let delivery = Delivery::Event {
+            stream,
+            sequence: item.sequence,
         };
         match projector.1.handle(delivery).await {
             Ok(()) => Answer::Handled,
@@ -339,6 +336,16 @@ impl Run {
         let sref = StreamRef::try_from(stream).unwrap();
         self.memory().read(sref, 0, None).await.unwrap().pages
     }
+
+    /// The stream's next sequence: past its tombstones, which are pages.
+    async fn head(&self, stream: &Cover) -> u64 {
+        let sref = StreamRef::try_from(stream).unwrap();
+        self.memory()
+            .read(sref, 0, None)
+            .await
+            .unwrap()
+            .next_sequence
+    }
 }
 
 type ReferenceBus<'h, T> = Hub<'h, Pumped<T>, Store, Reference<'h>, StoreRead<'h, MemoryStore>>;
@@ -382,7 +389,7 @@ impl Harness for Run {
     }
 
     async fn append(&self, stream: &Cover) {
-        let head = self.pages(stream).await.len() as u64;
+        let head = self.head(stream).await;
         let n = self.commands.fetch_add(1, Ordering::SeqCst);
         let id = angzarr_proto::v1::Uuid::from_bytes(u128::from(n + 1).to_be_bytes());
         let page = [page(head, Some(id))];
@@ -394,7 +401,7 @@ impl Harness for Run {
     }
 
     async fn purge(&self, stream: &Cover) {
-        let head = self.pages(stream).await.len() as u64;
+        let head = self.head(stream).await;
         let sref = StreamRef::try_from(stream).unwrap();
         self.memory().purge(sref, head).await.unwrap();
     }
@@ -471,7 +478,10 @@ impl TransportHarness for Run {
     }
 
     async fn stored(&self, stream: &Cover, sequence: u64) -> Option<EventPage> {
-        self.pages(stream).await.into_iter().nth(sequence as usize)
+        self.pages(stream)
+            .await
+            .into_iter()
+            .find(|page| page.sequence == sequence)
     }
 
     async fn record(&self, name: &str, stream: &Cover, mark: u64) {

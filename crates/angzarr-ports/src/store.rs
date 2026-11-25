@@ -261,12 +261,21 @@ impl<T: EventStore + SnapshotStore + PositionStore + ?Sized> Store for T {}
 
 // ================================================================== purge
 
-/// Opt-in: delete a stream, its snapshot, its command ids and the dead
-/// letters about it ([`DeadLetterStore`]). It restarts at 0. Its own call.
-/// The positions on it stay: they are its drivers' record of what their
-/// handlers processed ([`Processed`]), which a purge never touches
-/// (decision 14.68); a driver finds the stream gone by its listing and
-/// forgets it.
+/// Opt-in: delete a stream's events, its snapshot, its command ids and the
+/// dead letters about it ([`DeadLetterStore`]), and keep the stream: ONE
+/// tombstone ([`crate::tombstone`]) is appended at its next sequence, so
+/// sequence numbers never restart and a later write continues after it. A
+/// stream is dense from 0, or from its latest tombstone; a purged stream
+/// stays listed, and one whose last event is a tombstone is destroyed.
+/// Readers fold the tombstone as an ordinary event: an aggregate's state is
+/// the default again, a projector resets. A repeat purge removes the events
+/// written after the last tombstone and appends a new tombstone only if it
+/// removed any (nothing after the tombstone is a no-op answering 0); the
+/// old tombstones are kept. Its own call. The positions on the stream stay
+/// ([`Processed`]): sequences do not restart, so they stay true, and the
+/// tombstone is the next event of a handler at its position. This
+/// supersedes decision 14.68, by which a purge deleted the stream whole
+/// and a driver found it gone by its listing.
 ///
 /// **Guarded by the head the caller read** (14.43). A purge is a
 /// decision made on a read: the stream is deleted only if it is still at
@@ -280,12 +289,21 @@ impl<T: EventStore + SnapshotStore + PositionStore + ?Sized> Store for T {}
 ///   holds (a snapshot, dead letters) and answers 0; a purge at more is a
 ///   conflict (a racing purge got there first).
 /// - An edition stream's head is its head as read (main's events below its
-///   fork, then its own); a purge removes only its own rows, never main's,
-///   and it reads as main's again.
-/// - A known limit (ABA): a head is a length, so a stream purged and
-///   re-created to the same length in between passes the guard.
+///   fork, then its own); a purge deletes only its own events, never main's
+///   and never its fork (which is what makes the edition), and appends a
+///   tombstone on the edition at that head. A reader of the edition then
+///   reads main's events below the fork (they are main's), the fork, and
+///   the tombstone: the edition's own history is closed, a fold restarts
+///   from its default state there, and what the edition writes after it
+///   continues past it. An edition stream with no row of its own reads as
+///   main's: a purge of it removes nothing and appends nothing.
+/// - A head is a length and sequences never restart, so a stream purged
+///   and written again can never pass the guard or a position for the
+///   stream it was.
 ///
-/// Answers how many events it removed.
+/// Answers how many events it removed (a tombstone is no event: a purge of
+/// a stream with nothing after its last tombstone answers 0 and changes
+/// nothing).
 pub trait Purge: MaybeSend + MaybeSync {
     fn purge(
         &self,
@@ -468,10 +486,9 @@ pub trait ListStreams: MaybeSend + MaybeSync {
 /// a saga) has processed, the one capability every driver keeps it
 /// through (decision 14.68): every stream the handler has seen, with where
 /// it is on each, its [`PositionStore::position`]. The record is the
-/// driver's own. A [`Purge`] never touches it, so a driver finds a stream
-/// gone by comparing its record with [`ListStreams`], hands its handler
-/// the stream's gone book, then forgets the stream by writing its position
-/// back to 0. It answers every stream whose position for `handler` is
+/// driver's own. A [`Purge`] never touches it: a purged stream keeps its
+/// sequences, so the record stays true and the handler is handed the
+/// stream's tombstone next. It answers every stream whose position for `handler` is
 /// above 0 (0 is no position: what an unwritten or forgotten one reads
 /// as), with that position, in [`ListStreams`]' order: by domain, then main
 /// first, then by edition and root. A distributed coordinator keeps it

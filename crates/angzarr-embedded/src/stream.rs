@@ -1,6 +1,7 @@
 //! A stream: an append-only log of stamped events and the state folded from
 //! it.
 
+use angzarr_ports::tombstone;
 use angzarr_proto::v1::event_meta::Causation;
 use angzarr_proto::v1::{Cover, EventBook, EventMeta, EventPage, FactOrigin, Snapshot, Uuid};
 use coded_diagnostic::Report;
@@ -269,6 +270,23 @@ impl<D: Domain> Stream<D> {
     fn fold(&mut self, pages: &[EventPage], registry: &Registry) -> Result<(), KernelError> {
         let upcaster = Self::typed(registry)?;
         for (index, page) in pages.iter().enumerate() {
+            // A tombstone (a purge's) closes the stream: what was folded
+            // before it is gone and the state is the factory's again,
+            // before the next event; business code never sees it. It may
+            // stand above the sequence folded so far (the events it
+            // closed over are deleted): the stream runs on from it.
+            if tombstone::is(page) && page.sequence >= self.len() {
+                self.state = registry.fresh::<D>();
+                #[cfg(any(test, feature = "test-support"))]
+                {
+                    self.base = self.state.clone();
+                }
+                self.events.clear();
+                self.meta_events = 0;
+                self.first = page.sequence + 1;
+                self.last_recorded_at = None;
+                continue;
+            }
             if page.sequence != self.len() {
                 return Err(KernelError::Replay(ReplayError::OutOfSequence {
                     index,
@@ -338,7 +356,7 @@ impl<D: Domain> Stream<D> {
         let upcaster = Self::typed(registry)?;
         book.pages
             .iter()
-            .filter(|page| angzarr_router::page_event(page).is_some())
+            .filter(|page| angzarr_router::page_event(page).is_some() && !tombstone::is(page))
             .map(|page| Envelope::decode(&cover, page, upcaster))
             .collect()
     }

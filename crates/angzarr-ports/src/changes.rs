@@ -85,12 +85,14 @@ impl ChangeCursor {
 pub struct StreamChange {
     /// The stream.
     pub stream: Cover,
-    /// Its head now: the next sequence, 0 if it has no events (it was
-    /// purged, or removed, and not written again).
+    /// Its head now: the next sequence, 0 if it has no events (an
+    /// edition's stream removed, and not written again). A purged stream
+    /// keeps its tombstone, so its head is the one past it.
     pub head: u64,
-    /// Whether it was purged (or removed) at some point since the cursor,
-    /// so what the follower saw of it is gone, whatever its head now: a
-    /// stream purged and written again is told from one only written to.
+    /// Whether it was purged (or removed) at some point since the cursor:
+    /// a main stream's purge is a tombstone among the events a follower
+    /// reads like any other, so this only says one landed; an edition
+    /// stream removed has lost its own rows.
     pub purged: bool,
 }
 

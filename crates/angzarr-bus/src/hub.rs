@@ -43,6 +43,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 use std::time::Duration;
 
+use angzarr_ports::tombstone;
 use angzarr_ports::{
     CommitSignal, EventRead, EventStore, MaybeSend, MaybeSync, PositionStore, StoreError,
 };
@@ -63,12 +64,12 @@ pub const AHEAD: usize = 4;
 /// The code of a missing sequence's failure, as served.
 pub const MISSING: &str = "angzarr-bus-predecessor-missing";
 
-/// What a handler is handed: one event of a stream, or the stream gone.
+/// What a handler is handed: one event of a stream.
 #[derive(Clone, Copy, Debug)]
 pub struct Item<'a> {
     /// The stream.
     pub stream: &'a Cover,
-    /// The event's sequence (0 for a gone stream).
+    /// The event's sequence.
     pub sequence: u64,
     /// How many times it was handed before: the framework's, never in a
     /// business request.
@@ -76,8 +77,8 @@ pub struct Item<'a> {
     /// Whether this is its last attempt under the retry policy: failing, it
     /// is dead-lettered, not held.
     pub last: bool,
-    /// The event; `None`: the stream is gone.
-    pub page: Option<&'a EventPage>,
+    /// The event.
+    pub page: &'a EventPage,
 }
 
 /// A handler's answer, as the hub settles it.
@@ -140,8 +141,8 @@ pub trait Dispatch: MaybeSend + MaybeSync {
         std::future::ready(Ok(()))
     }
 
-    /// Hand `item` to `projector`, subscription `name`. A gone stream is
-    /// handed too. On its last attempt, a failure is dead-lettered.
+    /// Hand `item` to `projector`, subscription `name`. On its last
+    /// attempt, a failure is dead-lettered.
     fn project<'a>(
         &'a self,
         projector: &'a Self::Projector,
@@ -149,7 +150,7 @@ pub trait Dispatch: MaybeSend + MaybeSync {
         item: Item<'a>,
     ) -> impl Future<Output = Answer> + MaybeSend + 'a;
 
-    /// Hand `item` (an event, never a gone stream) to `policy`,
+    /// Hand `item` to `policy`,
     /// subscription `name`, routing its outputs and committing its position
     /// past the event with them when it answers handled or passed.
     fn react<'a>(
@@ -620,14 +621,11 @@ where
     }
 
     /// Place `delivery` in its stream: a duplicate is answered at once, a
-    /// gone stream forgotten, one past the lane's room held; else it waits
+    /// one past the lane's room held; else it waits
     /// for its turn, driving the fill when no other call does.
     async fn place(&self, at: usize, delivery: Delivery) -> Result<Settle, Report> {
         let run = &self.runs[at];
         let report = |error: D::Error| Report::of(&error);
-        if delivery.body == Body::Gone {
-            return self.gone(at, &delivery.stream).await.map_err(report);
-        }
         let stream = delivery.stream.clone();
         self.load(at, &stream).await.map_err(report)?;
         let sequence = delivery.sequence;
@@ -733,10 +731,38 @@ where
             _ => self.shared.reads.resolve(stream, sequence).await?,
         };
         let Some(page) = page else {
+            if self.restarts(at, stream, sequence).await? {
+                // Its events were deleted by a purge: the stream goes on
+                // from the tombstone. What waited below it is answered.
+                for waiter in waiters {
+                    fill_slot(&waiter.slot, Settle::Handled);
+                }
+                return Ok(());
+            }
             return self.missed(at, stream, sequence, waiters).await;
         };
         let handed = self.hand_at_mark(at, stream, (sequence, counted), &page, waiters);
         handed.await.map(drop)
+    }
+
+    /// Whether the stream runs on from a tombstone after `sequence`, the
+    /// events below it deleted by a purge: then its mark moves to the
+    /// tombstone, which is handed in its turn like any event.
+    async fn restarts(&self, at: usize, stream: &Cover, sequence: u64) -> Result<bool, D::Error> {
+        let mut pages = self.shared.reads.recover(stream, sequence, u64::MAX);
+        let Some(Ok(first)) = pages.next().await else {
+            return Ok(false);
+        };
+        let Body::Event(page) = first.body else {
+            return Ok(false);
+        };
+        if first.sequence <= sequence || !tombstone::is(&page) {
+            return Ok(false);
+        }
+        self.runs[at].with_lane(stream, |lane| {
+            lane.mark = lane.mark.max(first.sequence);
+        });
+        Ok(true)
     }
 
     /// Recover `from..to` of `stream` and hand each in order, stopping where
@@ -748,6 +774,14 @@ where
         for expected in from..to {
             let recovered = match pages.next().await {
                 Some(Ok(recovered)) if recovered.sequence == expected => recovered,
+                Some(Ok(recovered)) if recovered.sequence > expected => {
+                    // Events deleted by a purge, below a tombstone: the
+                    // stream goes on from it.
+                    return match self.restarts(at, stream, expected).await? {
+                        true => Ok(()),
+                        false => self.missed(at, stream, expected, Vec::new()).await,
+                    };
+                }
                 Some(Err(error)) => {
                     let error: D::Error = error.into();
                     run.fail(stream, Some(expected), Report::of(&error), Outcome::Held);
@@ -797,7 +831,7 @@ where
             sequence,
             attempt,
             last: self.shared.retry.last(attempt),
-            page: Some(page),
+            page,
         };
         let answer = self.hand(at, item).await;
         match &answer {
@@ -936,50 +970,6 @@ where
             .tracker(pool)
             .record(&pool.name, stream, mark)
             .await?;
-        Ok(())
-    }
-
-    /// `stream` is gone: a projector is handed it, a policy is not called;
-    /// handled or passed, the stream is forgotten, its position put back
-    /// to 0.
-    async fn gone(&self, at: usize, stream: &Cover) -> Result<Settle, D::Error> {
-        let run = &self.runs[at];
-        let answer = match &run.pool.handler {
-            Handler::Projector { projector, .. } => {
-                let item = Item {
-                    stream,
-                    sequence: 0,
-                    attempt: 0,
-                    last: false,
-                    page: None,
-                };
-                let name = &run.pool.name;
-                self.shared.dispatch.project(projector, name, item).await
-            }
-            Handler::Policy(_) => {
-                self.forget(at, stream).await?;
-                return Ok(Settle::Handled);
-            }
-        };
-        match &answer {
-            Answer::Handled => run.lock().handled += 1,
-            Answer::Passed(cause) => run.fail(stream, None, cause.clone(), Outcome::Passed),
-            Answer::Held(cause) => run.fail(stream, None, cause.clone(), Outcome::Held),
-        }
-        if matches!(answer, Answer::Held(_)) {
-            return Ok(Settle::Held { after: None });
-        }
-        self.forget(at, stream).await?;
-        Ok(match answer {
-            Answer::Handled => Settle::Handled,
-            _ => Settle::DeadLettered,
-        })
-    }
-
-    /// Put the position on `stream` back to 0, and its lane away.
-    async fn forget(&self, at: usize, stream: &Cover) -> Result<(), D::Error> {
-        self.write(at, stream, 0).await?;
-        self.runs[at].lock().lanes.remove(&key(stream));
         Ok(())
     }
 }

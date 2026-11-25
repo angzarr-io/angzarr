@@ -127,6 +127,7 @@ use crate::store::{
     ReadUnit, ReadUntilTime, Store, Watch, Write, Written,
 };
 use crate::stream::{PositionKey, StreamRef};
+use crate::tombstone;
 
 #[path = "changes_contract.rs"]
 pub mod changes;
@@ -1004,11 +1005,14 @@ pub async fn two_writers_racing_on_one_stream_land_one<S: Store>((a, b): (S, S))
 
 // ------------------------------------------------------------ purge (opt-in)
 
-async fn assert_gone<S: Store>(store: &S, stream: StreamRef<'_>, what: &str) {
+/// `stream` as a purge leaves it with `closed` events removed: its events
+/// gone but for ONE tombstone at the sequence the purge found as the head,
+/// no snapshot, no command ids, and still listed.
+async fn assert_closed<S: Store>(store: &S, stream: StreamRef<'_>, at: u64, what: &str) {
     let slice = store.read(stream, 0, None).await.unwrap();
     assert_eq!(
         (slice.next_sequence, slice.pages),
-        (0, vec![]),
+        (at + 1, vec![tombstone::page(at)]),
         "{what}: read"
     );
     assert_eq!(
@@ -1023,11 +1027,16 @@ async fn assert_gone<S: Store>(store: &S, stream: StreamRef<'_>, what: &str) {
     );
     let listed = store.covers(stream.domain).await.unwrap();
     assert!(
-        !listed.contains(&stream.to_cover()),
+        listed.contains(&stream.to_cover()),
         "{what}: covers {listed:?}"
     );
 }
 
+/// A purge deletes a stream's events, snapshot and command ids and keeps
+/// the stream: it appends ONE tombstone ([`tombstone::StreamClosed`]) at
+/// the next sequence, so a purged stream is listed and its last event is
+/// the tombstone. A purge of what holds nothing after the tombstone
+/// removes nothing and appends nothing.
 pub async fn a_purge_deletes_a_streams_events_snapshot_and_command_ids<S>(store: S)
 where
     S: Store + Purge,
@@ -1041,25 +1050,35 @@ where
         store.write_snapshot(s, &snapshot(1, "v1")).await.unwrap();
     }
     assert_eq!(store.purge(purged, 2).await, Ok(2), "its two events");
-    assert_gone(&store, purged, "purged").await;
-    assert_eq!(store.covers("account").await, Ok(covers(&[kept])));
+    assert_closed(&store, purged, 2, "purged").await;
+    assert_eq!(store.covers("account").await, Ok(covers(&[purged, kept])));
     assert_eq!(
         store.read(kept, 0, None).await.unwrap().pages,
         [page(0, 1), page(1, 2)],
         "another stream untouched"
     );
     assert_eq!(store.read_snapshot(kept).await, Ok(Some(snapshot(1, "v1"))));
-    assert_eq!(store.purge(purged, 0).await, Ok(0), "nothing left to purge");
+    assert_eq!(
+        store.purge(purged, 3).await,
+        Ok(0),
+        "nothing after the tombstone"
+    );
+    assert_closed(&store, purged, 2, "purged again").await;
     assert_eq!(
         store.purge(main_stream("account", 3), 0).await,
         Ok(0),
         "no stream"
     );
+    assert_eq!(
+        store.covers("account").await,
+        Ok(covers(&[purged, kept])),
+        "no stream made by a purge of none"
+    );
 }
 
 /// A purge never touches the positions on its stream: they are its
-/// drivers' record of what their handlers processed, by which a driver
-/// finds the stream gone (decision 14.68).
+/// drivers' record of what their handlers processed, and the tombstone,
+/// at the sequence a position stands at, is the next thing they read.
 pub async fn a_purge_keeps_the_streams_positions<S>(store: S)
 where
     S: Store + Purge,
@@ -1073,6 +1092,11 @@ where
     store.purge(s, 1).await.unwrap();
     assert_eq!(store.position(key("a", s)).await, Ok(1));
     assert_eq!(store.position(key("b", s)).await, Ok(1));
+    assert_eq!(
+        store.read(s, 1, None).await.unwrap().pages,
+        [tombstone::page(1)],
+        "the tombstone is what a handler at its position reads next"
+    );
     assert_eq!(
         store.position(key("a", kept)).await,
         Ok(4),
@@ -1088,9 +1112,17 @@ where
     store.write_snapshot(s, &snapshot(4, "v1")).await.unwrap();
     assert_eq!(store.purge(s, 0).await, Ok(0));
     assert_eq!(store.read_snapshot(s).await, Ok(None));
+    assert_eq!(
+        store.read(s, 0, None).await.unwrap().next_sequence,
+        0,
+        "no event removed, no tombstone"
+    );
 }
 
-pub async fn a_purged_stream_starts_again_from_nothing<S>(store: S)
+/// Sequence numbers never restart: a write continues after the tombstone,
+/// a writer that raced the purge is refused, and a reader across the purge
+/// folds the tombstone, then the new events.
+pub async fn a_purged_stream_continues_after_its_tombstone<S>(store: S)
 where
     S: Store + Purge,
 {
@@ -1101,18 +1133,63 @@ where
     store.purge(s, 2).await.unwrap();
     assert_eq!(
         append(&store, s, 2, &[page(2, 2)]).await,
-        Err(conflict(s, 2, 0)),
+        Err(conflict(s, 2, 3)),
         "a stale writer that raced the purge"
     );
-    assert_gone(&store, s, "after the refused append").await;
-    assert_eq!(append(&store, s, 0, &[page(0, 3)]).await, Ok(1));
+    assert_closed(&store, s, 2, "after the refused append").await;
+    assert_eq!(
+        append(&store, s, 3, &[page(3, 3)]).await,
+        Ok(4),
+        "continues after the tombstone"
+    );
     let slice = store.read(s, 0, None).await.unwrap();
-    assert_eq!(slice.pages, [page(0, 3)]);
-    assert_eq!(slice.last_recorded_at, Some(at(0)));
+    assert_eq!(slice.pages, [tombstone::page(2), page(3, 3)]);
+    assert_eq!(slice.next_sequence, 4);
+    assert_eq!(slice.last_recorded_at, Some(at(3)));
+    assert_eq!(
+        store.read(s, 2, None).await.unwrap().pages,
+        [tombstone::page(2), page(3, 3)],
+        "a reader at the old head folds the tombstone, then the new events"
+    );
+    assert_eq!(
+        store.read(s, 3, None).await.unwrap().pages,
+        [page(3, 3)],
+        "one past it, only the new"
+    );
     assert_eq!(
         store.find_command(s, command(1)).await,
         Ok(vec![]),
         "old ids forgotten"
+    );
+}
+
+/// A second purge removes the events written after the last tombstone and
+/// appends a new tombstone after them; the old tombstone stays.
+pub async fn a_second_purge_keeps_the_first_tombstone<S>(store: S)
+where
+    S: Store + Purge,
+{
+    let s = main_stream("account", 1);
+    append(&store, s, 0, &[page(0, 1), page(1, 1)])
+        .await
+        .unwrap();
+    store.purge(s, 2).await.unwrap();
+    append(&store, s, 3, &[page(3, 2), page(4, 2)])
+        .await
+        .unwrap();
+    assert_eq!(store.purge(s, 5).await, Ok(2), "the events after it");
+    let slice = store.read(s, 0, None).await.unwrap();
+    assert_eq!(
+        (slice.next_sequence, slice.pages),
+        (6, vec![tombstone::page(2), tombstone::page(5)]),
+        "both tombstones, nothing between"
+    );
+    assert_eq!(store.purge(s, 6).await, Ok(0), "nothing after the last");
+    assert_eq!(store.head(s).await.unwrap().next_sequence, 6);
+    assert_eq!(
+        append(&store, s, 6, &[page(6, 3)]).await,
+        Ok(7),
+        "continues after the second"
     );
 }
 
@@ -1154,8 +1231,8 @@ async fn purge_fixture<S: Store>(store: &S, s: StreamRef<'_>) {
     put(store, key("a", s), 2).await.unwrap();
 }
 
-/// 14.43: a purge at the head its caller read removes the stream whole, but
-/// for its drivers' record of it, the positions on it (14.68).
+/// 14.43: a purge at the head its caller read deletes the stream's events
+/// and leaves its tombstone; the positions on it stay.
 pub async fn a_purge_at_the_streams_head_removes_it<S>(store: S)
 where
     S: Store + Purge,
@@ -1164,7 +1241,7 @@ where
     purge_fixture(&store, s).await;
     let read = store.read(s, 0, None).await.unwrap().next_sequence;
     assert_eq!(store.purge(s, read).await, Ok(2), "at the head it read");
-    assert_gone(&store, s, "purged at its head").await;
+    assert_closed(&store, s, 2, "purged at its head").await;
     assert_eq!(
         store.position(key("a", s)).await,
         Ok(2),
@@ -1238,15 +1315,15 @@ where
     assert_eq!(store.purge(s, first).await, Ok(2), "the first purger");
     assert_eq!(
         store.purge(s, second).await,
-        Err(conflict(s, 2, 0)),
+        Err(conflict(s, 2, 3)),
         "the second, racing on the same read"
     );
-    assert_eq!(store.purge(s, 0).await, Ok(0), "re-read: nothing left");
-    assert_gone(&store, s, "purged once").await;
+    assert_eq!(store.purge(s, 3).await, Ok(0), "re-read: nothing left");
+    assert_closed(&store, s, 2, "purged once").await;
 }
 
-/// 14.43 and 14.68: a purge never takes the positions on its stream, refused
-/// or landed: every handler stays where it was.
+/// 14.43: a purge never takes the positions on its stream, refused or
+/// landed: every handler stays where it was.
 pub async fn a_purge_never_takes_the_positions_on_its_stream<S>(store: S)
 where
     S: Store + Purge,
@@ -1283,8 +1360,13 @@ where
 
 /// 14.43, editions: an edition stream's purge is guarded by its head as
 /// read (main's events below its fork, then its own), not main's head nor
-/// its own row count. It removes only the stream's own rows; main is
-/// untouched, and the stream reads as main's again.
+/// its own row count. It deletes only the stream's own EVENTS (never
+/// main's, and never its fork, which keeps the edition) and appends a
+/// tombstone on the edition at its next sequence, as a main stream's: what
+/// a reader of the edition then sees is main's events below the fork (they
+/// are main's, untouched), the fork, and the tombstone, which closes the
+/// edition's own history (a fold restarts from its default state there);
+/// the edition's own events written after it continue past it.
 pub async fn a_purge_of_a_forked_stream_is_guarded_by_its_head_as_read<S>(store: S)
 where
     S: Store + Purge,
@@ -1312,17 +1394,76 @@ where
         4,
         "refused: the fork kept"
     );
-    assert_eq!(store.purge(e, 4).await, Ok(2), "its own two rows");
+    assert_eq!(store.purge(e, 4).await, Ok(1), "its one own event");
     assert_eq!(
         store.read(main, 0, None).await.unwrap().pages,
         [page(0, 1), page(1, 1), page(2, 3)],
         "main untouched"
     );
+    let closed = store.read(e, 0, None).await.unwrap();
+    assert_eq!(
+        (closed.next_sequence, closed.pages),
+        (
+            5,
+            vec![page(0, 1), page(1, 1), created_page(2), tombstone::page(4)]
+        ),
+        "main below the fork, the fork, the edition's tombstone"
+    );
+}
+
+/// An edition's tombstone is a main stream's: a repeat purge with nothing
+/// after it is a no-op, the edition's writes continue past it, and a second
+/// purge keeps the first tombstone.
+pub async fn an_edition_purge_continues_and_repeats_like_a_mains<S>(store: S)
+where
+    S: Store + Purge,
+{
+    let main = main_stream("account", 1);
+    let e = edition_stream("account", 1, "what-if");
+    append(&store, main, 0, &[page(0, 1), page(1, 1)])
+        .await
+        .unwrap();
+    assert_eq!(fork(&store, e).await, 2);
+    append(&store, e, 3, &[page(3, 5)]).await.unwrap();
+    assert_eq!(store.purge(e, 4).await, Ok(1));
+    assert_eq!(
+        store.purge(e, 5).await,
+        Ok(0),
+        "nothing after the tombstone"
+    );
+    assert_eq!(
+        append(&store, e, 5, &[page(5, 6)]).await,
+        Ok(6),
+        "continues after the tombstone"
+    );
+    assert_eq!(store.purge(e, 6).await, Ok(1), "the events after it");
+    let twice = store.read(e, 0, None).await.unwrap();
+    assert_eq!(
+        twice.pages.iter().map(|p| p.sequence).collect::<Vec<_>>(),
+        [0, 1, 2, 4, 6],
+        "both tombstones, the fork, main's below it"
+    );
+}
+
+/// An edition stream with no row of its own reads as main's: a purge of it
+/// at main's head removes nothing and appends nothing (a tombstone is its
+/// own row, and the first own row of an edition is its fork).
+pub async fn a_purge_of_an_unforked_edition_stream_removes_nothing<S>(store: S)
+where
+    S: Store + Purge,
+{
+    let main = main_stream("account", 1);
+    let other = edition_stream("account", 2, "what-if");
+    let e = edition_stream("account", 1, "what-if");
+    append(&store, main, 0, &[page(0, 1)]).await.unwrap();
+    assert_eq!(fork(&store, other).await, 0, "the edition exists");
+    assert_eq!(store.purge(e, 1).await, Ok(0));
     assert_eq!(
         store.read(e, 0, None).await.unwrap().pages,
-        [page(0, 1), page(1, 1), page(2, 3)],
-        "reads as main's again"
+        [page(0, 1)],
+        "still main's"
     );
+    assert_eq!(store.read(main, 0, None).await.unwrap().pages, [page(0, 1)]);
 }
 
 // --------------------------------------------------------- editions (opt-in)
@@ -1787,7 +1928,12 @@ where
     assert_eq!(reads.covers("account").await, Ok(listed), "listed still");
     drop(reads);
     let mut later = reader.begin_read().await.unwrap();
-    assert_eq!(later.covers("account").await, Ok(covers(&[kept])));
+    assert_eq!(later.covers("account").await, Ok(covers(&[purged, kept])));
+    assert_eq!(
+        later.read(purged, 0, None).await.unwrap().pages,
+        [tombstone::page(2)],
+        "a later unit reads its tombstone"
+    );
 }
 
 pub async fn a_read_unit_keeps_a_stream_purged_after_it_began<S>((reader, writer): (S, S))
@@ -1874,7 +2020,7 @@ async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_beg
     assert_eq!(reads.read_snapshot(s).await, Ok(Some(snapshot(1, "v1"))));
     drop(reads);
     let mut later = reader.begin_read().await.unwrap();
-    assert_eq!(later.head(s).await.unwrap().next_sequence, 0);
+    assert_eq!(later.head(s).await.unwrap().next_sequence, 3);
     assert_eq!(later.read_snapshot(s).await, Ok(None));
 }
 
@@ -2289,10 +2435,9 @@ where
     assert_eq!(store.processed("nobody").await, Ok(vec![]));
 }
 
-/// 14.68: a handler's record of a stream outlives the stream's purge, so
-/// its driver, comparing the record with the store's listing, finds the
-/// stream gone; forgotten (its position put back to 0), it is out of the
-/// record.
+/// A handler's record of a stream outlives the stream's purge (the stream
+/// is kept, with its tombstone, and stays listed); forgotten (its position
+/// put back to 0), it is out of the record.
 pub async fn a_handlers_record_outlives_a_purge_until_forgotten<S>(store: S)
 where
     S: Store + Purge + Processed + ListStreams,
@@ -2306,8 +2451,8 @@ where
     assert_eq!(store.processed("h").await, Ok(vec![(s.to_cover(), 2)]));
     assert_eq!(
         store.list_streams().await,
-        Ok(vec![]),
-        "the store lists it no more"
+        Ok(vec![s.to_cover()]),
+        "the store lists it still: a purged stream is destroyed, not gone"
     );
     put(&store, key("h", s), 0).await.unwrap();
     assert_eq!(store.processed("h").await, Ok(vec![]), "forgotten");
@@ -3906,7 +4051,10 @@ macro_rules! store_contract {
             a_purge_deletes_a_streams_events_snapshot_and_command_ids,
             a_purge_keeps_the_streams_positions,
             a_purge_deletes_a_snapshot_with_no_events,
-            a_purged_stream_starts_again_from_nothing,
+            a_purged_stream_continues_after_its_tombstone,
+            a_second_purge_keeps_the_first_tombstone,
+            an_edition_purge_continues_and_repeats_like_a_mains,
+            a_purge_of_an_unforked_edition_stream_removes_nothing,
             a_purge_at_the_streams_head_removes_it,
             a_purge_at_a_stale_head_is_a_conflict_and_removes_nothing,
             a_purge_of_an_absent_stream_is_at_zero,
