@@ -1,13 +1,20 @@
 //! Seal and open a field.
 
+use zeroize::Zeroizing;
+
 use crate::{
-    Algorithm, KeyId, OpenError, RecipientPrivateKey, RecipientPublicKey, SealError, Sealed,
+    rfc9180, Aead, Algorithm, Kdf, Kem, KeyId, OpenError, RecipientPrivateKey, RecipientPublicKey,
+    SealError, Sealed,
 };
 
 /// The one suite: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256,
 /// ChaCha20-Poly1305.
 pub fn suite() -> Algorithm {
-    todo!("the three enum values")
+    Algorithm {
+        kem: Kem::DhkemX25519HkdfSha256.into(),
+        kdf: Kdf::HkdfSha256.into(),
+        aead: Aead::Chacha20Poly1305.into(),
+    }
 }
 
 /// HPKE's `info` (RFC 9180 section 5.1) for every seal: the ASCII text
@@ -27,8 +34,10 @@ pub const AAD_LABEL: &[u8] = b"angzarr-sealed v1 aad";
 ///
 /// # Errors
 /// [`SealError::TooLong`] when `len` is over `u32::MAX`.
-pub(crate) fn length_word(_field: &'static str, _len: usize) -> Result<[u8; 4], SealError> {
-    todo!("u32::try_from, to_be_bytes")
+pub(crate) fn length_word(field: &'static str, len: usize) -> Result<[u8; 4], SealError> {
+    u32::try_from(len)
+        .map(u32::to_be_bytes)
+        .map_err(|_| SealError::TooLong { field })
 }
 
 /// The associated data a Sealed is authenticated with: the key id, the
@@ -73,12 +82,21 @@ pub(crate) fn length_word(_field: &'static str, _len: usize) -> Result<[u8; 4], 
 /// # Errors
 /// [`SealError::TooLong`] for a `key_id` or `data` over `u32::MAX` bytes.
 pub fn associated_data(
-    _key_id: &KeyId,
-    _algorithm: &Algorithm,
-    _data: &[u8],
+    key_id: &KeyId,
+    algorithm: &Algorithm,
+    data: &[u8],
 ) -> Result<Vec<u8>, SealError> {
-    length_word("key_id", _key_id.as_str().len())?;
-    todo!("label || len(key_id) || key_id || kem || kdf || aead || len(data) || data")
+    let key_id = key_id.as_str().as_bytes();
+    let mut out = Vec::with_capacity(AAD_LABEL.len() + 24 + key_id.len() + data.len());
+    out.extend_from_slice(AAD_LABEL);
+    out.extend_from_slice(&length_word("key_id", key_id.len())?);
+    out.extend_from_slice(key_id);
+    for number in [algorithm.kem, algorithm.kdf, algorithm.aead] {
+        out.extend_from_slice(&number.to_be_bytes());
+    }
+    out.extend_from_slice(&length_word("data", data.len())?);
+    out.extend_from_slice(data);
+    Ok(out)
 }
 
 /// Seals `plaintext` to `recipient`: RFC 9180 `SealBase` with a fresh
@@ -90,12 +108,13 @@ pub fn associated_data(
 /// (an all-zero shared secret is refused, RFC 9180 section 7.1.4);
 /// [`SealError::RngFailed`].
 pub fn seal(
-    _recipient: &RecipientPublicKey,
-    _key_id: &KeyId,
-    _data: &[u8],
-    _plaintext: &[u8],
+    recipient: &RecipientPublicKey,
+    key_id: &KeyId,
+    data: &[u8],
+    plaintext: &[u8],
 ) -> Result<Sealed, SealError> {
-    todo!("SetupBaseS then Seal")
+    let ephemeral = RecipientPrivateKey::generate()?;
+    seal_with_ephemeral(&ephemeral, recipient, key_id, data, plaintext)
 }
 
 /// Opens a [`Sealed`] with the recipient's private key: RFC 9180 `OpenBase`.
@@ -107,11 +126,37 @@ pub fn seal(
 /// changed ciphertext, encapsulated key, key id, algorithm or data, or
 /// another key.
 pub fn open(
-    _private: &RecipientPrivateKey,
-    _sealed: &Sealed,
-    _data: &[u8],
+    private: &RecipientPrivateKey,
+    sealed: &Sealed,
+    data: &[u8],
 ) -> Result<Vec<u8>, OpenError> {
-    todo!("DecapBase then Open")
+    let algorithm = sealed
+        .algorithm
+        .as_ref()
+        .ok_or(OpenError::UnsupportedAlgorithm)?;
+    if *algorithm != suite() {
+        return Err(OpenError::UnsupportedAlgorithm);
+    }
+    let enc: [u8; 32] =
+        sealed
+            .encapsulated_key
+            .as_ref()
+            .try_into()
+            .map_err(|_| OpenError::Malformed {
+                field: "encapsulated_key",
+                why: "not 32 bytes",
+            })?;
+    let key_id = KeyId::new(sealed.key_id.as_str());
+    let aad = associated_data(&key_id, algorithm, data).map_err(|e| match e {
+        SealError::TooLong { field } => OpenError::Malformed {
+            field,
+            why: "longer than 4294967295 bytes",
+        },
+        _ => OpenError::Failed,
+    })?;
+    let shared = Zeroizing::new(rfc9180::decap(&enc, private)?);
+    let mut schedule = rfc9180::key_schedule(&shared, INFO);
+    schedule.open(&aad, &sealed.ciphertext)
 }
 
 /// Seals with a caller-chosen ephemeral key: for held-to-the-RFC tests of
@@ -119,13 +164,25 @@ pub fn open(
 /// repeated key.
 #[doc(hidden)]
 pub fn seal_with_ephemeral(
-    _ephemeral: &RecipientPrivateKey,
-    _recipient: &RecipientPublicKey,
-    _key_id: &KeyId,
-    _data: &[u8],
-    _plaintext: &[u8],
+    ephemeral: &RecipientPrivateKey,
+    recipient: &RecipientPublicKey,
+    key_id: &KeyId,
+    data: &[u8],
+    plaintext: &[u8],
 ) -> Result<Sealed, SealError> {
-    todo!("SetupBaseS with the given ephemeral key")
+    let algorithm = suite();
+    let aad = associated_data(key_id, &algorithm, data)?;
+    let (shared, enc) = rfc9180::encap(recipient, ephemeral)?;
+    let shared = Zeroizing::new(shared);
+    let mut schedule = rfc9180::key_schedule(&shared, INFO);
+    let ciphertext = schedule.seal(&aad, plaintext);
+    Ok(Sealed {
+        key_id: key_id.as_str().to_string(),
+        algorithm: Some(algorithm),
+        encapsulated_key: enc.to_vec().into(),
+        nonce: Default::default(),
+        ciphertext: ciphertext.into(),
+    })
 }
 
 #[cfg(test)]

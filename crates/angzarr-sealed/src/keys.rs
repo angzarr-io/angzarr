@@ -4,7 +4,18 @@ use std::fmt;
 
 use zeroize::Zeroize;
 
+use ring::rand::{SecureRandom, SystemRandom};
+
 use crate::SealError;
+
+/// `N` bytes from the system random source.
+pub(crate) fn random<const N: usize>() -> Result<[u8; N], SealError> {
+    let mut bytes = [0u8; N];
+    SystemRandom::new()
+        .fill(&mut bytes)
+        .map_err(|_| SealError::RngFailed)?;
+    Ok(bytes)
+}
 
 /// Names a recipient key (or a key-encryption key). It is the owner's
 /// choice of text, carried in the clear and bound as associated data.
@@ -50,7 +61,7 @@ pub struct RecipientPrivateKey {
 impl RecipientPrivateKey {
     /// A fresh key from the system random source.
     pub fn generate() -> Result<Self, SealError> {
-        todo!("fill 32 bytes from ring::rand::SystemRandom")
+        Ok(Self { bytes: random()? })
     }
 
     /// The key of these 32 bytes (X25519 clamps them on use).
@@ -60,7 +71,10 @@ impl RecipientPrivateKey {
 
     /// The matching public key.
     pub fn public_key(&self) -> RecipientPublicKey {
-        todo!("x25519(sk, basepoint)")
+        RecipientPublicKey(x25519_dalek::x25519(
+            self.bytes,
+            x25519_dalek::X25519_BASEPOINT_BYTES,
+        ))
     }
 
     /// The raw bytes, for the key's owner to store; the name says it.
@@ -70,8 +84,9 @@ impl RecipientPrivateKey {
 }
 
 impl fmt::Debug for RecipientPrivateKey {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!("print the type's name and nothing of the bytes")
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RecipientPrivateKey")
+            .finish_non_exhaustive()
     }
 }
 

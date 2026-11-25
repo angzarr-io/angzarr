@@ -29,16 +29,22 @@ impl KeySet {
     }
 
     /// Adds (or replaces) a key. It is not made current.
-    pub fn insert(&mut self, _id: KeyId, _key: RecipientPrivateKey) {
-        todo!("insert")
+    pub fn insert(&mut self, id: KeyId, key: RecipientPrivateKey) {
+        self.keys.insert(id, key);
     }
 
     /// Marks a held key current.
     ///
     /// # Errors
     /// [`KeySetError::NoSuchKey`].
-    pub fn set_current(&mut self, _id: &KeyId) -> Result<(), KeySetError> {
-        todo!("check held, set")
+    pub fn set_current(&mut self, id: &KeyId) -> Result<(), KeySetError> {
+        if !self.keys.contains_key(id) {
+            return Err(KeySetError::NoSuchKey {
+                key_id: id.as_str().to_string(),
+            });
+        }
+        self.current = id.clone();
+        Ok(())
     }
 
     /// Removes a key: values sealed to it no longer open.
@@ -46,8 +52,18 @@ impl KeySet {
     /// # Errors
     /// [`KeySetError::NoSuchKey`]; [`KeySetError::CurrentKey`] for the
     /// current key.
-    pub fn remove(&mut self, _id: &KeyId) -> Result<(), KeySetError> {
-        todo!("refuse the current, remove")
+    pub fn remove(&mut self, id: &KeyId) -> Result<(), KeySetError> {
+        if *id == self.current {
+            return Err(KeySetError::CurrentKey {
+                key_id: id.as_str().to_string(),
+            });
+        }
+        self.keys
+            .remove(id)
+            .map(drop)
+            .ok_or_else(|| KeySetError::NoSuchKey {
+                key_id: id.as_str().to_string(),
+            })
     }
 
     /// The current key's id.
@@ -57,7 +73,7 @@ impl KeySet {
 
     /// The current key's public key: what a producer seals to.
     pub fn current_public_key(&self) -> RecipientPublicKey {
-        todo!("derive from the current private key")
+        self.keys[&self.current].public_key()
     }
 
     /// The ids held, in order.
@@ -66,14 +82,20 @@ impl KeySet {
     }
 
     /// Seals to the current key, named by its id.
-    pub fn seal(&self, _data: &[u8], _plaintext: &[u8]) -> Result<Sealed, SealError> {
-        todo!("crate::seal to the current key")
+    pub fn seal(&self, data: &[u8], plaintext: &[u8]) -> Result<Sealed, SealError> {
+        crate::seal(&self.current_public_key(), &self.current, data, plaintext)
     }
 }
 
 impl fmt::Debug for KeySet {
-    fn fmt(&self, _f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        todo!("ids and the current id, no key")
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("KeySet")
+            .field(
+                "ids",
+                &self.keys.keys().map(KeyId::as_str).collect::<Vec<_>>(),
+            )
+            .field("current", &self.current.as_str())
+            .finish_non_exhaustive()
     }
 }
 
@@ -83,8 +105,13 @@ impl fmt::Debug for KeySet {
 /// [`OpenError::UnknownKey`] when the set holds no such key (the value is
 /// not authenticated yet: nothing was tried); otherwise as
 /// [`open`](crate::open).
-pub fn open_with(_set: &KeySet, _sealed: &Sealed, _data: &[u8]) -> Result<Vec<u8>, OpenError> {
-    todo!("lookup by sealed.key_id, then open")
+pub fn open_with(set: &KeySet, sealed: &Sealed, data: &[u8]) -> Result<Vec<u8>, OpenError> {
+    match set.keys.get(&KeyId::new(sealed.key_id.as_str())) {
+        Some(private) => crate::open(private, sealed, data),
+        None => Err(OpenError::UnknownKey {
+            key_id: sealed.key_id.clone(),
+        }),
+    }
 }
 
 #[cfg(test)]
