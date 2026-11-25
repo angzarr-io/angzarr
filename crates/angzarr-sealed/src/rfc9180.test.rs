@@ -83,7 +83,11 @@ fn the_encryptions_are_the_vectors() {
     for (seq, pt, aad, _, ct) in ENCRYPTIONS {
         let mut s = schedule();
         s.at_sequence(*seq);
-        assert_eq!(s.seal(&unhex(aad), &unhex(pt)), unhex(ct), "sequence {seq}");
+        assert_eq!(
+            s.seal(&unhex(aad), &unhex(pt)).expect("seal"),
+            unhex(ct),
+            "sequence {seq}"
+        );
     }
 }
 
@@ -105,8 +109,8 @@ fn the_sequence_advances_by_one_per_seal() {
     let mut s = schedule();
     let (_, pt, aad0, _, ct0) = &ENCRYPTIONS[0];
     let (_, _, aad1, _, ct1) = &ENCRYPTIONS[1];
-    assert_eq!(s.seal(&unhex(aad0), &unhex(pt)), unhex(ct0));
-    assert_eq!(s.seal(&unhex(aad1), &unhex(pt)), unhex(ct1));
+    assert_eq!(s.seal(&unhex(aad0), &unhex(pt)).expect("seal"), unhex(ct0));
+    assert_eq!(s.seal(&unhex(aad1), &unhex(pt)).expect("seal"), unhex(ct1));
     assert_eq!(s.sequence(), 2);
 }
 

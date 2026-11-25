@@ -5,16 +5,19 @@ use std::fmt;
 use zeroize::Zeroize;
 
 use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
+use zeroize::Zeroizing;
 
-use crate::keys::random;
-use crate::seal::{associated_data, length_word};
-use crate::{Aead, Algorithm, KeyId, OpenError, SealError, Sealed, WrapError, WrappedKey};
+use crate::keys::{random, random_boxed};
+use crate::seal::{associated_data, length_word, too_long};
+use crate::{
+    Aead, Algorithm, KeyId, OpenError, Plaintext, SealError, Sealed, WrapError, WrappedKey,
+};
 
 /// The ChaCha20-Poly1305 nonce size.
 const NONCE_LEN: usize = 12;
 
 /// The label that starts every wrapped key's associated data: the ASCII
-/// text `angzarr-sealed v1 wrap`, 21 bytes. Different from the seal's label,
+/// text `angzarr-sealed v1 wrap`, 22 bytes. Different from the seal's label,
 /// so a wrapped key and a sealed field never share aad bytes.
 pub const WRAP_LABEL: &[u8] = b"angzarr-sealed v1 wrap";
 
@@ -49,7 +52,7 @@ fn encrypt(
             Aad::from(aad),
             &mut out,
         )
-        .map_err(|_| SealError::RngFailed)?;
+        .map_err(|_| SealError::EncryptionFailed)?;
     Ok((nonce_bytes, out))
 }
 
@@ -89,21 +92,34 @@ fn wrap_aad(key_id: &KeyId, aead: i32, subject: &[u8]) -> Result<Vec<u8>, SealEr
 
 /// A symmetric key (256 bits) for one subject's fields. Wiped when dropped
 /// or [destroyed](DataKey::destroy); `Debug` renders no byte.
+///
+/// Every value sealed under it uses a fresh random 96-bit nonce, so a key
+/// must seal at most 2^32 values (NIST SP 800-38D's bound for random
+/// nonces); a subject's fields are far below it, and a key that could reach
+/// it should be replaced by a new data key.
+///
+/// `destroy` wipes THIS instance only. Shredding what was sealed under the
+/// key needs every copy of its [`WrappedKey`] erased, or the
+/// [`KeyEncryptionKey`] destroyed: keep wrapped keys in a mutable key store,
+/// never in an append-only event stream, where they cannot be erased.
 pub struct DataKey {
-    bytes: [u8; 32],
+    bytes: Box<[u8; 32]>,
     destroyed: bool,
 }
 
 impl DataKey {
     /// A fresh data key from the system random source.
     pub fn generate() -> Result<Self, SealError> {
-        Ok(Self::from_bytes(random()?))
+        Ok(Self {
+            bytes: random_boxed()?,
+            destroyed: false,
+        })
     }
 
-    /// The key of these bytes.
+    /// The key of these bytes (copied; the caller's array stays hers to wipe).
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self {
-            bytes,
+            bytes: Box::new(bytes),
             destroyed: false,
         }
     }
@@ -111,7 +127,7 @@ impl DataKey {
     /// Wipes the key. It seals and opens nothing afterwards
     /// ([`SealError::KeyDestroyed`], [`OpenError::KeyDestroyed`]).
     pub fn destroy(&mut self) {
-        self.bytes.zeroize();
+        self.bytes.as_mut().zeroize();
         self.destroyed = true;
     }
 
@@ -142,13 +158,24 @@ impl DataKey {
     }
 
     /// Opens what [`DataKey::seal`] sealed.
-    pub fn open(&self, sealed: &Sealed, data: &[u8]) -> Result<Vec<u8>, OpenError> {
+    ///
+    /// # Errors
+    /// A non-empty `encapsulated_key` is [`OpenError::Malformed`]: a
+    /// data-key value has none, and ignoring it would give one value two
+    /// encodings.
+    pub fn open(&self, sealed: &Sealed, data: &[u8]) -> Result<Plaintext, OpenError> {
         if self.destroyed {
             return Err(OpenError::KeyDestroyed);
         }
         let algorithm = data_key_algorithm();
         if sealed.algorithm.as_ref() != Some(&algorithm) {
             return Err(OpenError::UnsupportedAlgorithm);
+        }
+        if !sealed.encapsulated_key.is_empty() {
+            return Err(OpenError::Malformed {
+                field: "encapsulated_key",
+                why: "not empty",
+            });
         }
         let nonce: [u8; NONCE_LEN] =
             sealed
@@ -159,13 +186,11 @@ impl DataKey {
                     field: "nonce",
                     why: "not 12 bytes",
                 })?;
-        let aad = associated_data(&KeyId::new(sealed.key_id.as_str()), &algorithm, data).map_err(
-            |_| OpenError::Malformed {
-                field: "data",
-                why: "longer than 4294967295 bytes",
-            },
-        )?;
-        decrypt(&self.bytes, &nonce, &aad, &sealed.ciphertext).ok_or(OpenError::Failed)
+        let aad = associated_data(&KeyId::new(sealed.key_id.as_str()), &algorithm, data)
+            .map_err(too_long)?;
+        decrypt(&self.bytes, &nonce, &aad, &sealed.ciphertext)
+            .map(Plaintext::from)
+            .ok_or(OpenError::Failed)
     }
 }
 
@@ -179,25 +204,33 @@ impl fmt::Debug for DataKey {
 
 impl Drop for DataKey {
     fn drop(&mut self) {
-        self.bytes.zeroize();
+        self.bytes.as_mut().zeroize();
     }
 }
 
 /// The long-lived symmetric key (256 bits) that wraps data keys. Wiped on
 /// drop; `Debug` renders no byte.
+///
+/// Each wrap uses a fresh random 96-bit nonce, so a key-encryption key must
+/// wrap at most 2^32 data keys (NIST SP 800-38D's bound for random nonces):
+/// rotate it, by a new key under a new id, long before.
 pub struct KeyEncryptionKey {
-    bytes: [u8; 32],
+    bytes: Box<[u8; 32]>,
 }
 
 impl KeyEncryptionKey {
     /// A fresh key from the system random source.
     pub fn generate() -> Result<Self, SealError> {
-        Ok(Self::from_bytes(random()?))
+        Ok(Self {
+            bytes: random_boxed()?,
+        })
     }
 
-    /// The key of these bytes.
+    /// The key of these bytes (copied; the caller's array stays hers to wipe).
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self { bytes }
+        Self {
+            bytes: Box::new(bytes),
+        }
     }
 }
 
@@ -209,7 +242,7 @@ impl fmt::Debug for KeyEncryptionKey {
 
 impl Drop for KeyEncryptionKey {
     fn drop(&mut self) {
-        self.bytes.zeroize();
+        self.bytes.as_mut().zeroize();
     }
 }
 
@@ -227,7 +260,7 @@ pub fn wrap(
     }
     let aead = i32::from(Aead::Chacha20Poly1305);
     let aad = wrap_aad(key_id, aead, subject)?;
-    let (nonce, ciphertext) = encrypt(&kek.bytes, &aad, &data_key.bytes)?;
+    let (nonce, ciphertext) = encrypt(&kek.bytes, &aad, data_key.bytes.as_ref())?;
     Ok(WrappedKey {
         key_id: key_id.as_str().to_string(),
         aead,
@@ -263,22 +296,27 @@ pub fn unwrap(
                 why: "not 12 bytes",
             })?;
     let aad =
-        wrap_aad(&KeyId::new(wrapped.key_id.as_str()), wrapped.aead, subject).map_err(|_| {
-            WrapError::Malformed {
-                field: "subject",
-                why: "longer than 4294967295 bytes",
+        wrap_aad(&KeyId::new(wrapped.key_id.as_str()), wrapped.aead, subject).map_err(|error| {
+            match error {
+                SealError::TooLong { field } => WrapError::Malformed {
+                    field,
+                    why: "longer than 4294967295 bytes",
+                },
+                _ => WrapError::Failed,
             }
         })?;
-    let mut plain =
-        decrypt(&kek.bytes, &nonce, &aad, &wrapped.ciphertext).ok_or(WrapError::Failed)?;
-    let bytes: Result<[u8; 32], _> = plain.as_slice().try_into();
-    plain.zeroize();
-    bytes
-        .map(DataKey::from_bytes)
-        .map_err(|_| WrapError::Malformed {
+    let plain = Zeroizing::new(
+        decrypt(&kek.bytes, &nonce, &aad, &wrapped.ciphertext).ok_or(WrapError::Failed)?,
+    );
+    let mut key = DataKey::from_bytes([0u8; 32]);
+    if plain.len() != 32 {
+        return Err(WrapError::Malformed {
             field: "ciphertext",
             why: "not a 32-byte key",
-        })
+        });
+    }
+    key.bytes.copy_from_slice(&plain);
+    Ok(key)
 }
 
 #[cfg(test)]

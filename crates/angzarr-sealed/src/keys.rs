@@ -17,6 +17,16 @@ pub(crate) fn random<const N: usize>() -> Result<[u8; N], SealError> {
     Ok(bytes)
 }
 
+/// 32 random bytes written straight into a heap allocation, so the key
+/// never exists as a copy on the stack.
+pub(crate) fn random_boxed() -> Result<Box<[u8; 32]>, SealError> {
+    let mut bytes = Box::new([0u8; 32]);
+    SystemRandom::new()
+        .fill(bytes.as_mut())
+        .map_err(|_| SealError::RngFailed)?;
+    Ok(bytes)
+}
+
 /// Names a recipient key (or a key-encryption key). It is the owner's
 /// choice of text, carried in the clear and bound as associated data.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -55,24 +65,31 @@ impl RecipientPublicKey {
 /// Its bytes are wiped when it is dropped, and neither `Debug` nor any other
 /// formatting renders them. No `Clone`, no `Display`, no serialization.
 pub struct RecipientPrivateKey {
-    bytes: [u8; 32],
+    // Boxed: the key's one home is this allocation, which is wiped on drop;
+    // moving the key moves a pointer, not 32 bytes of secret.
+    bytes: Box<[u8; 32]>,
 }
 
 impl RecipientPrivateKey {
     /// A fresh key from the system random source.
     pub fn generate() -> Result<Self, SealError> {
-        Ok(Self { bytes: random()? })
+        Ok(Self {
+            bytes: random_boxed()?,
+        })
     }
 
-    /// The key of these 32 bytes (X25519 clamps them on use).
+    /// The key of these 32 bytes (X25519 clamps them on use). The caller's
+    /// array is copied, and stays the caller's to wipe.
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
-        Self { bytes }
+        Self {
+            bytes: Box::new(bytes),
+        }
     }
 
     /// The matching public key.
     pub fn public_key(&self) -> RecipientPublicKey {
         RecipientPublicKey(x25519_dalek::x25519(
-            self.bytes,
+            *self.bytes,
             x25519_dalek::X25519_BASEPOINT_BYTES,
         ))
     }
@@ -92,7 +109,7 @@ impl fmt::Debug for RecipientPrivateKey {
 
 impl Drop for RecipientPrivateKey {
     fn drop(&mut self) {
-        self.bytes.zeroize();
+        self.bytes.as_mut().zeroize();
     }
 }
 

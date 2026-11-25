@@ -37,14 +37,20 @@ fn a_sealed_names_its_key_and_suite_and_carries_an_ephemeral_key_and_a_tag() {
 #[test]
 fn a_sealed_opens_to_what_was_sealed() {
     let (private, sealed) = sealed();
-    assert_eq!(open(&private, &sealed, DATA), Ok(SECRET_TEXT.to_vec()));
+    assert_eq!(
+        open(&private, &sealed, DATA),
+        Ok(Plaintext::from(SECRET_TEXT))
+    );
 }
 
 #[test]
 fn an_empty_secret_round_trips() {
     let (private, public) = recipient();
     let sealed = seal(&public, &key_id(), DATA, b"").expect("seal");
-    assert_eq!(open(&private, &sealed, DATA), Ok(Vec::new()));
+    assert_eq!(
+        open(&private, &sealed, DATA),
+        Ok(Plaintext::from(Vec::new()))
+    );
 }
 
 #[test]
@@ -61,7 +67,10 @@ fn a_sealed_survives_the_wire() {
     use prost::Message;
     let (private, sealed) = sealed();
     let decoded = Sealed::decode(sealed.encode_to_vec().as_slice()).expect("decode");
-    assert_eq!(open(&private, &decoded, DATA), Ok(SECRET_TEXT.to_vec()));
+    assert_eq!(
+        open(&private, &decoded, DATA),
+        Ok(Plaintext::from(SECRET_TEXT))
+    );
 }
 
 #[test]
@@ -206,7 +215,7 @@ fn sealing_with_the_vectors_ephemeral_key_gives_the_vectors_encapsulated_key() {
         seal_with_ephemeral(&ephemeral, &pk_r, &key_id(), DATA, SECRET_TEXT).expect("seal");
     assert_eq!(sealed.encapsulated_key.to_vec(), unhex(ENC));
     let sk_r = RecipientPrivateKey::from_bytes(unhex_n(SKRM));
-    assert_eq!(open(&sk_r, &sealed, DATA), Ok(SECRET_TEXT.to_vec()));
+    assert_eq!(open(&sk_r, &sealed, DATA), Ok(Plaintext::from(SECRET_TEXT)));
 }
 
 #[test]
@@ -236,7 +245,7 @@ fn a_generated_private_key_matches_its_public_key_and_two_differ() {
     let b = RecipientPrivateKey::generate().expect("generate");
     assert_ne!(a.expose_secret(), b.expose_secret());
     let sealed = seal(&a.public_key(), &key_id(), DATA, SECRET_TEXT).expect("seal");
-    assert_eq!(open(&a, &sealed, DATA), Ok(SECRET_TEXT.to_vec()));
+    assert_eq!(open(&a, &sealed, DATA), Ok(Plaintext::from(SECRET_TEXT)));
     assert_eq!(open(&b, &sealed, DATA), Err(OpenError::Failed));
 }
 
@@ -316,7 +325,10 @@ fn the_crates_own_format_has_a_known_answer() {
     assert_eq!(sealed.ciphertext.to_vec(), unhex("6f6d5064ef886ec4269f6a3e11a09657f7901f67808a0cc39015ab4f6533e621d646e3ba142b8a94dd5a7d2876"));
     let aad = associated_data(&key_id, &suite(), b"session:abc").expect("aad");
     let mut by_hand = crate::rfc9180::key_schedule(&unhex_n(SHARED_SECRET), INFO);
-    assert_eq!(sealed.ciphertext.to_vec(), by_hand.seal(&aad, &plaintext));
+    assert_eq!(
+        sealed.ciphertext.to_vec(),
+        by_hand.seal(&aad, &plaintext).expect("seal")
+    );
 }
 
 /// Why: an HPKE value has no nonce field (the nonce is derived), so a
@@ -333,4 +345,35 @@ fn a_hpke_value_with_a_nonce_is_malformed() {
             why: "not empty"
         })
     );
+}
+
+/// Why: an over-long field must be named as the field it is, whichever
+/// open path meets it.
+#[test]
+fn an_over_long_field_is_named_in_the_open_error() {
+    assert_eq!(
+        crate::seal::too_long(SealError::TooLong { field: "key_id" }),
+        OpenError::Malformed {
+            field: "key_id",
+            why: "longer than 4294967295 bytes"
+        }
+    );
+    assert_eq!(
+        crate::seal::too_long(SealError::TooLong { field: "data" }),
+        OpenError::Malformed {
+            field: "data",
+            why: "longer than 4294967295 bytes"
+        }
+    );
+}
+
+/// Why: a plaintext beyond the AEAD's limit is an error, never a panic in a
+/// public call. ChaCha20-Poly1305's limit is 2^38 - 64 bytes, which cannot
+/// be allocated here, so the schedule's refusal is forced through its
+/// sequence: past the last sequence number a seal is refused.
+#[test]
+fn a_schedule_at_its_last_sequence_refuses_to_seal() {
+    let mut schedule = crate::rfc9180::key_schedule(&[7; 32], INFO);
+    schedule.at_sequence(u64::MAX);
+    assert_eq!(schedule.seal(b"", b"x"), Err(SealError::EncryptionFailed));
 }

@@ -5,6 +5,7 @@
 
 use super::*;
 use crate::testkit::{key_id, DATA, SECRET};
+use crate::Plaintext;
 use crate::{Aead, Algorithm};
 
 const SUBJECT: &[u8] = b"projects/p/sessions/s";
@@ -19,7 +20,7 @@ fn a_wrapped_data_key_unwraps_to_a_key_that_opens_what_the_original_sealed() {
     let sealed = data.seal(&key_id(), DATA, SECRET).expect("seal");
     let wrapped = wrap(&kek(), &key_id(), SUBJECT, &data).expect("wrap");
     let again = unwrap(&kek(), &wrapped, SUBJECT).expect("unwrap");
-    assert_eq!(again.open(&sealed, DATA), Ok(SECRET.to_vec()));
+    assert_eq!(again.open(&sealed, DATA), Ok(Plaintext::from(SECRET)));
 }
 
 #[test]
@@ -155,7 +156,6 @@ fn the_keys_debug_renders_no_byte() {
     let data = DataKey::from_bytes([0xab; 32]);
     let kek = KeyEncryptionKey::from_bytes([0xcd; 32]);
     for shown in [format!("{data:?}"), format!("{kek:?}")] {
-        assert!(!shown.contains("ab") || shown.contains("Key"), "{shown}");
         assert!(
             !shown.contains("171") && !shown.contains("205"),
             "no decimal bytes: {shown}"

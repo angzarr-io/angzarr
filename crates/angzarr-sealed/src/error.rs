@@ -14,6 +14,9 @@ pub enum SealError {
     RngFailed,
     /// The data key was destroyed.
     KeyDestroyed,
+    /// The AEAD refused to encrypt: the plaintext is beyond its limit, or an
+    /// HPKE context's sequence numbers are exhausted.
+    EncryptionFailed,
     /// A `key_id` or the caller's `data` is longer than `u32::MAX` bytes,
     /// which the associated data's 4-byte length prefix cannot say.
     TooLong {
@@ -70,6 +73,12 @@ pub enum KeySetError {
     /// The current key cannot be removed: mark another current first.
     CurrentKey {
         /// The current key's id.
+        key_id: String,
+    },
+    /// A key of that id is already in the set: replacing a key silently
+    /// would orphan everything sealed to it, so it is refused.
+    AlreadyHeld {
+        /// The id.
         key_id: String,
     },
 }
@@ -138,6 +147,7 @@ diagnostic!(SealError {
     Self::WeakSharedSecret => code!("seal-weak-shared-secret"),
     Self::RngFailed => code!("seal-rng-failed"),
     Self::KeyDestroyed => code!("seal-key-destroyed"),
+    Self::EncryptionFailed => code!("seal-encryption-failed"),
     Self::TooLong { .. } => code!("seal-too-long"),
 }, |e: &SealError| match e {
     SealError::TooLong { field } => vec![("field", Arg::from(*field))],
@@ -155,8 +165,11 @@ diagnostic!(OpenError {
 diagnostic!(KeySetError {
     Self::NoSuchKey { .. } => code!("key-set-no-such-key"),
     Self::CurrentKey { .. } => code!("key-set-current-key"),
+    Self::AlreadyHeld { .. } => code!("key-set-already-held"),
 }, |e: &KeySetError| match e {
-    KeySetError::NoSuchKey { key_id } | KeySetError::CurrentKey { key_id } => {
+    KeySetError::NoSuchKey { key_id }
+    | KeySetError::CurrentKey { key_id }
+    | KeySetError::AlreadyHeld { key_id } => {
         vec![("key_id", Arg::from(key_id.as_str()))]
     }
 });
@@ -179,6 +192,7 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
         Box::new(SealError::WeakSharedSecret),
         Box::new(SealError::RngFailed),
         Box::new(SealError::KeyDestroyed),
+        Box::new(SealError::EncryptionFailed),
         Box::new(SealError::TooLong { field: "data" }),
         Box::new(OpenError::Failed),
         Box::new(OpenError::UnsupportedAlgorithm),
@@ -194,6 +208,9 @@ pub(crate) fn diagnostic_samples() -> Vec<Box<dyn Diagnostic>> {
             key_id: "k1".into(),
         }),
         Box::new(KeySetError::CurrentKey {
+            key_id: "k1".into(),
+        }),
+        Box::new(KeySetError::AlreadyHeld {
             key_id: "k1".into(),
         }),
         Box::new(WrapError::Failed),

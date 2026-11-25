@@ -3,8 +3,8 @@
 use zeroize::Zeroizing;
 
 use crate::{
-    rfc9180, Aead, Algorithm, Kdf, Kem, KeyId, OpenError, RecipientPrivateKey, RecipientPublicKey,
-    SealError, Sealed,
+    rfc9180, Aead, Algorithm, Kdf, Kem, KeyId, OpenError, Plaintext, RecipientPrivateKey,
+    RecipientPublicKey, SealError, Sealed,
 };
 
 /// The one suite: DHKEM(X25519, HKDF-SHA256), HKDF-SHA256,
@@ -106,7 +106,12 @@ pub fn associated_data(
 /// # Errors
 /// [`SealError::WeakSharedSecret`] when `recipient` is a low-order point
 /// (an all-zero shared secret is refused, RFC 9180 section 7.1.4);
-/// [`SealError::RngFailed`].
+/// [`SealError::RngFailed`]; [`SealError::EncryptionFailed`];
+/// [`SealError::TooLong`].
+///
+/// Base mode authenticates no sender: anyone holding the recipient's public
+/// key can make a Sealed for any `key_id` and `data` (see the crate's
+/// "Security properties").
 pub fn seal(
     recipient: &RecipientPublicKey,
     key_id: &KeyId,
@@ -124,18 +129,25 @@ pub fn seal(
 /// [`OpenError::UnsupportedAlgorithm`], [`OpenError::Malformed`] (a wrong
 /// size), and [`OpenError::Failed`] for every authentication failure: a
 /// changed ciphertext, encapsulated key, key id, algorithm or data, or
-/// another key.
+/// another key. A non-empty `nonce` is [`OpenError::Malformed`]: an HPKE
+/// value has none, and ignoring it would give one value two encodings.
 pub fn open(
     private: &RecipientPrivateKey,
     sealed: &Sealed,
     data: &[u8],
-) -> Result<Vec<u8>, OpenError> {
+) -> Result<Plaintext, OpenError> {
     let algorithm = sealed
         .algorithm
         .as_ref()
         .ok_or(OpenError::UnsupportedAlgorithm)?;
     if *algorithm != suite() {
         return Err(OpenError::UnsupportedAlgorithm);
+    }
+    if !sealed.nonce.is_empty() {
+        return Err(OpenError::Malformed {
+            field: "nonce",
+            why: "not empty",
+        });
     }
     let enc: [u8; 32] =
         sealed
@@ -147,23 +159,28 @@ pub fn open(
                 why: "not 32 bytes",
             })?;
     let key_id = KeyId::new(sealed.key_id.as_str());
-    let aad = associated_data(&key_id, algorithm, data).map_err(|e| match e {
+    let aad = associated_data(&key_id, algorithm, data).map_err(too_long)?;
+    let shared = Zeroizing::new(rfc9180::decap(&enc, private)?);
+    let mut schedule = rfc9180::key_schedule(&shared, INFO);
+    schedule.open(&aad, &sealed.ciphertext).map(Plaintext::from)
+}
+
+/// A [`SealError`] of the associated data, seen from an open: the field
+/// that is too long is named as it is.
+pub(crate) fn too_long(error: SealError) -> OpenError {
+    match error {
         SealError::TooLong { field } => OpenError::Malformed {
             field,
             why: "longer than 4294967295 bytes",
         },
         _ => OpenError::Failed,
-    })?;
-    let shared = Zeroizing::new(rfc9180::decap(&enc, private)?);
-    let mut schedule = rfc9180::key_schedule(&shared, INFO);
-    schedule.open(&aad, &sealed.ciphertext)
+    }
 }
 
-/// Seals with a caller-chosen ephemeral key: for held-to-the-RFC tests of
-/// the whole path. Never use it in production: a repeated ephemeral key is a
-/// repeated key.
-#[doc(hidden)]
-pub fn seal_with_ephemeral(
+/// Seals with a caller-chosen ephemeral key: the one path `seal` and the
+/// tests (the crate's known answer) share. Private: a repeated ephemeral key
+/// is a repeated key.
+fn seal_with_ephemeral(
     ephemeral: &RecipientPrivateKey,
     recipient: &RecipientPublicKey,
     key_id: &KeyId,
@@ -175,7 +192,7 @@ pub fn seal_with_ephemeral(
     let (shared, enc) = rfc9180::encap(recipient, ephemeral)?;
     let shared = Zeroizing::new(shared);
     let mut schedule = rfc9180::key_schedule(&shared, INFO);
-    let ciphertext = schedule.seal(&aad, plaintext);
+    let ciphertext = schedule.seal(&aad, plaintext)?;
     Ok(Sealed {
         key_id: key_id.as_str().to_string(),
         algorithm: Some(algorithm),

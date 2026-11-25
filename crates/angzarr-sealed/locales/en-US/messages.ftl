@@ -13,6 +13,7 @@ open-unknown-key = the key set holds no key named "{ $key_id }"
 ## A key set.
 
 key-set-no-such-key = the key set holds no key named "{ $key_id }"
+key-set-already-held = the key set already holds a key named "{ $key_id }": a key is not replaced, add the new one under a new id
 key-set-current-key = "{ $key_id }" is the current key: mark another current before removing it
 
 ## Sealing.
@@ -20,6 +21,7 @@ key-set-current-key = "{ $key_id }" is the current key: mark another current bef
 seal-weak-shared-secret = the recipient key is a low-order point: the shared secret is all zero
 seal-rng-failed = the system random number generator failed
 seal-key-destroyed = the data key was destroyed
+seal-encryption-failed = the AEAD refused to encrypt: the plaintext is too long, or the sequence numbers are exhausted
 seal-too-long = { $field } is longer than 4294967295 bytes, which the associated data cannot length-prefix
 
 ## Wrapping a data key.

@@ -1,5 +1,7 @@
-//! The steps of RFC 9180 (HPKE) this crate's one suite is made of, public so
-//! that the RFC's Appendix A.2 test vectors can hold each, byte for byte.
+//! The steps of RFC 9180 (HPKE) this crate's one suite is made of, crate-private
+//! (a caller-chosen ephemeral key, a settable sequence number and a
+//! readable key schedule are hazards a public API must not offer) and held
+//! by the tests to the RFC's Appendix A.2 test vectors, byte for byte.
 //! The suite: DHKEM(X25519, HKDF-SHA256) (kem_id 32), HKDF-SHA256 (kdf_id 1),
 //! ChaCha20-Poly1305 (aead_id 3), base mode (mode 0).
 //!
@@ -101,7 +103,9 @@ fn is_all_zero(shared: &[u8; 32]) -> bool {
     shared.iter().fold(0u8, |seen, byte| seen | byte) == 0
 }
 
-/// `DeriveKeyPair(ikm)` for DHKEM(X25519) (RFC 9180 section 7.1.3).
+/// `DeriveKeyPair(ikm)` for DHKEM(X25519) (RFC 9180 section 7.1.3). Only the
+/// vectors derive keys this way.
+#[cfg(test)]
 pub fn derive_key_pair(ikm: &[u8]) -> (RecipientPrivateKey, RecipientPublicKey) {
     let dkp_prk = Zeroizing::new(labeled_extract(&KEM_SUITE_ID, b"", b"dkp_prk", ikm));
     let sk = Zeroizing::new(expand_array::<32>(&KEM_SUITE_ID, &dkp_prk, b"sk", b""));
@@ -154,15 +158,18 @@ pub fn key_schedule_context(info: &[u8]) -> Vec<u8> {
 /// An HPKE encryption context (RFC 9180 section 5.1), its sequence number
 /// counting each seal or open. Its `Debug` renders no key; its secrets are
 /// wiped when it is dropped.
+///
+/// The fields are private; the tests, a child module, read them against the
+/// vectors.
 pub struct Schedule {
-    /// The extracted `secret` (RFC 9180 section 5.1).
-    pub secret: [u8; 32],
-    /// The AEAD key.
-    pub key: [u8; 32],
-    /// The base nonce.
-    pub base_nonce: [u8; 12],
-    /// The exporter secret.
-    pub exporter_secret: [u8; 32],
+    // The extracted `secret` (RFC 9180 section 5.1).
+    secret: [u8; 32],
+    // The AEAD key.
+    key: [u8; 32],
+    // The base nonce.
+    base_nonce: [u8; 12],
+    // The exporter secret.
+    exporter_secret: [u8; 32],
     sequence: u64,
 }
 
@@ -200,22 +207,24 @@ impl Schedule {
     }
 
     /// The next sequence number. RFC 9180 section 5.2 refuses a seal or open
-    /// past 2^64 - 1; a context here seals once, so reaching it is a bug.
-    fn advance(&mut self) {
-        self.sequence = self
-            .sequence
-            .checked_add(1)
-            .expect("the sequence number is exhausted (RFC 9180 MessageLimitReached)");
+    /// past 2^64 - 1 (`MessageLimitReached`).
+    fn advance(&mut self) -> Result<(), ()> {
+        self.sequence = self.sequence.checked_add(1).ok_or(())?;
+        Ok(())
     }
 
     /// `ctx.Seal(aad, pt)` at the next sequence number (RFC 9180 section 5.2).
-    pub fn seal(&mut self, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
+    ///
+    /// # Errors
+    /// [`SealError::EncryptionFailed`]: the plaintext is beyond the AEAD's
+    /// limit, or the sequence numbers are exhausted.
+    pub fn seal(&mut self, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, SealError> {
         let (key, nonce) = self.aead();
         let mut out = plaintext.to_vec();
         key.seal_in_place_append_tag(nonce, Aad::from(aad), &mut out)
-            .expect("the plaintext is within the AEAD's limit");
-        self.advance();
-        out
+            .map_err(|_| SealError::EncryptionFailed)?;
+        self.advance().map_err(|()| SealError::EncryptionFailed)?;
+        Ok(out)
     }
 
     /// `ctx.Open(aad, ct)` at the next sequence number.
@@ -228,7 +237,7 @@ impl Schedule {
         match opened {
             Ok(len) => {
                 buffer.truncate(len);
-                self.advance();
+                self.advance().map_err(|()| OpenError::Failed)?;
                 Ok(buffer)
             }
             Err(_) => Err(OpenError::Failed),
@@ -236,17 +245,22 @@ impl Schedule {
     }
 
     /// The sequence number the next seal or open uses.
+    #[cfg(test)]
     pub fn sequence(&self) -> u64 {
         self.sequence
     }
 
     /// Sets the sequence number the next seal or open uses: the RFC's vectors
-    /// give sequence numbers 0, 1, 2, 4, 255 and 256, not a run.
+    /// give sequence numbers 0, 1, 2, 4, 255 and 256, not a run. Test-only: a
+    /// settable sequence number is how a nonce is reused.
+    #[cfg(test)]
     pub fn at_sequence(&mut self, seq: u64) {
         self.sequence = seq;
     }
 
-    /// `ctx.Export(exporter_context, L)` (RFC 9180 section 5.3).
+    /// `ctx.Export(exporter_context, L)` (RFC 9180 section 5.3). The suite
+    /// uses no exporter; the vectors hold it.
+    #[cfg(test)]
     pub fn export(&self, exporter_context: &[u8], len: usize) -> Vec<u8> {
         labeled_expand(
             &HPKE_SUITE_ID,

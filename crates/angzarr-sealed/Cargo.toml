@@ -24,7 +24,9 @@ prost = "0.14"
 # - x25519-dalek (dalek-cryptography, BSD-3-Clause): the X25519 function
 #   RFC 9180's DHKEM needs and ring does not expose for static keys.
 #   No default features and no optional ones: only the `x25519` function
-#   is used; our own key types wipe themselves.
+#   is used; our own key types wipe themselves. Its `zeroize` feature is not
+#   enabled: it would add the zeroize_derive proc-macro crate (and syn) to the
+#   lock, for a function that takes and returns plain arrays.
 ring = "0.17"
 x25519-dalek = { version = "2", default-features = false }
 # A private key, a data key and a key-encryption key are wiped on drop.

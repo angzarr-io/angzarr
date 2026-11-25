@@ -38,7 +38,10 @@ message Algorithm {
   Aead aead = 3;
 }
 
-// A field's secret, sealed to a recipient's public key.
+// A field's secret, sealed to a recipient's public key. Base-mode HPKE
+// authenticates no sender: anyone holding the recipient's public key can make
+// a valid Sealed for any key_id and data; sign the containing message where
+// its origin matters.
 message Sealed {
   // Names the recipient key that can open it (its owner's choice of
   // name, so a key can be rotated by naming the new one).
@@ -55,8 +58,10 @@ message Sealed {
 }
 
 // A per-subject data key, encrypted under a key-encryption key (envelope
-// encryption). Destroying the key-encryption key or this record shreds
-// everything sealed under the data key.
+// encryption). Everything sealed under the data key is shredded once every
+// copy of this record is erased or the key-encryption key is destroyed, so
+// this record belongs in a mutable key store, never in an append-only event
+// stream, where it could not be erased.
 message WrappedKey {
   // Names the key-encryption key that wrapped it.
   string key_id = 1;

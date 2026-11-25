@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::testkit::{DATA, SECRET};
+use crate::Plaintext;
 use crate::{open, KeyId, RecipientPrivateKey};
 
 fn id(name: &str) -> KeyId {
@@ -35,26 +36,26 @@ fn a_seal_is_to_the_current_key_named_by_its_id_and_opens_with_the_set() {
     let set = set();
     let sealed = set.seal(DATA, SECRET).expect("seal");
     assert_eq!(sealed.key_id, "2026-11");
-    assert_eq!(open_with(&set, &sealed, DATA), Ok(SECRET.to_vec()));
-    assert_eq!(open(&key(1), &sealed, DATA), Ok(SECRET.to_vec()));
+    assert_eq!(open_with(&set, &sealed, DATA), Ok(Plaintext::from(SECRET)));
+    assert_eq!(open(&key(1), &sealed, DATA), Ok(Plaintext::from(SECRET)));
 }
 
 #[test]
 fn a_value_sealed_before_a_rotation_still_opens_after_it() {
     let mut set = set();
     let old = set.seal(DATA, SECRET).expect("seal");
-    set.insert(id("2026-12"), key(2));
+    set.insert(id("2026-12"), key(2)).expect("insert");
     set.set_current(&id("2026-12")).expect("set current");
     let new = set.seal(DATA, SECRET).expect("seal");
     assert_eq!(new.key_id, "2026-12");
-    assert_eq!(open_with(&set, &old, DATA), Ok(SECRET.to_vec()));
-    assert_eq!(open_with(&set, &new, DATA), Ok(SECRET.to_vec()));
+    assert_eq!(open_with(&set, &old, DATA), Ok(Plaintext::from(SECRET)));
+    assert_eq!(open_with(&set, &new, DATA), Ok(Plaintext::from(SECRET)));
 }
 
 #[test]
 fn inserting_a_key_does_not_make_it_current() {
     let mut set = set();
-    set.insert(id("2026-12"), key(2));
+    set.insert(id("2026-12"), key(2)).expect("insert");
     assert_eq!(set.current_id(), &id("2026-11"));
     assert_eq!(set.ids().len(), 2);
 }
@@ -63,7 +64,7 @@ fn inserting_a_key_does_not_make_it_current() {
 fn a_removed_key_no_longer_opens_what_was_sealed_to_it() {
     let mut set = set();
     let old = set.seal(DATA, SECRET).expect("seal");
-    set.insert(id("2026-12"), key(2));
+    set.insert(id("2026-12"), key(2)).expect("insert");
     set.set_current(&id("2026-12")).expect("set current");
     set.remove(&id("2026-11")).expect("remove");
     assert_eq!(
@@ -131,7 +132,8 @@ fn the_current_key_cannot_be_removed_and_an_unknown_one_cannot_be_current() {
 #[test]
 fn the_debug_names_the_ids_and_the_current_and_renders_no_key() {
     let mut set = KeySet::new(id("2026-11"), RecipientPrivateKey::from_bytes([0xab; 32]));
-    set.insert(id("2026-12"), RecipientPrivateKey::from_bytes([0xcd; 32]));
+    set.insert(id("2026-12"), RecipientPrivateKey::from_bytes([0xcd; 32]))
+        .expect("insert");
     let shown = format!("{set:?}");
     assert!(
         shown.contains("2026-11") && shown.contains("2026-12"),
@@ -145,4 +147,19 @@ fn the_debug_names_the_ids_and_the_current_and_renders_no_key() {
         !shown.contains("171") && !shown.contains("205"),
         "no decimal bytes: {shown}"
     );
+}
+
+/// Why: replacing a key silently would orphan what was sealed to it, the
+/// current key above all.
+#[test]
+fn inserting_a_held_id_is_refused_and_leaves_the_key_as_it_was() {
+    let mut set = set();
+    let sealed = set.seal(DATA, SECRET).expect("seal");
+    assert_eq!(
+        set.insert(id("2026-11"), key(9)),
+        Err(KeySetError::AlreadyHeld {
+            key_id: "2026-11".to_string()
+        })
+    );
+    assert_eq!(open_with(&set, &sealed, DATA), Ok(Plaintext::from(SECRET)));
 }

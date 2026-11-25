@@ -4,7 +4,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::{
-    KeyId, KeySetError, OpenError, RecipientPrivateKey, RecipientPublicKey, SealError, Sealed,
+    KeyId, KeySetError, OpenError, Plaintext, RecipientPrivateKey, RecipientPublicKey, SealError,
+    Sealed,
 };
 
 /// The private keys a consumer holds, by [`KeyId`], one of them current.
@@ -28,9 +29,20 @@ impl KeySet {
         }
     }
 
-    /// Adds (or replaces) a key. It is not made current.
-    pub fn insert(&mut self, id: KeyId, key: RecipientPrivateKey) {
+    /// Adds a key. It is not made current.
+    ///
+    /// # Errors
+    /// [`KeySetError::AlreadyHeld`] when the id is held: replacing a key
+    /// would silently orphan everything sealed to it (the current key
+    /// included), so it is refused; remove it first.
+    pub fn insert(&mut self, id: KeyId, key: RecipientPrivateKey) -> Result<(), KeySetError> {
+        if self.keys.contains_key(&id) {
+            return Err(KeySetError::AlreadyHeld {
+                key_id: id.as_str().to_string(),
+            });
+        }
         self.keys.insert(id, key);
+        Ok(())
     }
 
     /// Marks a held key current.
@@ -105,7 +117,7 @@ impl fmt::Debug for KeySet {
 /// [`OpenError::UnknownKey`] when the set holds no such key (the value is
 /// not authenticated yet: nothing was tried); otherwise as
 /// [`open`](crate::open).
-pub fn open_with(set: &KeySet, sealed: &Sealed, data: &[u8]) -> Result<Vec<u8>, OpenError> {
+pub fn open_with(set: &KeySet, sealed: &Sealed, data: &[u8]) -> Result<Plaintext, OpenError> {
     match set.keys.get(&KeyId::new(sealed.key_id.as_str())) {
         Some(private) => crate::open(private, sealed, data),
         None => Err(OpenError::UnknownKey {
