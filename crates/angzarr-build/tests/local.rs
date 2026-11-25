@@ -105,10 +105,7 @@ fn fixtures() -> String {
 
 /// The spec's protos, which hold the blackjack example's.
 fn spec() -> String {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../angzarr-project/proto")
-        .display()
-        .to_string()
+    angzarr_project::proto_dir().display().to_string()
 }
 
 /// `cargo <args>` on `app`'s manifest, in the one target directory the
@@ -120,6 +117,9 @@ fn cargo(app: &Path, args: &[&str]) -> Output {
         .arg("--manifest-path")
         .arg(app.join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", target)
+        // The fixture apps are workspaces of their own: the one pin of the
+        // spec is this workspace's, handed to their build scripts.
+        .env("ANGZARR_SPEC_PROTO", angzarr_project::proto_dir())
         .output()
         .expect("cargo runs")
 }

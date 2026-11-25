@@ -253,12 +253,9 @@ fn test_scaffold_into_rescaffolded_leaves_every_users_file_byte_identical() {
 
 // ------------------------------------------------------------- generated
 
-/// The spec's protos: the angzarr-project submodule's `proto`.
+/// The spec's protos: the `angzarr-project` package's `proto`.
 fn spec() -> String {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../angzarr-project/proto")
-        .display()
-        .to_string()
+    angzarr_project::proto_dir().display().to_string()
 }
 
 /// The player's Python project scaffolded into `root` (no buf, no lock).
