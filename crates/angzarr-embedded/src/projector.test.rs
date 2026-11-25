@@ -381,6 +381,40 @@ fn a_stored_catch_up_hands_a_stream_written_again_from_its_start() {
     assert_eq!(recorder.take(), [(cover("account", 1), vec![0], 1)]);
 }
 
+/// A stream purged and written again to at least the length the projector
+/// was at, before the next step, is still a stream written again: the
+/// stored position alone cannot tell it, so its first event is kept beside
+/// it, and the stream is handed from its start.
+#[test]
+fn a_stored_catch_up_hands_a_stream_rewritten_past_its_position_from_its_start() {
+    let registry = registry();
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 5);
+    let recorder = Recorder::default();
+    step(
+        &mut CatchUp::stored(&["account"], recorder.clone()).unwrap(),
+        &store,
+        &registry,
+    );
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1], 2)]);
+    purge(&store, 1);
+    crate::toys::handle::<Account>(
+        &store,
+        &registry,
+        command(cover("account", 1), AccountCmd::Open.to_any()).id(8),
+        &at(40),
+    )
+    .unwrap();
+    deposit(&store, &registry, 1, 9, 6);
+    deposit(&store, &registry, 1, 10, 7);
+    let mut again = CatchUp::stored(&["account"], recorder.clone()).unwrap();
+    step(&mut again, &store, &registry);
+    assert_eq!(recorder.take(), [(cover("account", 1), vec![0, 1, 2], 3)]);
+    assert_eq!(position(&store, "recorder", &cover("account", 1)), 3);
+    step(&mut again, &store, &registry);
+    assert_eq!(recorder.take(), [], "then nothing new");
+}
+
 /// A stored catch-up started anew (a new process) knows, before its first
 /// step hands anything, every stream it holds a position on: one of them
 /// purged once it has started, with nothing new before, is handed gone.
