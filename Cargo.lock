@@ -22,6 +22,7 @@ name = "angzarr-build"
 version = "0.1.0"
 dependencies = [
  "angzarr-codegen",
+ "angzarr-project",
  "angzarr-proto",
  "coded-diagnostic",
  "presentation",
@@ -46,6 +47,7 @@ name = "angzarr-codegen"
 version = "0.1.0"
 dependencies = [
  "angzarr-embedded-host-config",
+ "angzarr-project",
  "angzarr-proto",
  "coded-diagnostic",
  "cucumber",
@@ -143,6 +145,7 @@ name = "angzarr-embedded-conformance"
 version = "0.1.0"
 dependencies = [
  "angzarr-embedded",
+ "angzarr-project",
  "cucumber",
  "prost",
 ]
@@ -218,9 +221,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "angzarr-project"
+version = "0.1.0"
+source = "git+https://github.com/angzarr-io/angzarr-project?rev=7cd12058f4747be1ec3939d5bd3ee17e66fba380#7cd12058f4747be1ec3939d5bd3ee17e66fba380"
+
+[[package]]
 name = "angzarr-proto"
 version = "0.1.0"
 dependencies = [
+ "angzarr-project",
  "bytes",
  "prost",
  "prost-build",
@@ -233,6 +242,7 @@ dependencies = [
 name = "angzarr-proto-component"
 version = "0.1.0"
 dependencies = [
+ "angzarr-project",
  "angzarr-proto",
  "angzarr-proto-handler",
  "bytes",
@@ -248,6 +258,7 @@ dependencies = [
 name = "angzarr-proto-handler"
 version = "0.1.0"
 dependencies = [
+ "angzarr-project",
  "angzarr-proto",
  "bytes",
  "prost",
@@ -259,6 +270,7 @@ dependencies = [
 name = "angzarr-proto-transport-distributed"
 version = "0.1.0"
 dependencies = [
+ "angzarr-project",
  "angzarr-proto",
  "angzarr-proto-component",
  "bytes",
@@ -274,6 +286,7 @@ dependencies = [
 name = "angzarr-proto-transport-embedded"
 version = "0.1.0"
 dependencies = [
+ "angzarr-project",
  "angzarr-proto",
  "angzarr-proto-component",
  "prost",
@@ -310,6 +323,7 @@ dependencies = [
 name = "angzarr-router-conformance"
 version = "0.1.0"
 dependencies = [
+ "angzarr-project",
  "angzarr-proto",
  "angzarr-router",
  "cucumber",
