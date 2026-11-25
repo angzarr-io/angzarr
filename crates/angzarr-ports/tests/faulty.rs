@@ -142,7 +142,7 @@ async fn a_purge_takes_the_next_fault_and_counts_as_an_attempt() {
     assert_eq!(store.purge(stream(), 2).await, Err(injected()));
     assert_eq!(length(store.inner(), stream()).await, 2);
     assert_eq!(store.purge(stream(), 2).await, Err(injected()));
-    assert_eq!(length(store.inner(), stream()).await, 0);
+    assert_eq!(length(store.inner(), stream()).await, 3, "the tombstone");
     assert_eq!(store.attempts(), 2);
 }
 

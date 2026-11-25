@@ -367,6 +367,22 @@ pub(crate) fn delete_events<D: Dialect>(cover: &Cover) -> DeleteStatement {
         .to_owned()
 }
 
+/// Delete the main stream's events from `sequence` on, and with them the
+/// command ids recorded in their rows.
+pub(crate) fn delete_events_from<D: Dialect>(cover: &Cover, sequence: u64) -> DeleteStatement {
+    Query::delete()
+        .from_table(Events::Table)
+        .cond_where(event_of::<D>(cover))
+        .and_where(Expr::col(Events::Sequence).gte(sequence_column(sequence)))
+        .to_owned()
+}
+
+/// Rows `(sequence, page)` of a main stream whose page holds the bytes `?4`
+/// (the tombstone's type URL), the latest first: candidates for its
+/// tombstones, which the caller decodes to be sure.
+pub(crate) const TOMBSTONE_CANDIDATES: &str = "SELECT sequence, page FROM events WHERE \
+     domain = ?1 AND root = ?2 AND edition = ?3 AND instr(page, ?4) > 0 ORDER BY sequence DESC";
+
 /// Delete the stream's snapshot.
 pub(crate) fn delete_snapshot<D: Dialect>(cover: &Cover) -> DeleteStatement {
     Query::delete()

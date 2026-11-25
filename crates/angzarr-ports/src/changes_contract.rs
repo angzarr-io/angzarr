@@ -14,7 +14,7 @@
 //! | [`streams_are_reported_in_the_order_first_touched`] | order |
 //! | [`commits_to_several_streams_are_all_reported_none_dropped_none_invented`] | completeness |
 //! | [`a_stream_that_did_not_change_is_not_reported`] | no stale reports |
-//! | [`a_purge_is_reported_purged_with_no_head`] | a purge cannot be missed |
+//! | [`a_purge_is_reported_purged_at_its_tombstones_head`] | a purge cannot be missed |
 //! | [`a_purge_then_rewrite_is_reported_purged_with_its_new_head`] | a rewrite is not a plain write |
 //! | [`a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor`] | purged is since the cursor |
 //! | [`a_cursor_taken_now_reports_nothing_until_the_next_commit`] | caught up |
@@ -71,7 +71,7 @@ pub const CHECKS: &[&str] = &[
     "streams_are_reported_in_the_order_first_touched",
     "commits_to_several_streams_are_all_reported_none_dropped_none_invented",
     "a_stream_that_did_not_change_is_not_reported",
-    "a_purge_is_reported_purged_with_no_head",
+    "a_purge_is_reported_purged_at_its_tombstones_head",
     "a_purge_then_rewrite_is_reported_purged_with_its_new_head",
     "a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor",
     "a_cursor_taken_now_reports_nothing_until_the_next_commit",
@@ -211,18 +211,19 @@ pub async fn a_stream_that_did_not_change_is_not_reported<F: ChangesFixture>(fix
     );
 }
 
-/// A purge is reported, purged, with no head: a follower cannot miss it.
-pub async fn a_purge_is_reported_purged_with_no_head<F: ChangesFixture>(fixture: F) {
+/// A purge is reported, purged, at the head its tombstone leaves: a
+/// follower cannot miss it, and reads the tombstone like any event.
+pub async fn a_purge_is_reported_purged_at_its_tombstones_head<F: ChangesFixture>(fixture: F) {
     let store = fixture.handle().await;
     commit(&store, 1, 2).await;
     let since = cursor(&store).await;
     store.purge(stream(1), 2).await.expect("the purge lands");
     let (changes, _) = changed(&store, &since).await;
-    assert_eq!(changes, [reported(1, 0, true)]);
+    assert_eq!(changes, [reported(1, 3, true)]);
 }
 
-/// A stream purged and written again is reported purged, at its new head:
-/// told from one that was only written to, though its head may be as high.
+/// A stream purged and written again is reported purged, at its new head
+/// (past its tombstone): told from one that was only written to.
 pub async fn a_purge_then_rewrite_is_reported_purged_with_its_new_head<F: ChangesFixture>(
     fixture: F,
 ) {
@@ -234,8 +235,8 @@ pub async fn a_purge_then_rewrite_is_reported_purged_with_its_new_head<F: Change
     let (changes, _) = changed(&store, &since).await;
     assert_eq!(
         changes,
-        [reported(1, 3, true)],
-        "purged, though at the same head"
+        [reported(1, 7, true)],
+        "purged, its head past the tombstone"
     );
 }
 
@@ -251,7 +252,7 @@ pub async fn a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor<F: C
     let (changes, _) = changed(&store, &since).await;
     assert_eq!(
         changes,
-        [reported(1, 1, false)],
+        [reported(1, 4, false)],
         "written, not purged, since the cursor"
     );
 }
@@ -466,7 +467,7 @@ macro_rules! changes_contract {
             streams_are_reported_in_the_order_first_touched,
             commits_to_several_streams_are_all_reported_none_dropped_none_invented,
             a_stream_that_did_not_change_is_not_reported,
-            a_purge_is_reported_purged_with_no_head,
+            a_purge_is_reported_purged_at_its_tombstones_head,
             a_purge_then_rewrite_is_reported_purged_with_its_new_head,
             a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor,
             a_cursor_taken_now_reports_nothing_until_the_next_commit,

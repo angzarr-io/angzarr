@@ -22,6 +22,7 @@ use std::time::Duration;
 use angzarr_ports::angzarr_proto::v1::{
     Cover, EditionSummary, EventBook, EventPage, EventRef, Snapshot,
 };
+use angzarr_ports::tombstone;
 use angzarr_ports::{
     is_fork, Append, AppliedMigration, ChangeCursor, ChangeToken, Changed, Changes, CommitNotify,
     CommitSignal, CommitWait, DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore,
@@ -29,7 +30,7 @@ use angzarr_ports::{
     Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore,
     StoreError, StreamChange, StreamRef, Uuid, Watch, WeakCommitSignal, Write, Written,
 };
-use prost::Message;
+use prost::{Message, Name};
 use prost_types::Timestamp;
 use sea_query::SqliteQueryBuilder;
 use sea_query_binder::SqlxBinder;
@@ -1233,15 +1234,52 @@ impl Purge for SqliteStore {
             return Err(StoreError::conflict(stream, expected, actual));
         }
         let cover = stream.to_cover();
-        let deleted = ex
-            .built_execute(statements::delete_events::<SqliteDialect>(&cover))
-            .await?;
+        let deleted = match stream.edition {
+            // A main stream is kept: the events after its last tombstone
+            // are deleted and a tombstone follows them, if there were any.
+            None => {
+                let mut from = 0;
+                let [domain, root, edition] = view_of(stream);
+                let candidates = ex
+                    .pages(
+                        stream,
+                        statements::TOMBSTONE_CANDIDATES,
+                        [
+                            domain,
+                            root,
+                            edition,
+                            Value::Blob(tombstone::StreamClosed::type_url().into_bytes()),
+                        ],
+                    )
+                    .await?;
+                if let Some(last) = candidates.iter().find(|page| tombstone::is(page)) {
+                    from = last.sequence + 1;
+                }
+                let deleted = ex
+                    .built_execute(statements::delete_events_from::<SqliteDialect>(
+                        &cover, from,
+                    ))
+                    .await?;
+                if deleted > 0 {
+                    let closed = [tombstone::page(actual)];
+                    ex.built_execute(statements::insert_pages::<SqliteDialect>(&cover, &closed)?)
+                        .await?;
+                }
+                deleted
+            }
+            Some(_) => {
+                ex.built_execute(statements::delete_events::<SqliteDialect>(&cover))
+                    .await?
+            }
+        };
         ex.built_execute(statements::delete_snapshot::<SqliteDialect>(&cover))
             .await?;
         // The positions on it stay: they are its drivers' record of what
         // their handlers processed, which a purge never touches (14.68).
         ex.delete_letters(stream).await?;
-        ex.touch(stream, true).await?;
+        if deleted > 0 || stream.edition.is_some() {
+            ex.touch(stream, true).await?;
+        }
         ex.count();
         ex.conn.commit().await.map_err(unavailable)?;
         self.signal.notify();

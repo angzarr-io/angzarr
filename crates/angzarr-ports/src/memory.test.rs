@@ -386,16 +386,16 @@ fn find_command_follows_purge_and_removal() {
         "main's below the fork are purged with main"
     );
     assert_eq!(find(&store, e, command_no(85)), [by(85, command_no(85))]);
-    grow(&store, main, 0, 10);
+    grow(&store, main, 101, 111);
     assert_eq!(
         find(&store, e, command_no(5)),
-        [by(5, command_no(5))],
-        "main's again below the fork"
+        [],
+        "main's below the fork stay purged: sequences never restart"
     );
     assert_eq!(
         read(&store, e, 0, None).next_sequence,
-        10 + 10,
-        "main's ten below the fork, then its own ten"
+        90,
+        "the fork at 80, then its own ten"
     );
     assert_eq!(
         find(&store, e, command_no(85)),
@@ -436,7 +436,12 @@ fn a_held_read_unit_keeps_its_moment_through_every_write() {
     assert_eq!(before, as_began(&mut unit), "after a purge");
     assert_eq!(before.0.next_sequence, 300);
     assert_eq!(before.1.next_sequence, 250);
-    assert_eq!(read(&store, main, 0, None).next_sequence, 0);
+    assert_eq!(read(&store, main, 0, None).next_sequence, 311);
+    assert_eq!(
+        read(&store, main, 0, None).pages,
+        [crate::tombstone::page(310)],
+        "its tombstone"
+    );
     assert_eq!(read(&store, e, 0, None).pages, [created_page(305)]);
 }
 

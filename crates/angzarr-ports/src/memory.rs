@@ -48,6 +48,7 @@ use crate::store::{
     Write, Written,
 };
 use crate::stream::{PositionKey, Slice, StreamRef};
+use crate::tombstone;
 
 /// A stream's place: its fields, ordered as [`StreamRef`] orders them
 /// (domain, then main before each edition by name, then root as bytes).
@@ -108,7 +109,7 @@ const CHUNK: usize = 64;
 #[derive(Clone, Default)]
 struct Log {
     /// Each chunk with the position of its first page, by position.
-    chunks: Vec<(usize, Arc<Vec<EventPage>>)>,
+    chunks: Vec<(usize, Arc<Vec<Option<EventPage>>>)>,
     len: usize,
 }
 
@@ -137,7 +138,7 @@ impl Log {
 
     fn get(&self, at: usize) -> Option<&EventPage> {
         let (start, pages) = &self.chunks[self.chunk_of(at)?];
-        pages.get(at - start)
+        pages.get(at - start)?.as_ref()
     }
 
     fn first(&self) -> Option<&EventPage> {
@@ -155,6 +156,7 @@ impl Log {
             .flat_map(|(_, pages)| pages.iter())
             .skip(skip)
             .take(to.saturating_sub(from))
+            .flatten()
     }
 
     fn iter(&self) -> impl Iterator<Item = &EventPage> {
@@ -165,14 +167,50 @@ impl Log {
         if let Some((_, pages)) = self.chunks.last_mut() {
             if pages.len() < CHUNK {
                 if let Some(pages) = Arc::get_mut(pages) {
-                    pages.push(page);
+                    pages.push(Some(page));
                     self.len += 1;
                     return;
                 }
             }
         }
-        self.chunks.push((self.len, Arc::new(vec![page])));
+        self.chunks.push((self.len, Arc::new(vec![Some(page)])));
         self.len += 1;
+    }
+
+    /// Whether any event follows the last tombstone (or there is no
+    /// tombstone and the log holds one).
+    fn has_events_after_tombstone(&self) -> bool {
+        let from = self.last_tombstone().map_or(0, |at| at + 1);
+        self.range(from, self.len).next().is_some()
+    }
+
+    /// The position of the last tombstone, if any.
+    fn last_tombstone(&self) -> Option<usize> {
+        self.chunks.iter().rev().find_map(|(start, pages)| {
+            let at = pages
+                .iter()
+                .rposition(|page| page.as_ref().is_some_and(tombstone::is))?;
+            Some(start + at)
+        })
+    }
+
+    /// Delete the pages after the last tombstone (from the start, with
+    /// none), leaving holes: sequences never move. How many were deleted.
+    fn empty_after_tombstone(&mut self) -> u64 {
+        let from = self.last_tombstone().map_or(0, |at| at + 1);
+        let mut removed = 0;
+        for (start, pages) in &mut self.chunks {
+            if *start + pages.len() <= from {
+                continue;
+            }
+            let pages = Arc::make_mut(pages);
+            for (offset, page) in pages.iter_mut().enumerate() {
+                if *start + offset >= from && page.take().is_some() {
+                    removed += 1;
+                }
+            }
+        }
+        removed
     }
 }
 
@@ -366,8 +404,21 @@ impl Data {
         if self.letters_of(k).next().is_some() {
             Arc::make_mut(&mut self.dead_letters).retain(|(stream, ..), _| stream != k);
         }
-        if !self.streams.contains_key(k) {
+        let Some(log) = self.streams.get(k) else {
             return 0;
+        };
+        if k.1.is_none() {
+            // A main stream is kept: its events after the last tombstone
+            // are deleted and a tombstone follows them, if any were.
+            if !log.has_events_after_tombstone() {
+                return 0;
+            }
+            let streams = Arc::make_mut(&mut self.streams);
+            let log = Arc::make_mut(streams.get_mut(k).expect("held above"));
+            let removed = log.empty_after_tombstone();
+            let head = log.len() as u64;
+            log.push(tombstone::page(head));
+            return removed;
         }
         Arc::make_mut(&mut self.streams)
             .remove(k)
@@ -642,9 +693,13 @@ impl State {
 
     /// Purge stream `k` (see [`Data::purge`]), its commands with it.
     fn purge(&mut self, k: &Key) -> u64 {
-        self.changes.record(cover(k), true);
         self.commands.remove(k);
-        Arc::make_mut(&mut self.data).purge(k)
+        let removed = Arc::make_mut(&mut self.data).purge(k);
+        // A purge that removed no event lands nothing a follower reads.
+        if removed > 0 || k.1.is_some() {
+            self.changes.record(cover(k), true);
+        }
+        removed
     }
 
     /// Remove edition stream `k` (see [`Data::remove`]), its commands with

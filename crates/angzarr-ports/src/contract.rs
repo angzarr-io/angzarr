@@ -1864,7 +1864,12 @@ where
     assert_eq!(reads.covers("account").await, Ok(listed), "listed still");
     drop(reads);
     let mut later = reader.begin_read().await.unwrap();
-    assert_eq!(later.covers("account").await, Ok(covers(&[kept])));
+    assert_eq!(later.covers("account").await, Ok(covers(&[purged, kept])));
+    assert_eq!(
+        later.read(purged, 0, None).await.unwrap().pages,
+        [tombstone::page(2)],
+        "a later unit reads its tombstone"
+    );
 }
 
 pub async fn a_read_unit_keeps_a_stream_purged_after_it_began<S>((reader, writer): (S, S))
@@ -1951,7 +1956,7 @@ async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_beg
     assert_eq!(reads.read_snapshot(s).await, Ok(Some(snapshot(1, "v1"))));
     drop(reads);
     let mut later = reader.begin_read().await.unwrap();
-    assert_eq!(later.head(s).await.unwrap().next_sequence, 0);
+    assert_eq!(later.head(s).await.unwrap().next_sequence, 3);
     assert_eq!(later.read_snapshot(s).await, Ok(None));
 }
 
@@ -2383,8 +2388,8 @@ where
     assert_eq!(store.processed("h").await, Ok(vec![(s.to_cover(), 2)]));
     assert_eq!(
         store.list_streams().await,
-        Ok(vec![]),
-        "the store lists it no more"
+        Ok(vec![s.to_cover()]),
+        "the store lists it still: a purged stream is destroyed, not gone"
     );
     put(&store, key("h", s), 0).await.unwrap();
     assert_eq!(store.processed("h").await, Ok(vec![]), "forgotten");

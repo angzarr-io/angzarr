@@ -1195,7 +1195,7 @@ impl Broken {
                 .collect();
         }
         if self.is(Bug::ChangesDropsPurge) {
-            changes.retain(|c| !(c.purged && c.head == 0));
+            changes.retain(|c| !c.purged);
         }
         if self.is(Bug::ChangesDropsRewrite) {
             for change in &mut changes {
@@ -3455,7 +3455,10 @@ fn the_change_feed_checks_catch_a_feed_that_misses_invents_or_misreports() {
         a_stream_that_did_not_change_is_not_reported,
         ChangesReportsUnchanged
     );
-    catches_feed!(a_purge_is_reported_purged_with_no_head, ChangesDropsPurge);
+    catches_feed!(
+        a_purge_is_reported_purged_at_its_tombstones_head,
+        ChangesDropsPurge
+    );
     catches_feed!(
         a_purge_then_rewrite_is_reported_purged_with_its_new_head,
         ChangesDropsRewrite

@@ -1739,7 +1739,11 @@ async fn a_purge_racing_an_append_waits_for_it_then_is_refused() {
     assert_eq!(pages(&writer, s).await, [page(0, 1), page(1, 2)]);
     assert_eq!(writer.covers("tasks").await, Ok(covers(&[s])));
     assert_eq!(purger.purge(s, 2).await, Ok(2), "re-read, purged");
-    assert_eq!(writer.covers("tasks").await, Ok(vec![]));
+    assert_eq!(
+        writer.covers("tasks").await,
+        Ok(covers(&[s])),
+        "kept, with its tombstone"
+    );
     drop((writer, purger, hasty));
 }
 
@@ -1785,9 +1789,15 @@ async fn an_append_racing_a_purge_lands_after_it_on_a_new_stream() {
 // ------------------------------------------------------- reading at once
 
 /// `slice`, read from 0, holds together: its pages reach the head it
-/// names, and its last `recorded_at` is its last page's.
+/// names (a purged stream's earlier events are gone: its pages run on
+/// from its latest tombstone), and its last `recorded_at` is its last
+/// page's.
 fn holds_together(slice: &Slice) {
-    assert_eq!(slice.pages.len() as u64, slice.next_sequence, "{slice:?}");
+    assert_eq!(
+        slice.pages.last().map_or(0, |page| page.sequence + 1),
+        slice.next_sequence,
+        "{slice:?}"
+    );
     assert_eq!(
         slice.last_recorded_at,
         slice
@@ -1827,11 +1837,16 @@ async fn a_read_outside_a_unit_is_one_moment_across_a_purge() {
     let path = database();
     drop(SqliteStore::open(&path).await.unwrap());
     read_while_churning(&path, |writer| async move {
-        loop {
-            append(&writer, stream(1), 0, &[page(0, 1), page(1, 2)])
-                .await
-                .unwrap();
-            writer.purge(stream(1), 2).await.unwrap();
+        for head in (0..).step_by(3) {
+            append(
+                &writer,
+                stream(1),
+                head,
+                &[page(head, 1), page(head + 1, 2)],
+            )
+            .await
+            .unwrap();
+            writer.purge(stream(1), head + 2).await.unwrap();
         }
     })
     .await;
