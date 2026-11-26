@@ -666,7 +666,7 @@ checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 [[package]]
 name = "coded-diagnostic"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/rust-support?rev=dcb930d198706371d8e7496ec5ec35efb067b92f#dcb930d198706371d8e7496ec5ec35efb067b92f"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=e92609d8de072c2947438a0cc395548fba51aedf#e92609d8de072c2947438a0cc395548fba51aedf"
 
 [[package]]
 name = "colorchoice"
@@ -1009,7 +1009,7 @@ checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
 [[package]]
 name = "file-system"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/rust-support?rev=dcb930d198706371d8e7496ec5ec35efb067b92f#dcb930d198706371d8e7496ec5ec35efb067b92f"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=e92609d8de072c2947438a0cc395548fba51aedf#e92609d8de072c2947438a0cc395548fba51aedf"
 dependencies = [
  "coded-diagnostic",
  "os",
@@ -2093,7 +2093,7 @@ dependencies = [
 [[package]]
 name = "os"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/rust-support?rev=dcb930d198706371d8e7496ec5ec35efb067b92f#dcb930d198706371d8e7496ec5ec35efb067b92f"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=e92609d8de072c2947438a0cc395548fba51aedf#e92609d8de072c2947438a0cc395548fba51aedf"
 dependencies = [
  "fs4",
  "junction",
@@ -2285,7 +2285,7 @@ dependencies = [
 [[package]]
 name = "presentation"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/rust-support?rev=dcb930d198706371d8e7496ec5ec35efb067b92f#dcb930d198706371d8e7496ec5ec35efb067b92f"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=e92609d8de072c2947438a0cc395548fba51aedf#e92609d8de072c2947438a0cc395548fba51aedf"
 dependencies = [
  "coded-diagnostic",
  "fluent-bundle 0.15.3",
@@ -3231,7 +3231,7 @@ dependencies = [
 [[package]]
 name = "test-dir"
 version = "0.1.0"
-source = "git+https://github.com/benjaminabbitt/rust-support?rev=dcb930d198706371d8e7496ec5ec35efb067b92f#dcb930d198706371d8e7496ec5ec35efb067b92f"
+source = "git+https://github.com/benjaminabbitt/rust-support?rev=e92609d8de072c2947438a0cc395548fba51aedf#e92609d8de072c2947438a0cc395548fba51aedf"
 
 [[package]]
 name = "textwrap"
