@@ -143,6 +143,8 @@ enum Bug {
     RefusedPurgeTakesSnapshot,
     /// A purge of an edition stream is guarded by main's head.
     PurgeGuardsByMain,
+    /// A purge of an edition stream with no row of its own purges main's.
+    PurgeUnforkedTakesMain,
     // ---- editions' forks (every store)
     /// An unforked edition stream reads empty, not as main's.
     UnforkedReadsEmpty,
@@ -1049,6 +1051,13 @@ impl Purge for Broken {
     async fn purge(&self, stream: StreamRef<'_>, expected: u64) -> Result<u64, StoreError> {
         if self.is(Bug::PurgeIsANoOp) {
             return Ok(self.inner.head(stream).await?.next_sequence);
+        }
+        if self.is(Bug::PurgeUnforkedTakesMain) && stream.edition.is_some() {
+            let main = StreamRef::main(stream.domain, stream.root);
+            let head = self.inner.head(main).await?.next_sequence;
+            if head == expected {
+                self.inner.purge(main, head).await?;
+            }
         }
         let expected = self.purge_guard(stream, expected).await?;
         let snapshot = self.inner.read_snapshot(stream).await?;
@@ -2037,6 +2046,21 @@ fn the_purge_checks_catch_what_a_purge_leaves() {
         a_purged_stream_continues_after_its_tombstone,
         broken,
         PurgeIsANoOp
+    );
+    catches!(
+        a_second_purge_keeps_the_first_tombstone,
+        broken,
+        PurgeIsANoOp
+    );
+    catches!(
+        an_edition_purge_continues_and_repeats_like_a_mains,
+        broken,
+        PurgeIsANoOp
+    );
+    catches!(
+        a_purge_of_an_unforked_edition_stream_removes_nothing,
+        broken,
+        PurgeUnforkedTakesMain
     );
 }
 

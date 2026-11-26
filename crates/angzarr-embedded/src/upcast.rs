@@ -141,12 +141,10 @@ pub(crate) async fn upcast_pages(
     Ok(pages
         .iter()
         .map(|page| match by_sequence.remove(&page.sequence) {
-            Some(event) if angzarr_router::page_event(page).is_some() && !tombstone::is(page) => {
-                EventPage {
-                    body: Some(event_page::Body::Event(event)),
-                    ..page.clone()
-                }
-            }
+            Some(event) if angzarr_router::page_event(page).is_some() => EventPage {
+                body: Some(event_page::Body::Event(event)),
+                ..page.clone()
+            },
             _ => page.clone(),
         })
         .collect())

@@ -239,13 +239,7 @@ impl Lane {
     /// What it owes next, if nothing of it is out or held: a released
     /// sequence, or its next one.
     fn owed(&self) -> Option<u64> {
-        if self.out.is_some() || self.held.is_some() {
-            return None;
-        }
-        if let Some(again) = self.again {
-            return Some(again);
-        }
-        (self.cursor < self.head).then_some(self.cursor)
+        self.owes().then(|| self.again.unwrap_or(self.cursor))
     }
 
     /// Whether it owes anything, credit and holds aside.
@@ -327,9 +321,6 @@ impl State {
             if let Some(lane) = self.lanes.get_mut(&key) {
                 lane.listed = false;
                 lane.head = 0;
-                if !lane.kept() {
-                    self.lanes.remove(&key);
-                }
             }
         } else {
             let lane = (self.lanes.entry(key.clone())).or_insert_with(|| Lane::new(cover, 0));

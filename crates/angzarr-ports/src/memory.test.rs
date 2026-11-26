@@ -404,6 +404,26 @@ fn find_command_follows_purge_and_removal() {
     );
 }
 
+/// A purge that removes no event lands nothing a follower reads: the change
+/// feed reports no stream for it.
+#[test]
+fn a_purge_that_removes_nothing_is_no_change_in_the_feed() {
+    let store = MemoryStore::new();
+    let main = main_stream("account", 1);
+    grow(&store, main, 0, 2);
+    assert_eq!(now(store.purge(main, 2)), Ok(2));
+    let since = now(store.changes_cursor()).unwrap();
+    assert_eq!(
+        now(store.purge(main, 3)),
+        Ok(0),
+        "nothing after the tombstone"
+    );
+    let Ok(Changed::Streams { changes, .. }) = now(store.changed_since(&since, 10)) else {
+        panic!("an answer");
+    };
+    assert_eq!(changes, [], "nothing was touched");
+}
+
 /// A read unit keeps its moment through every kind of write to the stream
 /// it reads: an append, a fork, a purge, a removal.
 #[test]

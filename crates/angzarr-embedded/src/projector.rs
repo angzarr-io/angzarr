@@ -339,7 +339,10 @@ impl<P: ProjectorHandler> CatchUp<P> {
             }
             Record::Held(held) => held.seen.get(&key(cover)).map_or(0, |seen| seen.next),
         };
-        match at > 0 && reads.head(stream).await?.next_sequence < at {
+        if at == 0 {
+            return Ok(0);
+        }
+        match reads.head(stream).await?.next_sequence < at {
             true => Ok(0),
             false => Ok(at),
         }

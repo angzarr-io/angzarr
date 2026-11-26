@@ -654,6 +654,47 @@ async fn a_purged_streams_tombstone_is_handed_as_an_event_and_the_position_moves
     assert_eq!(rig.position("projector").await, 3, "past the tombstone");
 }
 
+/// A delivery past the deleted events of a purged stream (a subscriber new
+/// to it, its mark at 0): the stream runs on from its tombstone, so the
+/// hub recovers from there and hands the tombstone, then the delivery.
+#[tokio::test]
+async fn a_delivery_past_a_purged_streams_deleted_events_recovers_from_its_tombstone() {
+    let rig = Rig::with(2).await;
+    Harness::purge(&rig.run, &stream()).await;
+    Harness::append(&rig.run, &stream()).await;
+    let script = Scripted::new([reference(3)]);
+    let mut hub = rig.hub(script);
+    rig.project(&mut hub, "projector", 1);
+    let spy = rig.spy.clone();
+    serve(&mut hub, move |_| spy.handed().len() < 2).await;
+    assert_eq!(rig.spy.handed(), [2, 3], "the tombstone, then the event");
+    assert_eq!(rig.position("projector").await, 4);
+}
+
+/// A delivery AT a deleted sequence (below a tombstone) is no miss: the
+/// mark moves to the tombstone, nothing is dead-lettered, and the
+/// tombstone is handed when it is delivered.
+#[tokio::test]
+async fn a_delivery_at_a_deleted_sequence_moves_the_mark_to_the_tombstone() {
+    let rig = Rig::with(2).await;
+    Harness::purge(&rig.run, &stream()).await;
+    let script = Scripted::new([reference(0), reference(2)]);
+    let mut hub = rig.hub(script.clone());
+    rig.project(&mut hub, "projector", 1);
+    let failed = Arc::new(Mutex::new(Vec::new()));
+    let (spy, kept) = (rig.spy.clone(), failed.clone());
+    serve(&mut hub, move |served| {
+        kept.lock().unwrap().extend_from_slice(served.failures());
+        spy.handed().is_empty()
+    })
+    .await;
+    assert_eq!(rig.spy.handed(), [2]);
+    assert!(failed.lock().unwrap().is_empty(), "no miss");
+    assert_eq!(rig.position("projector").await, 3);
+    let first = script.settled().into_iter().find(|(_, s, _, _)| *s == 0);
+    assert_eq!(first.map(|(_, _, _, settle)| settle), Some(Settle::Handled));
+}
+
 /// A tracker that counts what the hub asks of it, and keeps marks in memory.
 #[derive(Default)]
 struct Counting {

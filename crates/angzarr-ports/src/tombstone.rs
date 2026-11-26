@@ -54,8 +54,3 @@ pub fn is(page: &EventPage) -> bool {
         Some(event_page::Body::Event(any)) if any.type_url == StreamClosed::type_url()
     )
 }
-
-/// Whether `type_url` names the tombstone.
-pub fn is_type_url(type_url: &str) -> bool {
-    type_url == StreamClosed::type_url()
-}
