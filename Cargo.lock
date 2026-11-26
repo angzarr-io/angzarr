@@ -225,7 +225,7 @@ dependencies = [
 [[package]]
 name = "angzarr-project"
 version = "0.1.0"
-source = "git+https://github.com/angzarr-io/angzarr-project?rev=7cd12058f4747be1ec3939d5bd3ee17e66fba380#7cd12058f4747be1ec3939d5bd3ee17e66fba380"
+source = "git+https://github.com/angzarr-io/angzarr-project?rev=93df3f5f821dcf75dc5146589d369bd048dcc4ca#93df3f5f821dcf75dc5146589d369bd048dcc4ca"
 
 [[package]]
 name = "angzarr-proto"

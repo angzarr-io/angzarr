@@ -58,7 +58,7 @@ angzarr-embedded-host-config = { path = "crates/angzarr-embedded-host-config" }
 # The spec (proto/ and features/) as a cargo package, by git revision: Cargo.lock
 # is its one pin, and a local checkout overrides it through `[patch]`
 # (`cargo local-pins`), as for any other dependency.
-angzarr-project = { git = "https://github.com/angzarr-io/angzarr-project", rev = "7cd12058f4747be1ec3939d5bd3ee17e66fba380" }
+angzarr-project = { git = "https://github.com/angzarr-io/angzarr-project", rev = "93df3f5f821dcf75dc5146589d369bd048dcc4ca" }
 # rust-support (github.com/benjaminabbitt/rust-support), the generic substrate: localizable
 # errors, their rendering at the driving edge, a test's scratch directory, and the
 # platform seams (os, file-system) the SQLite store's opener opens files through. One
