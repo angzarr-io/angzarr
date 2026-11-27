@@ -37,7 +37,7 @@ use tonic::{Code, Status, Streaming};
 /// Longer than any test: a policy whose poll never comes round in one.
 const NEVER: Duration = Duration::from_secs(3600);
 /// How long a test waits for what must come.
-const PATIENCE: Duration = Duration::from_secs(10);
+const PATIENCE: Duration = Duration::from_secs(300);
 /// How long a test watches for what must not come.
 const QUIET: Duration = Duration::from_millis(1500);
 

@@ -20,7 +20,7 @@ use support::frames::{self, Frame};
 use test_dir::TestDir;
 
 /// How long a test waits for an outcome before it fails.
-const GUARD: Duration = Duration::from_secs(5);
+const GUARD: Duration = Duration::from_secs(300);
 
 /// A limit small enough to be forced at once.
 const SHORT: Duration = Duration::from_millis(100);

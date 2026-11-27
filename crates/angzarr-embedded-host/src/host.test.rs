@@ -489,16 +489,16 @@ fn a_failed_start_stops_the_children_it_started() {
 /// Shutdown closes the child's stdin, and the child exits by itself.
 #[test]
 fn shutdown_closes_stdin_and_the_child_exits() {
-    let host = started(vec![player(mode::SERVE)]);
+    // The grace is far longer than any run takes, so the child's own exit
+    // (`Exited`, never `Terminated`) is what ends the wait, however slowly
+    // the machine runs the test.
+    let mut config = config(vec![player(mode::SERVE)]);
+    config.supervision.shutdown_grace_ms = 600_000;
+    let host = Host::start(config).expect("the host starts");
     let pid = pid_of(&host.handler("player").unwrap());
-    let started = Instant::now();
     assert_eq!(
         host.shutdown(),
         vec![("player".to_string(), ChildExit::Exited(Some(0)))]
-    );
-    assert!(
-        started.elapsed() < Duration::from_millis(3_000),
-        "exited before the grace ran out"
     );
     assert!(!alive(&pid));
 }
@@ -1095,9 +1095,9 @@ impl OnTheClock {
         self.host.handler("player").unwrap()
     }
 
-    /// Whether its socket directory is empty within five seconds.
+    /// Whether its socket directory empties, within a guard against a hang.
     fn no_sockets(&self) -> bool {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(300);
         while files_in(&self.sockets) > 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }

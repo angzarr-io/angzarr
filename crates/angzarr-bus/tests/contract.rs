@@ -286,26 +286,10 @@ const EVERY: Duration = Duration::from_secs(1);
 /// machine) never spends it.
 const DEADLINE: Duration = Duration::from_secs(3);
 
-/// How often a check is woken before it is a livelock. A bus that spins
-/// without making progress keeps the runtime busy, so the paused clock never
-/// reaches `DEADLINE`; counting wakes bounds that too, whatever the machine's
-/// speed.
-const WAKES: usize = 500_000;
-
-/// Resolves when a check has waited longer than a check should: idle for
-/// `DEADLINE` of virtual time, or woken `WAKES` times without ending. It
-/// reads no wall clock, so a check run slowly (under a debugger, on a loaded
-/// host) passes as it does at full speed.
+/// A [`Harness::deadline`] for the paused clock the checks run on:
+/// `DEADLINE` of virtual time idle.
 fn hang() -> Pin<Box<dyn Future<Output = ()>>> {
-    let mut idle = Box::pin(tokio::time::sleep(DEADLINE));
-    let mut wakes = 0_usize;
-    Box::pin(std::future::poll_fn(move |cx| {
-        wakes += 1;
-        if wakes > WAKES {
-            return std::task::Poll::Ready(());
-        }
-        idle.as_mut().poll(cx)
-    }))
+    angzarr_bus::contract::hang(tokio::time::sleep(DEADLINE))
 }
 
 /// The bus's retry cap in the reference run.

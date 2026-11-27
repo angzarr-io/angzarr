@@ -63,7 +63,7 @@ angzarr-ports = { path = "../angzarr-ports", features = ["memory", "faulty"] }
 angzarr-bus = { path = "../angzarr-bus", features = ["contract"] }
 angzarr-embedded-macros = { path = "../angzarr-embedded-macros" }
 angzarr-store-sqlite = { path = "../angzarr-store-sqlite" }
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread", "time", "test-util"] }
 
 # The build writes the catalog's source under the crate's name
 # (coded_diagnostic::build): no catalog spells its crate's name.

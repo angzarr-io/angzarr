@@ -539,11 +539,11 @@ async fn a_write_holds_no_transaction_open_after_it_returns() {
     let path = database();
     let s = stream(1);
     let a = SqliteStore::open(&path).await.unwrap();
-    let b = SqliteStore::open(&path).await.unwrap();
+    let b = impatient(&path).await;
     append(&a, s, 0, &[page(0, 1)]).await.unwrap();
-    let started = Instant::now();
+    // `b` waits on no lock: one held against it fails the write at once,
+    // whatever the time the machine takes.
     assert_eq!(append(&b, s, 1, &[page(1, 2)]).await, Ok(2));
-    assert!(started.elapsed() < BUSY_TIMEOUT, "it waited on a lock");
     assert_eq!(pages(&a, s).await.len(), 2);
     drop((a, b));
 }
@@ -1415,10 +1415,17 @@ async fn checking_a_read_only_store_waits_on_no_writer() {
     append(&writer, s, 0, &[page(0, 1)]).await.unwrap();
     let writing = inserting(&path, &page(1, 2)).await;
 
-    let mut read_only = SqliteStore::open_existing(&path).await.unwrap().unwrap();
-    let started = Instant::now();
+    // Read only and waiting on no lock: a check that took the writer's
+    // lock fails at once, whatever the time the machine takes.
+    let conn = SqliteConnectOptions::new()
+        .filename(&path)
+        .busy_timeout(Duration::ZERO)
+        .read_only(true)
+        .connect()
+        .await
+        .unwrap();
+    let mut read_only = SqliteStore::on(conn, Some(path.to_path_buf()), &MIGRATOR);
     assert_eq!(read_only.integrity_check().await, Ok(Integrity::Intact));
-    assert!(started.elapsed() < BUSY_TIMEOUT, "{:?}", started.elapsed());
 
     end(writing, true).await;
     drop((writer, read_only));

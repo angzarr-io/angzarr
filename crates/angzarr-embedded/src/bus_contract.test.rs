@@ -326,17 +326,17 @@ impl Harness for Embedded {
     }
 
     fn deadline(&self) -> Pin<Box<dyn Future<Output = ()> + '_>> {
-        Box::pin(tokio::time::sleep(Duration::from_secs(20)))
+        angzarr_bus::contract::hang(tokio::time::sleep(Duration::from_secs(20)))
     }
 }
 
 mod durable_scan {
     use super::Embedded;
-    angzarr_bus::bus_contract!(#[tokio::test], Embedded::new());
+    angzarr_bus::bus_contract!(#[tokio::test(start_paused = true)], Embedded::new());
 }
 
 /// The suite again with the bus told which streams a commit touched.
 mod incremental_scan {
     use super::Embedded;
-    angzarr_bus::bus_contract!(#[tokio::test], Embedded::incremental());
+    angzarr_bus::bus_contract!(#[tokio::test(start_paused = true)], Embedded::incremental());
 }

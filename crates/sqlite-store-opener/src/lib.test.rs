@@ -99,7 +99,7 @@ fn written(home: &Home, path: &Path) {
     block_on(async { drop(SqliteStore::open(&real).await.unwrap()) });
     let mut wal = path.as_os_str().to_owned();
     wal.push("-wal");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
     while home.exists(Path::new(&wal)) {
         assert!(
             std::time::Instant::now() < deadline,

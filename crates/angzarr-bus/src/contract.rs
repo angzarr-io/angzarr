@@ -178,8 +178,32 @@ pub trait Harness {
     fn retry_cap(&self) -> u32;
     /// How many dead letters are kept.
     fn dead_letters(&self) -> impl Future<Output = usize>;
-    /// Resolves when a check has waited longer than a check should.
+    /// Resolves when a check has waited longer than a check should. It must
+    /// read no wall clock: a check is as slow as the machine it runs on (a
+    /// debugger, a loaded host), and its outcome must not depend on that.
+    /// [`hang`] builds one from the runtime's idle timer on a paused clock.
     fn deadline(&self) -> Pin<Box<dyn Future<Output = ()> + '_>>;
+}
+
+/// How often a check may be woken before it is a livelock: a bus that
+/// spins without progress keeps the runtime busy, so a paused clock never
+/// reaches its timer, and a count of wakes bounds it instead.
+pub const WAKES: usize = 500_000;
+
+/// A [`Harness::deadline`] from `idle`, a timer on a paused clock (which
+/// advances only when every task is idle, so only a check that waits on
+/// nothing spends it), and a bound of [`WAKES`] wakes for one that never
+/// idles.
+pub fn hang(idle: impl Future<Output = ()> + 'static) -> Pin<Box<dyn Future<Output = ()>>> {
+    let mut idle = Box::pin(idle);
+    let mut wakes = 0_usize;
+    Box::pin(poll_fn(move |cx| {
+        wakes += 1;
+        if wakes > WAKES {
+            return Poll::Ready(());
+        }
+        idle.as_mut().poll(cx)
+    }))
 }
 
 /// The suite's projector's name.

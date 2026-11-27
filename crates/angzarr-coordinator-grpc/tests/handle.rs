@@ -349,7 +349,7 @@ async fn the_server_stops_cleanly() {
         .expect("serves until told to stop");
     drop(channel);
 
-    tokio::time::timeout(Duration::from_secs(10), harness.running.shutdown())
+    tokio::time::timeout(Duration::from_secs(300), harness.running.shutdown())
         .await
         .expect("shutdown returns")
         .expect("and cleanly");

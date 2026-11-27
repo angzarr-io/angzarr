@@ -60,7 +60,7 @@ async fn arc_and_dyn_forward_commit_notify() {
     contract::append(&store, main_stream("account", 1), 0, &[page(0, 1)])
         .await
         .unwrap();
-    tokio::time::timeout(std::time::Duration::from_secs(5), wait)
+    tokio::time::timeout(std::time::Duration::from_secs(300), wait)
         .await
         .expect("the commit wakes the wait through dyn");
 }

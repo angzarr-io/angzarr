@@ -30,7 +30,7 @@ use tonic_prost::ProstCodec;
 use support::Reply;
 
 /// How long a test waits for an outcome before it fails.
-const GUARD: Duration = Duration::from_secs(10);
+const GUARD: Duration = Duration::from_secs(300);
 
 /// A grace short enough to be forced at once.
 const SHORT: Duration = Duration::from_millis(100);

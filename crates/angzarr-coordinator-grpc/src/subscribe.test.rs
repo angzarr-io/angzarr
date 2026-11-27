@@ -182,7 +182,7 @@ async fn a_push_wakes_before_the_poll() {
     let mut wait = signal.wait();
     signal.notify();
     let woke = tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(300),
         woken(Some(&mut wait), &tx, Duration::from_secs(3600)),
     )
     .await;

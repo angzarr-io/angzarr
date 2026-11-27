@@ -373,7 +373,7 @@ mod fixtures {
 
     /// How long a dispatch waits for what a test is forcing: past it, the
     /// test fails rather than hangs.
-    pub const WITHIN: Duration = Duration::from_secs(10);
+    pub const WITHIN: Duration = Duration::from_secs(300);
 
     pub fn any(type_url: &str) -> Any {
         Any {

@@ -126,7 +126,7 @@ async fn answer<F: Feed>(feed: &F) -> Next<F::Token>
 where
     F::Error: std::fmt::Debug,
 {
-    let next = tokio::time::timeout(Duration::from_secs(3), feed.next());
+    let next = tokio::time::timeout(Duration::from_secs(300), feed.next());
     next.await.expect("it answers").expect("it does not fail")
 }
 
@@ -142,7 +142,7 @@ where
             }
         }
     };
-    tokio::time::timeout(Duration::from_secs(3), deliver)
+    tokio::time::timeout(Duration::from_secs(300), deliver)
         .await
         .expect("a delivery comes")
 }

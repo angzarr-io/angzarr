@@ -271,7 +271,7 @@ async fn a_client_that_never_says_hello_is_dropped_after_the_handshake_timeout()
         .await
         .expect("connects");
     let mut byte = [0u8; 1];
-    let read = tokio::time::timeout(Duration::from_secs(5), silent.read(&mut byte))
+    let read = tokio::time::timeout(Duration::from_secs(300), silent.read(&mut byte))
         .await
         .expect("dropped within the guard");
     // Closed: an end of stream, or a reset; never a byte of a ServerHello.
