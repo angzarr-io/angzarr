@@ -637,3 +637,11 @@ fn wire_samples() -> Vec<WireError> {
         },
     ]
 }
+
+/// Without the `purge` feature the kernel's surface has no purge port.
+///
+/// ```compile_fail,E0432
+/// use angzarr_embedded::Purge;
+/// ```
+#[cfg(not(feature = "purge"))]
+pub mod without_purge {}

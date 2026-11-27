@@ -70,6 +70,15 @@
 //!   process" between its calls: for a caller's tests of its retries,
 //!   races and lost answers.
 
+/// A build without the `purge` feature has no purge port at all: the trait
+/// is absent, not refusing.
+///
+/// ```compile_fail,E0432
+/// use angzarr_ports::Purge;
+/// ```
+#[cfg(not(feature = "purge"))]
+pub mod without_purge {}
+
 mod changes;
 mod error;
 mod notify;

@@ -100,3 +100,13 @@ mod tests;
 #[cfg(test)]
 #[path = "test_database.test.rs"]
 mod test_database;
+
+/// Without the `purge` feature the store is append-only: it implements no
+/// purge port.
+///
+/// ```compile_fail
+/// fn purges<T: angzarr_ports::Purge>() {}
+/// purges::<angzarr_store_sqlite::SqliteStore>();
+/// ```
+#[cfg(not(feature = "purge"))]
+pub mod without_purge {}
