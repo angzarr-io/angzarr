@@ -351,17 +351,19 @@ pub async fn a_streams_events_are_handed_one_at_a_time_in_order_by_default<H: Ha
 }
 
 /// Two instances over four streams have two events in their handler at
-/// once, never more, and never two of one stream.
+/// once, never more, and never two of one stream. The first two wait for each
+/// other in the handler, so a bus that takes fewer fails by its deadline.
 pub async fn credit_bounds_what_is_in_flight<H: Harness>(harness: H) {
+    const INSTANCES: usize = 2;
     let domains = harness.domains();
     let streams: Vec<Cover> = (1..=4).map(|n| stream(&domains.first, n)).collect();
     for s in &streams {
         append(&harness, s, 2).await;
     }
-    let probe = Probe::new();
+    let probe = Probe::meeting(INSTANCES);
     let mut bus = harness.bus(Wake::Poll);
     let scope = Scope::domain(&domains.first);
-    project(&harness, &mut bus, PROBE, scope, credit(2), &probe);
+    project(&harness, &mut bus, PROBE, scope, credit(INSTANCES), &probe);
     serve(&harness, &mut bus, "two instances", |t| t.handled >= 8).await;
     let state = probe.lock();
     assert_eq!(state.most, 2, "two instances, two at once");
@@ -1221,6 +1223,13 @@ struct ProbeState {
     stuck: Vec<Delivery>,
     /// Failed, once each: a bug if marked, else retryably.
     failing: Vec<(Delivery, bool)>,
+    /// The first this many deliveries stay in the handler until that many
+    /// are in it at once: overlap is awaited, never hoped for after a
+    /// fixed number of yields. A bus that never overlaps them leaves the
+    /// check to its deadline.
+    meet: usize,
+    /// `meet` were in the handler at once.
+    met: bool,
 }
 
 impl Probe {
@@ -1228,8 +1237,23 @@ impl Probe {
         Arc::default()
     }
 
+    /// A probe whose first `n` deliveries wait for each other.
+    fn meeting(n: usize) -> Arc<Probe> {
+        let probe = Probe::new();
+        probe.lock().meet = n;
+        probe
+    }
+
     fn lock(&self) -> MutexGuard<'_, ProbeState> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether `meet` deliveries have been in the handler together, once and
+    /// for all: those that met first may leave before the rest look.
+    fn met(&self) -> bool {
+        let mut state = self.lock();
+        state.met |= state.now >= state.meet;
+        state.met
     }
 
     fn handed(&self) -> Vec<Delivery> {
@@ -1241,9 +1265,10 @@ impl Probe {
     }
 
     /// Take `delivery` into the handler: whether it sticks, and whether it
-    /// fails (a bug, or retryably).
-    fn enter(&self, delivery: &Delivery, key: &str) -> (bool, Option<bool>) {
+    /// fails (a bug, or retryably), and whether it waits to meet the others.
+    fn enter(&self, delivery: &Delivery, key: &str) -> (bool, Option<bool>, bool) {
         let mut state = self.lock();
+        let meets = state.handed.len() < state.meet;
         state.handed.push(delivery.clone());
         state.now += 1;
         let of_one = state.running.entry(key.to_string()).or_default();
@@ -1254,7 +1279,7 @@ impl Probe {
         let stuck = state.stuck.contains(delivery);
         let failing = state.failing.iter().position(|(f, _)| f == delivery);
         let fails = failing.map(|at| state.failing.remove(at).1);
-        (stuck, fails)
+        (stuck, fails, meets)
     }
 }
 
@@ -1262,9 +1287,12 @@ impl Sink for Probe {
     fn handle(&self, delivery: Delivery) -> BoxFuture<'_, Result<(), Failing>> {
         Box::pin(async move {
             let key = format!("{:?}", stream_of(&delivery));
-            let (stuck, fails) = self.enter(&delivery, &key);
+            let (stuck, fails, meets) = self.enter(&delivery, &key);
             if stuck {
                 std::future::pending::<()>().await;
+            }
+            if meets {
+                until(|| async { self.met() }).await;
             }
             for _ in 0..YIELDS {
                 YieldNow::default().await;

@@ -360,13 +360,15 @@ impl Rig {
     }
 }
 
-/// Serve `bus` until `more` says no, within a deadline.
+/// Serve `bus` until `more` says no, within `hang`'s bounds.
 async fn serve<B: Bus>(bus: &mut B, more: impl FnMut(&Served) -> bool + Send) {
-    let served = tokio::time::timeout(DEADLINE, bus.serve(more)).await;
-    match served {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => panic!("the bus stopped: {}", Report::of(&error)),
-        Err(_) => panic!("timed out"),
+    tokio::select! {
+        served = bus.serve(more) => {
+            if let Err(error) = served {
+                panic!("the bus stopped: {}", Report::of(&error));
+            }
+        }
+        () = hang() => panic!("timed out"),
     }
 }
 
@@ -376,7 +378,7 @@ fn reference(sequence: u64) -> (Cover, u64, Body) {
 
 // ---------------------------------------------------------------- tests
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_projectors_position_is_the_hubs_and_a_policys_its_dispatchs() {
     let rig = Rig::with(2).await;
     let mut hub = rig.hub(rig.run.transport(&Soon));
@@ -393,7 +395,7 @@ async fn a_projectors_position_is_the_hubs_and_a_policys_its_dispatchs() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn deliveries_ahead_of_the_mark_wait_up_to_the_room_and_the_rest_are_held() {
     let rig = Rig::with(4).await;
     let script = Scripted::new([reference(3), reference(2), reference(1), reference(0)]);
@@ -421,7 +423,7 @@ async fn deliveries_ahead_of_the_mark_wait_up_to_the_room_and_the_rest_are_held(
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn more_is_asked_only_once_nothing_is_in_flight_and_something_was_handled() {
     let rig = Rig::with(1).await;
     let script = Scripted::new([reference(0)]);
@@ -442,7 +444,7 @@ async fn more_is_asked_only_once_nothing_is_in_flight_and_something_was_handled(
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_gap_is_recovered_as_a_stream_and_only_the_arrived_delivery_is_resolved() {
     let rig = Rig::with(6).await;
     let script = Scripted::new([reference(5)]);
@@ -459,7 +461,7 @@ async fn a_gap_is_recovered_as_a_stream_and_only_the_arrived_delivery_is_resolve
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn an_arrived_event_is_handed_as_it_came_and_a_reference_is_resolved() {
     let rig = Rig::with(2).await;
     rig.probe.marks.store(true, Ordering::SeqCst);
@@ -473,7 +475,7 @@ async fn an_arrived_event_is_handed_as_it_came_and_a_reference_is_resolved() {
     assert_eq!(rig.spy.markers(), ["delivered", "resolved"]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_recovered_event_is_handed_as_recovered() {
     let rig = Rig::with(3).await;
     rig.probe.marks.store(true, Ordering::SeqCst);
@@ -485,7 +487,7 @@ async fn a_recovered_event_is_handed_as_recovered() {
     assert_eq!(rig.spy.markers(), ["recovered", "recovered", "resolved"]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_recovery_that_fails_midway_holds_the_stream_and_resumes_from_the_mark() {
     let rig = Rig::with(4).await;
     *rig.probe.fails_at.lock().unwrap() = Some(2);
@@ -514,7 +516,7 @@ async fn a_recovery_that_fails_midway_holds_the_stream_and_resumes_from_the_mark
     assert!(held, "the waiting delivery is held");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_recovery_that_skips_a_sequence_holds_there_and_is_never_handed_past_it() {
     let rig = Rig::with(3).await;
     *rig.probe.skips.lock().unwrap() = Some(1);
@@ -531,7 +533,7 @@ async fn a_recovery_that_skips_a_sequence_holds_there_and_is_never_handed_past_i
     assert_eq!(rig.spy.letters(), [(2, 1)], "its letter names it");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_failing_event_in_a_recovery_is_handed_again_before_any_after_it() {
     let rig = Rig::with(3).await;
     rig.spy.failing.lock().unwrap().push(1);
@@ -544,7 +546,7 @@ async fn a_failing_event_in_a_recovery_is_handed_again_before_any_after_it() {
     assert_eq!(rig.spy.seen.lock().unwrap().calls, 4, "1 failed once");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_failing_event_that_arrived_is_handed_again_before_any_after_it() {
     let rig = Rig::with(3).await;
     rig.spy.failing.lock().unwrap().push(0);
@@ -557,7 +559,7 @@ async fn a_failing_event_that_arrived_is_handed_again_before_any_after_it() {
     assert_eq!(rig.spy.seen.lock().unwrap().calls, 4, "0 failed once");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn every_delivery_waiting_on_a_held_stream_is_held_for_the_retry_delay() {
     let rig = Rig::with(3).await;
     rig.spy.failing.lock().unwrap().extend([0, 0]);
@@ -590,7 +592,7 @@ async fn every_delivery_waiting_on_a_held_stream_is_held_for_the_retry_delay() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_hold_with_no_delay_does_not_starve_the_runtime() {
     let rig = Rig::with(1).await;
     rig.spy.failing_always.store(true, Ordering::SeqCst);
@@ -609,7 +611,7 @@ async fn a_hold_with_no_delay_does_not_starve_the_runtime() {
     assert_eq!(rig.spy.handed(), [0]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_recovery_that_numbers_an_event_wrongly_holds_there_and_is_never_handed_past_it() {
     let rig = Rig::with(3).await;
     *rig.probe.renumbers.lock().unwrap() = Some(1);
@@ -626,7 +628,7 @@ async fn a_recovery_that_numbers_an_event_wrongly_holds_there_and_is_never_hande
     assert_eq!(rig.spy.letters(), [(2, 1)]);
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_delivery_at_the_mark_is_never_past_the_room() {
     let rig = Rig::with(3).await;
     let script = Scripted::new([reference(2), reference(1), reference(0)]);
@@ -639,7 +641,7 @@ async fn a_delivery_at_the_mark_is_never_past_the_room() {
     assert!(!held_at_mark, "{:?}", script.settled());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_purged_streams_tombstone_is_handed_as_an_event_and_the_position_moves_past_it() {
     let rig = Rig::with(2).await;
     let mut hub = rig.hub(rig.run.transport(&Soon));
@@ -657,7 +659,7 @@ async fn a_purged_streams_tombstone_is_handed_as_an_event_and_the_position_moves
 /// A delivery past the deleted events of a purged stream (a subscriber new
 /// to it, its mark at 0): the stream runs on from its tombstone, so the
 /// hub recovers from there and hands the tombstone, then the delivery.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_delivery_past_a_purged_streams_deleted_events_recovers_from_its_tombstone() {
     let rig = Rig::with(2).await;
     Harness::purge(&rig.run, &stream()).await;
@@ -674,7 +676,7 @@ async fn a_delivery_past_a_purged_streams_deleted_events_recovers_from_its_tombs
 /// A delivery AT a deleted sequence (below a tombstone) is no miss: the
 /// mark moves to the tombstone, nothing is dead-lettered, and the
 /// tombstone is handed when it is delivered.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_delivery_at_a_deleted_sequence_moves_the_mark_to_the_tombstone() {
     let rig = Rig::with(2).await;
     Harness::purge(&rig.run, &stream()).await;
@@ -737,7 +739,7 @@ impl angzarr_bus::Positions for Counting {
     }
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_subscription_with_its_own_tracker_loads_once_and_records_each_handled_event() {
     let rig = Rig::with(3).await;
     let tracker = Arc::new(Counting::default());
@@ -762,7 +764,7 @@ async fn a_subscription_with_its_own_tracker_loads_once_and_records_each_handled
     assert_eq!(rig.position("projector").await, 0, "the store has none");
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_policy_on_a_tracker_that_cannot_commit_with_outputs_is_refused_and_a_projector_is_not() {
     let rig = Rig::with(0).await;
     let mut hub = rig.hub(rig.run.transport(&Soon));
@@ -826,7 +828,7 @@ async fn trail(run: Run, seed: u64) -> Vec<(u8, u64)> {
     trail
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn following_a_random_history_by_the_feed_or_by_a_full_scan_hands_the_same_events() {
     for seed in 1..=25 {
         let scanned = trail(Run::default(), seed).await;

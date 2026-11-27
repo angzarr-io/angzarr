@@ -535,7 +535,7 @@ impl Harness for Broken {
     }
 
     fn deadline(&self) -> Pin<Box<dyn Future<Output = ()> + '_>> {
-        Box::pin(tokio::time::sleep(DEADLINE))
+        super::hang()
     }
 }
 
@@ -673,7 +673,7 @@ impl TransportHarness for Broken {
     }
 
     fn deadline(&self) -> Pin<Box<dyn Future<Output = ()> + '_>> {
-        Box::pin(tokio::time::sleep(DEADLINE))
+        super::hang()
     }
 }
 
@@ -737,8 +737,8 @@ async fn allows<F: Future<Output = ()>>(flaw: Flaw, check: impl Fn(Broken) -> F)
 
 mod honest {
     use super::Broken;
-    angzarr_bus::bus_contract!(#[tokio::test], Broken::new(None));
-    angzarr_bus::transport_contract!(#[tokio::test], Broken::new(None));
+    angzarr_bus::bus_contract!(#[tokio::test(start_paused = true)], Broken::new(None));
+    angzarr_bus::transport_contract!(#[tokio::test(start_paused = true)], Broken::new(None));
 }
 
 mod bus_checks {
@@ -746,198 +746,198 @@ mod bus_checks {
 
     use super::{allows, catches, Flaw};
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_crash_check_fails_a_bus_that_hands_events_twice() {
         let check = kit::a_crash_hands_again_exactly_what_the_stored_position_does_not_cover;
         catches(Flaw::Twice, "only what was not recorded", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_policy_check_fails_a_bus_that_reacts_twice() {
         let check = kit::a_re_served_policy_delivers_nothing_twice;
         catches(Flaw::Twice, "the policy runs again", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_scope_check_fails_a_bus_that_hands_events_twice() {
         let check = kit::several_subscriptions_on_one_bus_are_each_served_their_scope;
         catches(Flaw::Twice, "left == right", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_order_check_fails_a_bus_that_hands_events_out_of_order() {
         let check = kit::a_streams_events_are_handed_one_at_a_time_in_order_by_default;
         catches(Flaw::Swaps, "the projector, in order", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_credit_check_fails_a_bus_that_takes_more_than_its_instances() {
         let check = kit::credit_bounds_what_is_in_flight;
         catches(Flaw::Greedy, "two instances, two at once", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_credit_check_fails_a_bus_that_takes_fewer_than_its_instances() {
         let check = kit::credit_bounds_what_is_in_flight;
-        catches(Flaw::Narrow, "two instances, two at once", check).await;
+        catches(Flaw::Narrow, "two instances: timed out", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_commit_check_fails_a_bus_that_swallows_a_failed_commit() {
         let check = kit::a_policys_position_moves_only_with_its_outputs;
         catches(Flaw::Swallows, "timed out", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_held_failure_check_fails_a_bus_that_swallows_it() {
         let check = kit::a_held_failure_is_handed_again;
         catches(Flaw::Swallows, "left == right", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_held_failure_check_fails_a_bus_that_keeps_a_letter_for_it() {
         let check = kit::a_held_failure_is_handed_again;
         catches(Flaw::EarlyLetter, "nothing dead-lettered", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_projector_bug_check_fails_a_bus_that_keeps_no_letter() {
         let check = kit::a_projectors_bug_is_dead_lettered_and_its_stream_goes_on;
         catches(Flaw::NoLetters, "dead-lettered", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_projector_bug_check_fails_a_bus_that_does_not_report_it() {
         let check = kit::a_projectors_bug_is_dead_lettered_and_its_stream_goes_on;
         catches(Flaw::Swallows, "left == right", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_policy_bug_check_fails_a_bus_that_moves_past_it_with_no_letter() {
         let check = kit::a_policys_bug_is_dead_lettered_or_held;
         catches(Flaw::NoLetters, "moved past, dead-lettered", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_policy_bug_check_allows_a_bus_that_holds_it() {
         allows(Flaw::HoldsBugs, kit::a_policys_bug_is_dead_lettered_or_held).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_purge_check_fails_a_bus_that_skips_a_tombstone() {
         let check = kit::a_purged_stream_hands_a_projector_its_tombstone_then_what_follows;
         catches(Flaw::Skips, "left == right", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_wake_check_fails_a_bus_a_commit_does_not_wake() {
         let check = kit::a_commit_wakes_the_bus_with_no_poll;
         catches(Flaw::Deaf, "timed out", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_out_of_order_check_fails_a_bus_that_skips_an_event() {
         let check = kit::out_of_order_deliveries_are_served_in_stream_order_from_the_store;
         catches(Flaw::Skips, "in stream order, once each", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_policy_order_check_fails_a_bus_that_skips_a_trigger() {
         let check = kit::a_policys_out_of_order_triggers_are_reacted_to_in_stream_order;
         catches(Flaw::Skips, "left == right", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_held_delivery_check_fails_a_bus_that_swallows_the_failure() {
         let check = kit::a_held_delivery_is_settled_held_and_delivered_again;
         catches(Flaw::Swallows, "timed out", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_seventy_check_fails_a_bus_that_skips_an_event() {
         let check = kit::seventy_delivered_last_first_are_handled_in_order;
         catches(Flaw::Skips, "in stream order, once each", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_missing_predecessor_check_fails_a_bus_that_invents_it() {
         let check = kit::a_missing_predecessor_holds_and_is_never_skipped;
         catches(Flaw::Fabricates, "timed out", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_missing_predecessor_check_fails_a_bus_that_keeps_no_letter() {
         let check = kit::a_missing_predecessor_holds_and_is_never_skipped;
         catches(Flaw::NoLetters, "its letter kept", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_poison_check_fails_a_bus_that_keeps_no_letter() {
         let check = kit::a_poison_event_recovered_from_the_store_is_dead_lettered_at_the_cap;
         catches(Flaw::NoLetters, "dead-lettered", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_long_gap_check_fails_a_bus_that_skips_an_event() {
         let check = kit::a_long_gap_is_recovered_within_credit;
         catches(Flaw::Skips, "in order, once each", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_ephemeral_check_fails_a_bus_that_stores_its_positions() {
         let check = kit::an_ephemeral_projector_starts_at_zero_each_serve_and_stores_no_position;
         catches(Flaw::Persists, "no row stored", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_ephemeral_policy_check_fails_a_bus_that_accepts_one() {
         let check = kit::an_ephemeral_policy_is_refused;
         catches(Flaw::AcceptsEphemeralPolicy, "refused", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_ephemeral_recovery_check_fails_a_bus_that_stores_its_positions() {
         let check = kit::an_ephemeral_projector_recovers_out_of_order_deliveries;
         catches(Flaw::Persists, "no row stored", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_ephemeral_failure_check_fails_a_bus_that_swallows_them() {
         let check = kit::an_ephemeral_projector_holds_and_dead_letters_as_a_durable_one;
         catches(Flaw::Swallows, "left == right", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_ephemeral_failure_check_fails_a_bus_that_stores_its_positions() {
         let check = kit::an_ephemeral_projector_holds_and_dead_letters_as_a_durable_one;
         catches(Flaw::Persists, "no row stored", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_shared_bus_check_fails_a_bus_that_stores_the_ephemeral_ones() {
         let check = kit::a_durable_and_an_ephemeral_projector_share_a_bus;
         catches(Flaw::Persists, "the ephemeral one's none", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_shared_bus_check_fails_a_bus_that_forgets_the_durable_ones() {
         let check = kit::a_durable_and_an_ephemeral_projector_share_a_bus;
         catches(Flaw::Forgetful, "the durable one's row", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_outcome_check_fails_a_bus_that_mislabels_failures() {
         let check = kit::a_failure_is_reported_with_what_became_of_it;
         catches(Flaw::Mislabels, "held to be handed again", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_missing_outcome_check_fails_a_bus_that_mislabels_failures() {
         let check = kit::a_missing_predecessor_is_reported_held_then_dead_lettered;
         catches(Flaw::Mislabels, "held to the cap", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_policy_outcome_check_allows_a_bus_that_holds_the_bug() {
         allows(
             Flaw::HoldsBugs,
@@ -946,13 +946,13 @@ mod bus_checks {
         .await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_policy_outcome_check_fails_a_bus_that_mislabels_failures() {
         let check = kit::a_policys_failure_is_reported_by_what_became_of_its_position;
         catches(Flaw::Mislabels, "outcome", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_delay_check_fails_a_bus_that_holds_with_no_delay() {
         let check = kit::a_held_delivery_carries_its_delay;
         catches(Flaw::NoDelay, "held with a delay", check).await;
@@ -964,67 +964,67 @@ mod transport_checks {
 
     use super::{catches, Flaw};
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_delivery_check_fails_a_wrong_sequence() {
         let check = kit::a_delivery_carries_its_stream_sequence_key_and_body;
         catches(Flaw::WrongSequence, "left == right", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_delivery_check_fails_a_wrong_key() {
         let check = kit::a_delivery_carries_its_stream_sequence_key_and_body;
         catches(Flaw::WrongKey, "left == right", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_delivery_check_fails_a_body_that_is_not_the_stored_event() {
         let check = kit::a_delivery_carries_its_stream_sequence_key_and_body;
         catches(Flaw::WrongBody, "left == right", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_delivery_check_fails_a_first_delivery_that_is_a_second() {
         let check = kit::a_delivery_carries_its_stream_sequence_key_and_body;
         catches(Flaw::EarlyAttempt, "a first delivery", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_reopen_check_fails_a_transport_that_forgets_the_unsettled() {
         let check = kit::an_unsettled_delivery_is_delivered_again_after_reopening;
         catches(Flaw::Forgets, "timed out", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_handled_check_fails_a_transport_that_forgets_the_positions() {
         let check = kit::a_handled_and_recorded_delivery_is_not_delivered_again;
         catches(Flaw::Renames, "nothing is owed", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_held_check_fails_an_attempt_that_is_two_more() {
         let check = kit::a_held_delivery_is_delivered_again_one_attempt_more;
         catches(Flaw::WrongAttempt, "left == right", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_delay_check_fails_a_transport_that_ignores_the_delay() {
         let check = kit::a_held_delivery_waits_out_its_delay;
         catches(Flaw::IgnoresDelay, "held for its delay", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_credit_check_fails_a_transport_that_takes_more_than_its_instances() {
         let check = kit::credit_bounds_what_is_unsettled;
         catches(Flaw::Greedy, "two instances, two unsettled", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn the_credit_check_fails_a_transport_that_takes_fewer_than_its_instances() {
         let check = kit::credit_bounds_what_is_unsettled;
         catches(Flaw::Narrow, "timed out", check).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn every_check_that_waits_fails_a_feed_that_only_answers_idle() {
         let check = kit::a_purged_stream_delivers_its_tombstone_then_what_follows;
         catches(Flaw::Chatters, "timed out", check).await;

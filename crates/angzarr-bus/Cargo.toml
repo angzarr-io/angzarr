@@ -35,7 +35,7 @@ angzarr-ports = { path = "../angzarr-ports", features = ["memory", "faulty"] }
 # Its own suite, so `test-pkg angzarr-bus` builds it alone.
 angzarr-bus = { path = ".", features = ["contract"] }
 prost-types = "0.14"
-tokio = { version = "1", features = ["macros", "rt", "time"] }
+tokio = { version = "1", features = ["macros", "rt", "time", "test-util"] }
 
 # The shared crates' lints: the workspace's (the root Cargo.toml).
 [lints]

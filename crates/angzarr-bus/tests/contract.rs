@@ -280,9 +280,33 @@ struct Run {
 
 const EVERY: Duration = Duration::from_secs(1);
 
-/// How long a check may wait: a check takes milliseconds, so a hang is a
-/// quick failure.
+/// How long a check may sit idle before it is a hang. The tests run on a
+/// paused clock, so this is virtual time: the clock moves only when every
+/// task is idle, and a check that is merely slow (a debugger, a loaded
+/// machine) never spends it.
 const DEADLINE: Duration = Duration::from_secs(3);
+
+/// How often a check is woken before it is a livelock. A bus that spins
+/// without making progress keeps the runtime busy, so the paused clock never
+/// reaches `DEADLINE`; counting wakes bounds that too, whatever the machine's
+/// speed.
+const WAKES: usize = 500_000;
+
+/// Resolves when a check has waited longer than a check should: idle for
+/// `DEADLINE` of virtual time, or woken `WAKES` times without ending. It
+/// reads no wall clock, so a check run slowly (under a debugger, on a loaded
+/// host) passes as it does at full speed.
+fn hang() -> Pin<Box<dyn Future<Output = ()>>> {
+    let mut idle = Box::pin(tokio::time::sleep(DEADLINE));
+    let mut wakes = 0_usize;
+    Box::pin(std::future::poll_fn(move |cx| {
+        wakes += 1;
+        if wakes > WAKES {
+            return std::task::Poll::Ready(());
+        }
+        idle.as_mut().poll(cx)
+    }))
+}
 
 /// The bus's retry cap in the reference run.
 const CAP: u32 = 2;
@@ -441,7 +465,7 @@ impl Harness for Run {
     }
 
     fn deadline(&self) -> Pin<Box<dyn Future<Output = ()> + '_>> {
-        Box::pin(tokio::time::sleep(DEADLINE))
+        hang()
     }
 }
 
@@ -489,30 +513,30 @@ impl TransportHarness for Run {
     }
 
     fn deadline(&self) -> Pin<Box<dyn Future<Output = ()> + '_>> {
-        Box::pin(tokio::time::sleep(DEADLINE))
+        hang()
     }
 }
 
 mod bus {
     use super::Run;
-    angzarr_bus::bus_contract!(#[tokio::test], Run::default());
+    angzarr_bus::bus_contract!(#[tokio::test(start_paused = true)], Run::default());
 }
 
 mod transport {
     use super::Run;
-    angzarr_bus::transport_contract!(#[tokio::test], Run::default());
+    angzarr_bus::transport_contract!(#[tokio::test(start_paused = true)], Run::default());
 }
 
 /// The same suites with the store transport told which streams a commit
 /// touched, not listing and reading every stream.
 mod bus_incremental {
     use super::Run;
-    angzarr_bus::bus_contract!(#[tokio::test], Run::incremental());
+    angzarr_bus::bus_contract!(#[tokio::test(start_paused = true)], Run::incremental());
 }
 
 mod transport_incremental {
     use super::Run;
-    angzarr_bus::transport_contract!(#[tokio::test], Run::incremental());
+    angzarr_bus::transport_contract!(#[tokio::test(start_paused = true)], Run::incremental());
 }
 
 #[path = "contract/flawed.rs"]
