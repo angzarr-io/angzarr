@@ -130,11 +130,12 @@ mutants-diff base="main":
 # The gates' own self-tests: a throwaway worktree let go alone
 # (gates/drop-worktree.sh, never a repository-wide prune), and the mutation
 # verdict (`_mutants-verdict`) over fixture cargo-mutants outputs, and the
-# refusal of a feature rule.
+# refusal of a feature rule, and the pre-push gate's shared mutation lock.
 [no-exit-message]
 selftest:
     @{{justfile_directory()}}/gates/selftest/drop-worktree.selftest.sh
     @{{justfile_directory()}}/gates/selftest/mutants-verdict.selftest.sh
+    @{{justfile_directory()}}/gates/selftest/pre-push.selftest.sh
 
 # Wire lefthook's git hooks into the repository's .git/hooks. Worktrees share
 # .git/hooks, so this is once per clone, and again whenever lefthook.yml or

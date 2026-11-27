@@ -13,3 +13,18 @@ pre-commit:
       priority: 3
       glob: "crates/{angzarr-router,angzarr-router-conformance}/**/*.rs"
       run: just archlint
+
+# Added here: the pre-push gate beyond the pushed commit's tests (gates/
+# lefthook.yml's `tests`, priority 1): `just check`, then `just mutants-push`
+# over what the push adds, under the machine's shared mutation lock
+# (`flock ~/.cache/disk-slots/mutation.lock`, its holder line in
+# mutation.holder; gates/pre-push.sh, gates/mutation-lock.sh). Run
+# `just hooks-install` again after this lands: the pre-push hook is new to a
+# clone that installed before it.
+pre-push:
+  commands:
+    check-and-mutants:
+      priority: 2
+      use_stdin: true
+      files: echo justfile
+      run: gates/pre-push.sh {1} {files}
