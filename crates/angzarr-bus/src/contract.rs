@@ -159,6 +159,7 @@ pub trait Harness {
     /// Commit one event at `stream`'s head.
     fn append(&self, stream: &Cover) -> impl Future<Output = ()>;
     /// Purge `stream`: its events gone, the positions on it kept.
+    #[cfg(feature = "purge")]
     fn purge(&self, stream: &Cover) -> impl Future<Output = ()>;
     /// Every event on `stream`.
     fn landed(&self, stream: &Cover) -> impl Future<Output = Vec<EventPage>>;
@@ -511,6 +512,7 @@ pub async fn a_policys_bug_is_dead_lettered_or_held<H: Harness>(harness: H) {
     }
 }
 
+#[cfg(feature = "purge")]
 /// A stream a projector handled is purged: sequences never restart, so the
 /// projector is handed the tombstone at the next sequence, then what is
 /// written after it, and its position moves past each.
@@ -1049,7 +1051,6 @@ macro_rules! bus_contract {
             a_held_failure_is_handed_again,
             a_projectors_bug_is_dead_lettered_and_its_stream_goes_on,
             a_policys_bug_is_dead_lettered_or_held,
-            a_purged_stream_hands_a_projector_its_tombstone_then_what_follows,
             a_commit_wakes_the_bus_with_no_poll,
             out_of_order_deliveries_are_served_in_stream_order_from_the_store,
             a_policys_out_of_order_triggers_are_reacted_to_in_stream_order,
@@ -1067,6 +1068,11 @@ macro_rules! bus_contract {
             a_failure_is_reported_with_what_became_of_it,
             a_missing_predecessor_is_reported_held_then_dead_lettered,
             a_policys_failure_is_reported_by_what_became_of_its_position,
+        );
+    };
+    (purge, $(#[$t:meta])+, $f:expr) => {
+        $crate::bus_contract!(@each [$(#[$t])+], $f;
+            a_purged_stream_hands_a_projector_its_tombstone_then_what_follows,
         );
     };
     (@each [$($a:tt)*], $f:expr; $check:ident, $($rest:ident,)*) => {
@@ -1090,6 +1096,7 @@ pub const CHECKS: &[&str] = &[
     "a_held_failure_is_handed_again",
     "a_projectors_bug_is_dead_lettered_and_its_stream_goes_on",
     "a_policys_bug_is_dead_lettered_or_held",
+    #[cfg(feature = "purge")]
     "a_purged_stream_hands_a_projector_its_tombstone_then_what_follows",
     "a_commit_wakes_the_bus_with_no_poll",
     "out_of_order_deliveries_are_served_in_stream_order_from_the_store",

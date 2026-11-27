@@ -9,7 +9,15 @@ publish.workspace = true
 rust-version = "1.89"
 
 # No library to speak of and no dependencies: the runner is src/lib.test.rs.
+# The scenarios that purge (processed_state.feature) run only with `purge`,
+# which turns the capability on in the kernel. Off by default.
+[features]
+purge = ["dep:angzarr-embedded", "angzarr-embedded/purge"]
+
 [dependencies]
+# Only so the `purge` feature can name the kernel's; nothing is used from it
+# in a normal build.
+angzarr-embedded = { path = "../angzarr-embedded", optional = true }
 
 # cucumber runs the spec's features; it is the router's runner
 # (angzarr-router's conformance crate), at the same version. The kernel runs

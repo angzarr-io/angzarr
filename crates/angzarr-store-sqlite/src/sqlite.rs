@@ -22,15 +22,18 @@ use std::time::Duration;
 use angzarr_ports::angzarr_proto::v1::{
     Cover, EditionSummary, EventBook, EventPage, EventRef, Snapshot,
 };
+#[cfg(feature = "purge")]
 use angzarr_ports::tombstone;
 use angzarr_ports::{
     is_fork, Append, AppliedMigration, ChangeCursor, ChangeToken, Changed, Changes, CommitNotify,
     CommitSignal, CommitWait, DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore,
     Export, ExportRow, Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore,
-    Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore,
+    Processed, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore,
     StoreError, StreamChange, StreamRef, Uuid, Watch, WeakCommitSignal, Write, Written,
 };
-use prost::{Message, Name};
+use prost::Message;
+#[cfg(feature = "purge")]
+use prost::Name;
 use prost_types::Timestamp;
 use sea_query::SqliteQueryBuilder;
 use sea_query_binder::SqlxBinder;
@@ -1215,7 +1218,8 @@ impl PositionStore for SqliteStore {
     }
 }
 
-impl Purge for SqliteStore {
+#[cfg(feature = "purge")]
+impl angzarr_ports::Purge for SqliteStore {
     /// One `BEGIN IMMEDIATE` transaction, as a write's: a purge lands wholly
     /// before or wholly after any write, or not at all. The stream's head
     /// is checked against `expected` inside it, under the write lock

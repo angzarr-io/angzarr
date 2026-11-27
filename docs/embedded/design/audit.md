@@ -254,7 +254,7 @@ processed ids in the stream.)
 
 **Accepted costs** (the first two are angzarr's decision 12.2, the same in
 both runtimes; the third is angzarr-embedded's own, since a stream can be
-purged where its store opts in, [the store port](#the-store-port)):
+purged where its store opts in (the `purge` feature, [the store port](#the-store-port))):
 
 - **A decision that produced no events leaves nothing to find**, so a
   redelivery of it is decided again, against the stream as it is then
@@ -264,7 +264,7 @@ purged where its store opts in, [the store port](#the-store-port)):
   answered DUPLICATE with the first command's events. Payloads are not
   fingerprinted; a client mints a new id for every new command.
 - **Deduplication lasts as long as the stream.** There is no expiry or
-  retention window, but a store that opts in can purge a stream (see
+  retention window, but a `purge` build with a store that opts in can purge a stream (see
   [the store port](#the-store-port)), and a purge deletes its command
   ids with its events. A command redelivered after its stream is purged
   finds nothing, so it is decided again against the stream as it is then;
@@ -866,7 +866,17 @@ tombstone is destroyed.
 A tombstone is only the mark that a stream had events here once (owner
 ruling 2026-11-26): it ends an aggregate's events, writes resume from its
 sequence (`next_sequence` counts it), and whoever folds the stream wipes
-what came before it. An aggregate's `had_prior_events` therefore means
+what came before it. The framework does the wiping wherever it holds the
+state (owner ruling 2026-11-26): an aggregate's rebuild, and the router's
+projector fold (`ProjectorDispatch`), which puts a projection back to its
+default at a tombstone before what follows folds, a batched fold being
+handed the run from the latest tombstone, inclusive. A projector that keeps
+state outside its projection (an external store) is handed the tombstone
+itself, by registering a handler for `StreamClosed`'s type name, to clear
+it; one with no handler skips it silently. A projector the framework does
+not hold the state of (a hand-written `ProjectorHandler`, or an
+`AsyncProjector`'s one instance across streams) resets its own, per stream.
+An aggregate's `had_prior_events` therefore means
 events (or a starting state) SINCE the latest tombstone, as the kernel's
 fold of the stream has it (`angzarr_router::rebuild::Live`, used by the
 rebuild and the command context): a purged stream reads as never written, so
@@ -1024,7 +1034,12 @@ as `ext_err_txt` and SQLite's primary result code as `errno`.
 
 **Opt-in capabilities**, each a trait of its own with its own section of
 the suite: `Purge` (a stream, its snapshot, its command ids and its dead
-letters, in one call; the positions on it stay, decision 14.68), `ReadStore` (a read-only unit whose reads
+letters, in one call; the positions on it stay, decision 14.68; it is a
+**compile-time feature**, `purge`, off by default: the default build is
+append-only and has no purge API, the trait and every store's
+implementation being absent, not refusing; both flavours are built and
+released, and the suites run in both. READING a tombstone is in every
+build, so a default build folds a store a purge build wrote), `ReadStore` (a read-only unit whose reads
 all see the moment it began, so a reader listing `covers` and reading each
 stream never mixes two moments), `Watch` (a change token: equal tokens
 from one handle mean nothing was committed between), `ReadUntilTime`,

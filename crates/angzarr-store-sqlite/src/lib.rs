@@ -8,7 +8,7 @@
 //! [`PositionStore`](angzarr_ports::PositionStore) (a step's one
 //! [`write`](angzarr_ports::EventStore::write) is a `BEGIN IMMEDIATE`
 //! transaction, begun and committed inside the call),
-//! [`Purge`](angzarr_ports::Purge),
+//! `Purge` (angzarr_ports; only with the `purge` feature),
 //! [`ReadStore`](angzarr_ports::ReadStore), [`Watch`](angzarr_ports::Watch),
 //! [`CommitNotify`](angzarr_ports::CommitNotify) (a push after every commit,
 //! shared by every handle on one file in this process; another process's
@@ -100,3 +100,13 @@ mod tests;
 #[cfg(test)]
 #[path = "test_database.test.rs"]
 mod test_database;
+
+/// Without the `purge` feature the store is append-only: it implements no
+/// purge port.
+///
+/// ```compile_fail
+/// fn purges<T: angzarr_ports::Purge>() {}
+/// purges::<angzarr_store_sqlite::SqliteStore>();
+/// ```
+#[cfg(not(feature = "purge"))]
+pub mod without_purge {}

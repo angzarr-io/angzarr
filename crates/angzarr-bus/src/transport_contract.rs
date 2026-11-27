@@ -20,6 +20,7 @@ use std::pin::{pin, Pin};
 use std::task::{Context, Poll, Waker};
 use std::time::Duration;
 
+#[cfg(feature = "purge")]
 use angzarr_ports::tombstone;
 use angzarr_proto::v1::{Cover, EventPage, Uuid};
 
@@ -42,6 +43,7 @@ pub trait TransportHarness {
     /// Commit one event at `stream`'s head.
     fn append(&self, stream: &Cover) -> impl Future<Output = ()>;
     /// Purge `stream`.
+    #[cfg(feature = "purge")]
     fn purge(&self, stream: &Cover) -> impl Future<Output = ()>;
     /// The event at `sequence` of `stream`, as the store holds it.
     fn stored(&self, stream: &Cover, sequence: u64) -> impl Future<Output = Option<EventPage>>;
@@ -181,6 +183,7 @@ pub async fn credit_bounds_what_is_unsettled<H: TransportHarness>(harness: H) {
     assert_ne!(third.stream, second.stream, "one of a stream at a time");
 }
 
+#[cfg(feature = "purge")]
 /// A stream a subscription holds a position on, purged, delivers its
 /// tombstone at the sequence its mark stands at, then what is written
 /// after it: sequences never restart, so a reopened transport (or one
@@ -217,6 +220,10 @@ macro_rules! transport_contract {
             a_held_delivery_is_delivered_again_one_attempt_more,
             a_held_delivery_waits_out_its_delay,
             credit_bounds_what_is_unsettled,
+        );
+    };
+    (purge, $(#[$t:meta])+, $f:expr) => {
+        $crate::transport_contract!(@each [$(#[$t])+], $f;
             a_purged_stream_delivers_its_tombstone_then_what_follows,
         );
     };
@@ -239,6 +246,7 @@ pub const CHECKS: &[&str] = &[
     "a_held_delivery_is_delivered_again_one_attempt_more",
     "a_held_delivery_waits_out_its_delay",
     "credit_bounds_what_is_unsettled",
+    #[cfg(feature = "purge")]
     "a_purged_stream_delivers_its_tombstone_then_what_follows",
 ];
 

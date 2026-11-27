@@ -23,10 +23,14 @@ use angzarr_ports::angzarr_proto::v1::{Cover, EventBook, EventPage};
 use angzarr_ports::contract::{
     append, at, command, correlated, edition_stream, main_stream, page, snapshot,
 };
+#[cfg(feature = "purge")]
+use angzarr_ports::DeadLetterStore;
+#[cfg(feature = "purge")]
+use angzarr_ports::Purge;
 use angzarr_ports::{
-    Arg, CommitNotify, CommitWait, DeadLetterStore, EventStore, Export, ExportRow, Migrations,
-    Outbox, PositionKey, PositionStore, Purge, ReadByCorrelation, ReadStore, ReadUnit,
-    ReadUntilTime, Slice, SnapshotStore, StoreError, StreamRef, Watch,
+    Arg, CommitNotify, CommitWait, EventStore, Export, ExportRow, Migrations, Outbox, PositionKey,
+    PositionStore, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore,
+    StoreError, StreamRef, Watch,
 };
 use prost::Message;
 use sqlx::migrate::Migrator;
@@ -107,6 +111,7 @@ mod pair {
     angzarr_ports::store_contract!(pair, #[tokio::test], pair(&database()).await);
 }
 
+#[cfg(feature = "purge")]
 mod purge {
     use super::*;
     angzarr_ports::store_contract!(
@@ -158,6 +163,7 @@ mod read_one_handle {
     );
 }
 
+#[cfg(feature = "purge")]
 mod read_one_handle_purge {
     use super::*;
     angzarr_ports::store_contract!(
@@ -167,6 +173,7 @@ mod read_one_handle_purge {
     );
 }
 
+#[cfg(feature = "purge")]
 mod read_purge {
     use super::*;
     angzarr_ports::store_contract!(read_purge, #[tokio::test], pair(&database()).await);
@@ -231,6 +238,16 @@ mod processed {
     );
 }
 
+#[cfg(feature = "purge")]
+mod processed_purge {
+    use super::*;
+    angzarr_ports::store_contract!(
+        processed_purge,
+        #[tokio::test],
+        SqliteStore::open_in_memory().await.unwrap()
+    );
+}
+
 mod outbox {
     use super::*;
     angzarr_ports::store_contract!(
@@ -267,6 +284,7 @@ mod dead_letters_watch {
     );
 }
 
+#[cfg(feature = "purge")]
 mod dead_letters_purge {
     use super::*;
     angzarr_ports::store_contract!(
@@ -388,6 +406,7 @@ async fn a_file_no_handle_holds_is_forgotten() {
     drop(again);
 }
 
+#[cfg(feature = "purge")]
 /// Why: every kind of commit is pushed, not only a step's write: a
 /// snapshot, a purge, a dead letter drained or removed, an outbox entry
 /// cleared, each wakes a wait armed before it.
@@ -703,6 +722,7 @@ async fn inserting(path: &Path, page: &EventPage) -> SqliteConnection {
     conn
 }
 
+#[cfg(feature = "purge")]
 /// A raw connection to `path` in the middle of a purge of `tasks` stream
 /// 1: it holds the write lock and has deleted the stream's events,
 /// uncommitted. [`end`] finishes it.
@@ -1646,6 +1666,7 @@ async fn a_database_whose_schema_is_beyond_reading_is_damaged_however_it_is_open
 
 // ------------------------------------------------------------------ purge
 
+#[cfg(feature = "purge")]
 /// A store on `path` holding `s` with two events and a snapshot, and a
 /// trigger refusing to delete any snapshot: a purge's second statement
 /// fails after its first has deleted the events.
@@ -1667,6 +1688,7 @@ async fn refusing_to_delete_snapshots(path: &Path, s: StreamRef<'_>) -> SqliteSt
     store
 }
 
+#[cfg(feature = "purge")]
 /// `s` as `refusing_to_delete_snapshots` left it: nothing deleted.
 async fn assert_whole(store: &SqliteStore, s: StreamRef<'_>, what: &str) {
     assert_eq!(pages(store, s).await, [page(0, 1), page(1, 2)], "{what}");
@@ -1683,6 +1705,7 @@ async fn assert_whole(store: &SqliteStore, s: StreamRef<'_>, what: &str) {
     assert_eq!(store.covers("tasks").await, Ok(covers(&[s])), "{what}");
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn a_purge_that_fails_part_way_deletes_nothing() {
     let path = database();
@@ -1711,6 +1734,7 @@ async fn impatient(path: &Path) -> SqliteStore {
     SqliteStore::on(conn, Some(path.to_path_buf()), &MIGRATOR)
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn a_purge_racing_an_append_waits_for_it_then_is_refused() {
     // 14.43. A write in flight holds the write lock: a purge cannot land
@@ -1754,6 +1778,7 @@ async fn a_purge_racing_an_append_waits_for_it_then_is_refused() {
     drop((writer, purger, hasty));
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn an_append_racing_a_purge_lands_after_it_on_a_new_stream() {
     // A purge in flight holds the write lock: a write cannot land inside
@@ -1833,6 +1858,7 @@ where
     drop(reader);
 }
 
+#[cfg(feature = "purge")]
 /// A read on its own is one moment: a purge committing between its
 /// statements is not seen, so it never answers a stream of some length
 /// holding fewer pages. (Reworked: the old test forced the interleaving
@@ -1900,6 +1926,7 @@ async fn read_only_store(path: &Path) -> SqliteStore {
     SqliteStore::open_existing(path).await.unwrap().unwrap()
 }
 
+#[cfg(feature = "purge")]
 /// The ports' read-unit checks on a file, the reader opened to write or
 /// only to read.
 mod read_on_file {
@@ -1930,6 +1957,7 @@ mod read_on_file {
         .await;
     }
 
+    #[cfg(feature = "purge")]
     #[tokio::test]
     async fn a_read_unit_keeps_a_stream_purged_after_it_began() {
         on_file(
@@ -1948,6 +1976,7 @@ mod read_on_file {
         .await;
     }
 
+    #[cfg(feature = "purge")]
     #[tokio::test]
     async fn a_read_unit_on_a_read_only_store_keeps_a_stream_purged_after_it_began() {
         on_file(
@@ -1967,6 +1996,7 @@ mod read_on_file {
     }
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn a_writer_waits_on_no_open_read_unit() {
     // The writer waits on no lock at all: had the read unit taken the
@@ -2105,6 +2135,7 @@ fn every_open_is_a_send_future() {
     }));
 }
 
+#[cfg(feature = "purge")]
 #[test]
 fn every_purge_is_a_send_future() {
     drop(send(async {
@@ -2946,6 +2977,7 @@ async fn a_ledger_is_read_at_a_path_migrating_nothing() {
     );
 }
 
+#[cfg(feature = "purge")]
 mod changes {
     use std::path::PathBuf;
     use std::sync::Mutex;

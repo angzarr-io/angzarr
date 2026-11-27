@@ -14,6 +14,9 @@ publish = false
 # The conformance suite: `angzarr_bus::contract` and `bus_contract!`. An
 # implementation enables it for its own tests (under dev-dependencies).
 contract = []
+# The suite's purge checks and the harness's `purge`: an implementation with
+# the purge capability. Off by default.
+purge = ["angzarr-ports/purge"]
 
 # The handler types are each implementation's (angzarr-router's traits
 # depend on this workspace, so nothing here names them): no router, no

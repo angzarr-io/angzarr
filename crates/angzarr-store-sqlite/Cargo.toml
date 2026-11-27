@@ -14,6 +14,11 @@ rust-version = "1.89"
 # it as angzarr-embedded does. Third-party by design (see CLAUDE.md): a SQL store needs
 # a query builder and a driver, and hand-rolling either is a second,
 # unchecked implementation of the dialect.
+# The purge capability (`Purge for SqliteStore`), off by default: the default
+# store is append-only and has no purge API. Reading a tombstone is in every build.
+[features]
+purge = ["angzarr-ports/purge"]
+
 [dependencies]
 angzarr-ports = { path = "../angzarr-ports" }
 prost = "0.14"

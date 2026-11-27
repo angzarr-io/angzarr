@@ -104,6 +104,15 @@ fn block_on<F: Future>(future: F) -> F::Output {
     }
 }
 
+/// Whether this build has the purge capability: the scenarios that purge run
+/// only then.
+const PURGES: bool = cfg!(feature = "purge");
+
+/// The scenarios whose steps purge a stream (processed_state.feature: the
+/// record outliving a purge, a purged stream handed its tombstone, a purge
+/// keeping its stream, a repeat purge, an edition's purge).
+const PURGE_SCENARIOS: &[&str] = &["C-0771", "C-0772", "C-0773", "C-0880", "C-0881", "C-0882"];
+
 /// The tier, run: every untagged scenario passes.
 #[test]
 fn coordinator_contract() {
@@ -117,7 +126,9 @@ fn coordinator_contract() {
             })
             .fail_on_skipped()
             .filter_run(features(), move |_, _, scenario| {
-                run_tagged || tags::of(scenario).is_none()
+                (run_tagged || tags::of(scenario).is_none())
+                    && (PURGES
+                        || !tags::id(scenario).is_some_and(|id| PURGE_SCENARIOS.contains(&id)))
             }),
     );
     print!("{}", tags::listing(&features()));

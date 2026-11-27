@@ -12,9 +12,21 @@
 //! handler is skipped with a warn; a run whose cover carries an undeclared
 //! domain never folds, though Finish still runs. There is no wildcard
 //! domain (decision 14.53): a projector lists every domain it reads.
+//!
+//! A TOMBSTONE ([`angzarr_ports::tombstone`], what a purge leaves of a
+//! stream) puts the projection back to its default, as it does an
+//! aggregate's state: what the run folded before it is gone and the events
+//! after it are the projection's alone. A projector that keeps state
+//! outside its projection (an external store) opts into being handed the
+//! tombstone by registering a handler for [`StreamClosed`]'s type name
+//! ([`ProjectorDispatch::on_event`]); a batched fold is always handed it,
+//! first. One with no such handler skips it silently.
+//!
+//! [`StreamClosed`]: angzarr_ports::tombstone::StreamClosed
 
 use std::collections::{HashMap, HashSet};
 
+use angzarr_ports::tombstone;
 use prost_types::Any;
 
 use crate::error::{call_handler, map_handler_error, AngzarrReason, CodedError, HandlerError};
@@ -151,11 +163,16 @@ impl<P> ProjectorDispatch<P> {
         };
 
         if let (true, Some(fold)) = (consumed, self.fold.as_ref()) {
-            if !events.pages.is_empty() {
-                fold(&mut projection, &events.pages, cover).map_err(|failure| {
+            // A tombstone resets the projection: what the run holds before
+            // the latest one is not folded, and the fold is handed the
+            // tombstone itself, first, so a projector that keeps state
+            // outside its projection can clear it.
+            let pages = &events.pages[events.pages.iter().rposition(tombstone::is).unwrap_or(0)..];
+            if !pages.is_empty() {
+                fold(&mut projection, pages, cover).map_err(|failure| {
                     fold_error(
                         PageOrigin::Persisted,
-                        &events.pages,
+                        pages,
                         &failure,
                         &self.projection_type_url,
                     )
@@ -166,10 +183,17 @@ impl<P> ProjectorDispatch<P> {
                 let Some(event_any) = crate::page_event(page) else {
                     continue;
                 };
+                let is_tombstone = tombstone::is(page);
+                if is_tombstone {
+                    projection = (self.factory)();
+                }
                 let Some(thunk) = self
                     .handlers
                     .get(crate::type_name_from_url(&event_any.type_url))
                 else {
+                    if is_tombstone {
+                        continue;
+                    }
                     // Parity with the Go engine's projectorLogger.Warn.
                     tracing::warn!(
                         projector = %self.name,

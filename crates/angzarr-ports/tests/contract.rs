@@ -239,6 +239,7 @@ mod shared_handles_read {
     angzarr_ports::store_contract!(shared_handles_read, #[tokio::test], pair());
 }
 
+#[cfg(feature = "purge")]
 mod shared_handles_read_purge {
     use super::*;
     angzarr_ports::store_contract!(shared_handles_read_purge, #[tokio::test], pair());
@@ -259,11 +260,13 @@ mod read_one_handle {
     angzarr_ports::store_contract!(read_one_handle, #[tokio::test], MemoryStore::new());
 }
 
+#[cfg(feature = "purge")]
 mod read_one_handle_purge {
     use super::*;
     angzarr_ports::store_contract!(read_one_handle_purge, #[tokio::test], MemoryStore::new());
 }
 
+#[cfg(feature = "purge")]
 mod purge {
     use super::*;
     angzarr_ports::store_contract!(purge, #[tokio::test], MemoryStore::new());
@@ -279,6 +282,7 @@ mod read {
     angzarr_ports::store_contract!(read, #[tokio::test], pair());
 }
 
+#[cfg(feature = "purge")]
 mod read_purge {
     use super::*;
     angzarr_ports::store_contract!(read_purge, #[tokio::test], pair());
@@ -329,6 +333,12 @@ mod processed {
     angzarr_ports::store_contract!(processed, #[tokio::test], MemoryStore::new());
 }
 
+#[cfg(feature = "purge")]
+mod processed_purge {
+    use super::*;
+    angzarr_ports::store_contract!(processed_purge, #[tokio::test], MemoryStore::new());
+}
+
 mod outbox {
     use super::*;
     angzarr_ports::store_contract!(outbox, #[tokio::test], MemoryStore::new());
@@ -354,6 +364,7 @@ mod dead_letters_watch {
     angzarr_ports::store_contract!(dead_letters_watch, #[tokio::test], MemoryStore::new());
 }
 
+#[cfg(feature = "purge")]
 mod dead_letters_purge {
     use super::*;
     angzarr_ports::store_contract!(dead_letters_purge, #[tokio::test], MemoryStore::new());

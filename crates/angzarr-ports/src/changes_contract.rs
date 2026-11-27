@@ -32,14 +32,17 @@ use std::future::Future;
 use angzarr_proto::v1::Cover;
 
 use crate::contract::{main_stream, page};
-use crate::store::{Purge, Store, Write};
+#[cfg(feature = "purge")]
+use crate::store::Purge;
+use crate::store::{Store, Write};
 use crate::stream::{PositionKey, StreamRef};
 use crate::{ChangeCursor, Changed, Changes, EventStore, StreamChange};
 
 /// An implementation, as the checks drive it.
 pub trait ChangesFixture {
-    /// A store with the feed (and the purge it reports).
-    type Store: Store + Purge + Changes;
+    /// A store with the feed. The checks that purge need it to be a
+    /// [`Purge`](crate::store::Purge) too (the `purge` feature).
+    type Store: Store + Changes;
 
     /// A handle on the fixture's one store: each call another handle over
     /// the same state (the checks race two writers), the first on a fresh,
@@ -71,8 +74,11 @@ pub const CHECKS: &[&str] = &[
     "streams_are_reported_in_the_order_first_touched",
     "commits_to_several_streams_are_all_reported_none_dropped_none_invented",
     "a_stream_that_did_not_change_is_not_reported",
+    #[cfg(feature = "purge")]
     "a_purge_is_reported_purged_at_its_tombstones_head",
+    #[cfg(feature = "purge")]
     "a_purge_then_rewrite_is_reported_purged_with_its_new_head",
+    #[cfg(feature = "purge")]
     "a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor",
     "a_cursor_taken_now_reports_nothing_until_the_next_commit",
     "the_next_cursor_neither_skips_nor_repeats_a_change_used_back_to_back",
@@ -211,9 +217,14 @@ pub async fn a_stream_that_did_not_change_is_not_reported<F: ChangesFixture>(fix
     );
 }
 
+#[cfg(feature = "purge")]
 /// A purge is reported, purged, at the head its tombstone leaves: a
 /// follower cannot miss it, and reads the tombstone like any event.
-pub async fn a_purge_is_reported_purged_at_its_tombstones_head<F: ChangesFixture>(fixture: F) {
+pub async fn a_purge_is_reported_purged_at_its_tombstones_head<F>(fixture: F)
+where
+    F: ChangesFixture,
+    F::Store: Purge,
+{
     let store = fixture.handle().await;
     commit(&store, 1, 2).await;
     let since = cursor(&store).await;
@@ -222,11 +233,14 @@ pub async fn a_purge_is_reported_purged_at_its_tombstones_head<F: ChangesFixture
     assert_eq!(changes, [reported(1, 3, true)]);
 }
 
+#[cfg(feature = "purge")]
 /// A stream purged and written again is reported purged, at its new head
 /// (past its tombstone): told from one that was only written to.
-pub async fn a_purge_then_rewrite_is_reported_purged_with_its_new_head<F: ChangesFixture>(
-    fixture: F,
-) {
+pub async fn a_purge_then_rewrite_is_reported_purged_with_its_new_head<F>(fixture: F)
+where
+    F: ChangesFixture,
+    F::Store: Purge,
+{
     let store = fixture.handle().await;
     commit(&store, 1, 3).await;
     let since = cursor(&store).await;
@@ -240,10 +254,13 @@ pub async fn a_purge_then_rewrite_is_reported_purged_with_its_new_head<F: Change
     );
 }
 
+#[cfg(feature = "purge")]
 /// A purge is before a later cursor: a write after it is not purged.
-pub async fn a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor<F: ChangesFixture>(
-    fixture: F,
-) {
+pub async fn a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor<F>(fixture: F)
+where
+    F: ChangesFixture,
+    F::Store: Purge,
+{
     let store = fixture.handle().await;
     commit(&store, 1, 2).await;
     store.purge(stream(1), 2).await.expect("the purge lands");
@@ -467,9 +484,6 @@ macro_rules! changes_contract {
             streams_are_reported_in_the_order_first_touched,
             commits_to_several_streams_are_all_reported_none_dropped_none_invented,
             a_stream_that_did_not_change_is_not_reported,
-            a_purge_is_reported_purged_at_its_tombstones_head,
-            a_purge_then_rewrite_is_reported_purged_with_its_new_head,
-            a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor,
             a_cursor_taken_now_reports_nothing_until_the_next_commit,
             the_next_cursor_neither_skips_nor_repeats_a_change_used_back_to_back,
             two_writers_racing_lose_no_change,
@@ -479,6 +493,13 @@ macro_rules! changes_contract {
             a_refused_write_reports_nothing,
             the_cursor_now_is_consistent_with_changed_since,
             the_feed_survives_a_reopen_or_overflows,
+        );
+    };
+    (purge, $(#[$t:meta])+, $f:expr) => {
+        $crate::changes_contract!(@each [$(#[$t])+], $f;
+            a_purge_is_reported_purged_at_its_tombstones_head,
+            a_purge_then_rewrite_is_reported_purged_with_its_new_head,
+            a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor,
         );
     };
     (@each [$($a:tt)*], $f:expr; $check:ident, $($rest:ident,)*) => {

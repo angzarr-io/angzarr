@@ -623,6 +623,7 @@ async fn a_resumes_round_trips_grow_with_its_streams_linearly() {
     assert_eq!(forty - none, 2 * (twenty - none), "{spent:?}");
 }
 
+#[cfg(feature = "purge")]
 /// A purged stream is resumed like any: its tombstone is no event a policy
 /// is called for, and every position stays where it was.
 #[tokio::test]

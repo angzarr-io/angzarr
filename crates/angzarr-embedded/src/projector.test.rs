@@ -5,6 +5,7 @@
 
 use std::sync::{Arc, Mutex};
 
+#[cfg(feature = "purge")]
 use angzarr_ports::faulty::{At, FaultyStore};
 use angzarr_router::error::CodedError;
 use angzarr_router::router::ProjectorHandler;
@@ -15,6 +16,7 @@ use crate::toys::{at, command, cover, cover_in, opened, registry, Account, Accou
 use crate::v1::Cover;
 use crate::{CatchUp, KernelError, Payload as _, Registry};
 use crate::{PositionKey, Write};
+use angzarr_router::projector::ProjectorDispatch;
 
 /// One book as the projector was handed it: its stream, its pages'
 /// sequences, and its `next_sequence`.
@@ -78,6 +80,7 @@ fn deposit(store: &MemoryStore, registry: &Registry, n: u128, id: u128, cents: i
     .unwrap();
 }
 
+#[cfg(feature = "purge")]
 /// Purge account `n` at its head.
 fn purge(store: &MemoryStore, n: u128) {
     let stream = cover("account", n);
@@ -240,6 +243,7 @@ fn a_write_landing_during_a_step_is_the_next_steps() {
     assert_eq!(recorder.take(), [(cover("account", 2), vec![2], 3)]);
 }
 
+#[cfg(feature = "purge")]
 /// One moment, purges included: another process purging a stream and
 /// writing others between the step's listing of streams and its reads
 /// (forced here, before its first stream read) is none of that step's, the
@@ -316,6 +320,7 @@ fn written_again(store: &MemoryStore, registry: &Registry, n: u128) {
     deposit(store, registry, n, 90 + n, 6);
 }
 
+#[cfg(feature = "purge")]
 /// A purged stream is no gone stream: sequences never restart, so a
 /// projector is handed its tombstone, then what is written after it, as
 /// ordinary events in ordinary books, held or stored alike.
@@ -353,6 +358,7 @@ fn a_purged_stream_is_handed_its_tombstone_then_what_follows() {
     }
 }
 
+#[cfg(feature = "purge")]
 /// A stream purged and written again to at least the length of the
 /// projector's position, and read by a catch-up started anew (a new
 /// process), is handed the tombstone then the new events, never the old
@@ -381,6 +387,7 @@ fn a_new_stored_catch_up_folds_the_tombstone_then_the_new_events() {
     assert_eq!(position(&store, "recorder", &cover("account", 1)), 6);
 }
 
+#[cfg(feature = "purge")]
 /// A second purge keeps the first tombstone and appends its own; the
 /// projector is handed the second.
 #[test]
@@ -595,4 +602,53 @@ fn a_catch_up_with_no_source_is_refused() {
     });
     assert_eq!(CatchUp::new(&[], Recorder::default()).err(), refused);
     assert_eq!(CatchUp::stored(&[], Recorder::default()).err(), refused);
+}
+
+/// A projector the router holds the projection of (a [`ProjectorDispatch`]):
+/// its batched fold records the sequences of each run it is handed.
+fn folding(seen: Arc<Mutex<Vec<Vec<u64>>>>) -> ProjectorDispatch<()> {
+    ProjectorDispatch::new("folder", || ()).with_fold(move |_, pages, _| {
+        seen.lock()
+            .unwrap()
+            .push(pages.iter().map(|page| page.sequence).collect());
+        Ok(())
+    })
+}
+
+/// The account `n`'s stream with a tombstone appended at its head and
+/// nothing deleted: a run that holds events, then the tombstone.
+fn tombstoned_in_place(store: &MemoryStore, n: u128) {
+    let stream = cover("account", n);
+    let head = slice(store, &stream).next_sequence;
+    let pages = [angzarr_ports::tombstone::page(head)];
+    store
+        .write(Write::append(sref(&stream), head, &pages))
+        .ready()
+        .unwrap();
+}
+
+/// A projection the framework holds is reset at a tombstone inside a book,
+/// held or stored alike: the fold is handed the tombstone and what follows
+/// it, nothing from before.
+#[test]
+fn a_book_holding_events_then_a_tombstone_folds_from_the_tombstone() {
+    let registry = registry();
+    for stored in [false, true] {
+        let store = MemoryStore::new();
+        opened(&store, &registry, 1, 5);
+        tombstoned_in_place(&store, 1);
+        written_again(&store, &registry, 1);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut catch_up = match stored {
+            true => CatchUp::stored(&["account"], folding(seen.clone())).unwrap(),
+            false => CatchUp::new(&["account"], folding(seen.clone())).unwrap(),
+        };
+        let caught = catch_up.step(&store, registry.catalog()).ready().unwrap();
+        assert!(caught.failures().is_empty(), "{:?}", caught.failures());
+        assert_eq!(
+            *seen.lock().unwrap(),
+            [vec![2, 3, 4]],
+            "from the tombstone on ({stored})"
+        );
+    }
 }

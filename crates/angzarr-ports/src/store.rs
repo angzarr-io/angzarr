@@ -269,7 +269,11 @@ impl<T: EventStore + SnapshotStore + PositionStore + ?Sized> Store for T {}
 /// stays listed, and one whose last event is a tombstone is destroyed.
 /// Readers fold the tombstone as an ordinary event: an aggregate's state is
 /// the default again and has no prior events (writes resume from the
-/// tombstone's sequence), a projector resets. A repeat purge removes the events
+/// tombstone's sequence), and a projection the framework holds
+/// (`angzarr_router`'s `ProjectorDispatch`) is put back to its default
+/// before what follows folds, so a read model forgets what was purged
+/// without code of its own; one that keeps state outside the projection is
+/// handed the tombstone to clear it. A repeat purge removes the events
 /// written after the last tombstone and appends a new tombstone only if it
 /// removed any (nothing after the tombstone is a no-op answering 0); the
 /// old tombstones are kept. Its own call. The positions on the stream stay
@@ -305,6 +309,7 @@ impl<T: EventStore + SnapshotStore + PositionStore + ?Sized> Store for T {}
 /// Answers how many events it removed (a tombstone is no event: a purge of
 /// a stream with nothing after its last tombstone answers 0 and changes
 /// nothing).
+#[cfg(feature = "purge")]
 pub trait Purge: MaybeSend + MaybeSync {
     fn purge(
         &self,

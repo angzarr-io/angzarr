@@ -10,7 +10,9 @@ use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
 use angzarr_ports::memory::MemoryStore;
-use angzarr_ports::{EventStore, PositionKey, Purge, StreamRef, Write};
+#[cfg(feature = "purge")]
+use angzarr_ports::Purge;
+use angzarr_ports::{EventStore, PositionKey, StreamRef, Write};
 use angzarr_proto::v1::{event_page, EventPage, Uuid};
 use prost_types::Any;
 
@@ -71,6 +73,7 @@ async fn append(store: &MemoryStore, stream: &Cover, count: u64) {
         .unwrap();
 }
 
+#[cfg(feature = "purge")]
 async fn purge(store: &MemoryStore, stream: &Cover) {
     let sref = StreamRef::try_from(stream).unwrap();
     let head = store.head(sref).await.unwrap().next_sequence;
@@ -161,6 +164,7 @@ where
     true
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn a_stream_delivered_and_then_purged_is_delivered_its_tombstone() {
     let store = MemoryStore::default();
@@ -184,6 +188,7 @@ async fn a_stream_delivered_and_then_purged_is_delivered_its_tombstone() {
     );
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn a_purged_stream_is_delivered_from_the_mark_its_position_holds() {
     let store = MemoryStore::default();
@@ -584,6 +589,7 @@ async fn told_what_a_commit_touched_a_new_stream_is_delivered_from_its_start() {
     assert_eq!((first.stream, first.sequence), (stream(4), 0));
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn told_what_a_commit_touched_a_stream_delivered_and_purged_is_delivered_its_tombstone() {
     let store = MemoryStore::default();
@@ -602,6 +608,7 @@ async fn told_what_a_commit_touched_a_stream_delivered_and_purged_is_delivered_i
     assert_eq!((next.stream, next.sequence), (stream(1), 1));
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn told_what_a_commit_touched_a_purged_and_written_again_stream_continues_after_its_tombstone(
 ) {

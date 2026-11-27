@@ -44,10 +44,11 @@ use crate::notify::{CommitNotify, CommitSignal, CommitWait};
 use crate::store::{
     is_fork, Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore,
     Editions, EventStore, Export, ExportRow, ListStreams, Outbox, OutboxEntry, PositionStore,
-    Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch,
-    Write, Written,
+    Processed, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, SnapshotStore, Watch, Write,
+    Written,
 };
 use crate::stream::{PositionKey, Slice, StreamRef};
+#[cfg(feature = "purge")]
 use crate::tombstone;
 
 /// A stream's place: its fields, ordered as [`StreamRef`] orders them
@@ -177,6 +178,7 @@ impl Log {
         self.len += 1;
     }
 
+    #[cfg(feature = "purge")]
     /// Whether any event follows the last tombstone (or there is no
     /// tombstone and the log holds one).
     fn has_events_after_tombstone(&self) -> bool {
@@ -184,6 +186,7 @@ impl Log {
         self.range(from, self.len).any(|page| !is_fork(page))
     }
 
+    #[cfg(feature = "purge")]
     /// The position of the last tombstone, if any.
     fn last_tombstone(&self) -> Option<usize> {
         self.chunks.iter().rev().find_map(|(start, pages)| {
@@ -194,6 +197,7 @@ impl Log {
         })
     }
 
+    #[cfg(feature = "purge")]
     /// Delete the pages after the last tombstone (from the start, with
     /// none), leaving holes: sequences never move. How many were deleted.
     fn empty_after_tombstone(&mut self) -> u64 {
@@ -398,6 +402,7 @@ impl Data {
     ///
     /// Each collection is changed only if it holds a row of `k`, so a purge
     /// copies no collection it leaves as it was.
+    #[cfg(feature = "purge")]
     fn purge(&mut self, k: &Key) -> u64 {
         if self.snapshots.contains_key(k) {
             Arc::make_mut(&mut self.snapshots).remove(k);
@@ -702,7 +707,8 @@ impl State {
         }
     }
 
-    /// Purge stream `k` (see [`Data::purge`]), its commands with it.
+    /// Purge stream `k` (see `Data::purge`), its commands with it.
+    #[cfg(feature = "purge")]
     fn purge(&mut self, k: &Key) -> u64 {
         self.commands.remove(k);
         let removed = Arc::make_mut(&mut self.data).purge(k);
@@ -885,7 +891,8 @@ impl PositionStore for MemoryStore {
     }
 }
 
-impl Purge for MemoryStore {
+#[cfg(feature = "purge")]
+impl crate::Purge for MemoryStore {
     /// Under the store's lock, so the head checked is the head purged
     /// (14.43).
     async fn purge(&self, stream: StreamRef<'_>, expected: u64) -> Result<u64, StoreError> {

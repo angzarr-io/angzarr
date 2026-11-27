@@ -19,6 +19,11 @@ memory = []
 # `faulty::FaultyStore`: any backend failing what a test says, and changed
 # between its calls. For a backend's callers' tests.
 faulty = []
+# The purge capability: the `Purge` port and each backend's implementation of it,
+# with the contract checks that purge. OFF by default: a default build is
+# append-only and has no purge API at all. READING a tombstone
+# (`tombstone`) is in every build.
+purge = []
 
 [dependencies]
 # Every error is an coded_diagnostic::Diagnostic (zero dependencies;

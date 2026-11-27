@@ -58,9 +58,11 @@ jobs:
       - run: just build
       - run: just fmt-check
       - run: just lint
+      - run: just lint-purge
       - run: just archlint
       - run: just lint-deps
       - run: just test
+      - run: just test-purge
       - run: just selftest
       - name: The gates' logs
         if: failure()

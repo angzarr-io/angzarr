@@ -53,6 +53,8 @@ impl ChangesFixture for Memory {
 mod memory {
     use super::Memory;
     angzarr_ports::changes_contract!(#[tokio::test], Memory::default());
+    #[cfg(feature = "purge")]
+    angzarr_ports::changes_contract!(purge, #[tokio::test], Memory::default());
 }
 
 /// A fault-injecting wrapper over a memory store: forwarding, no fault.
@@ -77,6 +79,8 @@ impl ChangesFixture for Faulty {
 mod faulty {
     use super::Faulty;
     angzarr_ports::changes_contract!(#[tokio::test], Faulty::default());
+    #[cfg(feature = "purge")]
+    angzarr_ports::changes_contract!(purge, #[tokio::test], Faulty::default());
 }
 
 #[tokio::test]

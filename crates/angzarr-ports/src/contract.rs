@@ -121,12 +121,15 @@ use prost_types::{Any, Timestamp};
 use crate::error::StoreError;
 use crate::migrate::{latest, AppliedMigration, Backup, Migration, MigrationStatus, Migrations};
 use crate::notify::CommitNotify;
+#[cfg(feature = "purge")]
+use crate::store::Purge;
 use crate::store::{
     Append, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, Editions, EventStore, Export,
-    ExportRow, ListStreams, Outbox, OutboxEntry, Processed, Purge, ReadByCorrelation, ReadStore,
-    ReadUnit, ReadUntilTime, Store, Watch, Write, Written,
+    ExportRow, ListStreams, Outbox, OutboxEntry, Processed, ReadByCorrelation, ReadStore, ReadUnit,
+    ReadUntilTime, Store, Watch, Write, Written,
 };
 use crate::stream::{PositionKey, StreamRef};
+#[cfg(feature = "purge")]
 use crate::tombstone;
 
 #[path = "changes_contract.rs"]
@@ -1005,6 +1008,7 @@ pub async fn two_writers_racing_on_one_stream_land_one<S: Store>((a, b): (S, S))
 
 // ------------------------------------------------------------ purge (opt-in)
 
+#[cfg(feature = "purge")]
 /// `stream` as a purge leaves it with `closed` events removed: its events
 /// gone but for ONE tombstone at the sequence the purge found as the head,
 /// no snapshot, no command ids, and still listed.
@@ -1032,6 +1036,7 @@ async fn assert_closed<S: Store>(store: &S, stream: StreamRef<'_>, at: u64, what
     );
 }
 
+#[cfg(feature = "purge")]
 /// A purge deletes a stream's events, snapshot and command ids and keeps
 /// the stream: it appends ONE tombstone ([`tombstone::StreamClosed`]) at
 /// the next sequence, so a purged stream is listed and its last event is
@@ -1076,6 +1081,7 @@ where
     );
 }
 
+#[cfg(feature = "purge")]
 /// A purge never touches the positions on its stream: they are its
 /// drivers' record of what their handlers processed, and the tombstone,
 /// at the sequence a position stands at, is the next thing they read.
@@ -1104,6 +1110,7 @@ where
     );
 }
 
+#[cfg(feature = "purge")]
 pub async fn a_purge_deletes_a_snapshot_with_no_events<S>(store: S)
 where
     S: Store + Purge,
@@ -1119,6 +1126,7 @@ where
     );
 }
 
+#[cfg(feature = "purge")]
 /// Sequence numbers never restart: a write continues after the tombstone,
 /// a writer that raced the purge is refused, and a reader across the purge
 /// folds the tombstone, then the new events.
@@ -1163,6 +1171,7 @@ where
     );
 }
 
+#[cfg(feature = "purge")]
 /// A second purge removes the events written after the last tombstone and
 /// appends a new tombstone after them; the old tombstone stays.
 pub async fn a_second_purge_keeps_the_first_tombstone<S>(store: S)
@@ -1195,6 +1204,7 @@ where
 
 // ------------------------------------------- purge's expected head (14.43)
 
+#[cfg(feature = "purge")]
 /// `s` whole as `purge_fixture` wrote it: nothing a refused purge touched.
 async fn assert_unpurged<S: Store>(store: &S, s: StreamRef<'_>, what: &str) {
     let slice = store.read(s, 0, None).await.unwrap();
@@ -1222,6 +1232,7 @@ async fn assert_unpurged<S: Store>(store: &S, s: StreamRef<'_>, what: &str) {
     assert!(listed.contains(&s.to_cover()), "{what}: covers {listed:?}");
 }
 
+#[cfg(feature = "purge")]
 /// `s` with two events, a snapshot and a handler's position on it.
 async fn purge_fixture<S: Store>(store: &S, s: StreamRef<'_>) {
     append(store, s, 0, &[page(0, 1), page(1, 2)])
@@ -1231,6 +1242,7 @@ async fn purge_fixture<S: Store>(store: &S, s: StreamRef<'_>) {
     put(store, key("a", s), 2).await.unwrap();
 }
 
+#[cfg(feature = "purge")]
 /// 14.43: a purge at the head its caller read deletes the stream's events
 /// and leaves its tombstone; the positions on it stay.
 pub async fn a_purge_at_the_streams_head_removes_it<S>(store: S)
@@ -1249,6 +1261,7 @@ where
     );
 }
 
+#[cfg(feature = "purge")]
 /// 14.43: a purge at any head but the stream's is refused as a conflict
 /// (re-read, decide again), and removes nothing. The race it closes: a
 /// prune read the stream, then an event landed on it (the task re-created
@@ -1293,6 +1306,7 @@ where
     assert_eq!(store.position(key("a", s)).await, Ok(2), "its position");
 }
 
+#[cfg(feature = "purge")]
 /// 14.43: an absent stream is at 0. A purge at 0 removes what it still
 /// holds and answers 0; one at more is a conflict, which is how the second
 /// of two racing purges of one read learns the first got there.
@@ -1322,6 +1336,7 @@ where
     assert_closed(&store, s, 2, "purged once").await;
 }
 
+#[cfg(feature = "purge")]
 /// 14.43: a purge never takes the positions on its stream, refused or
 /// landed: every handler stays where it was.
 pub async fn a_purge_never_takes_the_positions_on_its_stream<S>(store: S)
@@ -1358,6 +1373,7 @@ where
     );
 }
 
+#[cfg(feature = "purge")]
 /// 14.43, editions: an edition stream's purge is guarded by its head as
 /// read (main's events below its fork, then its own), not main's head nor
 /// its own row count. It deletes only the stream's own EVENTS (never
@@ -1411,6 +1427,7 @@ where
     );
 }
 
+#[cfg(feature = "purge")]
 /// An edition's tombstone is a main stream's: a repeat purge with nothing
 /// after it is a no-op, the edition's writes continue past it, and a second
 /// purge keeps the first tombstone.
@@ -1445,6 +1462,7 @@ where
     );
 }
 
+#[cfg(feature = "purge")]
 /// An edition stream with no row of its own reads as main's: a purge of it
 /// at main's head removes nothing and appends nothing (a tombstone is its
 /// own row, and the first own row of an edition is its fork).
@@ -1909,6 +1927,7 @@ where
     a_read_unit_sees_the_store_as_it_began_between(&store, &store).await;
 }
 
+#[cfg(feature = "purge")]
 async fn a_read_unit_keeps_a_stream_purged_after_it_began_between<S>(reader: &S, writer: &S)
 where
     S: Store + ReadStore + Purge,
@@ -1936,6 +1955,7 @@ where
     );
 }
 
+#[cfg(feature = "purge")]
 pub async fn a_read_unit_keeps_a_stream_purged_after_it_began<S>((reader, writer): (S, S))
 where
     S: Store + ReadStore + Purge,
@@ -1943,6 +1963,7 @@ where
     a_read_unit_keeps_a_stream_purged_after_it_began_between(&reader, &writer).await;
 }
 
+#[cfg(feature = "purge")]
 pub async fn a_read_unit_keeps_a_stream_purged_after_it_began_through_one_handle<S>(store: S)
 where
     S: Store + ReadStore + Purge,
@@ -1997,6 +2018,7 @@ where
     a_read_unit_heads_and_snapshots_as_it_began_between(&store, &store).await;
 }
 
+#[cfg(feature = "purge")]
 /// A stream purged after a read unit began keeps, through the unit, its
 /// head and its snapshot as well as its pages.
 async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began_between<S>(
@@ -2024,6 +2046,7 @@ async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_beg
     assert_eq!(later.read_snapshot(s).await, Ok(None));
 }
 
+#[cfg(feature = "purge")]
 pub async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began<S>(
     (reader, writer): (S, S),
 ) where
@@ -2035,6 +2058,7 @@ pub async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it
     .await;
 }
 
+#[cfg(feature = "purge")]
 pub async fn a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began_through_one_handle<
     S,
 >(
@@ -2435,6 +2459,7 @@ where
     assert_eq!(store.processed("nobody").await, Ok(vec![]));
 }
 
+#[cfg(feature = "purge")]
 /// A handler's record of a stream outlives the stream's purge (the stream
 /// is kept, with its tombstone, and stays listed); forgotten (its position
 /// put back to 0), it is out of the record.
@@ -3055,6 +3080,7 @@ where
     assert_eq!(store.position(k).await, Ok(0), "nothing landed");
 }
 
+#[cfg(feature = "purge")]
 /// A purge of a stream removes the letters about it, and only when it
 /// lands: a refused purge keeps them.
 pub async fn a_purge_removes_the_dead_letters_about_its_stream<S>(store: S)
@@ -3994,7 +4020,9 @@ pub const SHARED_HANDLES: &[&str] = &[
     "a_read_unit_sees_the_store_as_it_began",
     "a_read_unit_heads_and_snapshots_as_it_began",
     "a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main",
+    #[cfg(feature = "purge")]
     "a_read_unit_keeps_a_stream_purged_after_it_began",
+    #[cfg(feature = "purge")]
     "a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began",
     "export_is_one_moment_while_a_writer_writes",
 ];
@@ -4131,6 +4159,10 @@ macro_rules! store_contract {
     (processed, $(#[$t:meta])+, $f:expr) => {
         $crate::store_contract!(@each [$(#[$t])+], $f;
             processed_is_a_handlers_record_in_stream_order,
+        );
+    };
+    (processed_purge, $(#[$t:meta])+, $f:expr) => {
+        $crate::store_contract!(@each [$(#[$t])+], $f;
             a_handlers_record_outlives_a_purge_until_forgotten,
         );
     };

@@ -502,6 +502,7 @@ impl Harness for Broken {
         Harness::append(&self.run, stream).await;
     }
 
+    #[cfg(feature = "purge")]
     async fn purge(&self, stream: &Cover) {
         Harness::purge(&self.run, stream).await;
     }
@@ -660,6 +661,7 @@ impl TransportHarness for Broken {
         Harness::append(&self.run, stream).await;
     }
 
+    #[cfg(feature = "purge")]
     async fn purge(&self, stream: &Cover) {
         Harness::purge(&self.run, stream).await;
     }
@@ -738,7 +740,11 @@ async fn allows<F: Future<Output = ()>>(flaw: Flaw, check: impl Fn(Broken) -> F)
 mod honest {
     use super::Broken;
     angzarr_bus::bus_contract!(#[tokio::test(start_paused = true)], Broken::new(None));
+    #[cfg(feature = "purge")]
+    angzarr_bus::bus_contract!(purge, #[tokio::test(start_paused = true)], Broken::new(None));
     angzarr_bus::transport_contract!(#[tokio::test(start_paused = true)], Broken::new(None));
+    #[cfg(feature = "purge")]
+    angzarr_bus::transport_contract!(purge, #[tokio::test(start_paused = true)], Broken::new(None));
 }
 
 mod bus_checks {
@@ -823,6 +829,7 @@ mod bus_checks {
         allows(Flaw::HoldsBugs, kit::a_policys_bug_is_dead_lettered_or_held).await;
     }
 
+    #[cfg(feature = "purge")]
     #[tokio::test(start_paused = true)]
     async fn the_purge_check_fails_a_bus_that_skips_a_tombstone() {
         let check = kit::a_purged_stream_hands_a_projector_its_tombstone_then_what_follows;
@@ -1024,6 +1031,7 @@ mod transport_checks {
         catches(Flaw::Narrow, "timed out", check).await;
     }
 
+    #[cfg(feature = "purge")]
     #[tokio::test(start_paused = true)]
     async fn every_check_that_waits_fails_a_feed_that_only_answers_idle() {
         let check = kit::a_purged_stream_delivers_its_tombstone_then_what_follows;

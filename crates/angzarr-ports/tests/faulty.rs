@@ -12,10 +12,12 @@ use std::sync::Arc;
 use angzarr_ports::contract::{command, dead_letter, main_stream, page, snapshot};
 use angzarr_ports::faulty::{At, Fault, FaultyStore, WriteRecord, INJECTED};
 use angzarr_ports::memory::MemoryStore;
+#[cfg(feature = "purge")]
+use angzarr_ports::Purge;
 use angzarr_ports::{
     Cause, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore, ListStreams, PositionKey,
-    PositionStore, Processed, Purge, ReadStore, ReadUnit, SnapshotStore, StoreError, StreamRef,
-    Watch, Write,
+    PositionStore, Processed, ReadStore, ReadUnit, SnapshotStore, StoreError, StreamRef, Watch,
+    Write,
 };
 
 fn stream() -> StreamRef<'static> {
@@ -135,6 +137,7 @@ async fn a_new_script_replaces_the_faults_still_due() {
     append(&store, stream(), 1).await.unwrap();
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn a_purge_takes_the_next_fault_and_counts_as_an_attempt() {
     let store = holding(2).await;
@@ -146,6 +149,7 @@ async fn a_purge_takes_the_next_fault_and_counts_as_an_attempt() {
     assert_eq!(store.attempts(), 2);
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn a_purge_conflict_names_the_purged_stream() {
     let store = holding(2).await;
@@ -221,8 +225,12 @@ async fn an_interleaving_waits_for_the_nth_call() {
 }
 
 #[tokio::test]
-async fn an_interleaving_at_any_runs_before_the_first_read_write_or_purge() {
-    for call in [At::Read, At::Write, At::Purge] {
+async fn an_interleaving_at_any_runs_before_the_first_read_or_write() {
+    #[cfg(feature = "purge")]
+    let calls = [At::Read, At::Write, At::Purge];
+    #[cfg(not(feature = "purge"))]
+    let calls = [At::Read, At::Write];
+    for call in calls {
         let store = holding(1).await;
         let runs = Arc::new(AtomicU32::new(0));
         store.before(At::Any, appending(&runs));
@@ -237,13 +245,35 @@ async fn an_interleaving_at_any_runs_before_the_first_read_write_or_purge() {
         match call {
             At::Read => drop(store.read(stream(), 0, None).await.unwrap()),
             At::Write => append(&store, stream(), 1).await.unwrap(),
+            #[cfg(feature = "purge")]
             _ => drop(store.purge(stream(), 1).await.unwrap()),
+            #[cfg(not(feature = "purge"))]
+            _ => unreachable!("only a read and a write are made"),
         }
         assert_eq!(runs.load(Ordering::SeqCst), 1, "{call:?}");
         assert!(store.ran(At::Any));
     }
 }
 
+#[tokio::test]
+async fn an_interleaving_at_a_write_waits_out_a_read_and_a_unit_read() {
+    let store = holding(1).await;
+    let runs = Arc::new(AtomicU32::new(0));
+    store.before(At::Write, appending(&runs));
+    store.before(At::UnitRead, appending(&runs));
+    store.read(stream(), 0, None).await.unwrap();
+    assert_eq!(runs.load(Ordering::SeqCst), 0);
+    append(&store, stream(), 1).await.unwrap();
+    assert_eq!(runs.load(Ordering::SeqCst), 1);
+    assert!(!store.ran(At::UnitRead));
+    let mut unit = store.begin_read().await.unwrap();
+    unit.covers("ledger").await.unwrap();
+    assert_eq!(runs.load(Ordering::SeqCst), 1, "not at a unit's covers");
+    unit.read(stream(), 0, None).await.unwrap();
+    assert_eq!(runs.load(Ordering::SeqCst), 2);
+}
+
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn an_interleaving_at_one_kind_of_call_waits_out_the_others() {
     let store = holding(1).await;

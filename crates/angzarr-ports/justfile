@@ -41,16 +41,22 @@ fmt-check:
 build:
     cargo build --locked -p angzarr-ports --all-features
 
+# Lint, test and build-tests run both flavours: `--all-features` is the `purge`
+# flavour (the purge capability on); the explicit feature list is the default
+# one (append-only, no purge API).
 lint:
     cargo clippy --locked -p angzarr-ports --all-targets --all-features -- -D warnings
+    cargo clippy --locked -p angzarr-ports --all-targets --features contract,memory,faulty -- -D warnings
 
 # The tests are the suite run against the reference backend: they need it
 test:
     cargo test --locked -p angzarr-ports --all-features
+    cargo test --locked -p angzarr-ports --features contract,memory,faulty
 
 # Build the tests without running them
 build-tests:
     cargo test --locked -p angzarr-ports --all-features --no-run
+    cargo test --locked -p angzarr-ports --features contract,memory,faulty --no-run
 
 # The contract must build for the browser, suite and memory store included,
 # and so must the suite's run on a store that is not Send (tests/wasm.rs).
@@ -59,6 +65,7 @@ wasm:
     cargo build --locked -p angzarr-ports --target wasm32-unknown-unknown
     cargo build --locked -p angzarr-ports --target wasm32-unknown-unknown --all-features
     cargo test --locked -p angzarr-ports --target wasm32-unknown-unknown --all-features --no-run
+    cargo test --locked -p angzarr-ports --target wasm32-unknown-unknown --features contract,memory,faulty --no-run
 
 # Run the wasm tests: the suite on a store that is not Send (`just tools`
 # installs the runner). Needs node on PATH.

@@ -277,6 +277,7 @@ impl Harness for Embedded {
         assert!(handled.is_ok(), "the suite's append is handled");
     }
 
+    #[cfg(feature = "purge")]
     async fn purge(&self, stream: &Cover) {
         let head = self
             .memory()
@@ -333,10 +334,14 @@ impl Harness for Embedded {
 mod durable_scan {
     use super::Embedded;
     angzarr_bus::bus_contract!(#[tokio::test(start_paused = true)], Embedded::new());
+    #[cfg(feature = "purge")]
+    angzarr_bus::bus_contract!(purge, #[tokio::test(start_paused = true)], Embedded::new());
 }
 
 /// The suite again with the bus told which streams a commit touched.
 mod incremental_scan {
     use super::Embedded;
     angzarr_bus::bus_contract!(#[tokio::test(start_paused = true)], Embedded::incremental());
+    #[cfg(feature = "purge")]
+    angzarr_bus::bus_contract!(purge, #[tokio::test(start_paused = true)], Embedded::incremental());
 }

@@ -438,3 +438,93 @@ fn a_batched_fold_failure_names_its_page_or_the_batchs_range() {
         "/test.Board",
     );
 }
+
+// A tombstone (a purge's) puts the projection back to its default: what was
+// folded before it is gone, and the events after it are the projection's
+// alone.
+
+/// A run of `before` events, a tombstone, then `after` events, numbered.
+fn purged_run(before: usize, after: usize) -> Vec<pb::EventPage> {
+    let mut pages = cover_pages("order", before);
+    pages.push(angzarr_ports::tombstone::page(before as u64));
+    pages.extend(cover_pages("order", after));
+    for (seq, page) in pages.iter_mut().enumerate() {
+        page.sequence = seq as u64;
+    }
+    pages
+}
+
+/// The tombstone's registered type name: how a projector that keeps state
+/// outside its projection opts into being handed it.
+fn tombstone_name() -> String {
+    use prost::Name;
+    angzarr_ports::tombstone::StreamClosed::full_name()
+}
+
+#[test]
+fn a_tombstone_resets_the_projection_before_what_follows_folds() {
+    let proj = counting_projector(None)
+        .dispatch(&book("order", purged_run(3, 2)))
+        .expect("dispatch");
+    assert_eq!(count(&proj), 2, "only what follows the tombstone is folded");
+}
+
+#[test]
+fn the_latest_of_several_tombstones_resets() {
+    let mut pages = purged_run(2, 1);
+    pages.push(angzarr_ports::tombstone::page(4));
+    pages.extend(cover_pages("order", 3));
+    let proj = counting_projector(None)
+        .dispatch(&book("order", pages))
+        .expect("dispatch");
+    assert_eq!(count(&proj), 3);
+}
+
+#[test]
+fn a_run_ending_in_a_tombstone_projects_the_default() {
+    let proj = counting_projector(None)
+        .dispatch(&book("order", purged_run(4, 0)))
+        .expect("dispatch");
+    assert_eq!(count(&proj), 0, "a destroyed stream projects nothing");
+}
+
+#[test]
+fn a_projector_with_a_tombstone_handler_is_handed_it_after_the_reset() {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let projector = counting_projector(None).on_event(&tombstone_name(), move |p, _any, ctx| {
+        sink.lock().unwrap().push((p.entries.len(), ctx.sequence));
+        Ok(())
+    });
+    let proj = projector
+        .dispatch(&book("order", purged_run(3, 2)))
+        .expect("dispatch");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![(0, 3)],
+        "handed once, onto a projection already reset, at its sequence"
+    );
+    assert_eq!(count(&proj), 2);
+}
+
+#[test]
+fn a_projector_with_no_tombstone_handler_skips_it_without_a_handler_warning() {
+    let proj = counting_projector(None)
+        .dispatch(&book("order", purged_run(0, 2)))
+        .expect("dispatch");
+    assert_eq!(count(&proj), 2);
+}
+
+#[test]
+fn a_batched_fold_is_handed_the_pages_from_the_latest_tombstone() {
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let proj = batched(calls.clone())
+        .dispatch(&book("order", purged_run(3, 2)))
+        .expect("dispatch");
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![(vec![3, 4, 5], "order".to_string())],
+        "the tombstone first, nothing before it"
+    );
+    assert_eq!(count(&proj), 3);
+}

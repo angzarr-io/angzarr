@@ -22,7 +22,7 @@
 //! | [`SnapshotStore`] | the snapshot last written per stream; the caller judges it | base |
 //! | [`PositionStore`] | a handler's next sequence per stream | base |
 //! | [`EventStore::write`] | ONE handling step's atomic write: optionally one stream's events at an expected length, with the step's positions and outbox entries; there is no unit of work | base |
-//! | [`Purge`] | delete a stream, never the positions on it | opt-in |
+//! | `Purge` (the `purge` feature, off by default) | delete a stream, never the positions on it; absent from a default build, which is append-only (reading a tombstone is in every build) | opt-in, feature |
 //! | [`Editions`] | per-stream forks' administration: `ListEditions`, and removing an edition stream's rows (`DeleteEdition`'s step) | opt-in |
 //! | [`EditionKnown`] | does a fork of an edition exist: the one question a reader of editions asks, with no write; every [`Editions`] store has it | opt-in |
 //! | [`EventRead`] | [`EventStore`]'s read, head and covers, with no `write`; every [`EventStore`] is one | read-only |
@@ -70,6 +70,15 @@
 //!   process" between its calls: for a caller's tests of its retries,
 //!   races and lost answers.
 
+/// A build without the `purge` feature has no purge port at all: the trait
+/// is absent, not refusing.
+///
+/// ```compile_fail,E0432
+/// use angzarr_ports::Purge;
+/// ```
+#[cfg(not(feature = "purge"))]
+pub mod without_purge {}
+
 mod changes;
 mod error;
 mod notify;
@@ -99,11 +108,13 @@ pub use migrate::{
 };
 pub use notify::{CommitNotify, CommitSignal, CommitWait, WeakCommitSignal};
 pub use send::{MaybeSend, MaybeSync};
+#[cfg(feature = "purge")]
+pub use store::Purge;
 pub use store::{
     is_fork, Append, ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore,
     EditionKnown, Editions, EventRead, EventStore, Export, ExportRow, ListStreams, Outbox,
-    OutboxEntry, PositionStore, Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit,
-    ReadUntilTime, SnapshotStore, Store, Watch, Write, Written,
+    OutboxEntry, PositionStore, Processed, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime,
+    SnapshotStore, Store, Watch, Write, Written,
 };
 pub use stream::{Head, PositionKey, Slice, StreamRef};
 

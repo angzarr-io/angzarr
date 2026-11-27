@@ -1379,5 +1379,7 @@ pub fn assert_letter(
 /// read it, and the ports' traits, so their methods are in scope.
 pub mod prelude {
     pub use super::{pages, position, slice, sref, streams, MemoryStore, Ready};
-    pub use crate::{EventStore, PositionStore, Purge, SnapshotStore, Write};
+    #[cfg(feature = "purge")]
+    pub use crate::Purge;
+    pub use crate::{EventStore, PositionStore, SnapshotStore, Write};
 }
