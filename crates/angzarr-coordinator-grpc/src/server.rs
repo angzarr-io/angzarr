@@ -473,7 +473,7 @@ impl HealthStatus {
 /// task while the server runs. The server itself sets `""` SERVING once
 /// bound and NOT_SERVING as shutdown begins; a status set after shutdown
 /// began is answered by nothing.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Health {
     reporter: HealthReporter,
 }
@@ -484,12 +484,6 @@ impl Health {
     /// A Check and every open Watch of that name hear it.
     pub async fn set(&self, service: &str, status: HealthStatus) {
         self.reporter.set_service_status(service, status.of()).await;
-    }
-}
-
-impl std::fmt::Debug for Health {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Health").finish_non_exhaustive()
     }
 }
 
