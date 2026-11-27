@@ -78,6 +78,7 @@ mod dedup {
         );
     }
 
+    #[cfg(feature = "purge")]
     #[test]
     fn a_creating_command_redelivered_after_a_purge_creates_its_stream_again() {
         let registry = registry();

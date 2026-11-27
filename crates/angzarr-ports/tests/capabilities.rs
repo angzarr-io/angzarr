@@ -36,6 +36,7 @@ mod one_handle_read_units_pass_on_an_isolated_handle {
     angzarr_ports::store_contract!(read_one_handle, #[tokio::test], isolated_pair().0);
 }
 
+#[cfg(feature = "purge")]
 mod one_handle_read_unit_purges_pass_on_an_isolated_handle {
     use super::*;
     angzarr_ports::store_contract!(read_one_handle_purge, #[tokio::test], isolated_pair().1);
@@ -61,6 +62,7 @@ mod shared_handles_read_fails_on_isolated_handles {
     );
 }
 
+#[cfg(feature = "purge")]
 mod shared_handles_read_purge_fails_on_isolated_handles {
     use super::*;
     angzarr_ports::store_contract!(
@@ -130,6 +132,7 @@ mod legacy_read_still_holds_the_read_unit_checks {
     );
 }
 
+#[cfg(feature = "purge")]
 mod legacy_read_purge_still_holds_its_checks {
     use super::*;
     angzarr_ports::store_contract!(
@@ -177,12 +180,14 @@ mod one_handle_export_dead_letters_passes_on_an_isolated_handle {
     angzarr_ports::store_contract!(export_dead_letters, #[tokio::test], isolated_pair().0);
 }
 
-/// The capability's checks, by name, are the ones the sections run.
+/// The capability's checks, by name, are the ones the sections run: nine
+/// with the `purge` feature (two read-unit checks purge), seven without.
 #[test]
-fn the_capability_lists_its_nine_checks() {
-    assert_eq!(angzarr_ports::contract::SHARED_HANDLES.len(), 9);
+fn the_capability_lists_the_checks_each_flavour_runs() {
+    let expected = if cfg!(feature = "purge") { 9 } else { 7 };
+    assert_eq!(angzarr_ports::contract::SHARED_HANDLES.len(), expected);
     let mut names = angzarr_ports::contract::SHARED_HANDLES.to_vec();
     names.sort_unstable();
     names.dedup();
-    assert_eq!(names.len(), 9, "no check twice");
+    assert_eq!(names.len(), expected, "no check twice");
 }

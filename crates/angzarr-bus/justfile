@@ -24,15 +24,21 @@ fmt-check:
 build:
     cargo build --locked -p angzarr-bus --all-features
 
+# Lint, test and build-tests run both flavours: `--all-features` is the `purge`
+# flavour (the purge capability on); the explicit feature list is the default
+# one (append-only, no purge API).
 lint:
     cargo clippy --locked -p angzarr-bus --all-targets --all-features -- -D warnings
+    cargo clippy --locked -p angzarr-bus --all-targets --features contract -- -D warnings
 
 test:
     cargo test --locked -p angzarr-bus --all-features
+    cargo test --locked -p angzarr-bus --features contract
 
 # Build the tests without running them
 build-tests:
     cargo test --locked -p angzarr-bus --all-features --no-run
+    cargo test --locked -p angzarr-bus --features contract --no-run
 
 # The interface and its suite must build for the browser, where a bus's
 # futures need not be Send

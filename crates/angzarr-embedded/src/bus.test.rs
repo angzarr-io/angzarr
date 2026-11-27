@@ -87,6 +87,7 @@ impl Worker {
     }
 
     /// Failing with a bug, not retryably.
+    #[cfg(feature = "purge")]
     fn buggy(self) -> Worker {
         self.log().buggy = true;
         self
@@ -423,6 +424,7 @@ async fn a_retryable_failure_is_retried_then_dead_lettered_at_the_cap() {
     assert_eq!(store.dead_letters(sref(&at_cap)).ready().unwrap().len(), 1);
 }
 
+#[cfg(feature = "purge")]
 /// A stream handled and purged since is handed its tombstone, an event at
 /// the next sequence, by the bus that handled it and by a new one on the
 /// store; its position moves past it.
@@ -454,6 +456,7 @@ async fn a_purged_stream_is_handed_its_tombstone() {
     assert_eq!(again.handed(), [(cover("account", 2), vec![2])]);
 }
 
+#[cfg(feature = "purge")]
 /// A stream purged and written again to at least the length of the mark,
 /// while no bus runs: sequences never restart, so a new bus hands the
 /// tombstone, then the new events, each once.
@@ -499,6 +502,7 @@ async fn a_stream_purged_and_rewritten_while_the_bus_was_down_is_handed_its_tomb
     assert_eq!(position(&store, "worker", &stream), 6);
 }
 
+#[cfg(feature = "purge")]
 /// A subscription new to a purged stream (no position on it) is handed the
 /// tombstone then what follows: the events below the tombstone are deleted
 /// and the stream goes on past them.
@@ -528,6 +532,7 @@ async fn a_new_subscription_to_a_purged_stream_is_handed_its_tombstone_then_what
     assert_eq!(position(&store, "worker", &stream), 4);
 }
 
+#[cfg(feature = "purge")]
 /// A tombstone's book that fails retryably, with retries off, is held and
 /// handed again like any event's.
 #[tokio::test]
@@ -558,6 +563,7 @@ async fn a_failed_tombstone_book_is_held_and_handed_again() {
     assert_eq!(position(&store, "worker", &purged), 3);
 }
 
+#[cfg(feature = "purge")]
 /// A tombstone's book that fails with a bug is dead-lettered and the
 /// position moves past it, as an event's does.
 #[tokio::test]
@@ -741,6 +747,7 @@ async fn a_policy_moved_from_inline_to_the_bus_keeps_its_place() {
     assert_eq!(position(&store, "bookkeeping", &cover("account", 1)), 3);
 }
 
+#[cfg(feature = "purge")]
 /// A purged stream's tombstone is no event a policy is called for: it is
 /// passed, and the position moves past it.
 #[tokio::test]

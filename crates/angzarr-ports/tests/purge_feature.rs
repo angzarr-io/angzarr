@@ -18,10 +18,18 @@ fn a_purge_build_offers_the_purge_port() {
 async fn a_build_of_any_flavour_reads_a_stream_that_holds_a_tombstone() {
     let store = MemoryStore::new();
     let s = main_stream("account", 1);
-    append(&store, s, 0, &[page(0, 1), page(1, 2), tombstone::page(2), page(3, 3)])
-        .await
-        .unwrap();
+    append(
+        &store,
+        s,
+        0,
+        &[page(0, 1), page(1, 2), tombstone::page(2), page(3, 3)],
+    )
+    .await
+    .unwrap();
     let read = EventStore::read(&store, s, 0, None).await.unwrap();
-    assert!(tombstone::is(&read.pages[2]), "the tombstone reads as an event");
+    assert!(
+        tombstone::is(&read.pages[2]),
+        "the tombstone reads as an event"
+    );
     assert_eq!(read.pages.len(), 4);
 }

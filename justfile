@@ -48,7 +48,10 @@ default:
     @just --list
 
 # Every gate the Linux CI job runs after the build, stopping at the first failure.
-check: fmt-check lint archlint lint-deps test selftest
+# Tests and lint run in BOTH flavours: the default (append-only, no purge
+# capability) and the `purge` feature (the owner's rule: both are built and
+# released, and CI runs every suite in both).
+check: fmt-check lint lint-purge archlint lint-deps test test-purge selftest
 
 # Build everything, tests included.
 [no-exit-message]
@@ -67,14 +70,22 @@ build:
 lint:
     @just _run lint workspace cargo just _lint
 
-# Clippy, warnings denied, over the workspace.
+# `lint` with the `purge` feature on across the workspace.
+[no-exit-message]
+lint-purge:
+    @GATE_FEATURES=purge just _run lint-purge workspace cargo just _lint
+
+# Clippy, warnings denied, over the workspace. `GATE_FEATURES` (a space
+# separated list) turns a flavour's features on.
 [no-exit-message]
 _lint:
     #!/usr/bin/env bash
     set -euo pipefail
     terse=(-q --message-format=short)
     [ "${VERBOSE:-}" = 1 ] && terse=()
-    cargo clippy "${terse[@]}" --workspace --all-targets -- -D warnings
+    features=()
+    for extra in ${GATE_FEATURES:-}; do features+=(--features "$extra"); done
+    cargo clippy "${terse[@]}" --workspace --all-targets ${features[@]+"${features[@]}"} -- -D warnings
     just licence-check
 
 # Hold every crate's licence to licences.tsv: its Cargo `license`, its LICENSE-*
@@ -162,3 +173,4 @@ build-portable:
 [no-exit-message]
 test-portable:
     @just test-pkg {{portable_crates}}
+    @GATE_FEATURES=purge just test-pkg {{portable_crates}}

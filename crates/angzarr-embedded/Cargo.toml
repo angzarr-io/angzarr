@@ -49,6 +49,10 @@ sqlite = ["dep:angzarr-store-sqlite"]
 # with no store (`Stream::execute`), for tests of the pipeline's steps.
 # Tests only; an application runs `Kernel::handle`.
 test-support = ["angzarr-ports/memory", "angzarr-ports/faulty"]
+# The purge capability: re-exports `Purge` and enables it on the ports and on
+# the SQLite store. OFF by default: the default build is append-only and has
+# no purge API. Reading a tombstone is in every build.
+purge = ["angzarr-ports/purge", "angzarr-store-sqlite?/purge"]
 
 # The kernel's tests run on angzarr-ports' MemoryStore and, on a tokio
 # runtime, on the shared SQLite adapter (sqlite.test.rs); and a decorated

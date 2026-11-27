@@ -6,6 +6,20 @@ the conformance suite every backend runs (`contract`). The crate's
 documentation (`src/lib.rs`) is the reference; this file points at what
 moved lately.
 
+## The `purge` feature
+
+Purging is a compile-time capability, the cargo feature `purge`, **off by
+default**. A default build is append-only: the `Purge` port, each backend's
+implementation (`MemoryStore`, `FaultyStore`, `angzarr-store-sqlite`) and the
+suite's purge checks do not exist. Reading a tombstone (`tombstone`,
+`StreamClosed`) is in every build, so a default build folds a store that a
+purge build wrote. The feature propagates: `angzarr-store-sqlite/purge`,
+`angzarr-embedded/purge`, `angzarr-bus/purge` and the test crates' `purge` all
+enable `angzarr-ports/purge`. A product that purges (angzarr, Cherenkov,
+taskloom, ctxloom) enables `purge` on the crate it depends on and ships both
+flavours; `just check` runs lint and tests in both (`lint-purge`,
+`test-purge`).
+
 ## The change feed (`Changes`)
 
 What a store tells a follower about what changed, so a follower that keeps

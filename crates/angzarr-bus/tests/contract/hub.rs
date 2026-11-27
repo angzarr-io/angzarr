@@ -639,6 +639,7 @@ async fn a_delivery_at_the_mark_is_never_past_the_room() {
     assert!(!held_at_mark, "{:?}", script.settled());
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn a_purged_streams_tombstone_is_handed_as_an_event_and_the_position_moves_past_it() {
     let rig = Rig::with(2).await;
@@ -654,6 +655,7 @@ async fn a_purged_streams_tombstone_is_handed_as_an_event_and_the_position_moves
     assert_eq!(rig.position("projector").await, 3, "past the tombstone");
 }
 
+#[cfg(feature = "purge")]
 /// A delivery past the deleted events of a purged stream (a subscriber new
 /// to it, its mark at 0): the stream runs on from its tombstone, so the
 /// hub recovers from there and hands the tombstone, then the delivery.
@@ -671,6 +673,7 @@ async fn a_delivery_past_a_purged_streams_deleted_events_recovers_from_its_tombs
     assert_eq!(rig.position("projector").await, 4);
 }
 
+#[cfg(feature = "purge")]
 /// A delivery AT a deleted sequence (below a tombstone) is no miss: the
 /// mark moves to the tombstone, nothing is dead-lettered, and the
 /// tombstone is handed when it is delivered.
@@ -812,6 +815,7 @@ async fn trail(run: Run, seed: u64) -> Vec<(u8, u64)> {
         };
         let head = rig.run.landed(&cover).await.len() as u64;
         match (random.next(4), head) {
+            #[cfg(feature = "purge")]
             (0, 1..) => Harness::purge(&rig.run, &cover).await,
             (1, _) => {}
             _ => {

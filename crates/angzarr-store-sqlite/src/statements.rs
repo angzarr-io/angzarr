@@ -367,6 +367,7 @@ pub(crate) fn delete_events<D: Dialect>(cover: &Cover) -> DeleteStatement {
         .to_owned()
 }
 
+#[cfg(feature = "purge")]
 /// Delete the main stream's events from `sequence` on, and with them the
 /// command ids recorded in their rows.
 pub(crate) fn delete_events_from<D: Dialect>(cover: &Cover, sequence: u64) -> DeleteStatement {
@@ -377,6 +378,7 @@ pub(crate) fn delete_events_from<D: Dialect>(cover: &Cover, sequence: u64) -> De
         .to_owned()
 }
 
+#[cfg(feature = "purge")]
 /// Rows `(sequence, page)` of a main stream whose page holds the bytes `?4`
 /// (the tombstone's type URL), the latest first: candidates for its
 /// tombstones, which the caller decodes to be sure.

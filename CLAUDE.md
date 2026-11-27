@@ -85,7 +85,7 @@ Use `just`, never plain cargo for the gates; `just --list`. Each gate prints one
 `ok` line, or `FAIL`, the extract and a log in `target/logs/<gate>.log`
 (`VERBOSE=1` shows all). `just test` runs cargo-nextest (targets with
 `harness = false` run by `cargo test`); `just test-pkg <crate>...` is the quick
-loop; `just selftest` tests the gates; core's own recipes (images,
+loop; purging is the cargo feature `purge` (off by default; the default build is append-only, no `Purge` API), and `just check` lints and tests in BOTH flavours (`lint-purge`, `test-purge` beside `lint`, `test`); `just selftest` tests the gates; core's own recipes (images,
 per-crate justfiles) are the `core` module: `just core::check-shared-crates`.
 
 - Hooks are lefthook's (`just hooks-install`, once per clone). Pre-commit: fmt of

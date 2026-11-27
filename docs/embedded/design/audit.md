@@ -254,7 +254,7 @@ processed ids in the stream.)
 
 **Accepted costs** (the first two are angzarr's decision 12.2, the same in
 both runtimes; the third is angzarr-embedded's own, since a stream can be
-purged where its store opts in, [the store port](#the-store-port)):
+purged where its store opts in (the `purge` feature, [the store port](#the-store-port))):
 
 - **A decision that produced no events leaves nothing to find**, so a
   redelivery of it is decided again, against the stream as it is then
@@ -264,7 +264,7 @@ purged where its store opts in, [the store port](#the-store-port)):
   answered DUPLICATE with the first command's events. Payloads are not
   fingerprinted; a client mints a new id for every new command.
 - **Deduplication lasts as long as the stream.** There is no expiry or
-  retention window, but a store that opts in can purge a stream (see
+  retention window, but a `purge` build with a store that opts in can purge a stream (see
   [the store port](#the-store-port)), and a purge deletes its command
   ids with its events. A command redelivered after its stream is purged
   finds nothing, so it is decided again against the stream as it is then;
@@ -1024,7 +1024,12 @@ as `ext_err_txt` and SQLite's primary result code as `errno`.
 
 **Opt-in capabilities**, each a trait of its own with its own section of
 the suite: `Purge` (a stream, its snapshot, its command ids and its dead
-letters, in one call; the positions on it stay, decision 14.68), `ReadStore` (a read-only unit whose reads
+letters, in one call; the positions on it stay, decision 14.68; it is a
+**compile-time feature**, `purge`, off by default: the default build is
+append-only and has no purge API, the trait and every store's
+implementation being absent, not refusing; both flavours are built and
+released, and the suites run in both. READING a tombstone is in every
+build, so a default build folds a store a purge build wrote), `ReadStore` (a read-only unit whose reads
 all see the moment it began, so a reader listing `covers` and reading each
 stream never mixes two moments), `Watch` (a change token: equal tokens
 from one handle mean nothing was committed between), `ReadUntilTime`,

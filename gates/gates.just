@@ -190,6 +190,12 @@ secrets-scan-staged:
 test: (_require-nextest "test")
     @just --justfile '{{gates_root}}/justfile' _run test workspace tests just --justfile '{{gates_root}}/justfile' _tests --workspace
 
+# `test`, with the `purge` feature on (the flavour with the purge capability).
+# `GATE_FEATURES` is read by `_tests`; the log is test-purge.log.
+[no-exit-message]
+test-purge: (_require-nextest "test-purge")
+    @GATE_FEATURES=purge just --justfile '{{gates_root}}/justfile' _run test-purge workspace tests just --justfile '{{gates_root}}/justfile' _tests --workspace
+
 # Test what the commit changes: lefthook's pre-commit step. Runs the tests of
 # every crate with a staged change and of the workspace crates depending on
 # them (a change can break a dependent's tests); a staged workspace-wide file
@@ -342,6 +348,23 @@ _tests +packages:
             --offline --manifest-path "$root/Cargo.toml" | jq -r --args '.packages[] | select(.name as $n | $ARGS.positional
             | index($n)) | select(any(.targets[]; .kind | index("lib") or index("proc-macro"))) | .name' "$@")
     fi
+    # GATE_FEATURES: a flavour of the whole run (a cargo feature turned on across the
+    # workspace), set by a recipe that runs the same suite a second time.
+    for extra in ${GATE_FEATURES:-}; do features+=(--features "$extra"); done
+    # A harness-less target is run by `cargo test --package <p>`, which refuses a
+    # flavour feature the package does not declare: it gets only those it has.
+    pkg_features() {
+        local declared extra
+        declared=$(cargo metadata --format-version 1 --no-deps --offline --manifest-path "$root/Cargo.toml" \
+            | jq -r --arg p "$1" '.packages[] | select(.name == $p) | .features | keys[]')
+        for extra in ${GATE_FEATURES:-}; do
+            if printf '%s\n' "$declared" | grep -qx "$extra"; then printf '%s\n' --features "$extra"; fi
+        done
+        for rule in ${rules[@]+"${rules[@]}"}; do
+            [ "${rule%%=*}" = "$1" ] && printf '%s\n' --features "${rule#*=}"
+        done
+        return 0
+    }
     if [ "${#features[@]}" -gt 0 ] && [ -n "{{features_prepare}}" ]; then
         just --justfile "$root/justfile" {{features_prepare}}
     fi
@@ -368,7 +391,7 @@ _tests +packages:
     # They were built above, so a failure here is a red test, not a build failure: 100.
     for pair in ${harnessless[@]+"${harnessless[@]}"}; do
         IFS=$'\t' read -r pkg target <<< "$pair"
-        cargo test --manifest-path "$root/Cargo.toml" ${cargo_terse[@]+"${cargo_terse[@]}"} --package "$pkg" --test "$target" ${features[@]+"${features[@]}"} || rc=100
+        cargo test --manifest-path "$root/Cargo.toml" ${cargo_terse[@]+"${cargo_terse[@]}"} --package "$pkg" --test "$target" $(pkg_features "$pkg") || rc=100
     done
     # After a failed test, the doc tests would only bury it. Everything they
     # need was built above, so their failing is a red doc test (one that does

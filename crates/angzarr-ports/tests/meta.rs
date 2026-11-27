@@ -26,12 +26,14 @@ use angzarr_ports::angzarr_proto::v1::event_meta::Causation;
 use angzarr_ports::angzarr_proto::v1::{Cover, EditionSummary, EventBook, EventPage, Snapshot};
 use angzarr_ports::contract;
 use angzarr_ports::memory::{MemoryRead, MemoryStore};
+#[cfg(feature = "purge")]
+use angzarr_ports::Purge;
 use angzarr_ports::{
     Append, ChangeCursor, ChangeToken, Changed, Changes, CommitNotify, CommitSignal, CommitWait,
     DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore, Export, ExportRow, Head,
-    ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, Purge,
-    ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError,
-    StreamChange, StreamRef, Uuid, Watch, Write, Written,
+    ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore, Processed, ReadByCorrelation,
+    ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore, StoreError, StreamChange, StreamRef,
+    Uuid, Watch, Write, Written,
 };
 use prost_types::Timestamp;
 
@@ -84,8 +86,10 @@ enum Bug {
     ChangesMissesWrite,
     /// It reports a stream that did not change.
     ChangesReportsUnchanged,
+    #[cfg(feature = "purge")]
     /// It drops a purge from its answer.
     ChangesDropsPurge,
+    #[cfg(feature = "purge")]
     /// It reports a purged and rewritten stream as only written to.
     ChangesDropsRewrite,
     /// It reports a stream twice.
@@ -106,6 +110,7 @@ enum Bug {
     ChangesMisorders,
     /// Each handle keeps a feed of its own commits alone.
     ChangesPerHandle,
+    #[cfg(feature = "purge")]
     /// A stream once purged is reported purged for ever.
     ChangesPurgedForever,
     /// Its cursor now is one behind where its answers end.
@@ -129,20 +134,28 @@ enum Bug {
     /// A writer that lost a race lands its pages after the winner's.
     LastWriterWins,
     // ---- purge
+    #[cfg(feature = "purge")]
     /// A purge keeps the snapshot.
     PurgeKeepsSnapshot,
+    #[cfg(feature = "purge")]
     /// A purge takes the stream's positions.
     PurgeTakesPositions,
+    #[cfg(feature = "purge")]
     /// A purge deletes nothing, and says it did.
     PurgeIsANoOp,
+    #[cfg(feature = "purge")]
     /// A purge ignores the head it expects: a stale one still deletes.
     PurgeIgnoresTheHead,
+    #[cfg(feature = "purge")]
     /// A purge refused for a stale head removes the positions anyway.
     RefusedPurgeTakesPositions,
+    #[cfg(feature = "purge")]
     /// A purge refused for a stale head removes the snapshot anyway.
     RefusedPurgeTakesSnapshot,
+    #[cfg(feature = "purge")]
     /// A purge of an edition stream is guarded by main's head.
     PurgeGuardsByMain,
+    #[cfg(feature = "purge")]
     /// A purge of an edition stream with no row of its own purges main's.
     PurgeUnforkedTakesMain,
     // ---- editions' forks (every store)
@@ -170,6 +183,7 @@ enum Bug {
     RemoveKeepsSnapshot,
     /// The removal keeps the positions on the stream.
     RemoveKeepsPositions,
+    #[cfg(feature = "purge")]
     /// The removal deletes main's stream too.
     RemoveTakesMain,
     /// The removal of one stream removes every stream of the edition.
@@ -279,8 +293,10 @@ enum Bug {
     DeadLetteredRepeats,
     /// `dead_lettered` ignores its domain.
     DeadLetteredAnyDomain,
+    #[cfg(feature = "purge")]
     /// A purge keeps the stream's letters.
     PurgeKeepsLetters,
+    #[cfg(feature = "purge")]
     /// A purge refused for a stale head removes the letters anyway.
     RefusedPurgeTakesLetters,
     /// An edition stream's removal keeps its letters.
@@ -339,6 +355,7 @@ struct Shared {
     /// Every edition a stream was removed from.
     removed_from: Mutex<Vec<String>>,
     /// Every stream ever purged.
+    #[cfg(feature = "purge")]
     purged_ever: Mutex<Vec<Cover>>,
     /// Streams a feed reports that did not change: refused writes, positions.
     phantoms: Mutex<Vec<Cover>>,
@@ -937,6 +954,7 @@ impl PositionStore for Broken {
 }
 
 impl Broken {
+    #[cfg(feature = "purge")]
     /// The head a purge of `stream` expecting `expected` is guarded by, as
     /// the bug bends it.
     async fn purge_guard(&self, stream: StreamRef<'_>, expected: u64) -> Result<u64, StoreError> {
@@ -983,6 +1001,7 @@ impl Broken {
         Ok(())
     }
 
+    #[cfg(feature = "purge")]
     /// What a purge of `stream` refused at head `actual` takes anyway, as
     /// the bug bends it.
     async fn taken_despite_refusal(
@@ -1047,6 +1066,7 @@ impl Broken {
     }
 }
 
+#[cfg(feature = "purge")]
 impl Purge for Broken {
     async fn purge(&self, stream: StreamRef<'_>, expected: u64) -> Result<u64, StoreError> {
         if self.is(Bug::PurgeIsANoOp) {
@@ -1203,9 +1223,11 @@ impl Broken {
                 .flat_map(|c| [c.clone(), c.clone()])
                 .collect();
         }
+        #[cfg(feature = "purge")]
         if self.is(Bug::ChangesDropsPurge) {
             changes.retain(|c| !c.purged);
         }
+        #[cfg(feature = "purge")]
         if self.is(Bug::ChangesDropsRewrite) {
             for change in &mut changes {
                 if change.head > 0 {
@@ -1213,6 +1235,7 @@ impl Broken {
                 }
             }
         }
+        #[cfg(feature = "purge")]
         if self.is(Bug::ChangesPurgedForever) {
             let purged = self.shared.purged_ever.lock().unwrap();
             for change in &mut changes {
@@ -1291,6 +1314,7 @@ impl Editions for Broken {
                 })
                 .await?;
         }
+        #[cfg(feature = "purge")]
         if self.is(Bug::RemoveTakesMain) {
             let mains = self.inner.head(main_of(stream)).await?.next_sequence;
             self.inner.purge(main_of(stream), mains).await?;
@@ -2026,37 +2050,44 @@ fn the_pair_check_catches_a_lost_race_landing() {
 
 #[test]
 fn the_purge_checks_catch_what_a_purge_leaves() {
+    #[cfg(feature = "purge")]
     catches!(
         a_purge_deletes_a_streams_events_snapshot_and_command_ids,
         broken,
         PurgeKeepsSnapshot,
         PurgeIsANoOp,
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_purge_keeps_the_streams_positions,
         broken,
         PurgeTakesPositions
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_purge_deletes_a_snapshot_with_no_events,
         broken,
         PurgeKeepsSnapshot
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_purged_stream_continues_after_its_tombstone,
         broken,
         PurgeIsANoOp
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_second_purge_keeps_the_first_tombstone,
         broken,
         PurgeIsANoOp
     );
+    #[cfg(feature = "purge")]
     catches!(
         an_edition_purge_continues_and_repeats_like_a_mains,
         broken,
         PurgeIsANoOp
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_purge_of_an_unforked_edition_stream_removes_nothing,
         broken,
@@ -2066,6 +2097,7 @@ fn the_purge_checks_catch_what_a_purge_leaves() {
 
 #[test]
 fn the_purge_head_checks_catch_an_unguarded_purge() {
+    #[cfg(feature = "purge")]
     catches!(
         a_purge_at_the_streams_head_removes_it,
         broken,
@@ -2073,6 +2105,7 @@ fn the_purge_head_checks_catch_an_unguarded_purge() {
         PurgeKeepsSnapshot,
         PurgeTakesPositions,
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_purge_at_a_stale_head_is_a_conflict_and_removes_nothing,
         broken,
@@ -2080,12 +2113,14 @@ fn the_purge_head_checks_catch_an_unguarded_purge() {
         RefusedPurgeTakesPositions,
         RefusedPurgeTakesSnapshot,
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_purge_of_an_absent_stream_is_at_zero,
         broken,
         PurgeIgnoresTheHead,
         PurgeIsANoOp,
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_purge_never_takes_the_positions_on_its_stream,
         broken,
@@ -2093,6 +2128,7 @@ fn the_purge_head_checks_catch_an_unguarded_purge() {
         PurgeTakesPositions,
         PurgeIgnoresTheHead,
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_purge_of_a_forked_stream_is_guarded_by_its_head_as_read,
         broken,
@@ -2109,6 +2145,7 @@ fn the_read_unit_head_and_snapshot_checks_catch_a_live_unit() {
         ReadUnitHeadIsLive,
         ReadUnitSnapshotIsLive,
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began,
         broken_pair,
@@ -2124,6 +2161,7 @@ fn the_read_unit_checks_catch_a_live_unit() {
         broken_pair,
         ReadUnitIsLive
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_read_unit_keeps_a_stream_purged_after_it_began,
         broken_pair,
@@ -2182,6 +2220,11 @@ fn the_edition_checks_catch_a_wrong_list_or_removal() {
         broken,
         RemoveKeepsSnapshot,
         RemoveKeepsPositions,
+    );
+    #[cfg(feature = "purge")]
+    catches!(
+        a_removed_edition_stream_loses_every_row_of_it,
+        broken,
         RemoveTakesMain,
     );
     catches!(
@@ -2199,8 +2242,13 @@ fn the_edition_checks_catch_a_wrong_list_or_removal() {
     catches!(
         a_what_if_edition_runs_beside_main_and_leaves_main_untouched,
         broken,
-        RemoveTakesMain,
         ForkSeesMainsLater,
+    );
+    #[cfg(feature = "purge")]
+    catches!(
+        a_what_if_edition_runs_beside_main_and_leaves_main_untouched,
+        broken,
+        RemoveTakesMain,
     );
 }
 
@@ -2288,6 +2336,7 @@ fn the_core_read_checks_catch_a_wrong_bound_filter_or_order() {
         ProcessedKeepsZero,
         ProcessedReversed,
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_handlers_record_outlives_a_purge_until_forgotten,
         broken,
@@ -2384,18 +2433,6 @@ fn an_honest_broken_store_passes_every_check() {
         a_store_keeps_the_newest_snapshot_per_stream,
         a_position_is_zero_until_put_then_the_last_put,
         positions_are_per_handler_and_per_stream,
-        a_purge_deletes_a_streams_events_snapshot_and_command_ids,
-        a_purge_keeps_the_streams_positions,
-        a_purge_deletes_a_snapshot_with_no_events,
-        a_purged_stream_continues_after_its_tombstone,
-        a_purge_at_the_streams_head_removes_it,
-        a_purge_at_a_stale_head_is_a_conflict_and_removes_nothing,
-        a_purge_of_an_absent_stream_is_at_zero,
-        a_purge_never_takes_the_positions_on_its_stream,
-        a_purge_of_a_forked_stream_is_guarded_by_its_head_as_read,
-        a_purge_of_an_unforked_edition_stream_removes_nothing,
-        an_edition_purge_continues_and_repeats_like_a_mains,
-        a_second_purge_keeps_the_first_tombstone,
         list_editions_derives_each_edition_from_its_fork_events,
         a_removed_edition_stream_loses_every_row_of_it,
         an_edition_is_deleted_by_removing_each_forked_stream,
@@ -2408,7 +2445,6 @@ fn an_honest_broken_store_passes_every_check() {
         read_by_correlation_gives_one_book_per_stream,
         list_streams_is_every_domains_covers_in_order,
         processed_is_a_handlers_record_in_stream_order,
-        a_handlers_record_outlives_a_purge_until_forgotten,
         an_outbox_entry_lands_with_its_write_or_not_at_all,
         a_write_clears_outbox_entries_with_its_own,
         the_outbox_drains_each_stream_in_order_and_clears,
@@ -2426,7 +2462,6 @@ fn an_honest_broken_store_passes_every_check() {
         a_drain_takes_one_streams_dead_letters,
         dead_lettered_lists_a_domains_streams_holding_letters,
         a_dead_letter_on_a_malformed_stream_refuses_its_write,
-        a_purge_removes_the_dead_letters_about_its_stream,
         a_removed_edition_stream_takes_its_dead_letters,
         dead_letters_written_drained_and_removed_change_the_change_token,
         export_yields_every_row_kind_once,
@@ -2435,15 +2470,35 @@ fn an_honest_broken_store_passes_every_check() {
         export_includes_positions_of_a_handler_no_one_names,
         export_includes_dead_letters_about_a_stream_with_no_events,
     );
+    #[cfg(feature = "purge")]
+    passes!(broken;
+        a_purge_deletes_a_streams_events_snapshot_and_command_ids,
+        a_purge_keeps_the_streams_positions,
+        a_purge_deletes_a_snapshot_with_no_events,
+        a_purged_stream_continues_after_its_tombstone,
+        a_purge_at_the_streams_head_removes_it,
+        a_purge_at_a_stale_head_is_a_conflict_and_removes_nothing,
+        a_purge_of_an_absent_stream_is_at_zero,
+        a_purge_never_takes_the_positions_on_its_stream,
+        a_purge_of_a_forked_stream_is_guarded_by_its_head_as_read,
+        a_purge_of_an_unforked_edition_stream_removes_nothing,
+        an_edition_purge_continues_and_repeats_like_a_mains,
+        a_second_purge_keeps_the_first_tombstone,
+        a_handlers_record_outlives_a_purge_until_forgotten,
+        a_purge_removes_the_dead_letters_about_its_stream,
+    );
     passes!(broken_pair;
         export_is_one_moment_while_a_writer_writes,
         two_writers_racing_on_one_stream_land_one,
         a_read_unit_sees_the_store_as_it_began,
-        a_read_unit_keeps_a_stream_purged_after_it_began,
         a_read_unit_heads_and_snapshots_as_it_began,
-        a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began,
         a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main,
         a_change_token_changes_when_another_handle_commits,
+    );
+    #[cfg(feature = "purge")]
+    passes!(broken_pair;
+        a_read_unit_keeps_a_stream_purged_after_it_began,
+        a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began,
     );
 }
 
@@ -2467,11 +2522,13 @@ fn the_one_handle_read_unit_checks_catch_a_live_unit() {
         broken,
         ReadUnitAnyEdition
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_read_unit_keeps_a_stream_purged_after_it_began_through_one_handle,
         broken,
         ReadUnitIsLive
     );
+    #[cfg(feature = "purge")]
     catches!(
         a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began_through_one_handle,
         broken,
@@ -2514,9 +2571,12 @@ fn the_shared_handles_checks_catch_handles_that_share_nothing() {
         a_read_unit_sees_the_store_as_it_began,
         a_read_unit_heads_and_snapshots_as_it_began,
         a_read_unit_refuses_an_unknown_edition_and_reads_an_unforked_stream_as_main,
+        export_is_one_moment_while_a_writer_writes,
+    );
+    #[cfg(feature = "purge")]
+    isolated!(
         a_read_unit_keeps_a_stream_purged_after_it_began,
         a_read_unit_keeps_the_head_and_snapshot_of_a_stream_purged_after_it_began,
-        export_is_one_moment_while_a_writer_writes,
     );
     let mut listed: Vec<&str> = contract::SHARED_HANDLES.to_vec();
     named.sort_unstable();
@@ -3305,6 +3365,7 @@ fn a_malformed_letter_catches_a_write_landing_without_it() {
 
 #[test]
 fn a_purge_catches_letters_kept_or_taken_when_refused() {
+    #[cfg(feature = "purge")]
     catches!(
         a_purge_removes_the_dead_letters_about_its_stream,
         broken,
@@ -3482,14 +3543,17 @@ fn the_change_feed_checks_catch_a_feed_that_misses_invents_or_misreports() {
         a_stream_that_did_not_change_is_not_reported,
         ChangesReportsUnchanged
     );
+    #[cfg(feature = "purge")]
     catches_feed!(
         a_purge_is_reported_purged_at_its_tombstones_head,
         ChangesDropsPurge
     );
+    #[cfg(feature = "purge")]
     catches_feed!(
         a_purge_then_rewrite_is_reported_purged_with_its_new_head,
         ChangesDropsRewrite
     );
+    #[cfg(feature = "purge")]
     catches_feed!(
         a_write_after_a_purge_is_not_reported_purged_by_a_later_cursor,
         ChangesPurgedForever

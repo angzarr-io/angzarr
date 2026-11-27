@@ -12,10 +12,12 @@ use std::sync::Arc;
 use angzarr_ports::contract::{command, dead_letter, main_stream, page, snapshot};
 use angzarr_ports::faulty::{At, Fault, FaultyStore, WriteRecord, INJECTED};
 use angzarr_ports::memory::MemoryStore;
+#[cfg(feature = "purge")]
+use angzarr_ports::Purge;
 use angzarr_ports::{
     Cause, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore, ListStreams, PositionKey,
-    PositionStore, Processed, Purge, ReadStore, ReadUnit, SnapshotStore, StoreError, StreamRef,
-    Watch, Write,
+    PositionStore, Processed, ReadStore, ReadUnit, SnapshotStore, StoreError, StreamRef, Watch,
+    Write,
 };
 
 fn stream() -> StreamRef<'static> {
@@ -135,6 +137,7 @@ async fn a_new_script_replaces_the_faults_still_due() {
     append(&store, stream(), 1).await.unwrap();
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn a_purge_takes_the_next_fault_and_counts_as_an_attempt() {
     let store = holding(2).await;
@@ -146,6 +149,7 @@ async fn a_purge_takes_the_next_fault_and_counts_as_an_attempt() {
     assert_eq!(store.attempts(), 2);
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn a_purge_conflict_names_the_purged_stream() {
     let store = holding(2).await;
@@ -220,6 +224,7 @@ async fn an_interleaving_waits_for_the_nth_call() {
     assert!(store.ran(At::Read));
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn an_interleaving_at_any_runs_before_the_first_read_write_or_purge() {
     for call in [At::Read, At::Write, At::Purge] {
@@ -244,6 +249,7 @@ async fn an_interleaving_at_any_runs_before_the_first_read_write_or_purge() {
     }
 }
 
+#[cfg(feature = "purge")]
 #[tokio::test]
 async fn an_interleaving_at_one_kind_of_call_waits_out_the_others() {
     let store = holding(1).await;

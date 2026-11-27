@@ -10,7 +10,9 @@ use std::sync::{Arc, Mutex};
 use angzarr_embedded::angzarr_ports::{ListStreams as _, Processed as _};
 use angzarr_embedded::angzarr_router::error::{CodedError, RetryableStatus};
 use angzarr_embedded::v1::{Cover, EventBook};
-use angzarr_embedded::{CatchUp, EventStore as _, PositionKey, Purge as _, StreamRef, Write};
+#[cfg(feature = "purge")]
+use angzarr_embedded::Purge as _;
+use angzarr_embedded::{CatchUp, EventStore as _, PositionKey, StreamRef, Write};
 use cucumber::{given, then, when};
 
 use crate::tests::policy::locked;
@@ -102,6 +104,7 @@ fn policy_processed(
     processed_to(w, &name, &order, n);
 }
 
+#[cfg(feature = "purge")]
 #[when(regex = r#"^order "([\w-]+)" is purged$"#)]
 fn purged(w: &mut Coordinator, order: String) {
     let cover = w.cover("order", &order);
@@ -110,6 +113,7 @@ fn purged(w: &mut Coordinator, order: String) {
     futures_ready(w.store.purge(stream, head));
 }
 
+#[cfg(feature = "purge")]
 #[given(regex = r#"^order "([\w-]+)" is purged(?: while "\w+" is not running)?$"#)]
 fn purged_given(w: &mut Coordinator, order: String) {
     purged(w, order);
@@ -299,6 +303,7 @@ fn forked(w: &mut Coordinator, order: String, edition: String) {
     w.write(&cover, &["Happened"]);
 }
 
+#[cfg(feature = "purge")]
 #[when(regex = r#"^the edition "([\w-]+)" of order "([\w-]+)" is purged$"#)]
 fn edition_purged(w: &mut Coordinator, edition: String, order: String) {
     let cover = in_edition(w, &order, &edition);

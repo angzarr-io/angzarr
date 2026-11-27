@@ -21,9 +21,11 @@ use angzarr_bus::{
 };
 use angzarr_ports::faulty::{Fault, FaultyStore};
 use angzarr_ports::memory::MemoryStore;
+#[cfg(feature = "purge")]
+use angzarr_ports::Purge;
 use angzarr_ports::{
-    Append, BoxFuture, EventStore, PositionKey, PositionStore, Processed, Purge, StoreError,
-    StreamRef, Write,
+    Append, BoxFuture, EventStore, PositionKey, PositionStore, Processed, StoreError, StreamRef,
+    Write,
 };
 use angzarr_proto::ids::policy_command_id;
 use angzarr_proto::v1::event_meta::Causation;
@@ -400,6 +402,7 @@ impl Harness for Run {
             .unwrap();
     }
 
+    #[cfg(feature = "purge")]
     async fn purge(&self, stream: &Cover) {
         let head = self.head(stream).await;
         let sref = StreamRef::try_from(stream).unwrap();
@@ -473,6 +476,7 @@ impl TransportHarness for Run {
         Harness::append(self, stream).await;
     }
 
+    #[cfg(feature = "purge")]
     async fn purge(&self, stream: &Cover) {
         Harness::purge(self, stream).await;
     }
@@ -496,11 +500,15 @@ impl TransportHarness for Run {
 mod bus {
     use super::Run;
     angzarr_bus::bus_contract!(#[tokio::test], Run::default());
+    #[cfg(feature = "purge")]
+    angzarr_bus::bus_contract!(purge, #[tokio::test], Run::default());
 }
 
 mod transport {
     use super::Run;
     angzarr_bus::transport_contract!(#[tokio::test], Run::default());
+    #[cfg(feature = "purge")]
+    angzarr_bus::transport_contract!(purge, #[tokio::test], Run::default());
 }
 
 /// The same suites with the store transport told which streams a commit
@@ -508,11 +516,15 @@ mod transport {
 mod bus_incremental {
     use super::Run;
     angzarr_bus::bus_contract!(#[tokio::test], Run::incremental());
+    #[cfg(feature = "purge")]
+    angzarr_bus::bus_contract!(purge, #[tokio::test], Run::incremental());
 }
 
 mod transport_incremental {
     use super::Run;
     angzarr_bus::transport_contract!(#[tokio::test], Run::incremental());
+    #[cfg(feature = "purge")]
+    angzarr_bus::transport_contract!(purge, #[tokio::test], Run::incremental());
 }
 
 #[path = "contract/flawed.rs"]

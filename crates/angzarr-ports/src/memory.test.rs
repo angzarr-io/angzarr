@@ -21,6 +21,8 @@ use angzarr_proto::v1::CommandCause;
 
 use super::*;
 use crate::contract::{command, created_page, edition_stream, main_stream, page};
+#[cfg(feature = "purge")]
+use crate::Purge;
 
 // ------------------------------------------------- counting allocations
 
@@ -354,6 +356,7 @@ fn find_command_finds_one_command_among_many() {
     );
 }
 
+#[cfg(feature = "purge")]
 /// The lookup follows the stream's rows out: a purge takes its command ids,
 /// a removed edition stream finds main's again, and a fork whose main was
 /// purged below it finds only its own.
@@ -404,6 +407,7 @@ fn find_command_follows_purge_and_removal() {
     );
 }
 
+#[cfg(feature = "purge")]
 /// A purge that removes no event lands nothing a follower reads: the change
 /// feed reports no stream for it.
 #[test]
@@ -424,6 +428,7 @@ fn a_purge_that_removes_nothing_is_no_change_in_the_feed() {
     assert_eq!(changes, [], "nothing was touched");
 }
 
+#[cfg(feature = "purge")]
 /// A read unit keeps its moment through every kind of write to the stream
 /// it reads: an append, a fork, a purge, a removal.
 #[test]

@@ -305,6 +305,7 @@ impl<T: EventStore + SnapshotStore + PositionStore + ?Sized> Store for T {}
 /// Answers how many events it removed (a tombstone is no event: a purge of
 /// a stream with nothing after its last tombstone answers 0 and changes
 /// nothing).
+#[cfg(feature = "purge")]
 pub trait Purge: MaybeSend + MaybeSync {
     fn purge(
         &self,

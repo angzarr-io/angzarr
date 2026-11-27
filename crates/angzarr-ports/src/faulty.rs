@@ -29,8 +29,8 @@ use coded_diagnostic::code;
 
 use crate::store::{
     ChangeToken, DeadLetter, DeadLetterAt, DeadLetterKey, DeadLetterStore, EventStore, ListStreams,
-    Outbox, OutboxEntry, PositionStore, Processed, Purge, ReadStore, ReadUnit, SnapshotStore,
-    Watch, Write, Written,
+    Outbox, OutboxEntry, PositionStore, Processed, ReadStore, ReadUnit, SnapshotStore, Watch,
+    Write, Written,
 };
 use crate::stream::{PositionKey, Slice, StreamRef};
 use crate::{Cause, ChangeCursor, Changed, Changes, StoreError, Uuid};
@@ -64,7 +64,8 @@ pub const INJECTED: &str = code!("faulty-injected");
 pub enum At {
     /// A [`EventStore::write`].
     Write,
-    /// A [`Purge::purge`].
+    /// A `Purge::purge`.
+    #[cfg(feature = "purge")]
     Purge,
     /// A stream read ([`EventStore::read`], and the `head` that reads).
     Read,
@@ -75,9 +76,18 @@ pub enum At {
 }
 
 impl At {
+    /// Whether `at` is a call kind `Any` stands for.
+    fn any_names(at: At) -> bool {
+        #[cfg(feature = "purge")]
+        if at == At::Purge {
+            return true;
+        }
+        matches!(at, At::Write | At::Read)
+    }
+
     /// Whether a call made `at` is one this names.
     fn names(self, at: At) -> bool {
-        self == at || (self == At::Any && matches!(at, At::Write | At::Purge | At::Read))
+        self == at || (self == At::Any && Self::any_names(at))
     }
 }
 
@@ -428,7 +438,8 @@ impl<S: PositionStore> PositionStore for FaultyStore<S> {
     }
 }
 
-impl<S: Purge> Purge for FaultyStore<S> {
+#[cfg(feature = "purge")]
+impl<S: crate::Purge> crate::Purge for FaultyStore<S> {
     async fn purge(&self, stream: StreamRef<'_>, expected: u64) -> Result<u64, StoreError> {
         self.interleave(At::Purge);
         let lost = judged(self.next_fault(), stream.to_cover(), expected)?;

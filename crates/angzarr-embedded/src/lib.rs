@@ -200,10 +200,12 @@ pub use projector::{CatchUp, Caught, HeldRecord};
 pub use registry::Registry;
 pub use route::{rejection, spec_coded, Rejected, SpecKey};
 pub use snapshot_policy::SnapshotPolicy;
+#[cfg(feature = "purge")]
+pub use store::Purge;
 pub use store::{
     Append, ChangeToken, CommitNotify, CommitWait, DeadLetter, DeadLetterAt, DeadLetterKey,
     DeadLetterStore, EventStore, Head, ListStreams, Outbox, OutboxEntry, PositionKey,
-    PositionStore, Processed, Purge, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
+    PositionStore, Processed, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice,
     SnapshotStore, Store, StoreError, StreamRef, Watch, Write, Written,
 };
 #[cfg(any(test, feature = "test-support"))]
