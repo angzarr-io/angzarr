@@ -1525,3 +1525,38 @@ async fn a_durable_and_an_ephemeral_projector_share_a_bus() {
         "everything again"
     );
 }
+
+/// A projector the router holds the projection of is handed a purged
+/// stream's tombstone on the bus as its own one-event book: its fold sees
+/// the tombstone first, as in a catch-up.
+#[tokio::test]
+async fn a_router_held_projector_is_handed_the_tombstone_on_the_bus() {
+    let registry = registry();
+    let store = MemoryStore::new();
+    opened(&store, &registry, 1, 5);
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let projector: Box<dyn DynProjectorHandler> = Box::new(
+        angzarr_router::projector::ProjectorDispatch::new("folder", || ()).with_fold(
+            move |_, pages, _| {
+                sink.lock()
+                    .unwrap()
+                    .push(pages.iter().map(|p| p.sequence).collect::<Vec<u64>>());
+                Ok(())
+            },
+        ),
+    );
+    let kernel = kernel(&registry);
+    let mut bus = bus_on(&store, &kernel, &Never);
+    let credit = angzarr_bus::Credit::new(n(1));
+    let scope = angzarr_bus::Scope::domain("account");
+    bus.subscribe(angzarr_bus::Subscription::projector(
+        scope, credit, projector,
+    ))
+    .unwrap();
+    drain(&mut bus).await;
+    seen.lock().unwrap().clear();
+    store.purge(sref(&cover("account", 1)), 2).ready().unwrap();
+    drain(&mut bus).await;
+    assert_eq!(*seen.lock().unwrap(), [vec![2]]);
+}
