@@ -237,3 +237,27 @@ fn the_context_counts_only_history_after_the_latest_tombstone() {
         "a snapshot before it"
     );
 }
+
+// A starting state is history only when it is newer than the latest
+// tombstone: one AT the tombstone's sequence is the state after it, which is
+// the default again.
+#[test]
+fn a_snapshot_counts_only_when_newer_than_the_latest_tombstone() {
+    let history = |snapshot_at: u64| pb::EventBook {
+        snapshot: Some(pb::Snapshot {
+            sequence: snapshot_at,
+            ..Default::default()
+        }),
+        pages: vec![angzarr_ports::tombstone::page(4)],
+        next_sequence: 6,
+        ..Default::default()
+    };
+    let mut req = request(command(None));
+    req.history = Some(history(4));
+    assert!(!command_context(&req).had_prior_events, "at the tombstone");
+    req.history = Some(history(5));
+    assert!(
+        command_context(&req).had_prior_events,
+        "after the tombstone"
+    );
+}
