@@ -309,7 +309,6 @@ fn stored_positions_resume_in_a_new_catch_up() {
 
 /// The account `n` opened again after a purge, then one deposit more:
 /// what a purged stream is written with, past its tombstone.
-#[cfg(feature = "purge")]
 fn written_again(store: &MemoryStore, registry: &Registry, n: u128) {
     crate::toys::handle::<Account>(
         store,

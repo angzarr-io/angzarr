@@ -1533,6 +1533,7 @@ async fn a_durable_and_an_ephemeral_projector_share_a_bus() {
     );
 }
 
+#[cfg(feature = "purge")]
 /// A projector the router holds the projection of is handed a purged
 /// stream's tombstone on the bus as its own one-event book: its fold sees
 /// the tombstone first, as in a catch-up.
