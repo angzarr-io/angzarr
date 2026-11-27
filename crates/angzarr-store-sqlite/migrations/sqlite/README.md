@@ -23,3 +23,14 @@ An applied migration is never edited: sqlx records its checksum, and a store
 refuses a database whose applied migrations differ from its own
 (`angzarr-ports-store-migration-changed`), one a migration failed in
 (`-migration-failed`), and one a newer build migrated (`-newer-than-build`).
+
+Migration 0009 stamps the wire package that wrote each page and snapshot
+(decision 14.113): a `wire` column on `events` and `snapshots`, a one-row
+`wire_stamp` (oldest, newest) and triggers that raise `newest` in a write's
+own transaction. SQL cannot tell a row's version, so the migration marks the
+rows it finds 255 and the one-time `wire-stamp` backfill (`src/stamp.rs`, run
+under the same lock, recorded in `backfills`) classifies each by the shape of
+its bytes, marks it, and inserts the stamp; a row of no known shape, or a
+legacy store with pending outbox or dead-letter rows, refuses the open and
+the transaction leaves the store as it was. An open also refuses a stamp
+whose `newest` is beyond the build's wire version.

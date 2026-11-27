@@ -278,6 +278,12 @@ pub(crate) async fn run_to(
         tx.apply(migration).await.map_err(unavailable)?;
     }
     let after = ledger(&mut tx).await?;
+    if after
+        .iter()
+        .any(|r| r.version == crate::stamp::STAMPED_FROM)
+    {
+        crate::stamp::backfill(&mut tx).await?;
+    }
     if after.iter().any(|r| r.version == BACKFILLED_FROM) {
         backfill(&mut tx).await?;
     }
@@ -350,6 +356,7 @@ pub(crate) async fn open_writing(
     if migrating {
         run_to(&mut conn, Some(path), migrator, latest(&build(migrator))).await?;
     }
+    crate::stamp::check(&mut conn).await?;
     Ok(SqliteStore::on(conn, Some(path.to_path_buf()), migrator))
 }
 
@@ -372,6 +379,7 @@ pub(crate) async fn open_reading(
         writer.into_conn().close().await.map_err(unavailable)?;
         conn = reading(path).await?;
     }
+    crate::stamp::check(&mut conn).await?;
     Ok(Some(SqliteStore::on(
         conn,
         Some(path.to_path_buf()),

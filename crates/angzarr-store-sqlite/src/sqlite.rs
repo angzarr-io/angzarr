@@ -22,6 +22,7 @@ use std::time::Duration;
 use angzarr_ports::angzarr_proto::v1::{
     Cover, EditionSummary, EventBook, EventPage, EventRef, Snapshot,
 };
+use angzarr_ports::angzarr_proto::wire::{self, WireVersion};
 #[cfg(feature = "purge")]
 use angzarr_ports::tombstone;
 use angzarr_ports::{
@@ -29,7 +30,7 @@ use angzarr_ports::{
     CommitSignal, CommitWait, DeadLetter, DeadLetterKey, DeadLetterStore, Editions, EventStore,
     Export, ExportRow, Head, ListStreams, Outbox, OutboxEntry, PositionKey, PositionStore,
     Processed, ReadByCorrelation, ReadStore, ReadUnit, ReadUntilTime, Slice, SnapshotStore,
-    StoreError, StreamChange, StreamRef, Uuid, Watch, WeakCommitSignal, Write, Written,
+    StoreError, StreamChange, StreamRef, Uuid, Watch, WeakCommitSignal, WireStamp, Write, Written,
 };
 use prost::Message;
 #[cfg(feature = "purge")]
@@ -306,6 +307,39 @@ impl SqliteStore {
         Ok(Some(ledger))
     }
 
+    /// The wire stamp of the store at `path` (decision 14.113): the oldest
+    /// and newest wire version its rows hold, read on a read-only
+    /// connection of its own and migrating nothing. `None` if there is no
+    /// file there, or the store predates the stamp (it is stamped by its
+    /// first open by a build that has it).
+    pub async fn wire_stamp_at(path: &Path) -> Result<Option<WireStamp>, StoreError> {
+        crate::stamp::read_at(path).await
+    }
+
+    /// What opening the store at `path` would stamp or refuse, counted by
+    /// the shape of its rows on a read-only connection of its own: nothing
+    /// is written, so it can be run over many stores first.
+    pub async fn detect_wire_at(path: &Path) -> Result<crate::WireDetected, StoreError> {
+        crate::stamp::detect_at(path).await
+    }
+
+    /// This store's wire stamp.
+    pub async fn wire_stamp(&self) -> Result<WireStamp, StoreError> {
+        crate::stamp::read(&mut *self.connection().await)
+            .await?
+            .ok_or_else(|| StoreError::WireUnknownVersion {
+                wire: WireVersion::UNSTAMPED,
+            })
+    }
+
+    /// Re-encode every page and snapshot an older wire package wrote as the
+    /// current one, in one transaction, and raise the stamp's `oldest` to
+    /// the current version. Reading never needs it: an old row is decoded as
+    /// its own version; it is for the day a decoder is retired.
+    pub async fn rewrite_to_current(&self) -> Result<crate::WireRewritten, StoreError> {
+        crate::stamp::rewrite(&mut *self.connection().await).await
+    }
+
     /// Whether the database file is sound: SQLite's `PRAGMA
     /// integrity_check`, its problems returned as it reports them (up to
     /// its limit of 100). A read: it takes no write lock, so it runs on a
@@ -445,7 +479,15 @@ pub(crate) async fn backfill(conn: &mut SqliteConnection) -> Result<(), StoreErr
         .map_err(unavailable)?;
     for (domain, edition, root, sequence, bytes) in unfilled {
         let cover = rows::cover::<SqliteDialect>(&domain, edition.clone(), &root)?;
-        let page = rows::page(&cover, sequence, &bytes)?;
+        // The wire column may not be stamped yet: the page's own shape says
+        // how to read it.
+        let wire = i64::from(
+            wire::shape_of_page(&bytes)
+                .version()
+                .unwrap_or(WireVersion::CURRENT)
+                .0,
+        );
+        let page = rows::page(&cover, sequence, wire, &bytes)?;
         let (correlation_id, recorded_at) = statements::meta_columns(&page);
         sqlx::query(statements::FILL)
             .bind(domain)
@@ -670,7 +712,8 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
         for row in self.rows(sql, values).await? {
             let sequence: i64 = row.try_get(0).map_err(unavailable)?;
             let bytes: Vec<u8> = row.try_get(1).map_err(unavailable)?;
-            pages.push(rows::page(&cover, sequence, &bytes)?);
+            let wire: i64 = row.try_get(2).map_err(unavailable)?;
+            pages.push(rows::page(&cover, sequence, wire, &bytes)?);
         }
         Ok(pages)
     }
@@ -745,7 +788,8 @@ impl<C: DerefMut<Target = SqliteConnection>> Exec<'_, C> {
             return Ok(None);
         };
         let bytes: Vec<u8> = row.try_get(0).map_err(unavailable)?;
-        rows::snapshot(&cover, &bytes).map(Some)
+        let wire: i64 = row.try_get(1).map_err(unavailable)?;
+        rows::snapshot(&cover, wire, &bytes).map(Some)
     }
 
     /// The first sequence of `stream`'s own rows in its edition: none while
@@ -1858,17 +1902,21 @@ impl Export for SqliteStore {
         let pages = moment.rows(statements::EXPORT_PAGES, []).await?;
         gathered.add(pages, |stream, row| {
             let sequence: i64 = row.try_get(3).map_err(unavailable)?;
+            let wire: i64 = row.try_get(5).map_err(unavailable)?;
+            let stored: Vec<u8> = row.try_get(4).map_err(unavailable)?;
             Ok(ExportRow::Page {
+                stored: rows::current_page(&stream, sequence, wire, stored)?,
                 stream,
                 sequence: sequence.unsigned_abs(),
-                stored: row.try_get(4).map_err(unavailable)?,
             })
         })?;
         let snapshots = moment.rows(statements::EXPORT_SNAPSHOTS, []).await?;
         gathered.add(snapshots, |stream, row| {
+            let wire: i64 = row.try_get(4).map_err(unavailable)?;
+            let stored: Vec<u8> = row.try_get(3).map_err(unavailable)?;
             Ok(ExportRow::Snapshot {
+                stored: rows::current_snapshot(&stream, wire, stored)?,
                 stream,
-                stored: row.try_get(3).map_err(unavailable)?,
             })
         })?;
         let positions = moment.rows(statements::EXPORT_POSITIONS, []).await?;

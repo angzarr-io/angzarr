@@ -175,6 +175,40 @@ fn edition_and_migration_rows() -> Vec<Row> {
             Code::FailedPrecondition,
             [("target", "state.db.bak")],
         ),
+        row(
+            StoreError::WireNewerThanBuild {
+                stamped: 2,
+                build: 1,
+            },
+            "angzarr-ports-store-wire-newer-than-build",
+            Code::FailedPrecondition,
+            [("stamped", "2"), ("build", "1")],
+        ),
+        row(
+            StoreError::WireUnrecognised {
+                table: "events".to_string(),
+                stream: Box::new(cover(None)),
+                sequence: 4,
+            },
+            "angzarr-ports-store-wire-unrecognised",
+            Code::DataLoss,
+            [("table", "events"), ("stream", &stream), ("sequence", "4")],
+        ),
+        row(
+            StoreError::WireUnknownVersion { wire: 9 },
+            "angzarr-ports-store-wire-unknown-version",
+            Code::DataLoss,
+            [("wire", "9")],
+        ),
+        row(
+            StoreError::WireLegacyTransient {
+                outbox: 2,
+                dead_letters: 1,
+            },
+            "angzarr-ports-store-wire-legacy-transient",
+            Code::FailedPrecondition,
+            [("outbox", "2"), ("dead_letters", "1")],
+        ),
     ]
 }
 

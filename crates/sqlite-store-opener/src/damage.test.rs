@@ -21,41 +21,89 @@ fn varint(bytes: &[u8]) -> (u64, usize) {
 }
 
 /// The root page of the schema object `name`, read from the schema table
-/// on the file's first page (one leaf page, for a schema this small): each
-/// row is (type, name, tbl_name, rootpage, sql).
+/// (page 1) as SQLite lays it out: a table b-tree, one leaf page for a
+/// small schema and interior pages above leaves for a larger one. Each row
+/// is (type, name, tbl_name, rootpage, sql).
 fn root_page(file: &[u8], name: &str) -> usize {
-    let page = &file[100..];
-    assert_eq!(page[0], 0x0d, "the schema is one table leaf page");
+    let page_size = match u16::from_be_bytes([file[16], file[17]]) {
+        1 => 65_536,
+        size => usize::from(size),
+    };
+    find_in(file, page_size, 1, name).unwrap_or_else(|| panic!("no {name} in the schema"))
+}
+
+/// The root page of `name` in the schema rows under table b-tree page `no`.
+fn find_in(file: &[u8], page_size: usize, no: usize, name: &str) -> Option<usize> {
+    let base = (no - 1) * page_size;
+    // The first page holds the file's 100-byte header before the b-tree's.
+    let page = &file[base + if no == 1 { 100 } else { 0 }..base + page_size];
     let cells = usize::from(u16::from_be_bytes([page[3], page[4]]));
-    for cell in 0..cells {
-        let at = usize::from(u16::from_be_bytes([page[8 + 2 * cell], page[9 + 2 * cell]]));
-        let (_, size) = varint(&file[at..]);
-        let (_, rowid) = varint(&file[at + size..]);
-        let record = &file[at + size + rowid..];
-        let (header, mut i) = varint(record);
-        let mut body = usize::try_from(header).unwrap();
-        // Each column: its bytes, and the integer they hold if one.
-        let mut columns: Vec<(&[u8], usize)> = Vec::new();
-        while i < usize::try_from(header).unwrap() {
-            let (serial, n) = varint(&record[i..]);
-            i += n;
-            let len = match serial {
-                0 | 8 | 9 => 0,
-                1..=4 => usize::try_from(serial).unwrap(),
-                5 => 6,
-                6 | 7 => 8,
-                text_or_blob => usize::try_from((text_or_blob - 12) / 2).unwrap(),
-            };
-            let bytes = &record[body..body + len];
-            let int = bytes.iter().fold(0, |v, b| (v << 8) | usize::from(*b));
-            columns.push((bytes, int));
-            body += len;
+    match page[0] {
+        0x0d => {
+            for cell in 0..cells {
+                let pointer = 8 + 2 * cell;
+                let at = usize::from(u16::from_be_bytes([page[pointer], page[pointer + 1]]));
+                let at = base + at;
+                if let Some(root) = row_named(file, at, name) {
+                    return Some(root);
+                }
+            }
+            None
         }
-        if columns[1].0 == name.as_bytes() {
-            return columns[3].1;
+        0x05 => {
+            let mut children = Vec::new();
+            for cell in 0..cells {
+                let pointer = 12 + 2 * cell;
+                let at = usize::from(u16::from_be_bytes([page[pointer], page[pointer + 1]]));
+                let at = base + at;
+                children.push(
+                    usize::try_from(u32::from_be_bytes([
+                        file[at],
+                        file[at + 1],
+                        file[at + 2],
+                        file[at + 3],
+                    ]))
+                    .unwrap(),
+                );
+            }
+            children.push(
+                usize::try_from(u32::from_be_bytes([page[8], page[9], page[10], page[11]]))
+                    .unwrap(),
+            );
+            children
+                .into_iter()
+                .find_map(|child| find_in(file, page_size, child, name))
         }
+        other => panic!("the schema table has a page of type {other:#x}"),
     }
-    panic!("no {name} in the schema")
+}
+
+/// The schema row whose cell starts at `at`, as its rootpage if it names
+/// `name`.
+fn row_named(file: &[u8], at: usize, name: &str) -> Option<usize> {
+    let (_, size) = varint(&file[at..]);
+    let (_, rowid) = varint(&file[at + size..]);
+    let record = &file[at + size + rowid..];
+    let (header, mut i) = varint(record);
+    let mut body = usize::try_from(header).unwrap();
+    // Each column: its bytes, and the integer they hold if one.
+    let mut columns: Vec<(&[u8], usize)> = Vec::new();
+    while i < usize::try_from(header).unwrap() {
+        let (serial, n) = varint(&record[i..]);
+        i += n;
+        let len = match serial {
+            0 | 8 | 9 => 0,
+            1..=4 => usize::try_from(serial).unwrap(),
+            5 => 6,
+            6 | 7 => 8,
+            text_or_blob => usize::try_from((text_or_blob - 12) / 2).unwrap(),
+        };
+        let bytes = &record[body..body + len];
+        let int = bytes.iter().fold(0, |v, b| (v << 8) | usize::from(*b));
+        columns.push((bytes, int));
+        body += len;
+    }
+    (columns[1].0 == name.as_bytes()).then_some(columns[3].1)
 }
 
 /// `file`, a whole database file (its write-ahead log checkpointed into

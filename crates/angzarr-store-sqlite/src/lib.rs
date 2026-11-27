@@ -49,6 +49,13 @@
 //! row of an edition that no longer exists is refused
 //! (`StoreError::EditionNotFound`).
 //!
+//! Every page and snapshot row records the wire package that wrote it
+//! (`wire`, decision 14.113) and the store a stamp of the oldest and newest
+//! ([`SqliteStore::wire_stamp_at`], [`SqliteStore::detect_wire_at`],
+//! [`SqliteStore::rewrite_to_current`]): a row is decoded as its own version
+//! and mapped to the current types, and every write is current (migration
+//! 0009, `stamp.rs`).
+//!
 //! The rows are written with sea-query from the schema's identifiers
 //! (`schema`, `statements`) and read with SQL over one condition, a stream
 //! as read in its edition; stored rows decode in `rows`. Pages are stored
@@ -64,9 +71,12 @@ mod error;
 mod migrations;
 mod rows;
 mod schema;
+mod stamp;
 mod statements;
 
 pub mod sqlite;
+
+pub use stamp::{ShapeCounts, WireDetected, WireRewritten};
 
 use angzarr_ports::angzarr_proto::v1::Cover;
 
@@ -100,6 +110,10 @@ mod tests;
 #[cfg(test)]
 #[path = "test_database.test.rs"]
 mod test_database;
+
+#[cfg(test)]
+#[path = "wire.test.rs"]
+mod wire_tests;
 
 /// Without the `purge` feature the store is append-only: it implements no
 /// purge port.

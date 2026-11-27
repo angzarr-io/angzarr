@@ -4,7 +4,7 @@
 
 use angzarr_ports::angzarr_proto::v1::event_meta::Causation;
 use angzarr_ports::angzarr_proto::v1::{Cover, EventPage, Snapshot};
-use angzarr_ports::StoreError;
+use angzarr_ports::{StoreError, WireVersion};
 use prost::Message;
 use prost_types::Timestamp;
 use sea_query::{Cond, Condition, DeleteStatement, Expr, InsertStatement, OnConflict, Query};
@@ -52,37 +52,37 @@ macro_rules! view {
     };
 }
 
-/// Rows `(sequence, page)`: the stream's last page, as read in its edition.
+/// Rows `(sequence, page, wire)`: the stream's last page, as read in its edition.
 pub(crate) const LAST: &str = concat!(
-    "SELECT sequence, page FROM events WHERE ",
+    "SELECT sequence, page, wire FROM events WHERE ",
     view!(),
     " ORDER BY sequence DESC LIMIT 1"
 );
 
-/// Rows `(sequence, page)` with `?4 <= sequence < ?5`, in order.
+/// Rows `(sequence, page, wire)` with `?4 <= sequence < ?5`, in order.
 pub(crate) const PAGES: &str = concat!(
-    "SELECT sequence, page FROM events WHERE ",
+    "SELECT sequence, page, wire FROM events WHERE ",
     view!(),
     " AND sequence >= ?4 AND sequence < ?5 ORDER BY sequence"
 );
 
-/// Rows `(sequence, page)` the command `?4` caused: the dedup lookup.
+/// Rows `(sequence, page, wire)` the command `?4` caused: the dedup lookup.
 pub(crate) const OF_COMMAND: &str = concat!(
-    "SELECT sequence, page FROM events WHERE ",
+    "SELECT sequence, page, wire FROM events WHERE ",
     view!(),
     " AND command_id = ?4 ORDER BY sequence"
 );
 
-/// Rows `(sequence, page)` of the correlation `?4`.
+/// Rows `(sequence, page, wire)` of the correlation `?4`.
 pub(crate) const OF_CORRELATION: &str = concat!(
-    "SELECT sequence, page FROM events WHERE ",
+    "SELECT sequence, page, wire FROM events WHERE ",
     view!(),
     " AND correlation_id = ?4 ORDER BY sequence"
 );
 
-/// Rows `(sequence, page)` recorded at or before `?4` (nanoseconds).
+/// Rows `(sequence, page, wire)` recorded at or before `?4` (nanoseconds).
 pub(crate) const UNTIL: &str = concat!(
-    "SELECT sequence, page FROM events WHERE ",
+    "SELECT sequence, page, wire FROM events WHERE ",
     view!(),
     " AND recorded_at <= ?4 ORDER BY sequence"
 );
@@ -170,12 +170,13 @@ pub(crate) const PENDING: &str = "SELECT id, origin, message, edition FROM outbo
 /// Rows `(domain, edition, root, sequence, page)`: every stored page, by
 /// stream (the key's order: main's edition `''` first) and sequence. The
 /// export's.
-pub(crate) const EXPORT_PAGES: &str = "SELECT domain, edition, root, sequence, page FROM events \
+pub(crate) const EXPORT_PAGES: &str =
+    "SELECT domain, edition, root, sequence, page, wire FROM events \
      ORDER BY domain, edition, root, sequence";
 
-/// Rows `(domain, edition, root, snapshot)`: every stored snapshot.
+/// Rows `(domain, edition, root, snapshot, wire)`: every stored snapshot.
 pub(crate) const EXPORT_SNAPSHOTS: &str =
-    "SELECT domain, edition, root, snapshot FROM snapshots ORDER BY domain, edition, root";
+    "SELECT domain, edition, root, snapshot, wire FROM snapshots ORDER BY domain, edition, root";
 
 /// Rows `(domain, edition, root, handler, next)`: every position above 0,
 /// by stream and handler.
@@ -320,6 +321,7 @@ pub(crate) fn insert_pages<D: Dialect>(
             Events::Page,
             Events::CorrelationId,
             Events::RecordedAt,
+            Events::Wire,
         ])
         .to_owned();
     for page in pages {
@@ -343,6 +345,7 @@ pub(crate) fn insert_pages<D: Dialect>(
                 page.encode_to_vec().into(),
                 correlation_id.into(),
                 recorded_at.into(),
+                i64::from(WireVersion::CURRENT.0).into(),
             ])
             .map_err(unavailable)?;
     }
@@ -353,6 +356,7 @@ pub(crate) fn insert_pages<D: Dialect>(
 pub(crate) fn snapshot_of<D: Dialect>(cover: &Cover) -> sea_query::SelectStatement {
     Query::select()
         .column(Snapshots::Snapshot)
+        .column(Snapshots::Wire)
         .from(Snapshots::Table)
         .cond_where(snapshot_of_stream::<D>(cover))
         .to_owned()
@@ -379,10 +383,10 @@ pub(crate) fn delete_events_from<D: Dialect>(cover: &Cover, sequence: u64) -> De
 }
 
 #[cfg(feature = "purge")]
-/// Rows `(sequence, page)` of a main stream whose page holds the bytes `?4`
+/// Rows `(sequence, page, wire)` of a main stream whose page holds the bytes `?4`
 /// (the tombstone's type URL), the latest first: candidates for its
 /// tombstones, which the caller decodes to be sure.
-pub(crate) const TOMBSTONE_CANDIDATES: &str = "SELECT sequence, page FROM events WHERE \
+pub(crate) const TOMBSTONE_CANDIDATES: &str = "SELECT sequence, page, wire FROM events WHERE \
      domain = ?1 AND root = ?2 AND edition = ?3 AND instr(page, ?4) > 0 ORDER BY sequence DESC";
 
 /// Delete the stream's snapshot.
@@ -405,17 +409,19 @@ pub(crate) fn upsert_snapshot<D: Dialect>(
             Snapshots::Edition,
             Snapshots::Root,
             Snapshots::Snapshot,
+            Snapshots::Wire,
         ])
         .values([
             cover.domain.clone().into(),
             D::edition(cover).into(),
             root(cover).into(),
             snapshot.encode_to_vec().into(),
+            i64::from(WireVersion::CURRENT.0).into(),
         ])
         .map_err(unavailable)?
         .on_conflict(
             OnConflict::columns([Snapshots::Domain, Snapshots::Edition, Snapshots::Root])
-                .update_column(Snapshots::Snapshot)
+                .update_columns([Snapshots::Snapshot, Snapshots::Wire])
                 .to_owned(),
         )
         .to_owned())

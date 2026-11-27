@@ -115,6 +115,26 @@ pub enum StoreError {
     /// as the adapter names it: a backup never overwrites. Nothing was
     /// written.
     BackupExists { target: String },
+    /// A store a newer wire package wrote (decision 14.113): its stamp's
+    /// newest version, `stamped`, is beyond the newest this build decodes,
+    /// `build`. Refused at open, untouched: run a build at least as new.
+    WireNewerThanBuild { stamped: u8, build: u8 },
+    /// A stored row in the `table` that fits no wire version this build
+    /// knows (its bytes are neither shape, or an older version follows a
+    /// newer in one stream): the store is refused, untouched, rather than
+    /// stamped on a guess. `sequence` is 0 for a snapshot.
+    WireUnrecognised {
+        table: String,
+        stream: Box<Cover>,
+        sequence: u64,
+    },
+    /// A row marked with a wire version this build has no decoder for.
+    WireUnknownVersion { wire: u8 },
+    /// A store written in an older wire package holds `outbox` pending
+    /// entries and `dead_letters` dead letters, whole transient messages
+    /// of that package, which are not mapped: refused at open, untouched,
+    /// until they are cleared.
+    WireLegacyTransient { outbox: u64, dead_letters: u64 },
 }
 
 impl From<crate::stream::StreamRef<'_>> for Cover {
@@ -199,7 +219,11 @@ impl StoreError {
             | StoreError::MigrationMissing { .. }
             | StoreError::MigrationUnknown { .. }
             | StoreError::MigrationIrreversible { .. }
-            | StoreError::BackupExists { .. } => None,
+            | StoreError::BackupExists { .. }
+            | StoreError::WireNewerThanBuild { .. }
+            | StoreError::WireUnknownVersion { .. }
+            | StoreError::WireLegacyTransient { .. } => None,
+            StoreError::WireUnrecognised { stream, .. } => Some(stream),
         }
     }
 }
@@ -309,6 +333,10 @@ impl StoreError {
                 code!("store-migration-irreversible")
             }
             StoreError::BackupExists { .. } => code!("store-backup-exists"),
+            StoreError::WireNewerThanBuild { .. } => code!("store-wire-newer-than-build"),
+            StoreError::WireUnrecognised { .. } => code!("store-wire-unrecognised"),
+            StoreError::WireUnknownVersion { .. } => code!("store-wire-unknown-version"),
+            StoreError::WireLegacyTransient { .. } => code!("store-wire-legacy-transient"),
         }
     }
 
@@ -369,6 +397,29 @@ impl StoreError {
                 vec![("version", Arg::Uint(*version))]
             }
             StoreError::BackupExists { target } => vec![("target", Arg::Str(target.clone()))],
+            StoreError::WireNewerThanBuild { stamped, build } => vec![
+                ("stamped", Arg::Uint(u64::from(*stamped))),
+                ("build", Arg::Uint(u64::from(*build))),
+            ],
+            StoreError::WireUnrecognised {
+                table,
+                stream,
+                sequence,
+            } => vec![
+                ("table", Arg::Str(table.clone())),
+                ("stream", stream_arg(stream)),
+                ("sequence", Arg::Uint(*sequence)),
+            ],
+            StoreError::WireUnknownVersion { wire } => {
+                vec![("wire", Arg::Uint(u64::from(*wire)))]
+            }
+            StoreError::WireLegacyTransient {
+                outbox,
+                dead_letters,
+            } => vec![
+                ("outbox", Arg::Uint(*outbox)),
+                ("dead_letters", Arg::Uint(*dead_letters)),
+            ],
         }
     }
 
@@ -389,7 +440,12 @@ impl StoreError {
             StoreError::NewerThanBuild { .. }
             | StoreError::BackupExists { .. }
             | StoreError::MigrationUnknown { .. }
-            | StoreError::MigrationIrreversible { .. } => Recovery::Invalid,
+            | StoreError::MigrationIrreversible { .. }
+            | StoreError::WireNewerThanBuild { .. }
+            | StoreError::WireLegacyTransient { .. } => Recovery::Invalid,
+            StoreError::WireUnrecognised { .. } | StoreError::WireUnknownVersion { .. } => {
+                Recovery::Bug
+            }
             StoreError::MigrationFailed { .. }
             | StoreError::MigrationChanged { .. }
             | StoreError::MigrationMissing { .. } => Recovery::Bug,
@@ -486,6 +542,20 @@ pub(crate) fn samples() -> Vec<StoreError> {
         StoreError::MigrationIrreversible { version: 4 },
         StoreError::BackupExists {
             target: "state.db.pre-3-20261031T000000Z".to_string(),
+        },
+        StoreError::WireNewerThanBuild {
+            stamped: 2,
+            build: 1,
+        },
+        StoreError::WireUnrecognised {
+            table: "events".to_string(),
+            stream: Box::new(stream()),
+            sequence: 4,
+        },
+        StoreError::WireUnknownVersion { wire: 9 },
+        StoreError::WireLegacyTransient {
+            outbox: 2,
+            dead_letters: 1,
         },
     ]
 }

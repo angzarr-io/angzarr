@@ -710,8 +710,8 @@ async fn inserting(path: &Path, page: &EventPage) -> SqliteConnection {
         .await
         .unwrap();
     sqlx::query(
-        "INSERT INTO events (domain, edition, root, sequence, command_id, page) \
-         VALUES ('tasks', '', ?, ?, NULL, ?)",
+        "INSERT INTO events (domain, edition, root, sequence, command_id, page, wire) \
+         VALUES ('tasks', '', ?, ?, NULL, ?, 1)",
     )
     .bind(vec![1u8; 16])
     .bind(i64::try_from(page.sequence).unwrap())
@@ -822,7 +822,7 @@ async fn the_builds_migration_set_is_what_an_open_applies() {
     assert_eq!(build, store.migrations());
     assert_eq!(
         build.iter().map(|m| m.version).collect::<Vec<_>>(),
-        [1, 2, 3, 4, 5, 6, 7, 8]
+        [1, 2, 3, 4, 5, 6, 7, 8, 9]
     );
     let ledger = store.applied().await.unwrap();
     assert_eq!(
@@ -1242,7 +1242,8 @@ async fn a_migrated_database_keeps_no_store_wide_position() {
             "page",
             "recorded_at",
             "root",
-            "sequence"
+            "sequence",
+            "wire"
         ],
         "the events columns"
     );

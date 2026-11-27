@@ -86,6 +86,7 @@ mod send;
 mod store;
 mod stream;
 pub mod tombstone;
+mod wire;
 
 pub mod dyn_store;
 pub mod migrate;
@@ -117,6 +118,7 @@ pub use store::{
     SnapshotStore, Store, Watch, Write, Written,
 };
 pub use stream::{Head, PositionKey, Slice, StreamRef};
+pub use wire::{Shape, WireStamp, WireVersion};
 
 /// The diagnostic crate every error here implements, as the ports use it.
 pub use coded_diagnostic;

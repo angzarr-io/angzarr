@@ -194,6 +194,36 @@ fn migration_errors() -> Vec<(StoreError, &'static str, Recovery)> {
             code!("store-backup-exists"),
             Invalid,
         ),
+        (
+            StoreError::WireNewerThanBuild {
+                stamped: 2,
+                build: 1,
+            },
+            code!("store-wire-newer-than-build"),
+            Invalid,
+        ),
+        (
+            StoreError::WireUnrecognised {
+                table: "events".to_string(),
+                stream: Box::new(stream()),
+                sequence: 4,
+            },
+            code!("store-wire-unrecognised"),
+            Bug,
+        ),
+        (
+            StoreError::WireUnknownVersion { wire: 9 },
+            code!("store-wire-unknown-version"),
+            Bug,
+        ),
+        (
+            StoreError::WireLegacyTransient {
+                outbox: 2,
+                dead_letters: 1,
+            },
+            code!("store-wire-legacy-transient"),
+            Invalid,
+        ),
     ]
 }
 

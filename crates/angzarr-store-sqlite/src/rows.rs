@@ -1,28 +1,72 @@
 //! Stored values read back: what a backend's rows decode to.
 
 use angzarr_ports::angzarr_proto::v1::{AngzarrDeadLetter, Cover, EventPage, Snapshot};
+use angzarr_ports::angzarr_proto::wire::{self, WireError, WireVersion};
 use angzarr_ports::{DeadLetter, DeadLetterAt, StoreError};
 use prost::Message;
 
 use crate::error::{bad_root, undecodable, SqlError};
 use crate::Dialect;
 
-/// A page's stored bytes, decoded; `sequence` names it if they do not.
-pub(crate) fn page(cover: &Cover, sequence: i64, bytes: &[u8]) -> Result<EventPage, StoreError> {
-    EventPage::decode(bytes).map_err(|e| StoreError::Unreadable {
-        stream: Box::new(cover.clone()),
-        sequence: sequence.unsigned_abs(),
-        reason: undecodable(e),
-    })
+/// A page's stored bytes, decoded as the wire version that wrote them and
+/// mapped to the current page; `sequence` names it if they do not decode.
+pub(crate) fn page(
+    cover: &Cover,
+    sequence: i64,
+    wire: i64,
+    bytes: &[u8],
+) -> Result<EventPage, StoreError> {
+    wire::decode_page(wire_of(wire), bytes)
+        .map_err(|e| wire_error(e, cover, sequence.unsigned_abs()))
 }
 
-/// A snapshot's stored bytes, decoded.
-pub(crate) fn snapshot(cover: &Cover, bytes: &[u8]) -> Result<Snapshot, StoreError> {
-    Snapshot::decode(bytes).map_err(|e| StoreError::Unreadable {
-        stream: Box::new(cover.clone()),
-        sequence: 0,
-        reason: undecodable(e),
-    })
+/// A snapshot's stored bytes, decoded as the wire version that wrote them
+/// and mapped to the current snapshot.
+pub(crate) fn snapshot(cover: &Cover, wire: i64, bytes: &[u8]) -> Result<Snapshot, StoreError> {
+    wire::decode_snapshot(wire_of(wire), bytes).map_err(|e| wire_error(e, cover, 0))
+}
+
+/// A page's bytes as the current version writes them: as stored if they
+/// are, else decoded as their version and encoded again (an export is
+/// always current).
+pub(crate) fn current_page(
+    cover: &Cover,
+    sequence: i64,
+    wire: i64,
+    bytes: Vec<u8>,
+) -> Result<Vec<u8>, StoreError> {
+    if wire_of(wire) == WireVersion::CURRENT.0 {
+        return Ok(bytes);
+    }
+    Ok(page(cover, sequence, wire, &bytes)?.encode_to_vec())
+}
+
+/// A snapshot's bytes as the current version writes them.
+pub(crate) fn current_snapshot(
+    cover: &Cover,
+    wire: i64,
+    bytes: Vec<u8>,
+) -> Result<Vec<u8>, StoreError> {
+    if wire_of(wire) == WireVersion::CURRENT.0 {
+        return Ok(bytes);
+    }
+    Ok(snapshot(cover, wire, &bytes)?.encode_to_vec())
+}
+
+/// A stored `wire` column as a version byte (one out of range is none).
+fn wire_of(wire: i64) -> u8 {
+    u8::try_from(wire).unwrap_or(WireVersion::UNSTAMPED)
+}
+
+fn wire_error(error: WireError, cover: &Cover, sequence: u64) -> StoreError {
+    match error {
+        WireError::Unknown(wire) => StoreError::WireUnknownVersion { wire },
+        WireError::Undecodable(e) => StoreError::Unreadable {
+            stream: Box::new(cover.clone()),
+            sequence,
+            reason: undecodable(e),
+        },
+    }
 }
 
 /// A stream of `domain` from its stored edition and root.

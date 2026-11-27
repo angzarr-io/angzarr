@@ -15,6 +15,7 @@ pub(crate) enum Events {
     Page,
     CorrelationId,
     RecordedAt,
+    Wire,
 }
 
 #[derive(Iden)]
@@ -24,4 +25,5 @@ pub(crate) enum Snapshots {
     Edition,
     Root,
     Snapshot,
+    Wire,
 }

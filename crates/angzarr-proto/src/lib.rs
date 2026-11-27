@@ -128,5 +128,6 @@ pub fn reason_key_args(key: &str) -> Option<&'static [&'static str]> {
 mod diagnostic;
 pub mod ids;
 pub mod protos;
+pub mod wire;
 
 pub use uuid;

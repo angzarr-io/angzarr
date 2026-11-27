@@ -41,10 +41,14 @@ fn status(error: &StoreError) -> Code {
         | StoreError::MigrationIrreversible { .. } => Code::InvalidArgument,
         StoreError::UnknownEdition { .. } | StoreError::EditionNotFound { .. } => Code::NotFound,
         StoreError::EditionAlreadyForked { .. } => Code::AlreadyExists,
-        StoreError::Unreadable { .. } | StoreError::DeadLetterUnreadable { .. } => Code::DataLoss,
-        StoreError::NewerThanBuild { .. } | StoreError::BackupExists { .. } => {
-            Code::FailedPrecondition
-        }
+        StoreError::Unreadable { .. }
+        | StoreError::DeadLetterUnreadable { .. }
+        | StoreError::WireUnrecognised { .. }
+        | StoreError::WireUnknownVersion { .. } => Code::DataLoss,
+        StoreError::NewerThanBuild { .. }
+        | StoreError::BackupExists { .. }
+        | StoreError::WireNewerThanBuild { .. }
+        | StoreError::WireLegacyTransient { .. } => Code::FailedPrecondition,
         _ => Code::Internal,
     }
 }
