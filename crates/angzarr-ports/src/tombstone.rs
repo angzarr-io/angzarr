@@ -5,8 +5,10 @@
 //! numbers never restart and a later write continues after it. A stream is
 //! dense from sequence 0, or from its latest tombstone: the events before a
 //! tombstone are gone, the tombstone itself is read like any event, and
-//! whoever folds the stream (an aggregate, a projector) restarts from its
-//! default state at it. A stream whose last event is a tombstone is
+//! whoever folds the stream restarts from its default state at it: the
+//! framework does it for an aggregate's state and for a projection the
+//! router holds, and hands the tombstone to a projector that keeps state
+//! of its own. A stream whose last event is a tombstone is
 //! destroyed.
 //!
 //! The tombstone is an ordinary [`EventPage`] whose body is the event arm,

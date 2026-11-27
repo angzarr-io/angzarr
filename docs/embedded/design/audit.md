@@ -866,7 +866,17 @@ tombstone is destroyed.
 A tombstone is only the mark that a stream had events here once (owner
 ruling 2026-11-26): it ends an aggregate's events, writes resume from its
 sequence (`next_sequence` counts it), and whoever folds the stream wipes
-what came before it. An aggregate's `had_prior_events` therefore means
+what came before it. The framework does the wiping wherever it holds the
+state (owner ruling 2026-11-26): an aggregate's rebuild, and the router's
+projector fold (`ProjectorDispatch`), which puts a projection back to its
+default at a tombstone before what follows folds, a batched fold being
+handed the run from the latest tombstone, inclusive. A projector that keeps
+state outside its projection (an external store) is handed the tombstone
+itself, by registering a handler for `StreamClosed`'s type name, to clear
+it; one with no handler skips it silently. A projector the framework does
+not hold the state of (a hand-written `ProjectorHandler`, or an
+`AsyncProjector`'s one instance across streams) resets its own, per stream.
+An aggregate's `had_prior_events` therefore means
 events (or a starting state) SINCE the latest tombstone, as the kernel's
 fold of the stream has it (`angzarr_router::rebuild::Live`, used by the
 rebuild and the command context): a purged stream reads as never written, so
