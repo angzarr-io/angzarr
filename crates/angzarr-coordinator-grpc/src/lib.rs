@@ -37,7 +37,8 @@
 //!   `CorrelationFrom` is UNIMPLEMENTED.
 //! - [`Server`]: the builder. Services are added once and served on every
 //!   [`Listener`]; `grpc.health.v1.Health` is always served (SERVING once
-//!   bound, NOT_SERVING when shutdown begins). [`Server::bind`] gives a
+//!   bound, NOT_SERVING when shutdown begins; [`Running::health`] lets the
+//!   composition set any name's status while it runs). [`Server::bind`] gives a
 //!   [`Running`] server, its [`Bound`] endpoints reported, stopped by
 //!   [`Running::shutdown`] (graceful, unbounded), by
 //!   [`Running::shutdown_within`] (graceful for a grace, then every
@@ -112,7 +113,7 @@ pub use edge::Edge;
 pub use error::ListenError;
 #[cfg(feature = "reads")]
 pub use query::{Queries, ServedReads};
-pub use server::{Bound, BoundEndpoint, Listener, Running, Server};
+pub use server::{Bound, BoundEndpoint, Health, HealthStatus, Listener, Running, Server};
 pub use status::{
     error_info, status, status_of, tonic_code, unauthenticated, ErrorInfo, ERROR_DOMAIN,
     ERROR_INFO_TYPE_URL,

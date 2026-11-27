@@ -451,6 +451,48 @@ impl Server {
     }
 }
 
+/// What a `grpc.health.v1` status says: the service answers, or it does not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HealthStatus {
+    Serving,
+    NotServing,
+}
+
+impl HealthStatus {
+    fn of(self) -> ServingStatus {
+        match self {
+            HealthStatus::Serving => ServingStatus::Serving,
+            HealthStatus::NotServing => ServingStatus::NotServing,
+        }
+    }
+}
+
+/// A handle on the `grpc.health.v1.Health` service of a [`Running`] server,
+/// for the composition to say whether what it serves is really working
+/// (the listener knows only that it accepts). Cloneable and usable from any
+/// task while the server runs. The server itself sets `""` SERVING once
+/// bound and NOT_SERVING as shutdown begins; a status set after shutdown
+/// began is answered by nothing.
+#[derive(Clone)]
+pub struct Health {
+    reporter: HealthReporter,
+}
+
+impl Health {
+    /// Set the status of `service` (`""` is the whole server; any other
+    /// name is the fully qualified name of a served service) to `status`.
+    /// A Check and every open Watch of that name hear it.
+    pub async fn set(&self, service: &str, status: HealthStatus) {
+        self.reporter.set_service_status(service, status.of()).await;
+    }
+}
+
+impl std::fmt::Debug for Health {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Health").finish_non_exhaustive()
+    }
+}
+
 /// A server that is serving. [`Running::shutdown`] stops it gracefully,
 /// health first, waiting for open calls however long they take;
 /// [`Running::shutdown_within`] does the same for at most a grace, then
@@ -521,6 +563,13 @@ impl Running {
     /// The listeners, as bound.
     pub fn bound(&self) -> &Bound {
         &self.bound
+    }
+
+    /// The handle on this server's health service.
+    pub fn health(&self) -> Health {
+        Health {
+            reporter: self.health.clone(),
+        }
     }
 
     /// Stop gracefully: health turns NOT_SERVING, the listeners stop
