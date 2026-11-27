@@ -71,23 +71,15 @@ pub enum At {
     Read,
     /// A stream read through a read unit ([`ReadUnit::read`]).
     UnitRead,
-    /// Whichever comes first of a write, a purge and a stream read.
+    /// Whichever comes first of a write, a purge (with the `purge` feature) and a stream read.
     Any,
 }
 
 impl At {
-    /// Whether `at` is a call kind `Any` stands for.
-    fn any_names(at: At) -> bool {
-        #[cfg(feature = "purge")]
-        if at == At::Purge {
-            return true;
-        }
-        matches!(at, At::Write | At::Read)
-    }
-
-    /// Whether a call made `at` is one this names.
+    /// Whether a call made `at` is one this names. `Any` names every kind of
+    /// call but a read unit's read; `at` is a call, so never `Any`.
     fn names(self, at: At) -> bool {
-        self == at || (self == At::Any && Self::any_names(at))
+        self == at || (self == At::Any && at != At::UnitRead)
     }
 }
 
