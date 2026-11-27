@@ -194,3 +194,46 @@ fn event_meta_is_the_contexts_identity_under_the_rules_version() {
         }
     );
 }
+
+// A tombstone is no prior event: the context says a stream has history
+// only for what follows its latest tombstone, as the kernel's fold does.
+#[test]
+fn the_context_counts_only_history_after_the_latest_tombstone() {
+    use angzarr_ports::tombstone;
+    let mut req = request(command(None));
+    req.history = Some(pb::EventBook {
+        pages: vec![tombstone::page(4)],
+        next_sequence: 5,
+        ..Default::default()
+    });
+    let ctx = command_context(&req);
+    assert!(!ctx.had_prior_events, "a tombstone alone");
+    assert_eq!(ctx.next_sequence, 5, "writes resume from its sequence");
+
+    req.history = Some(pb::EventBook {
+        pages: vec![
+            tombstone::page(4),
+            pb::EventPage {
+                sequence: 5,
+                ..Default::default()
+            },
+        ],
+        next_sequence: 6,
+        ..Default::default()
+    });
+    assert!(command_context(&req).had_prior_events, "events after it");
+
+    req.history = Some(pb::EventBook {
+        snapshot: Some(pb::Snapshot {
+            sequence: 3,
+            ..Default::default()
+        }),
+        pages: vec![tombstone::page(4)],
+        next_sequence: 5,
+        ..Default::default()
+    });
+    assert!(
+        !command_context(&req).had_prior_events,
+        "a snapshot before it"
+    );
+}

@@ -818,3 +818,55 @@ fn a_panicking_codec_fails_the_rebuild_naming_the_snapshot() {
     );
     assert_panicked_cause(&err);
 }
+
+// A tombstone (a purge's) only marks that the stream had events once: it
+// is no prior event, and what was folded before it is gone.
+#[test]
+fn a_stream_whose_last_page_is_a_tombstone_has_no_prior_events() {
+    let r = cover_applier(fresh_rebuilder());
+    let book = pb::EventBook {
+        pages: vec![angzarr_ports::tombstone::page(3)],
+        next_sequence: 4,
+        ..Default::default()
+    };
+    let (state, info) = r.rebuild(Some(&book)).expect("rebuild");
+    assert!(state.applied.is_empty());
+    assert!(!info.had_prior_events, "a tombstone alone is no history");
+    assert_eq!(info.applied_count, 0);
+}
+
+#[test]
+fn events_after_a_tombstone_are_prior_events_and_those_before_it_are_not_folded() {
+    let r = cover_applier(fresh_rebuilder());
+    let book = pb::EventBook {
+        pages: vec![
+            sequenced_event_page(0, cover_any("old")),
+            angzarr_ports::tombstone::page(1),
+            sequenced_event_page(2, cover_any("new")),
+        ],
+        next_sequence: 3,
+        ..Default::default()
+    };
+    let (state, info) = r.rebuild(Some(&book)).expect("rebuild");
+    assert_eq!(state.applied, vec!["new"]);
+    assert!(info.had_prior_events);
+    assert_eq!(info.applied_count, 1);
+}
+
+#[test]
+fn a_snapshot_older_than_the_tombstone_is_no_prior_history() {
+    let r = starting_at(cover_applier(fresh_rebuilder()), "snap");
+    let book = pb::EventBook {
+        snapshot: Some(pb::Snapshot {
+            sequence: 0,
+            state: Some(Any::default()),
+            ..Default::default()
+        }),
+        pages: vec![angzarr_ports::tombstone::page(1)],
+        next_sequence: 2,
+        ..Default::default()
+    };
+    let (state, info) = r.rebuild(Some(&book)).expect("rebuild");
+    assert!(state.applied.is_empty(), "the snapshot predates the purge");
+    assert!(!info.had_prior_events);
+}
