@@ -123,7 +123,7 @@ pub fn command_context(req: &hpb::HandleRequest) -> CommandContext {
     let page = book.and_then(|b| b.page.as_ref());
     CommandContext {
         next_sequence: crate::next_sequence(history),
-        had_prior_events: history.is_some_and(|b| !b.pages.is_empty() || b.snapshot.is_some()),
+        had_prior_events: history.is_some_and(|b| crate::rebuild::Live::of(b).had_events()),
         cover: book.and_then(|b| b.cover.clone()),
         arm: arm_of(page),
         command_id: page.and_then(|p| p.command_id.clone()),

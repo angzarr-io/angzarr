@@ -344,9 +344,10 @@ impl<S> Rebuilder<S> {
         let Some(book) = book else {
             return Ok((state, info));
         };
-        info.had_prior_events = !book.pages.is_empty() || book.snapshot.is_some();
+        let live = Live::of(book);
+        info.had_prior_events = live.had_events();
 
-        if let (Some(snapshot), Some(codec)) = (book.snapshot.as_ref(), self.codec.as_ref()) {
+        if let (Some(snapshot), Some(codec)) = (live.snapshot, self.codec.as_ref()) {
             if let Some(start) = snapshot.state.as_ref() {
                 let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     (codec.decode)(start)
@@ -372,23 +373,21 @@ impl<S> Rebuilder<S> {
         }
 
         if let Some(fold) = self.fold.as_ref() {
-            if !book.pages.is_empty() {
-                run_fold(fold, &mut state, &book.pages, book.cover.as_ref()).map_err(
-                    |failure| {
-                        fold_error(
-                            PageOrigin::Persisted,
-                            &book.pages,
-                            &failure,
-                            &self.state_type_url,
-                        )
-                    },
-                )?;
-                info.applied_count = book.pages.len();
+            if !live.pages.is_empty() {
+                run_fold(fold, &mut state, live.pages, book.cover.as_ref()).map_err(|failure| {
+                    fold_error(
+                        PageOrigin::Persisted,
+                        live.pages,
+                        &failure,
+                        &self.state_type_url,
+                    )
+                })?;
+                info.applied_count = live.pages.len();
             }
             return Ok((state, info));
         }
 
-        for page in &book.pages {
+        for page in live.pages {
             let Some(event) = crate::page_event(page) else {
                 continue;
             };
@@ -520,3 +519,42 @@ impl<S> Rebuilder<S> {
 #[cfg(test)]
 #[path = "rebuild.test.rs"]
 mod rebuild_tests;
+
+/// What of a book counts as history: the part after its latest tombstone
+/// (angzarr-ports' [`tombstone`](angzarr_ports::tombstone), a purge's).
+/// A tombstone only marks that events were here once; what was folded
+/// before it is gone and writes resume from its sequence, so the stream
+/// has no prior events until one follows it. A starting state older than
+/// the tombstone is gone with the rest. This is the kernel's own fold of a
+/// stream, kept by the router so the evidence a handler is given agrees.
+#[derive(Clone, Copy, Debug)]
+pub struct Live<'a> {
+    /// The starting state, when no tombstone is newer than it.
+    pub snapshot: Option<&'a pb::Snapshot>,
+    /// The pages after the latest tombstone, in order.
+    pub pages: &'a [pb::EventPage],
+}
+
+impl<'a> Live<'a> {
+    /// The live part of `book`.
+    pub fn of(book: &'a pb::EventBook) -> Self {
+        let closed = book.pages.iter().rposition(angzarr_ports::tombstone::is);
+        let Some(at) = closed else {
+            return Live {
+                snapshot: book.snapshot.as_ref(),
+                pages: &book.pages,
+            };
+        };
+        let tombstone = book.pages[at].sequence;
+        Live {
+            snapshot: book.snapshot.as_ref().filter(|s| s.sequence > tombstone),
+            pages: &book.pages[at + 1..],
+        }
+    }
+
+    /// Whether the stream has events (or a starting state) since its latest
+    /// tombstone.
+    pub fn had_events(&self) -> bool {
+        !self.pages.is_empty() || self.snapshot.is_some()
+    }
+}

@@ -268,7 +268,8 @@ impl<T: EventStore + SnapshotStore + PositionStore + ?Sized> Store for T {}
 /// stream is dense from 0, or from its latest tombstone; a purged stream
 /// stays listed, and one whose last event is a tombstone is destroyed.
 /// Readers fold the tombstone as an ordinary event: an aggregate's state is
-/// the default again, a projector resets. A repeat purge removes the events
+/// the default again and has no prior events (writes resume from the
+/// tombstone's sequence), a projector resets. A repeat purge removes the events
 /// written after the last tombstone and appends a new tombstone only if it
 /// removed any (nothing after the tombstone is a no-op answering 0); the
 /// old tombstones are kept. Its own call. The positions on the stream stay

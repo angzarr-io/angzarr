@@ -863,6 +863,16 @@ again). Sequences never restart, so no book from sequence 0 starts a stream
 afresh and none says a stream is gone; a stream whose last event is a
 tombstone is destroyed.
 
+A tombstone is only the mark that a stream had events here once (owner
+ruling 2026-11-26): it ends an aggregate's events, writes resume from its
+sequence (`next_sequence` counts it), and whoever folds the stream wipes
+what came before it. An aggregate's `had_prior_events` therefore means
+events (or a starting state) SINCE the latest tombstone, as the kernel's
+fold of the stream has it (`angzarr_router::rebuild::Live`, used by the
+rebuild and the command context): a purged stream reads as never written, so
+an aggregate that decides "exists" on it accepts a re-create, with no
+workaround on folded state.
+
 ### The bus
 
 The bus is angzarr core's generic bus (`angzarr_bus::Hub`, the

@@ -136,7 +136,8 @@ pub use angzarr_router::error::{Bug, BugExt};
 /// - [`Context::command`]: angzarr-router's whole
 ///   [`CommandContext`](angzarr_router::domain::CommandContext), as the
 ///   router hands it to the handler: `cover` (the stream's domain, root and
-///   edition), `next_sequence`, `had_prior_events`, `arm` (a command's
+///   edition), `next_sequence`, `had_prior_events` (events since the stream's
+///   latest tombstone), `arm` (a command's
 ///   expected sequence as sent, or a fact's origin), the input's identity:
 ///   `command_id` (a client's, the one the application minted, a policy's
 ///   derived one, or, for a fact, the one derived from its origin; a
