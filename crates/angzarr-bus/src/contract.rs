@@ -1649,3 +1649,7 @@ fn sorted(mut deliveries: Vec<Delivery>) -> Vec<Delivery> {
     });
     deliveries
 }
+
+#[cfg(test)]
+#[path = "contract.test.rs"]
+mod tests;
