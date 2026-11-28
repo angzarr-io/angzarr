@@ -60,7 +60,7 @@ the `LICENSE-*` files, `deny.toml` and this table to it.
 | `angzarr-ports` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | the shared storage contract and its conformance suite |
 | `angzarr-bus` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | the bus interface and its conformance kit |
 | `angzarr-sealed` | C | `Apache-2.0 OR BSD-3-Clause` | a Sealed protobuf message and its HPKE seal/open and data-key wrap helpers |
-| `angzarr-yaml` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | a strict YAML subset |
+| `angzarr-yaml` | C | `Apache-2.0 OR BSD-3-Clause` | a strict YAML subset |
 | `angzarr-store-transfer` | B | `AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception` | a store carried across a proto generation |
 | `angzarr-proto` | C | `Apache-2.0 OR BSD-3-Clause` | prost types of the wire contract |
 | `angzarr-proto-handler` | C | `Apache-2.0 OR BSD-3-Clause` | the handler layer's prost types |

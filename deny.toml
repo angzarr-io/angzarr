@@ -120,10 +120,6 @@ crate = "angzarr-bus"
 allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
 
 [[licenses.exceptions]]
-crate = "angzarr-yaml"
-allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
-
-[[licenses.exceptions]]
 crate = "angzarr-store-transfer"
 allow = ["AGPL-3.0-only WITH AdditionRef-angzarr-runtime-exception"]
 
